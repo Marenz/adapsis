@@ -745,16 +745,32 @@ fn parse_call_decl(line: usize, input: &str) -> Result<CallDecl> {
 fn parse_check_decl(line: usize, input: &str) -> Result<CheckDecl> {
     let (name, rest) =
         take_ident(input).ok_or_else(|| anyhow!("line {}: expected check name", line))?;
-    let (expr_text, err_label) = split_once_required(line, rest.trim(), "~")?;
-    let err_label = err_label.trim();
-    if err_label.is_empty() {
-        bail!("line {}: expected error label after `~`", line);
+    let rest = rest.trim();
+
+    // Find the ~err_label at the end. Search from the right to handle complex expressions.
+    if let Some(tilde_pos) = rest.rfind('~') {
+        let expr_text = rest[..tilde_pos].trim();
+        let err_label = rest[tilde_pos + 1..].trim();
+        if err_label.is_empty() {
+            bail!("line {}: expected error label after `~`", line);
+        }
+        if expr_text.is_empty() {
+            bail!(
+                "line {}: expected condition expression between check name and `~`",
+                line
+            );
+        }
+        Ok(CheckDecl {
+            name: name.to_string(),
+            expr: parse_expr(line, expr_text)?,
+            err_label: err_label.to_string(),
+        })
+    } else {
+        bail!(
+            "line {}: check statement needs `~err_label` at the end. Format: +check label condition ~err_label",
+            line
+        );
     }
-    Ok(CheckDecl {
-        name: name.to_string(),
-        expr: parse_expr(line, expr_text.trim())?,
-        err_label: err_label.to_string(),
-    })
 }
 
 fn parse_branch_decl(line: usize, input: &str) -> Result<BranchDecl> {
