@@ -294,7 +294,32 @@ fn eval_function_body(
     Ok(Value::None)
 }
 
+std::thread_local! {
+    static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+const MAX_CALL_DEPTH: usize = 64;
+
 fn eval_call(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Result<Value> {
+    let depth = CALL_DEPTH.with(|d| {
+        let v = d.get();
+        d.set(v + 1);
+        v
+    });
+    if depth >= MAX_CALL_DEPTH {
+        CALL_DEPTH.with(|d| d.set(0));
+        bail!(
+            "maximum call depth ({MAX_CALL_DEPTH}) exceeded — possible infinite recursion in `{}`",
+            call.callee
+        );
+    }
+
+    let result = eval_call_inner(program, call, env);
+    CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    result
+}
+
+fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Result<Value> {
     let args: Vec<Value> = call
         .args
         .iter()
@@ -361,6 +386,38 @@ fn eval_call(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Res
                 Value::Int(n) => Ok(Value::Int(n.abs())),
                 Value::Float(n) => Ok(Value::Float(n.abs())),
                 _ => bail!("abs() expects number"),
+            }
+        }
+        "sqrt" => {
+            if args.len() != 1 {
+                bail!("sqrt() expects 1 argument");
+            }
+            match &args[0] {
+                Value::Int(n) => Ok(Value::Float((*n as f64).sqrt())),
+                Value::Float(n) => Ok(Value::Float(n.sqrt())),
+                _ => bail!("sqrt() expects number"),
+            }
+        }
+        "pow" => {
+            if args.len() != 2 {
+                bail!("pow() expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(*b as u32))),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(*b))),
+                (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).powf(*b))),
+                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.powi(*b as i32))),
+                _ => bail!("pow() expects numbers"),
+            }
+        }
+        "floor" => {
+            if args.len() != 1 {
+                bail!("floor() expects 1 argument");
+            }
+            match &args[0] {
+                Value::Float(n) => Ok(Value::Int(n.floor() as i64)),
+                Value::Int(n) => Ok(Value::Int(*n)),
+                _ => bail!("floor() expects number"),
             }
         }
         "max" => {
@@ -572,21 +629,29 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
         ast::BinaryOp::GreaterThan => match (lhs, rhs) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) > *b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a > *b as f64)),
             _ => bail!("cannot compare {lhs} > {rhs}"),
         },
         ast::BinaryOp::LessThan => match (lhs, rhs) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) < *b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a < *b as f64)),
             _ => bail!("cannot compare {lhs} < {rhs}"),
         },
         ast::BinaryOp::GreaterThanOrEqual => match (lhs, rhs) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) >= *b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a >= *b as f64)),
             _ => bail!("cannot compare {lhs} >= {rhs}"),
         },
         ast::BinaryOp::LessThanOrEqual => match (lhs, rhs) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) <= *b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a <= *b as f64)),
             _ => bail!("cannot compare {lhs} <= {rhs}"),
         },
     }
