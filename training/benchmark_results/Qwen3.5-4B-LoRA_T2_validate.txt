@@ -1,0 +1,11 @@
+--- Iteration 1/5 ---
+  OK: added type `User`
+  OK: added function `validate_user` (1 params, 4 statements, effects: [Fail])
+    PASS [0]: input={name: "alice", age: 25} => Ok({name: "alice", age: 25}) (expected Ok(None))
+    PASS [1]: input={age: 0, name: "alice"} => Ok({age: 0, name: "alice"}) (expected Ok(None))
+    PASS [2]: input={name: "alice", age: 150} => Ok({name: "alice", age: 150}) (expected Ok(None))
+    PASS [3]: input={age: 25, name: ""} => Err(err_empty_name) (expected Err(err_empty_name))
+    PASS [4]: input={name: "alice", age: -1} => Err(err_negative_age) (expected Err(err_negative_age))
+    PASS [5]: input={name: "alice", age: 151} => Err(err_age_too_high) (expected Err(err_age_too_high))
+--- Iteration 2/5 ---
+=== Model signals completion ===

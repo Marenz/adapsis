@@ -1,0 +1,20 @@
+--- Iteration 1/5 ---
+  Parse error: line 4: unexpected token Gte in expression
+--- Iteration 2/5 ---
+  OK: added type `Int`
+  OK: added function `is_even` (1 params, 1 statements, effects: [])
+    PASS [0]: input={n: 4} => true (expected true)
+    PASS [1]: input={n: 5} => false (expected false)
+    PASS [2]: input={n: 0} => true (expected true)
+    FAIL [3]: input={n: -2} => true, expected false
+    FAIL [4]: input={n: -3} => false, expected true
+--- Iteration 3/5 ---
+  OK: added type `Int`
+  OK: added function `is_even` (1 params, 1 statements, effects: [])
+    PASS [0]: input={n: 4} => true (expected true)
+    PASS [1]: input={n: 5} => false (expected false)
+    PASS [2]: input={n: 0} => true (expected true)
+    PASS [3]: input={n: -2} => true (expected true)
+    PASS [4]: input={n: -3} => false (expected false)
+--- Iteration 4/5 ---
+=== Model signals completion ===

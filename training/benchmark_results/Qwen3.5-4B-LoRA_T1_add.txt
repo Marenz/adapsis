@@ -1,0 +1,8 @@
+--- Iteration 1/5 ---
+  OK: added function `add` (2 params, 1 statements, effects: [])
+    PASS [0]: input={a: 5, b: 3} => 8 (expected 8)
+    PASS [1]: input={a: -5, b: 3} => -2 (expected -2)
+    PASS [2]: input={a: 0, b: 7} => 7 (expected 7)
+    PASS [3]: input={b: -4, a: -3} => -7 (expected -7)
+--- Iteration 2/5 ---
+=== Model signals completion ===

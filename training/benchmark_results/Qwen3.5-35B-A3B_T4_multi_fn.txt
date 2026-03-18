@@ -1,0 +1,13 @@
+--- Iteration 1/5 ---
+  OK: added function `square` (1 params, 1 statements, effects: [])
+  OK: added function `sum_of_squares` (2 params, 3 statements, effects: [])
+    PASS [0]: input=5 => 25 (expected 25)
+    PASS [1]: input=0 => 0 (expected 0)
+    PASS [2]: input=-3 => 9 (expected 9)
+    PASS [3]: input=1 => 1 (expected 1)
+    PASS [0]: input={b: 4, a: 3} => 25 (expected 25)
+    PASS [1]: input={a: 0, b: 0} => 0 (expected 0)
+    PASS [2]: input={b: 1, a: 1} => 2 (expected 2)
+    PASS [3]: input={b: 5, a: 5} => 50 (expected 50)
+--- Iteration 2/5 ---
+=== Model signals completion ===

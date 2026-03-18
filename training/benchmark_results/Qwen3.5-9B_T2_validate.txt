@@ -1,0 +1,14 @@
+--- Iteration 1/5 ---
+  OK: added type `User`
+  OK: added type `Request`
+  OK: added function `validate_user` (1 params, 4 statements, effects: [Fail])
+    PASS [0]: input={age: 25, name: "alice"} => Ok({age: 25, name: "alice"}) (expected Ok(None))
+    PASS [1]: input={age: 25, name: ""} => Err(err_empty_name) (expected Err(err_empty_name))
+    PASS [2]: input={name: "alice", age: -1} => Err(err_negative_age) (expected Err(err_negative_age))
+    PASS [3]: input={name: "alice", age: 200} => Err(err_age_too_high) (expected Err(err_age_too_high))
+--- Iteration 2/5 ---
+  Parse error: line 1: unknown operation `The tests are passing. The implementation is complete.`
+--- Iteration 3/5 ---
+  Parse error: line 1: unknown operation `block instead of valid Forge code. The implementation is already complete and validated. I just need to send the completion marker.`
+--- Iteration 4/5 ---
+=== Model signals completion ===

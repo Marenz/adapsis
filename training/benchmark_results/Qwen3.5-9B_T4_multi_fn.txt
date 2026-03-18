@@ -1,0 +1,12 @@
+--- Iteration 1/5 ---
+  OK: added function `square` (1 params, 1 statements, effects: [])
+  OK: added type `TwoInts`
+  OK: added function `sum_of_squares` (1 params, 3 statements, effects: [])
+    PASS [0]: input=5 => 25 (expected 25)
+    PASS [1]: input=0 => 0 (expected 0)
+    PASS [2]: input=-3 => 9 (expected 9)
+    PASS [0]: input={b: 4, a: 3} => 25 (expected 25)
+    PASS [1]: input={a: 0, b: 5} => 25 (expected 25)
+    PASS [2]: input={a: 1, b: 1} => 2 (expected 2)
+--- Iteration 2/5 ---
+=== Model signals completion ===
