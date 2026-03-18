@@ -1,0 +1,66 @@
++fn count_chars (s:String, target:String)->Int
+  +let count:Int = 0
+  +let i:Int = 0
+  +while i < s.len
+    +let ch:String = char_at(s, i)
+    +if ch == target
+      +set count = count + 1
+    +else
+      +let dummy:Int = 0
+    +set i = i + 1
+  +return count
+
++fn reverse_string (s:String)->String
+  +let result:String = ""
+  +let i:Int = s.len - 1
+  +while i >= 0
+    +let ch:String = char_at(s, i)
+    +set result = concat(result, ch)
+    +set i = i - 1
+  +return result
+
++fn repeat_string (s:String, n:Int)->String
+  +let result:String = ""
+  +let i:Int = 0
+  +while i < n
+    +set result = concat(result, s)
+    +set i = i + 1
+  +return result
+
++fn word_count (s:String)->Int
+  +let words:List<String> = split(s, " ")
+  +return words.len
+
++fn to_upper_first (s:String)->String
+  +if s.len == 0
+    +return ""
+  +else
+    +let first:String = char_at(s, 0)
+    +let rest:String = substring(s, 1, s.len)
+    +return concat(first, rest)
+
+!test count_chars
+  +with s="hello" target="l" -> expect 2
+  +with s="aaa" target="a" -> expect 3
+  +with s="abc" target="z" -> expect 0
+
+!test reverse_string
+  +with "hello" -> expect "olleh"
+  +with "abc" -> expect "cba"
+  +with "a" -> expect "a"
+
+!test repeat_string
+  +with s="ab" n=3 -> expect "ababab"
+  +with s="x" n=1 -> expect "x"
+
+!test word_count
+  +with "hello world foo" -> expect 3
+  +with "single" -> expect 1
+
+!test to_upper_first
+  +with "hello" -> expect "hello"
+  +with "" -> expect ""
+
+!eval count_chars s="mississippi" target="s"
+!eval reverse_string "Forge"
+!eval repeat_string s="ha" n=3

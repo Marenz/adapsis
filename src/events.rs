@@ -168,6 +168,8 @@ fn snapshot_function(func: &crate::ast::FunctionDecl) -> FunctionSnapshot {
                     crate::ast::StatementKind::Branch { .. } => "branch".to_string(),
                     crate::ast::StatementKind::Return { .. } => "return".to_string(),
                     crate::ast::StatementKind::Each { .. } => "each".to_string(),
+                    crate::ast::StatementKind::Set { name, .. } => format!("set {name}"),
+                    crate::ast::StatementKind::While { .. } => "while".to_string(),
                     crate::ast::StatementKind::Yield { .. } => "yield".to_string(),
                 },
                 description: format!("{:?}", s.kind),

@@ -50,12 +50,14 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements outside a function — invalid at top level
         parser::Operation::Let(_)
+        | parser::Operation::Set(_)
         | parser::Operation::Call(_)
         | parser::Operation::Check(_)
         | parser::Operation::Branch(_)
         | parser::Operation::If(_)
         | parser::Operation::Return(_)
-        | parser::Operation::Each(_) => {
+        | parser::Operation::Each(_)
+        | parser::Operation::While(_) => {
             bail!("statement outside of function body")
         }
     }
@@ -274,6 +276,20 @@ fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
             ty: convert_type(&decl.ty)?,
             value: convert_expr(&decl.expr)?,
         },
+        parser::Operation::Set(decl) => ast::StatementKind::Set {
+            name: decl.name.clone(),
+            value: convert_expr(&decl.expr)?,
+        },
+        parser::Operation::While(decl) => {
+            let condition = convert_expr(&decl.condition)?;
+            let mut body = vec![];
+            for (i, op) in decl.body.iter().enumerate() {
+                let mut stmt = convert_statement_op(op)?;
+                stmt.id = format!("while.s{}", i + 1);
+                body.push(stmt);
+            }
+            ast::StatementKind::While { condition, body }
+        }
         parser::Operation::Call(decl) => ast::StatementKind::Call {
             binding: Some(ast::Binding {
                 name: decl.name.clone(),

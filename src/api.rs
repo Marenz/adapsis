@@ -379,6 +379,10 @@ fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
         crate::ast::StatementKind::Each { binding, .. } => {
             ("each".into(), format!("each {}:{}", binding.name, format_type(&binding.ty)))
         }
+        crate::ast::StatementKind::Set { name, .. } => {
+            ("set".into(), format!("set {name} = ..."))
+        }
+        crate::ast::StatementKind::While { .. } => ("while".into(), "while ...".into()),
         crate::ast::StatementKind::Yield { .. } => ("yield".into(), "yield ...".into()),
     }
 }

@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 
-
 use crate::ast::*;
 
 /// A symbol table tracking types, functions, and variables in scope.
@@ -248,9 +247,36 @@ fn check_statements(
                 loop_locals.insert(binding.name.clone(), binding.ty.clone());
                 check_statements(table, body, &mut loop_locals, return_type, errors);
             }
-            StatementKind::Yield { .. } => {
-                // Yield is valid inside functions with [yield] effect
+            StatementKind::Set { name, value } => {
+                // Check that the variable exists and the new value is compatible
+                if let Some(existing_ty) = locals.get(name) {
+                    if let Some(expr_ty) = infer_expr_type(table, value, locals) {
+                        if !types_compatible(existing_ty, &expr_ty, table) {
+                            errors.push(format!(
+                                "{}: type mismatch in set `{}`: variable is {:?} but expression is {:?}",
+                                stmt.id, name, existing_ty, expr_ty
+                            ));
+                        }
+                    }
+                } else {
+                    errors.push(format!(
+                        "{}: undefined variable `{}` in set statement",
+                        stmt.id, name
+                    ));
+                }
             }
+            StatementKind::While { condition, body } => {
+                if let Some(ty) = infer_expr_type(table, condition, locals) {
+                    if !matches!(ty, Type::Bool) {
+                        errors.push(format!(
+                            "{}: while condition should be Bool, got {:?}",
+                            stmt.id, ty
+                        ));
+                    }
+                }
+                check_statements(table, body, &mut locals.clone(), return_type, errors);
+            }
+            StatementKind::Yield { .. } => {}
         }
     }
 }

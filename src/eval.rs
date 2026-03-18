@@ -428,8 +428,10 @@ fn eval_function_body(
                     else_body
                 };
                 let result = eval_function_body(program, branch, env)?;
-                // If the branch returned, propagate it
-                return Ok(result);
+                // Only propagate if the branch did an explicit return (non-None)
+                if !matches!(result, Value::None) {
+                    return Ok(result);
+                }
             }
             ast::StatementKind::Each {
                 iterator,
@@ -451,8 +453,33 @@ fn eval_function_body(
                     _ => bail!("each: expected list, got {}", iter_val),
                 }
             }
+            ast::StatementKind::Set { name, value } => {
+                let val = eval_ast_expr(program, value, env)?;
+                env.set(name, val);
+            }
+            ast::StatementKind::While { condition, body } => {
+                let mut iterations = 0;
+                loop {
+                    let cond = eval_ast_expr(program, condition, env)?;
+                    if !cond.is_truthy() {
+                        break;
+                    }
+                    iterations += 1;
+                    if iterations > 10000 {
+                        bail!("while loop exceeded 10000 iterations — possible infinite loop");
+                    }
+                    match eval_function_body(program, body, env) {
+                        Ok(val) => {
+                            // If the body returned a value (via +return), propagate it
+                            if !matches!(val, Value::None) {
+                                return Ok(val);
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
             ast::StatementKind::Yield { value } => {
-                // For Phase 1, yield just evaluates the expression (no real coroutine)
                 let _val = eval_ast_expr(program, value, env)?;
             }
         }
@@ -545,6 +572,157 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 bail!("to_string() expects 1 argument");
             }
             Ok(Value::String(format!("{}", args[0])))
+        }
+        "char_at" => {
+            if args.len() != 2 {
+                bail!("char_at(s, i) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::Int(i)) => {
+                    let i = *i as usize;
+                    if i < s.len() {
+                        Ok(Value::String(s[i..i + 1].to_string()))
+                    } else {
+                        bail!("char_at: index {i} out of bounds (len {})", s.len())
+                    }
+                }
+                _ => bail!("char_at expects (String, Int)"),
+            }
+        }
+        "substring" | "substr" => {
+            if args.len() != 3 {
+                bail!("substring(s, start, end) expects 3 arguments");
+            }
+            match (&args[0], &args[1], &args[2]) {
+                (Value::String(s), Value::Int(start), Value::Int(end)) => {
+                    let start = *start as usize;
+                    let end = (*end as usize).min(s.len());
+                    if start <= end && start <= s.len() {
+                        Ok(Value::String(s[start..end].to_string()))
+                    } else {
+                        bail!(
+                            "substring: invalid range {}..{} (len {})",
+                            start,
+                            end,
+                            s.len()
+                        )
+                    }
+                }
+                _ => bail!("substring expects (String, Int, Int)"),
+            }
+        }
+        "starts_with" => {
+            if args.len() != 2 {
+                bail!("starts_with(s, prefix) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(prefix)) => {
+                    Ok(Value::Bool(s.starts_with(prefix.as_str())))
+                }
+                _ => bail!("starts_with expects (String, String)"),
+            }
+        }
+        "ends_with" => {
+            if args.len() != 2 {
+                bail!("ends_with(s, suffix) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(suffix)) => {
+                    Ok(Value::Bool(s.ends_with(suffix.as_str())))
+                }
+                _ => bail!("ends_with expects (String, String)"),
+            }
+        }
+        "contains" => {
+            if args.len() != 2 {
+                bail!("contains(s, substr) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_str()))),
+                _ => bail!("contains expects (String, String)"),
+            }
+        }
+        "index_of" => {
+            if args.len() != 2 {
+                bail!("index_of(s, substr) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(sub)) => match s.find(sub.as_str()) {
+                    Some(i) => Ok(Value::Int(i as i64)),
+                    None => Ok(Value::Int(-1)),
+                },
+                _ => bail!("index_of expects (String, String)"),
+            }
+        }
+        "split" => {
+            if args.len() != 2 {
+                bail!("split(s, delim) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(delim)) => {
+                    let parts: Vec<Value> = s
+                        .split(delim.as_str())
+                        .map(|p| Value::String(p.to_string()))
+                        .collect();
+                    Ok(Value::List(parts))
+                }
+                _ => bail!("split expects (String, String)"),
+            }
+        }
+        "trim" => {
+            if args.len() != 1 {
+                bail!("trim(s) expects 1 argument");
+            }
+            match &args[0] {
+                Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                _ => bail!("trim expects String"),
+            }
+        }
+        // List operations
+        "list" => {
+            // list() creates empty list, list(a, b, c) creates list with items
+            Ok(Value::List(args))
+        }
+        "push" => {
+            if args.len() != 2 {
+                bail!("push(list, item) expects 2 arguments");
+            }
+            match &args[0] {
+                Value::List(items) => {
+                    let mut new_items = items.clone();
+                    new_items.push(args[1].clone());
+                    Ok(Value::List(new_items))
+                }
+                _ => bail!("push expects (List, value)"),
+            }
+        }
+        "get" => {
+            if args.len() != 2 {
+                bail!("get(list, index) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::List(items), Value::Int(i)) => {
+                    let i = *i as usize;
+                    if i < items.len() {
+                        Ok(items[i].clone())
+                    } else {
+                        bail!("get: index {i} out of bounds (len {})", items.len())
+                    }
+                }
+                _ => bail!("get expects (List, Int)"),
+            }
+        }
+        "join" => {
+            if args.len() != 2 {
+                bail!("join(list, delim) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::List(items), Value::String(delim)) => {
+                    let parts: Vec<String> = items.iter().map(|v| format!("{v}")).collect();
+                    Ok(Value::String(parts.join(delim)))
+                }
+                _ => bail!("join expects (List, String)"),
+            }
         }
         "abs" => {
             if args.len() != 1 {

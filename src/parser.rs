@@ -6,17 +6,31 @@ pub enum Operation {
     Type(TypeDecl),
     Function(FunctionDecl),
     Let(LetDecl),
+    Set(SetDecl),
     Call(CallDecl),
     Check(CheckDecl),
     Branch(BranchDecl),
     If(IfDecl),
     Return(ReturnDecl),
     Each(EachDecl),
+    While(WhileDecl),
     Replace(ReplaceMutation),
     Test(TestMutation),
     Trace(TraceMutation),
     Eval(EvalMutation),
     Query(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct SetDecl {
+    pub name: String,
+    pub expr: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhileDecl {
+    pub condition: Expr,
+    pub body: Vec<Operation>,
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +355,27 @@ impl<'a> Parser<'a> {
             let decl = parse_binding_decl(line.number, rest.trim(), false)?;
             self.index += 1;
             return Ok(Operation::Let(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+set") {
+            let rest = rest.trim();
+            // Format: +set name = expr
+            let (name, expr_text) = rest
+                .split_once('=')
+                .ok_or_else(|| anyhow!("line {}: expected `name = expr` in +set", line.number))?;
+            let expr = parse_expr(line.number, expr_text.trim())?;
+            self.index += 1;
+            return Ok(Operation::Set(SetDecl {
+                name: name.trim().to_string(),
+                expr,
+            }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+while") {
+            let condition = parse_expr(line.number, rest.trim())?;
+            self.index += 1;
+            let body = self.parse_nested_block(indent)?;
+            return Ok(Operation::While(WhileDecl { condition, body }));
         }
 
         if let Some(rest) = text.strip_prefix("+call") {

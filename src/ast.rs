@@ -203,6 +203,14 @@ pub enum StatementKind {
         binding: Binding,
         body: Vec<Statement>,
     },
+    Set {
+        name: Identifier,
+        value: Expr,
+    },
+    While {
+        condition: Expr,
+        body: Vec<Statement>,
+    },
     Yield {
         value: Expr,
     },

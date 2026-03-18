@@ -597,6 +597,21 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
             Ok(())
         }
 
+        ast::StatementKind::Set { name, value } => {
+            let var = ctx
+                .vars
+                .get(name)
+                .ok_or_else(|| anyhow!("undefined variable `{name}` in compiler (use +let first)"))?
+                .clone();
+            let val = compile_expr(ctx, value, types::I64)?;
+            ctx.builder.def_var(var, val);
+            Ok(())
+        }
+
+        ast::StatementKind::While { .. } => {
+            bail!("while loops not yet supported in compiler")
+        }
+
         ast::StatementKind::Each { .. } => {
             bail!("each loops not yet supported in compiler")
         }
