@@ -1,0 +1,21 @@
++type CreateRequest = {name:String, email:String}
++type User = {id:Int, name:String, email:String}
+
++fn validate_request (req:CreateRequest)->Result<CreateRequest> [fail]
+  +check name req.name.len>0 ~err_empty_name
+  +check email req.email.len>0 ~err_empty_email
+  +return req
+
++fn create_user (req:CreateRequest, id:Int)->Result<User> [fail]
+  +call validated:CreateRequest = validate_request(req)
+  +return {id: id, name: validated.name, email: validated.email}
+
+!test validate_request
+  +with name="alice" email="a@b.com" -> expect Ok
+  +with name="" email="a@b.com" -> expect Err(err_empty_name)
+  +with name="alice" email="" -> expect Err(err_empty_email)
+
+!test create_user
+  +with name="alice" email="a@b.com" id=1 -> expect Ok
+  +with name="" email="a@b.com" id=1 -> expect Err(err_empty_name)
+  +with name="alice" email="" id=1 -> expect Err(err_empty_email)

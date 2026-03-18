@@ -184,31 +184,7 @@ pub fn eval_call_with_input(
 
     let input_val = eval_parser_expr_standalone(input)?;
     let mut env = Env::new();
-
-    // Bind params
-    match (&input_val, func.params.len()) {
-        (_, 0) => {}
-        (Value::Struct(_, fields), _) => {
-            if func.params.len() == 1 {
-                env.set(&func.params[0].name, input_val.clone());
-                for (k, v) in fields {
-                    env.set(k, v.clone());
-                }
-            } else {
-                for param in &func.params {
-                    if let Some(val) = fields.get(&param.name) {
-                        env.set(&param.name, val.clone());
-                    }
-                }
-            }
-        }
-        (_, 1) => {
-            env.set(&func.params[0].name, input_val.clone());
-        }
-        _ => {
-            env.set(&func.params[0].name, input_val.clone());
-        }
-    }
+    bind_input_to_params(program, func, &input_val, &mut env);
 
     let returns_result = matches!(&func.return_type, ast::Type::Result(_));
 
@@ -229,35 +205,69 @@ pub fn eval_call_with_input(
 }
 
 /// Evaluate a test case against a function in the program.
-pub fn eval_test_case(
+/// Bind test input values to function parameters.
+/// Handles three cases:
+/// 1. Single param → bind directly
+/// 2. Multi-param, all fields match param names → bind each field to its param
+/// 3. Multi-param with struct params → distribute fields based on type definitions
+fn bind_input_to_params(
     program: &ast::Program,
-    function_name: &str,
-    case: &parser::TestCase,
-) -> Result<String> {
-    let func = program
-        .get_function(function_name)
-        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
-
-    let input = eval_parser_expr_standalone(&case.input)?;
-    let expected = eval_parser_expr_standalone(&case.expected)?;
-
-    // Set up environment with function params bound to input
-    let mut env = Env::new();
-    match (&input, func.params.len()) {
+    func: &ast::FunctionDecl,
+    input: &Value,
+    env: &mut Env,
+) {
+    match (input, func.params.len()) {
         (_, 0) => {} // no params
+        (Value::Struct(_, fields), n) if n == 1 => {
+            // Single struct-typed param — pass the whole struct
+            env.set(&func.params[0].name, input.clone());
+            // Also expose fields directly for field access (e.g., input.name)
+            for (k, v) in fields {
+                env.set(k, v.clone());
+            }
+        }
         (Value::Struct(_, fields), _) => {
-            // If input is a struct, bind each param by name from the struct fields,
-            // or bind the whole struct as the first param
-            if func.params.len() == 1 {
-                env.set(&func.params[0].name, input.clone());
-                // Also expose fields directly for field access
-                for (k, v) in fields {
-                    env.set(k, v.clone());
-                }
-            } else {
+            // Multi-param function with struct input (key=value pairs)
+            // First, check if all fields directly match param names
+            let all_match = func.params.iter().all(|p| fields.contains_key(&p.name));
+
+            if all_match {
+                // Direct match: a=3 b=4 for (a:Int, b:Int)
                 for param in &func.params {
                     if let Some(val) = fields.get(&param.name) {
                         env.set(&param.name, val.clone());
+                    }
+                }
+            } else {
+                // Smart distribution: fields may belong to struct-typed params
+                // For each param, check if it's a struct type and collect matching fields
+                let mut used_fields: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+
+                for param in &func.params {
+                    // Check if this param matches a field directly
+                    if let Some(val) = fields.get(&param.name) {
+                        env.set(&param.name, val.clone());
+                        used_fields.insert(param.name.clone());
+                        continue;
+                    }
+
+                    // Check if this param is a struct type — look up its field names
+                    if let ast::Type::Struct(type_name) = &param.ty {
+                        if let Some(type_fields) = get_struct_fields(program, type_name) {
+                            // Collect input fields that match this struct's fields
+                            let mut struct_fields = HashMap::new();
+                            for (tf_name, _) in &type_fields {
+                                if let Some(val) = fields.get(tf_name) {
+                                    struct_fields.insert(tf_name.clone(), val.clone());
+                                    used_fields.insert(tf_name.clone());
+                                }
+                            }
+                            if !struct_fields.is_empty() {
+                                let struct_val = Value::Struct(type_name.clone(), struct_fields);
+                                env.set(&param.name, struct_val);
+                            }
+                        }
                     }
                 }
             }
@@ -270,6 +280,54 @@ pub fn eval_test_case(
             env.set(&func.params[0].name, input.clone());
         }
     }
+}
+
+/// Look up struct field names from the program's type declarations.
+fn get_struct_fields(program: &ast::Program, type_name: &str) -> Option<Vec<(String, ast::Type)>> {
+    for td in &program.types {
+        if let ast::TypeDecl::Struct(s) = td {
+            if s.name == type_name {
+                return Some(
+                    s.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
+                );
+            }
+        }
+    }
+    // Also check modules
+    for module in &program.modules {
+        for td in &module.types {
+            if let ast::TypeDecl::Struct(s) = td {
+                if s.name == type_name {
+                    return Some(
+                        s.fields
+                            .iter()
+                            .map(|f| (f.name.clone(), f.ty.clone()))
+                            .collect(),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn eval_test_case(
+    program: &ast::Program,
+    function_name: &str,
+    case: &parser::TestCase,
+) -> Result<String> {
+    let func = program
+        .get_function(function_name)
+        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+
+    let input = eval_parser_expr_standalone(&case.input)?;
+    let expected = eval_parser_expr_standalone(&case.expected)?;
+
+    let mut env = Env::new();
+    bind_input_to_params(program, func, &input, &mut env);
 
     // Execute function body
     let result = eval_function_body(program, &func.body, &mut env);
@@ -893,31 +951,7 @@ pub fn trace_function(
 
     let input_val = eval_parser_expr_standalone(input)?;
     let mut env = Env::new();
-
-    // Bind params
-    match (&input_val, func.params.len()) {
-        (_, 0) => {}
-        (Value::Struct(_, fields), _) => {
-            if func.params.len() == 1 {
-                env.set(&func.params[0].name, input_val.clone());
-                for (k, v) in fields {
-                    env.set(k, v.clone());
-                }
-            } else {
-                for param in &func.params {
-                    if let Some(val) = fields.get(&param.name) {
-                        env.set(&param.name, val.clone());
-                    }
-                }
-            }
-        }
-        (_, 1) => {
-            env.set(&func.params[0].name, input_val.clone());
-        }
-        _ => {
-            env.set(&func.params[0].name, input_val.clone());
-        }
-    }
+    bind_input_to_params(program, func, &input_val, &mut env);
 
     let mut steps = vec![];
     trace_body(program, &func.body, &mut env, &mut steps);
