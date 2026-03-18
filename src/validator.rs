@@ -46,6 +46,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             Ok("test block (skipped during validation)".to_string())
         }
         parser::Operation::Trace(_) => Ok("trace (handled by evaluator)".to_string()),
+        parser::Operation::Eval(_) => Ok("eval (handled by evaluator)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements outside a function — invalid at top level
         parser::Operation::Let(_)

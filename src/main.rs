@@ -1,4 +1,5 @@
 mod ast;
+mod compiler;
 mod eval;
 mod events;
 mod llm;
@@ -85,6 +86,20 @@ enum Command {
     Test {
         /// Path to .forge file
         path: String,
+    },
+
+    /// Compile a .forge file to native code and run it
+    Compile {
+        /// Path to .forge file
+        path: String,
+
+        /// Function to call
+        #[arg(short, long)]
+        func: String,
+
+        /// Arguments (comma-separated integers)
+        #[arg(short, long, default_value = "")]
+        args: String,
     },
 }
 
@@ -176,6 +191,7 @@ async fn main() -> Result<()> {
                 match op {
                     parser::Operation::Test(_)
                     | parser::Operation::Trace(_)
+                    | parser::Operation::Eval(_)
                     | parser::Operation::Query(_) => {}
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => println!("OK: {msg}"),
@@ -211,6 +227,16 @@ async fn main() -> Result<()> {
                             Err(e) => eprintln!("  TRACE ERROR: {e}"),
                         }
                     }
+                    parser::Operation::Eval(ev) => {
+                        match eval::eval_call_with_input(
+                            &program,
+                            &ev.function_name,
+                            &ev.input,
+                        ) {
+                            Ok(result) => println!("  eval {}(...) = {result}", ev.function_name),
+                            Err(e) => eprintln!("  EVAL ERROR: {e}"),
+                        }
+                    }
                     parser::Operation::Query(query) => {
                         let table = typeck::build_symbol_table(&program);
                         let response = typeck::handle_query(&program, &table, query);
@@ -233,6 +259,38 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Command::Compile { path, func, args } => {
+            let source = std::fs::read_to_string(&path)?;
+            let operations = parser::parse(&source)?;
+            let mut program = ast::Program::default();
+            for op in &operations {
+                match op {
+                    parser::Operation::Test(_)
+                    | parser::Operation::Trace(_)
+                    | parser::Operation::Eval(_)
+                    | parser::Operation::Query(_) => {}
+                    _ => {
+                        validator::apply_and_validate(&mut program, op)?;
+                    }
+                }
+            }
+
+            println!("Compiling...");
+            let mut compiled = compiler::compile(&program)?;
+            println!("Compiled {} function(s)", program.functions.len());
+
+            let int_args: Vec<i64> = if args.is_empty() {
+                vec![]
+            } else {
+                args.split(',')
+                    .map(|s| s.trim().parse::<i64>())
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            println!("Calling {}({})...", func, args);
+            let result = compiled.call_i64(&func, &int_args)?;
+            println!("Result: {result}");
         }
     }
 

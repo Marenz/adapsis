@@ -118,6 +118,62 @@ impl Env {
     }
 }
 
+/// Evaluate a function call with given input, returning the result as a displayable string.
+pub fn eval_call_with_input(
+    program: &ast::Program,
+    function_name: &str,
+    input: &parser::Expr,
+) -> Result<String> {
+    let func = program
+        .get_function(function_name)
+        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+
+    let input_val = eval_parser_expr_standalone(input)?;
+    let mut env = Env::new();
+
+    // Bind params
+    match (&input_val, func.params.len()) {
+        (_, 0) => {}
+        (Value::Struct(_, fields), _) => {
+            if func.params.len() == 1 {
+                env.set(&func.params[0].name, input_val.clone());
+                for (k, v) in fields {
+                    env.set(k, v.clone());
+                }
+            } else {
+                for param in &func.params {
+                    if let Some(val) = fields.get(&param.name) {
+                        env.set(&param.name, val.clone());
+                    }
+                }
+            }
+        }
+        (_, 1) => {
+            env.set(&func.params[0].name, input_val.clone());
+        }
+        _ => {
+            env.set(&func.params[0].name, input_val.clone());
+        }
+    }
+
+    let returns_result = matches!(&func.return_type, ast::Type::Result(_));
+
+    match eval_function_body(program, &func.body, &mut env) {
+        Ok(val) => {
+            let result = if returns_result {
+                match &val {
+                    Value::Ok(_) | Value::Err(_) => val,
+                    _ => Value::Ok(Box::new(val)),
+                }
+            } else {
+                val
+            };
+            Ok(format!("{result}"))
+        }
+        Err(e) => Ok(format!("Err({e})")),
+    }
+}
+
 /// Evaluate a test case against a function in the program.
 pub fn eval_test_case(
     program: &ast::Program,

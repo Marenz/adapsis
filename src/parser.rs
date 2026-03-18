@@ -15,7 +15,14 @@ pub enum Operation {
     Replace(ReplaceMutation),
     Test(TestMutation),
     Trace(TraceMutation),
+    Eval(EvalMutation),
     Query(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct EvalMutation {
+    pub function_name: String,
+    pub input: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -445,6 +452,22 @@ impl<'a> Parser<'a> {
             let input = parse_expr(line.number, input_text.trim())?;
             self.index += 1;
             return Ok(Operation::Trace(TraceMutation {
+                function_name: fn_name.to_string(),
+                input,
+            }));
+        }
+
+        if let Some(rest) = text.strip_prefix("!eval") {
+            let rest = rest.trim();
+            // Parse: !eval function_name arg1 arg2  OR  !eval function_name key=val key=val
+            let (fn_name, input_text) = rest.split_once(' ').unwrap_or((rest, ""));
+            let input = if input_text.trim().is_empty() {
+                Expr::StructLiteral(vec![])
+            } else {
+                parse_test_input(line.number, input_text.trim())?
+            };
+            self.index += 1;
+            return Ok(Operation::Eval(EvalMutation {
                 function_name: fn_name.to_string(),
                 input,
             }));

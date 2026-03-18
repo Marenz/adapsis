@@ -163,6 +163,36 @@ impl<B: LlmBackend> Orchestrator<B> {
                             }
                         }
                     }
+                    parser::Operation::Eval(ev) => {
+                        print!("  eval {}(...) = ", ev.function_name);
+                        match eval::eval_call_with_input(
+                            &program,
+                            &ev.function_name,
+                            &ev.input,
+                        ) {
+                            Ok(result) => {
+                                println!("{result}");
+                                self.emit(ForgeEvent::MutationOk {
+                                    message: format!(
+                                        "eval {}(...) = {result}",
+                                        ev.function_name
+                                    ),
+                                });
+                                results.push((
+                                    format!("eval {} = {result}", ev.function_name),
+                                    true,
+                                ));
+                            }
+                            Err(e) => {
+                                let msg = format!("eval error: {e}");
+                                println!("{msg}");
+                                self.emit(ForgeEvent::MutationError {
+                                    message: msg.clone(),
+                                });
+                                results.push((msg, false));
+                            }
+                        }
+                    }
                     parser::Operation::Query(query) => {
                         let table = typeck::build_symbol_table(&program);
                         let response = typeck::handle_query(&program, &table, query);
@@ -350,6 +380,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                 match op {
                     parser::Operation::Test(_)
                     | parser::Operation::Trace(_)
+                    | parser::Operation::Eval(_)
                     | parser::Operation::Query(_) => {}
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => {
