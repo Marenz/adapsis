@@ -1,9 +1,11 @@
 mod ast;
 mod eval;
+mod events;
 mod llm;
 mod orchestrator;
 mod parser;
 mod prompt;
+mod server;
 mod typeck;
 mod validator;
 
@@ -20,7 +22,7 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Run the interactive feedback loop with the LLM
+    /// Run the interactive feedback loop with the LLM (CLI mode)
     Run {
         /// Natural language task description for the model
         #[arg(short, long)]
@@ -33,6 +35,25 @@ enum Command {
         /// Maximum feedback loop iterations
         #[arg(short, long, default_value_t = 20)]
         max_iterations: usize,
+    },
+
+    /// Run with browser interface
+    Serve {
+        /// Natural language task description for the model
+        #[arg(short, long)]
+        task: String,
+
+        /// LLM server URL (OpenAI-compatible)
+        #[arg(short, long, default_value = "http://127.0.0.1:8081")]
+        url: String,
+
+        /// Maximum feedback loop iterations
+        #[arg(short, long, default_value_t = 20)]
+        max_iterations: usize,
+
+        /// Web server port
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
     },
 
     /// Parse a .forge file and validate it
@@ -66,6 +87,15 @@ async fn main() -> Result<()> {
             let mut orch = orchestrator::Orchestrator::new(llm_client, max_iterations);
             orch.run(&task).await?;
         }
+        Command::Serve {
+            task,
+            url,
+            max_iterations,
+            port,
+        } => {
+            let llm_client = llm::LlmClient::new(&url);
+            server::serve_and_run(llm_client, max_iterations, port, task).await?;
+        }
         Command::Check { path } => {
             let source = std::fs::read_to_string(&path)?;
             let operations = parser::parse(&source)?;
@@ -74,14 +104,13 @@ async fn main() -> Result<()> {
                 match op {
                     parser::Operation::Test(_)
                     | parser::Operation::Trace(_)
-                    | parser::Operation::Query(_) => {} // skip in check mode
+                    | parser::Operation::Query(_) => {}
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => println!("OK: {msg}"),
                         Err(e) => eprintln!("ERROR: {e}"),
                     },
                 }
             }
-            // Type check
             let table = typeck::build_symbol_table(&program);
             for func in &program.functions {
                 for error in typeck::check_function(&table, func) {

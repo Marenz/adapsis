@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forge — AI-First Programming Language</title>
+<style>
+:root {
+  --bg: #1a1b26;
+  --surface: #24283b;
+  --surface2: #2f3347;
+  --border: #3b4261;
+  --text: #c0caf5;
+  --text-dim: #565f89;
+  --green: #9ece6a;
+  --red: #f7768e;
+  --blue: #7aa2f7;
+  --yellow: #e0af68;
+  --purple: #bb9af7;
+  --cyan: #7dcfff;
+  --orange: #ff9e64;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+header h1 { font-size: 16px; color: var(--blue); font-weight: 600; }
+header .status { color: var(--text-dim); font-size: 12px; }
+header .status.connected { color: var(--green); }
+.task-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  gap: 8px;
+}
+.task-bar input {
+  flex: 1;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.task-bar button {
+  background: var(--blue);
+  color: var(--bg);
+  border: none;
+  padding: 6px 16px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.task-bar button:hover { opacity: 0.9; }
+.task-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+.panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+.panel:last-child { border-right: none; }
+.panel-header {
+  background: var(--surface);
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-bottom: 1px solid var(--border);
+}
+.panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.event {
+  padding: 3px 8px;
+  border-radius: 3px;
+  margin-bottom: 2px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.event.ok { color: var(--green); }
+.event.error { color: var(--red); }
+.event.warn { color: var(--yellow); }
+.event.info { color: var(--text-dim); }
+.event.code { color: var(--cyan); background: var(--surface2); padding: 6px 8px; }
+.event.thinking { color: var(--purple); opacity: 0.7; }
+.event.test-pass { color: var(--green); }
+.event.test-fail { color: var(--red); }
+.event.iteration {
+  color: var(--blue);
+  font-weight: 600;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.type-card, .fn-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+.type-card h3, .fn-card h3 {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.type-card h3 { color: var(--yellow); }
+.fn-card h3 { color: var(--blue); }
+.fn-card .effects { color: var(--orange); font-size: 11px; }
+.fn-card .params { color: var(--text-dim); font-size: 12px; }
+.fn-card .stmt {
+  padding: 2px 0 2px 12px;
+  font-size: 12px;
+  color: var(--text);
+  border-left: 2px solid var(--border);
+  margin: 2px 0;
+}
+.fn-card .stmt.pass { border-left-color: var(--green); }
+.fn-card .stmt.fail { border-left-color: var(--red); }
+.field { color: var(--text-dim); font-size: 12px; padding-left: 12px; }
+.test-summary {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+.test-summary h3 { font-size: 13px; color: var(--purple); margin-bottom: 6px; }
+.test-case { font-size: 12px; padding: 2px 0; }
+.test-case.pass { color: var(--green); }
+.test-case.fail { color: var(--red); }
+#no-program { color: var(--text-dim); padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FORGE</h1>
+  <span id="status" class="status">disconnected</span>
+  <span id="iteration" class="status"></span>
+</header>
+<div class="task-bar">
+  <input id="task-input" placeholder="Describe what to build..." value="Write a function that validates an email address">
+  <button id="run-btn" onclick="startTask()">Run</button>
+</div>
+<main>
+  <div class="panel" style="flex: 1.2">
+    <div class="panel-header">Event Log</div>
+    <div class="panel-content" id="events"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">Program State</div>
+    <div class="panel-content" id="program">
+      <div id="no-program">No program yet. Enter a task and click Run.</div>
+    </div>
+  </div>
+  <div class="panel" style="flex: 0.8">
+    <div class="panel-header">Tests</div>
+    <div class="panel-content" id="tests"></div>
+  </div>
+</main>
+
+<script>
+let ws = null;
+let testResults = {};
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('status').textContent = 'connected';
+    document.getElementById('status').className = 'status connected';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('status').textContent = 'disconnected';
+    document.getElementById('status').className = 'status';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (msg) => {
+    try {
+      const event = JSON.parse(msg.data);
+      handleEvent(event);
+    } catch (e) {
+      console.error('Failed to parse event:', e);
+    }
+  };
+}
+
+function handleEvent(event) {
+  const events = document.getElementById('events');
+  const el = document.createElement('div');
+  el.className = 'event';
+
+  switch (event.type) {
+    case 'IterationStart':
+      el.className = 'event iteration';
+      el.textContent = `--- Iteration ${event.iteration}/${event.max_iterations} ---`;
+      document.getElementById('iteration').textContent =
+        `iteration ${event.iteration}/${event.max_iterations}`;
+      break;
+
+    case 'Thinking':
+      el.className = 'event thinking';
+      el.textContent = `[think] ${event.text.substring(0, 200)}${event.text.length > 200 ? '...' : ''}`;
+      break;
+
+    case 'Code':
+      el.className = 'event code';
+      el.textContent = event.text;
+      break;
+
+    case 'MutationOk':
+      el.className = 'event ok';
+      el.textContent = `OK: ${event.message}`;
+      break;
+
+    case 'MutationError':
+      el.className = 'event error';
+      el.textContent = `ERROR: ${event.message}`;
+      break;
+
+    case 'TypeWarning':
+      el.className = 'event warn';
+      el.textContent = `TYPE: ${event.message}`;
+      break;
+
+    case 'TestPass':
+      el.className = 'event test-pass';
+      el.textContent = `PASS [${event.function}#${event.index}]: ${event.message}`;
+      addTestResult(event.function, event.index, true, event.message);
+      break;
+
+    case 'TestFail':
+      el.className = 'event test-fail';
+      el.textContent = `FAIL [${event.function}#${event.index}]: ${event.message}`;
+      addTestResult(event.function, event.index, false, event.message);
+      break;
+
+    case 'TraceStep':
+      el.className = 'event info';
+      el.textContent = `> ${event.stmt_id}: ${event.description} | ${event.result} | ${event.status}`;
+      break;
+
+    case 'ProgramSnapshot':
+      renderProgram(event);
+      return; // don't add to event log
+
+    case 'ProgramState':
+      el.className = 'event info';
+      el.textContent = event.summary.substring(0, 100);
+      break;
+
+    case 'Done':
+      el.className = 'event iteration';
+      el.textContent = '=== DONE ===';
+      document.getElementById('run-btn').disabled = false;
+      document.getElementById('iteration').textContent = 'done';
+      break;
+
+    default:
+      el.className = 'event info';
+      el.textContent = JSON.stringify(event);
+  }
+
+  events.appendChild(el);
+  events.scrollTop = events.scrollHeight;
+}
+
+function renderProgram(snapshot) {
+  const container = document.getElementById('program');
+  container.innerHTML = '';
+
+  // Types
+  for (const t of snapshot.types || []) {
+    const card = document.createElement('div');
+    card.className = 'type-card';
+    let html = `<h3>${t.kind} ${t.name}</h3>`;
+    for (const f of t.fields || []) {
+      html += `<div class="field">${f.name}: ${f.ty}</div>`;
+    }
+    card.innerHTML = html;
+    container.appendChild(card);
+  }
+
+  // Functions
+  for (const fn of snapshot.functions || []) {
+    renderFunction(container, fn);
+  }
+
+  // Modules
+  for (const m of snapshot.modules || []) {
+    const header = document.createElement('div');
+    header.className = 'event iteration';
+    header.textContent = `module ${m.name}`;
+    container.appendChild(header);
+
+    for (const t of m.types || []) {
+      const card = document.createElement('div');
+      card.className = 'type-card';
+      let html = `<h3>${t.kind} ${t.name}</h3>`;
+      for (const f of t.fields || []) {
+        html += `<div class="field">${f.name}: ${f.ty}</div>`;
+      }
+      card.innerHTML = html;
+      container.appendChild(card);
+    }
+
+    for (const fn of m.functions || []) {
+      renderFunction(container, fn);
+    }
+  }
+
+  if (container.children.length === 0) {
+    container.innerHTML = '<div id="no-program">No program yet.</div>';
+  }
+}
+
+function renderFunction(container, fn) {
+  const card = document.createElement('div');
+  card.className = 'fn-card';
+  const params = (fn.params || []).map(p => `${p.name}:${p.ty}`).join(', ');
+  const effects = (fn.effects || []).length > 0 ? ` [${fn.effects.join(',')}]` : '';
+  let html = `<h3>fn ${fn.name}</h3>`;
+  html += `<div class="params">(${params}) -> ${fn.return_type}${effects}</div>`;
+  for (const s of fn.statements || []) {
+    html += `<div class="stmt">${s.kind}</div>`;
+  }
+  card.innerHTML = html;
+  container.appendChild(card);
+}
+
+function addTestResult(fn_name, index, pass, message) {
+  if (!testResults[fn_name]) testResults[fn_name] = [];
+  testResults[fn_name][index] = { pass, message };
+  renderTests();
+}
+
+function renderTests() {
+  const container = document.getElementById('tests');
+  container.innerHTML = '';
+  for (const [fn_name, cases] of Object.entries(testResults)) {
+    const summary = document.createElement('div');
+    summary.className = 'test-summary';
+    const passed = cases.filter(c => c && c.pass).length;
+    const total = cases.filter(c => c).length;
+    let html = `<h3>${fn_name} (${passed}/${total})</h3>`;
+    for (let i = 0; i < cases.length; i++) {
+      if (cases[i]) {
+        const cls = cases[i].pass ? 'pass' : 'fail';
+        const icon = cases[i].pass ? 'PASS' : 'FAIL';
+        html += `<div class="test-case ${cls}">${icon} [${i}]: ${cases[i].message}</div>`;
+      }
+    }
+    summary.innerHTML = html;
+    container.appendChild(summary);
+  }
+}
+
+function startTask() {
+  const input = document.getElementById('task-input');
+  const task = input.value.trim();
+  if (!task) return;
+
+  // Clear previous state
+  document.getElementById('events').innerHTML = '';
+  document.getElementById('program').innerHTML = '<div id="no-program">Starting...</div>';
+  document.getElementById('tests').innerHTML = '';
+  testResults = {};
+
+  document.getElementById('run-btn').disabled = true;
+
+  // Send task via query param to trigger the orchestrator
+  fetch(`/api/run?task=${encodeURIComponent(task)}`);
+}
+
+connect();
+</script>
+</body>
+</html>

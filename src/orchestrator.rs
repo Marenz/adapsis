@@ -3,6 +3,7 @@ use tracing::info;
 
 use crate::ast;
 use crate::eval;
+use crate::events::{self, EventBus, ForgeEvent};
 use crate::llm::{ChatMessage, LlmBackend, LlmClient};
 use crate::parser;
 use crate::prompt;
@@ -12,6 +13,7 @@ use crate::validator;
 pub struct Orchestrator<B: LlmBackend = crate::llm::OpenAiBackend> {
     llm: LlmClient<B>,
     max_iterations: usize,
+    event_bus: Option<EventBus>,
 }
 
 impl<B: LlmBackend> Orchestrator<B> {
@@ -19,6 +21,21 @@ impl<B: LlmBackend> Orchestrator<B> {
         Self {
             llm,
             max_iterations,
+            event_bus: None,
+        }
+    }
+
+    pub fn with_event_bus(llm: LlmClient<B>, max_iterations: usize, bus: EventBus) -> Self {
+        Self {
+            llm,
+            max_iterations,
+            event_bus: Some(bus),
+        }
+    }
+
+    fn emit(&self, event: ForgeEvent) {
+        if let Some(bus) = &self.event_bus {
+            bus.send(event);
         }
     }
 
@@ -36,23 +53,37 @@ impl<B: LlmBackend> Orchestrator<B> {
 
         for iteration in 1..=self.max_iterations {
             println!("--- Iteration {iteration}/{} ---", self.max_iterations);
+            self.emit(ForgeEvent::IterationStart {
+                iteration,
+                max_iterations: self.max_iterations,
+            });
 
             // Get LLM response
             let output = self.llm.generate(messages.clone()).await?;
             println!(); // newline after streaming output
 
+            if !output.thinking.is_empty() {
+                self.emit(ForgeEvent::Thinking {
+                    text: output.thinking.clone(),
+                });
+            }
+
             // Check if the model signals completion
             let code = if output.code.is_empty() {
-                // If no <code> block, try to extract code from the raw text
-                // (the model might not always use tags perfectly)
                 extract_forge_code(&output.text)
             } else {
                 output.code.clone()
             };
 
+            if !code.is_empty() {
+                self.emit(ForgeEvent::Code { text: code.clone() });
+            }
+
             if code.trim() == "DONE" || code.trim().is_empty() {
                 println!("\n=== Model signals completion ===");
                 println!("{program}");
+                self.emit(events::snapshot_program(&program));
+                self.emit(ForgeEvent::Done);
                 return Ok(());
             }
 
@@ -65,6 +96,9 @@ impl<B: LlmBackend> Orchestrator<B> {
                 Err(e) => {
                     let error_msg = format!("Parse error: {e}");
                     println!("  {error_msg}");
+                    self.emit(ForgeEvent::MutationError {
+                        message: error_msg.clone(),
+                    });
                     let feedback = prompt::feedback_message(
                         &[(error_msg, false)],
                         &[],
@@ -76,7 +110,6 @@ impl<B: LlmBackend> Orchestrator<B> {
             };
 
             // Each response is a complete program — start fresh
-            // (unless it contains only !replace or !test operations)
             let has_definitions = operations.iter().any(|op| {
                 matches!(
                     op,
@@ -104,12 +137,28 @@ impl<B: LlmBackend> Orchestrator<B> {
                             Ok(steps) => {
                                 for step in &steps {
                                     println!("    > {step}");
+                                    self.emit(ForgeEvent::TraceStep {
+                                        stmt_id: step.stmt_id.clone(),
+                                        description: step.description.clone(),
+                                        result: step.result.clone(),
+                                        status: format!("{:?}", step.status),
+                                    });
                                 }
-                                results.push((format!("traced {} ({} steps)", trace.function_name, steps.len()), true));
+                                results.push((
+                                    format!(
+                                        "traced {} ({} steps)",
+                                        trace.function_name,
+                                        steps.len()
+                                    ),
+                                    true,
+                                ));
                             }
                             Err(e) => {
                                 let msg = format!("trace error: {e}");
                                 println!("    {msg}");
+                                self.emit(ForgeEvent::MutationError {
+                                    message: msg.clone(),
+                                });
                                 results.push((msg, false));
                             }
                         }
@@ -118,42 +167,65 @@ impl<B: LlmBackend> Orchestrator<B> {
                         let table = typeck::build_symbol_table(&program);
                         let response = typeck::handle_query(&program, &table, query);
                         println!("  Query `{query}`:\n{response}");
+                        self.emit(ForgeEvent::QueryResult {
+                            query: query.clone(),
+                            response: response.clone(),
+                        });
                         results.push((format!("query: {query}"), true));
                     }
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => {
                             println!("  OK: {msg}");
+                            self.emit(ForgeEvent::MutationOk {
+                                message: msg.clone(),
+                            });
                             results.push((msg, true));
                         }
                         Err(e) => {
                             let msg = format!("{e}");
                             println!("  ERROR: {msg}");
+                            self.emit(ForgeEvent::MutationError {
+                                message: msg.clone(),
+                            });
                             results.push((msg, false));
                         }
                     },
                 }
             }
 
-            // Run type checking on the updated program
+            // Run type checking
             {
                 let table = typeck::build_symbol_table(&program);
                 for func in &program.functions {
-                    let errors = typeck::check_function(&table, func);
-                    for error in errors {
+                    for error in typeck::check_function(&table, func) {
                         println!("  TYPE WARNING: {error}");
-                        results.push((format!("type warning: {error}"), true)); // warnings, not errors
+                        self.emit(ForgeEvent::TypeWarning {
+                            message: error.clone(),
+                        });
+                        results.push((format!("type warning: {error}"), true));
                     }
                 }
                 for module in &program.modules {
                     for func in &module.functions {
-                        let errors = typeck::check_function(&table, func);
-                        for error in errors {
+                        for error in typeck::check_function(&table, func) {
                             println!("  TYPE WARNING: {error}");
-                            results.push((format!("type warning in {}.{}: {}", module.name, func.name, error), true));
+                            self.emit(ForgeEvent::TypeWarning {
+                                message: error.clone(),
+                            });
+                            results.push((
+                                format!(
+                                    "type warning in {}.{}: {}",
+                                    module.name, func.name, error
+                                ),
+                                true,
+                            ));
                         }
                     }
                 }
             }
+
+            // Send program snapshot
+            self.emit(events::snapshot_program(&program));
 
             // Run tests
             let mut test_results: Vec<(String, bool)> = vec![];
@@ -163,11 +235,21 @@ impl<B: LlmBackend> Orchestrator<B> {
                     match eval::eval_test_case(&program, &test.function_name, case) {
                         Ok(msg) => {
                             println!("    PASS [{i}]: {msg}");
+                            self.emit(ForgeEvent::TestPass {
+                                function: test.function_name.clone(),
+                                index: i,
+                                message: msg.clone(),
+                            });
                             test_results.push((msg, true));
                         }
                         Err(e) => {
                             let msg = format!("{e}");
                             println!("    FAIL [{i}]: {msg}");
+                            self.emit(ForgeEvent::TestFail {
+                                function: test.function_name.clone(),
+                                index: i,
+                                message: msg.clone(),
+                            });
                             test_results.push((msg, false));
                         }
                     }
@@ -184,21 +266,24 @@ impl<B: LlmBackend> Orchestrator<B> {
             );
             messages.push(ChatMessage::user(feedback));
 
+            self.emit(ForgeEvent::ProgramState {
+                summary: validator::program_summary(&program),
+            });
+
             if all_ok && !results.is_empty() {
                 info!("iteration {iteration}: all passed");
-                // Don't break yet — let the model decide if it's done
             }
         }
 
         println!("\n=== Max iterations reached ===");
         println!("{program}");
+        self.emit(ForgeEvent::Done);
         Ok(())
     }
 }
 
 /// Try to extract Forge code from raw text when <code> tags are missing.
 fn extract_forge_code(text: &str) -> String {
-    // Look for lines starting with + or ! which are Forge operations
     let mut code_lines = vec![];
     let mut in_code = false;
 
@@ -210,7 +295,6 @@ fn extract_forge_code(text: &str) -> String {
         } else if in_code && (trimmed.is_empty() || trimmed.starts_with("//")) {
             code_lines.push(line);
         } else if in_code {
-            // Non-forge line after forge content — might be end of code block
             in_code = false;
         }
     }
