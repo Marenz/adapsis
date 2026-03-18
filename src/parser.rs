@@ -490,7 +490,7 @@ impl<'a> Parser<'a> {
                 .trim();
 
             let (input_text, expected_text) = split_test_case(line.number, rest)?;
-            let input = parse_expr(line.number, input_text.trim())?;
+            let input = parse_test_input(line.number, input_text.trim())?;
             let expected = parse_expr(line.number, expected_text.trim())?;
             cases.push(TestCase { input, expected });
             self.index += 1;
@@ -1437,6 +1437,124 @@ fn split_once_required<'a>(
     input
         .split_once(needle)
         .ok_or_else(|| anyhow!("line {}: expected `{}` in `{}`", line, needle, input))
+}
+
+/// Parse test input — supports both `key=value` pairs and regular expressions.
+///
+/// `key=value` format: `name="alice" age=25 active=true`
+/// Regular format: `{name: "alice", age: 25}` or `5` or `"hello"`
+fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
+    let input = input.trim();
+    if input.is_empty() {
+        bail!("line {}: empty test input", line);
+    }
+
+    // Detect key=value format: first non-whitespace token contains '=' and doesn't start with {
+    // but is not a comparison like `x==5` or `x>=3`
+    if !input.starts_with('{')
+        && !input.starts_with('"')
+        && !input.starts_with('-')
+        && !input.chars().next().unwrap_or(' ').is_ascii_digit()
+        && input.contains('=')
+        && !input.contains("==")
+        && !input.contains(">=")
+        && !input.contains("<=")
+        && !input.contains("!=")
+    {
+        // Parse as space-separated key=value pairs
+        let mut fields = Vec::new();
+        let mut rest = input;
+
+        while !rest.is_empty() {
+            rest = rest.trim_start();
+            if rest.is_empty() {
+                break;
+            }
+
+            // Find key
+            let eq_pos = rest.find('=').ok_or_else(|| {
+                anyhow!("line {}: expected `key=value` pair, got `{}`", line, rest)
+            })?;
+            let key = rest[..eq_pos].trim();
+            rest = &rest[eq_pos + 1..];
+
+            // Parse value — could be quoted string, number, bool, or nested struct
+            let (value, remaining) = parse_test_value(line, rest)?;
+            fields.push(FieldValue {
+                name: key.to_string(),
+                value,
+            });
+            rest = remaining;
+        }
+
+        if fields.is_empty() {
+            bail!("line {}: no key=value pairs found in test input", line);
+        }
+
+        Ok(Expr::StructLiteral(fields))
+    } else {
+        // Regular expression format
+        parse_expr(line, input)
+    }
+}
+
+/// Parse a single value from key=value format, returning (value, remaining_input).
+fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
+    let input = input.trim_start();
+
+    if input.starts_with('"') {
+        // Quoted string — find closing quote
+        let end = input[1..]
+            .find('"')
+            .ok_or_else(|| anyhow!("line {}: unterminated string in test value", line))?;
+        let s = &input[1..end + 1];
+        let rest = &input[end + 2..];
+        Ok((Expr::String(s.to_string()), rest))
+    } else if input.starts_with('{') {
+        // Nested struct literal — find matching brace
+        let mut depth = 0;
+        let mut end = 0;
+        for (i, ch) in input.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            bail!("line {}: unmatched brace in test value", line);
+        }
+        let expr = parse_expr(line, &input[..end])?;
+        Ok((expr, &input[end..]))
+    } else {
+        // Number, bool, or identifier — read until whitespace
+        let end = input
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(input.len());
+        let token = &input[..end];
+        let rest = &input[end..];
+
+        let expr = if token == "true" {
+            Expr::Bool(true)
+        } else if token == "false" {
+            Expr::Bool(false)
+        } else if let Ok(n) = token.parse::<i64>() {
+            Expr::Int(n)
+        } else if let Ok(f) = token.parse::<f64>() {
+            Expr::Float(f)
+        } else {
+            // Treat as identifier
+            Expr::Ident(token.to_string())
+        };
+
+        Ok((expr, rest))
+    }
 }
 
 fn split_test_case<'a>(line: usize, input: &'a str) -> Result<(&'a str, &'a str)> {

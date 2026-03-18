@@ -69,12 +69,18 @@ end
 
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
-For functions with multiple parameters, wrap inputs in a struct literal with field names matching the parameter names.
+For single-param functions, pass the value directly.
+For multi-param functions, use space-separated key=value pairs (named after the parameters).
 
-!test function_name
-  +with {a: 5, b: 3} -> expect 8
-  +with {age: 25, email: "foo@bar.com"} -> expect Ok
-  +with {age: -1, email: "foo@bar.com"} -> expect Err(err_negative)
+!test double
+  +with 5 -> expect 10
+
+!test add
+  +with a=3 b=4 -> expect 7
+
+!test validate
+  +with name="alice" age=25 -> expect Ok
+  +with name="" age=25 -> expect Err(err_empty_name)
 
 ### Tracing
 !trace function_name {input: "value", age: 25}
@@ -118,10 +124,10 @@ Shows step-by-step execution of a function with the given input.
   +return input
 
 !test validate
-  +with {age: 25, email: "foo@bar.com", name: "alice"} -> expect Ok
-  +with {age: -1, email: "foo@bar.com", name: "alice"} -> expect Err(err_negative_age)
-  +with {age: 200, email: "foo@bar.com", name: "alice"} -> expect Err(err_age_too_high)
-  +with {age: 25, email: "foo@bar.com", name: ""} -> expect Err(err_empty_name)
+  +with age=25 email="foo@bar.com" name="alice" -> expect Ok
+  +with age=-1 email="foo@bar.com" name="alice" -> expect Err(err_negative_age)
+  +with age=200 email="foo@bar.com" name="alice" -> expect Err(err_age_too_high)
+  +with age=25 email="foo@bar.com" name="" -> expect Err(err_empty_name)
 </code>
 
 ## Example 2: Conditional logic with if/elif/else
