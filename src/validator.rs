@@ -220,7 +220,7 @@ fn convert_type_decl(decl: &parser::TypeDecl) -> Result<ast::TypeDecl> {
                 variants: ast_variants,
             }))
         }
-        parser::TypeBody::Alias(type_expr) => {
+        parser::TypeBody::Alias(_type_expr) => {
             // Treat alias as a struct with no fields for now, or as a named reference
             // For Phase 1, just make it a struct with zero fields — we can improve later
             Ok(ast::TypeDecl::Struct(ast::StructDecl {
@@ -285,21 +285,40 @@ fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
             on_fail: decl.err_label.clone(),
         },
         parser::Operation::Branch(decl) => {
-            // Simplified: convert the branch pattern into a condition-based branch
-            ast::StatementKind::Branch {
-                condition: ast::Expr::Identifier(decl.ident.clone()),
-                then_body: vec![ast::Statement {
+            // Convert branch arms into nested if/else chains
+            // Each arm: pattern -> target becomes: if expr == pattern { return target }
+            let match_expr = convert_expr(&decl.expr)?;
+            let mut else_body = vec![];
+
+            // Build from last arm backwards to nest properly
+            for arm in decl.arms.iter().rev() {
+                let pattern = convert_expr(&arm.pattern)?;
+                let condition = ast::Expr::Binary {
+                    left: Box::new(match_expr.clone()),
+                    op: ast::BinaryOp::Equal,
+                    right: Box::new(pattern),
+                };
+                let then_body = vec![ast::Statement {
                     id: String::new(),
                     kind: ast::StatementKind::Return {
-                        value: ast::Expr::Identifier(decl.left_label.clone()),
+                        value: ast::Expr::Identifier(arm.target.clone()),
                     },
-                }],
-                else_body: vec![ast::Statement {
+                }];
+                else_body = vec![ast::Statement {
                     id: String::new(),
-                    kind: ast::StatementKind::Return {
-                        value: ast::Expr::Identifier(decl.right_label.clone()),
+                    kind: ast::StatementKind::Branch {
+                        condition,
+                        then_body,
+                        else_body,
                     },
-                }],
+                }];
+            }
+
+            // Unwrap the outermost branch
+            if let Some(stmt) = else_body.into_iter().next() {
+                stmt.kind
+            } else {
+                bail!("empty branch")
             }
         }
         parser::Operation::Return(decl) => ast::StatementKind::Return {
@@ -419,7 +438,7 @@ fn convert_expr(expr: &parser::Expr) -> Result<ast::Expr> {
                 fields: ast_fields,
             })
         }
-        parser::Expr::Cast { expr, ty } => {
+        parser::Expr::Cast { expr, ty: _ } => {
             // For Phase 1, just pass through the inner expression
             convert_expr(expr)
         }
@@ -483,7 +502,7 @@ fn convert_type(ty: &parser::TypeExpr) -> Result<ast::Type> {
                 Ok(ast::Type::Struct(other.to_string()))
             }
         },
-        parser::TypeExpr::Struct(fields) => {
+        parser::TypeExpr::Struct(_fields) => {
             // Anonymous struct type — just use a generated name
             Ok(ast::Type::Struct("_anon".to_string()))
         }
@@ -510,6 +529,7 @@ fn convert_binary_op(op: &parser::BinaryOp) -> ast::BinaryOp {
         parser::BinaryOp::Sub => ast::BinaryOp::Sub,
         parser::BinaryOp::Mul => ast::BinaryOp::Mul,
         parser::BinaryOp::Div => ast::BinaryOp::Div,
+        parser::BinaryOp::Mod => ast::BinaryOp::Mod,
         parser::BinaryOp::Gte => ast::BinaryOp::GreaterThanOrEqual,
         parser::BinaryOp::Lte => ast::BinaryOp::LessThanOrEqual,
         parser::BinaryOp::Eq => ast::BinaryOp::Equal,

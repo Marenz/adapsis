@@ -91,12 +91,17 @@ pub struct CheckDecl {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BranchDecl {
     pub name: String,
-    pub ident: String,
-    pub left_label: String,
-    pub right_ident: String,
-    pub right_label: String,
+    pub expr: Expr,
+    pub arms: Vec<BranchArm>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchArm {
+    pub pattern: Expr,
+    pub target: String,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +169,7 @@ pub enum Expr {
     StructLiteral(Vec<FieldValue>),
     Cast {
         expr: Box<Expr>,
+        #[allow(dead_code)]
         ty: TypeExpr,
     },
 }
@@ -180,6 +186,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Mod,
     Gte,
     Lte,
     Eq,
@@ -706,27 +713,94 @@ fn parse_check_decl(line: usize, input: &str) -> Result<CheckDecl> {
 }
 
 fn parse_branch_decl(line: usize, input: &str) -> Result<BranchDecl> {
+    // Format: +branch name expr -> target | expr -> target | ...
+    // The name is the branch label, expr is what we're matching on,
+    // and each arm is pattern -> target separated by |
     let (name, rest) =
         take_ident(input).ok_or_else(|| anyhow!("line {}: expected branch name", line))?;
-    let (left_ident, rest) = take_ident(rest.trim())
-        .ok_or_else(|| anyhow!("line {}: expected branch identifier", line))?;
-    let (left_label, right_side) = split_once_required(line, rest.trim(), "|")?;
-    let (_, left_target) = split_once_required(line, left_label.trim(), "->")?;
-    let left_target = left_target.trim();
-    let (right_ident, right_label) = split_once_required(line, right_side.trim(), "->")?;
-    let right_ident = right_ident.trim();
-    let right_label = right_label.trim();
+    let rest = rest.trim();
 
-    if left_target.is_empty() || right_ident.is_empty() || right_label.is_empty() {
-        bail!("line {}: malformed branch declaration", line);
+    // Split on | to get arms, but we need the first part to contain the expression
+    // Format: <expr> <pattern1> -> <target1> | <pattern2> -> <target2>
+    // Actually, simpler: +branch name <match_expr> | <pattern> -> <target> | <pattern> -> <target>
+    // But the design doc says: +branch name ident -> label | ident -> label
+    // Let's generalize: everything before the first -> is split into expr + first pattern
+    // Better approach: split by | first, then each arm has pattern -> target
+
+    // Find the expression being matched — it's everything before the first pattern->target
+    // We'll treat it as: +branch name <expr> <arm1> | <arm2> | ...
+    // where each arm is: <pattern> -> <target>
+
+    // Split all arms by |
+    let arm_strs: Vec<&str> = rest.split('|').collect();
+    if arm_strs.is_empty() {
+        bail!("line {}: branch needs at least one arm", line);
     }
+
+    // First segment: may contain the match expression before the first ->
+    // Or it could just be pattern -> target if the expr is implicit
+    let mut arms = Vec::new();
+    let mut match_expr = None;
+
+    for (i, arm_str) in arm_strs.iter().enumerate() {
+        let arm_str = arm_str.trim();
+        if arm_str.is_empty() {
+            continue;
+        }
+
+        if let Some((pattern_str, target)) = arm_str.split_once("->") {
+            let pattern_str = pattern_str.trim();
+            let target = target.trim();
+            if target.is_empty() {
+                bail!("line {}: empty target in branch arm", line);
+            }
+
+            // For the first arm, check if there's an expression before the pattern
+            // If the pattern contains spaces and we haven't set match_expr yet,
+            // the first word(s) might be the match expression
+            if i == 0 && match_expr.is_none() {
+                // Try to split: the match expression is everything except the last token before ->
+                // Heuristic: if pattern_str has multiple words, first word is the match expr
+                let words: Vec<&str> = pattern_str.split_whitespace().collect();
+                if words.len() >= 2 {
+                    // First tokens are the match expr, last token is the pattern
+                    let last = words.last().unwrap();
+                    let expr_str = &pattern_str[..pattern_str.rfind(last).unwrap()].trim();
+                    if !expr_str.is_empty() {
+                        match_expr = Some(parse_expr(line, expr_str)?);
+                    }
+                    arms.push(BranchArm {
+                        pattern: parse_expr(line, last)?,
+                        target: target.to_string(),
+                    });
+                    continue;
+                }
+            }
+
+            arms.push(BranchArm {
+                pattern: parse_expr(line, pattern_str)?,
+                target: target.to_string(),
+            });
+        } else {
+            bail!(
+                "line {}: expected `pattern -> target` in branch arm, got `{}`",
+                line,
+                arm_str
+            );
+        }
+    }
+
+    if arms.is_empty() {
+        bail!("line {}: branch needs at least one arm", line);
+    }
+
+    // If no explicit match expression, use the branch name as an identifier
+    let expr = match_expr.unwrap_or_else(|| Expr::Ident(name.to_string()));
 
     Ok(BranchDecl {
         name: name.to_string(),
-        ident: left_ident.to_string(),
-        left_label: left_target.to_string(),
-        right_ident: right_ident.to_string(),
-        right_label: right_label.to_string(),
+        expr,
+        arms,
     })
 }
 
@@ -868,6 +942,7 @@ enum Token {
     Minus,
     Star,
     Slash,
+    Percent,
 }
 
 struct ExprParser<'a> {
@@ -947,6 +1022,7 @@ impl<'a> ExprParser<'a> {
                 Some(Token::Minus) => (7, 8, BinaryOp::Sub),
                 Some(Token::Star) => (9, 10, BinaryOp::Mul),
                 Some(Token::Slash) => (9, 10, BinaryOp::Div),
+                Some(Token::Percent) => (9, 10, BinaryOp::Mod),
                 _ => break,
             };
 
@@ -1068,12 +1144,7 @@ impl<'a> ExprParser<'a> {
                 {
                     break
                 }
-                Token::Plus | Token::Minus | Token::Star | Token::Slash
-                    if depth_angle == 0 && depth_brace == 0 && depth_paren == 0 =>
-                {
-                    break
-                }
-                Token::Gt | Token::Lt
+                Token::Plus | Token::Minus | Token::Star | Token::Slash | Token::Percent
                     if depth_angle == 0 && depth_brace == 0 && depth_paren == 0 =>
                 {
                     break
@@ -1150,6 +1221,7 @@ fn tokenize_expr(line: usize, input: &str) -> Result<Vec<Token>> {
             '+' => tokens.push(Token::Plus),
             '*' => tokens.push(Token::Star),
             '/' => tokens.push(Token::Slash),
+            '%' => tokens.push(Token::Percent),
             '-' => {
                 if matches!(chars.peek(), Some((_, '>'))) {
                     chars.next();
@@ -1282,6 +1354,7 @@ fn token_text(token: &Token) -> String {
         Token::Minus => "-".to_string(),
         Token::Star => "*".to_string(),
         Token::Slash => "/".to_string(),
+        Token::Percent => "%".to_string(),
     }
 }
 

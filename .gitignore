@@ -1,1 +1,8 @@
 /target
+training/.venv/
+training/forge-lora-qwen3.5-4b/
+training/forge-lora-qwen3.5-4b-gguf/
+training/__pycache__/
+training/unsloth_compiled_cache/
+training/download-*.log
+*.gguf

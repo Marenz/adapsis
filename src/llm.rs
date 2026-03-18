@@ -66,6 +66,7 @@ pub struct OpenAiBackend {
     model: String,
 }
 
+#[allow(dead_code)]
 impl OpenAiBackend {
     pub fn new(base_url: &str) -> Self {
         Self {
@@ -223,6 +224,7 @@ impl LlmClient<OpenAiBackend> {
     }
 }
 
+#[allow(dead_code)]
 impl<B> LlmClient<B>
 where
     B: LlmBackend,

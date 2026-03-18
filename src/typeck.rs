@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
 
 use crate::ast::*;
 
@@ -113,7 +112,7 @@ pub fn build_symbol_table(program: &Program) -> SymbolTable {
         }
         for func in &module.functions {
             // Register with module-qualified name
-            let mut sig = FunctionSig {
+            let sig = FunctionSig {
                 params: func
                     .params
                     .iter()
@@ -318,7 +317,7 @@ fn infer_expr_type(
             .resolve_function(&call.callee)
             .map(|sig| sig.return_type.clone()),
         Expr::Binary { op, .. } => Some(match op {
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                 // Could be Int or Float depending on operands — simplified
                 Type::Int
             }

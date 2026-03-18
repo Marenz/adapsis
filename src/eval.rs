@@ -7,6 +7,7 @@ use crate::parser;
 
 /// A runtime value during evaluation.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -482,6 +483,23 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
                 Ok(Value::Float(a / *b as f64))
             }
             _ => bail!("cannot divide {lhs} / {rhs}"),
+        },
+        ast::BinaryOp::Mod => match (lhs, rhs) {
+            (Value::Int(a), Value::Int(b)) => {
+                if *b == 0 {
+                    bail!("modulo by zero")
+                }
+                Ok(Value::Int(a % b))
+            }
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 % b)),
+            (Value::Float(a), Value::Int(b)) => {
+                if *b == 0 {
+                    bail!("modulo by zero")
+                }
+                Ok(Value::Float(a % *b as f64))
+            }
+            _ => bail!("cannot modulo {lhs} % {rhs}"),
         },
         ast::BinaryOp::And => Ok(Value::Bool(lhs.is_truthy() && rhs.is_truthy())),
         ast::BinaryOp::Or => Ok(Value::Bool(lhs.is_truthy() || rhs.is_truthy())),

@@ -1,7 +1,6 @@
 //! Event system for streaming AST mutations to connected clients.
 
 use serde::Serialize;
-use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Events streamed to the browser over WebSocket.

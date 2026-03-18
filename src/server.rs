@@ -17,6 +17,7 @@ use crate::llm::{LlmBackend, LlmClient};
 use crate::orchestrator;
 
 /// Shared application state.
+#[allow(dead_code)]
 pub struct AppState<B: LlmBackend> {
     pub event_bus: EventBus,
     pub program: Mutex<ast::Program>,
@@ -24,6 +25,7 @@ pub struct AppState<B: LlmBackend> {
     pub max_iterations: usize,
 }
 
+#[allow(dead_code)]
 pub async fn serve<B: LlmBackend + Send + Sync + 'static>(
     llm: LlmClient<B>,
     max_iterations: usize,
@@ -60,10 +62,12 @@ pub async fn serve<B: LlmBackend + Send + Sync + 'static>(
 }
 
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct RunParams {
     task: String,
 }
 
+#[allow(dead_code)]
 async fn run_handler<B: LlmBackend + Send + Sync + 'static>(
     State(state): State<Arc<AppState<B>>>,
     params: RunParams,

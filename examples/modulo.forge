@@ -1,0 +1,10 @@
++fn is_even (x:Int)->Bool
+  +let remainder:Int = x % 2
+  +return remainder == 0
+
+!test is_even
+  +with 4 -> expect true
+  +with 5 -> expect false
+  +with 0 -> expect true
+  +with -2 -> expect true
+  +with 7 -> expect false
