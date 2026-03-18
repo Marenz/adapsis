@@ -1,0 +1,84 @@
++type Email = {address:String}
++type User = {name:String, email:Email, age:Int, role:String}
++type CreateRequest = {name:String, email_address:String, age:Int}
+
++fn validate_email (addr:String)->Result<Email> [fail]
+  +check not_empty addr.len>0 ~err_empty_email
+  +check min_len addr.len>=3 ~err_email_too_short
+  +return {address: addr}
+
++fn validate_name (name:String)->Result<String> [fail]
+  +check not_empty name.len>0 ~err_empty_name
+  +check min_len name.len>=2 ~err_name_too_short
+  +return name
+
++fn validate_age (age:Int)->Result<Int> [fail]
+  +check min age>=0 ~err_negative_age
+  +check max age<=150 ~err_age_too_high
+  +check adult age>=18 ~err_too_young
+  +return age
+
++fn create_user (req:CreateRequest)->Result<User> [fail]
+  +call valid_name:String = validate_name(req.name)
+  +call valid_email:Email = validate_email(req.email_address)
+  +call valid_age:Int = validate_age(req.age)
+  +return {name: valid_name, email: valid_email, age: valid_age, role: "user"}
+
++fn is_admin (user:User)->Bool
+  +if user.role == "admin"
+    +return true
+  +else
+    +return false
+
++fn format_greeting (user:User)->String
+  +let greeting:String = concat("Welcome, ", user.name)
+  +return greeting
+
++fn classify_user (user:User)->String
+  +if user.age < 25
+    +return "junior"
+  +elif user.age < 60
+    +return "regular"
+  +else
+    +return "senior"
+
++fn is_valid_age (age:Int)->Bool
+  +if age >= 0 AND age <= 150
+    +return true
+  +else
+    +return false
+
+!test validate_email
+  +with "alice@example.com" -> expect Ok
+  +with "" -> expect Err(err_empty_email)
+  +with "ab" -> expect Err(err_email_too_short)
+
+!test validate_name
+  +with "alice" -> expect Ok
+  +with "" -> expect Err(err_empty_name)
+  +with "a" -> expect Err(err_name_too_short)
+
+!test validate_age
+  +with 25 -> expect Ok
+  +with -1 -> expect Err(err_negative_age)
+  +with 200 -> expect Err(err_age_too_high)
+  +with 15 -> expect Err(err_too_young)
+
+!test create_user
+  +with name="alice" email_address="alice@example.com" age=25 -> expect Ok
+  +with name="" email_address="alice@example.com" age=25 -> expect Err(err_empty_name)
+  +with name="alice" email_address="" age=25 -> expect Err(err_empty_email)
+  +with name="alice" email_address="alice@example.com" age=15 -> expect Err(err_too_young)
+
+!test is_valid_age
+  +with 25 -> expect true
+  +with -1 -> expect false
+  +with 200 -> expect false
+
+!test classify_user
+  +with name="alice" email={address: "a@b.com"} age=22 role="user" -> expect "junior"
+  +with name="bob" email={address: "b@c.com"} age=40 role="user" -> expect "regular"
+  +with name="charlie" email={address: "c@d.com"} age=65 role="admin" -> expect "senior"
+
+!eval is_valid_age 25
+!eval is_valid_age -5
