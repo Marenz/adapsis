@@ -326,7 +326,7 @@ async fn main() -> Result<()> {
             let session_path = session.map(std::path::PathBuf::from);
             repl::run_repl(llm_client, session_path).await?;
         }
-        Command::Os { port, session, url } => {
+        Command::Os { port, session, url: _ } => {
             let session_path = std::path::Path::new(&session);
             let sess = if session_path.exists() {
                 println!("Loading session from {session}...");

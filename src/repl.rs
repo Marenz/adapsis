@@ -18,7 +18,6 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::eval;
-use crate::events::EventBus;
 use crate::llm::{ChatMessage, LlmBackend, LlmClient};
 use crate::parser;
 use crate::prompt;

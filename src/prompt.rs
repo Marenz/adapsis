@@ -82,8 +82,12 @@ For multi-param functions, use space-separated key=value pairs (named after the 
   +with name="alice" age=25 -> expect Ok
   +with name="" age=25 -> expect Err(err_empty_name)
 
+### Evaluating
+!eval function_name arg1=val1 arg2=val2
+Calls a function and shows the result. For single-param: !eval double 5
+
 ### Tracing
-!trace function_name {input: "value", age: 25}
+!trace function_name arg1=val1 arg2=val2
 Shows step-by-step execution of a function with the given input.
 
 ### Semantic Queries
@@ -178,7 +182,7 @@ pub fn task_message(task: &str) -> String {
 pub fn architect_system_prompt() -> String {
     let base = system_prompt();
     // Replace the workflow notes with architect-specific ones
-    let mut prompt = base.replace(
+    let prompt = base.replace(
         "## Important Workflow Notes\n\n\
          - Each <code> block you send is applied to a FRESH program state. Include ALL types and functions you need in each response.\n\
          - Work step by step — I'll validate each response and give you feedback.\n\

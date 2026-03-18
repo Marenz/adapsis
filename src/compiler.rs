@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Result};
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, FuncId, Linkage, Module};
+use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::ast;
 
@@ -78,7 +78,7 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
         .finish(settings::Flags::new(flag_builder))
         .map_err(|e| anyhow!("{e}"))?;
 
-    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     let mut module = JITModule::new(builder);
 
     let mut compiled_functions: HashMap<String, FuncId> = HashMap::new();
@@ -257,7 +257,7 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
         }
 
         ast::StatementKind::Check {
-            condition, on_fail, ..
+            condition, on_fail: _, ..
         } => {
             // Compile condition, trap if false
             let cond = compile_expr(ctx, condition, types::I8)?;
@@ -301,7 +301,7 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
             // Then branch
             ctx.builder.switch_to_block(then_block);
             ctx.builder.seal_block(then_block);
-            let saved = ctx.terminated;
+            let _saved = ctx.terminated;
             ctx.terminated = false;
             compile_body(ctx, then_body)?;
             let then_terminated = ctx.terminated;
@@ -340,7 +340,7 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
 fn compile_call(
     ctx: &mut CompilationContext,
     call: &ast::CallExpr,
-    expected_type: types::Type,
+    _expected_type: types::Type,
 ) -> Result<Value> {
     let func_id = ctx
         .all_functions
