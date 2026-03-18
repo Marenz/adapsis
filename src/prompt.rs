@@ -181,7 +181,6 @@ pub fn task_message(task: &str) -> String {
 /// System prompt for architect mode — teaches the two-phase workflow.
 pub fn architect_system_prompt() -> String {
     let base = system_prompt();
-    // Replace the workflow notes with architect-specific ones
     let prompt = base.replace(
         "## Important Workflow Notes\n\n\
          - Each <code> block you send is applied to a FRESH program state. Include ALL types and functions you need in each response.\n\
@@ -190,12 +189,18 @@ pub fn architect_system_prompt() -> String {
         "## Architect Workflow\n\n\
          You work in two phases:\n\n\
          **Phase 1 — Design:** Define all types and function signatures with stub bodies.\n\
-         Stub bodies should be minimal: just `+return 0` for Int, `+return \"\"` for String, etc.\n\
+         Stub bodies should be minimal: just `+return 0` for Int, `+return \"\"` for String, `+return input` for struct returns.\n\
+         Do NOT include !test blocks in the design phase — stubs will fail tests.\n\
          The runtime will validate that types and signatures are consistent.\n\n\
          **Phase 2 — Implement:** You will be asked to implement one function at a time.\n\
          The runtime tells you which function to implement and shows you the full program context.\n\
-         Write ONLY the function being requested (with `+fn ... end` and `!test`).\n\
+         Write ONLY the function being requested with `+fn` and `!test` blocks.\n\
          The runtime keeps previous functions — you don't need to repeat them.\n\n\
+         **Key patterns to remember:**\n\
+         - Multi-param tests use key=value: `+with a=3 b=4 -> expect 7`\n\
+         - Error auto-propagation: `+call val:T = func(x)` with [fail] — errors bubble up, you get T\n\
+         - If a function calls another [fail] function, declare [fail] on the caller too and bind as plain T\n\
+         - Do NOT create wrapper types just for tests — use key=value syntax\n\n\
          When all functions are implemented and tests pass, respond with `DONE`.\n",
     );
     prompt
@@ -207,11 +212,13 @@ pub fn architect_design_message(task: &str) -> String {
         "Design the architecture for the following system in Forge:\n\n\
          {task}\n\n\
          **Phase 1 — Design only.** Define all types and function signatures with stub bodies.\n\
-         Use `+return 0` for Int returns, `+return \"\"` for String, `+return input` for struct returns, etc.\n\
-         Do NOT write real implementations yet. Focus on:\n\
+         Use `+return 0` for Int returns, `+return \"\"` for String, `+return input` for struct returns.\n\
+         Do NOT write !test blocks — stubs will fail tests. Tests come in Phase 2.\n\
+         Do NOT create wrapper types for tests — Phase 2 uses key=value syntax.\n\n\
+         Focus on:\n\
          - What types are needed\n\
          - What functions exist, their parameters, return types, and effects\n\
-         - How functions relate to each other (which calls which)\n\n\
+         - If a function calls another [fail] function, the caller needs [fail] too\n\n\
          I'll validate the architecture, then ask you to implement each function one at a time."
     )
 }
@@ -220,12 +227,16 @@ pub fn architect_design_message(task: &str) -> String {
 pub fn architect_implement_message(function_name: &str, program_state: &str) -> String {
     format!(
         "**Phase 2 — Implement `{function_name}`.**\n\n\
-         Here is the current program state:\n\
+         Current program state:\n\
          {program_state}\n\n\
-         Write the full implementation for `{function_name}`. Include:\n\
-         - The complete function with `+fn {function_name} ...` and its body\n\
-         - `!test {function_name}` with test cases covering normal and edge cases\n\n\
-         Write ONLY this function and its tests. The runtime will merge it into the existing program."
+         Write the implementation for `{function_name}` and its tests.\n\n\
+         Rules:\n\
+         - Write ONLY `+fn {function_name} ...` and `!test {function_name}`\n\
+         - For multi-param tests use key=value: `+with a=3 b=4 -> expect 7`\n\
+         - For struct-param tests: `+with name=\"alice\" age=25 -> expect Ok`\n\
+         - If calling a [fail] function, bind as plain T (errors auto-propagate):\n\
+           `+call validated:Input = validate(input)` — NOT `+call result:Result<Input> = ...`\n\
+         - The runtime will merge this into the existing program"
     )
 }
 
