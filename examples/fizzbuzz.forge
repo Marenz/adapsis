@@ -1,0 +1,21 @@
++fn fizzbuzz (n:Int)->String
+  +let mod3:Int = n % 3
+  +let mod5:Int = n % 5
+  +if mod3 == 0 AND mod5 == 0
+    +return "fizzbuzz"
+  +elif mod3 == 0
+    +return "fizz"
+  +elif mod5 == 0
+    +return "buzz"
+  +else
+    +return "other"
+
+!test fizzbuzz
+  +with 15 -> expect "fizzbuzz"
+  +with 3 -> expect "fizz"
+  +with 5 -> expect "buzz"
+  +with 7 -> expect "other"
+  +with 30 -> expect "fizzbuzz"
+  +with 9 -> expect "fizz"
+  +with 10 -> expect "buzz"
+  +with 1 -> expect "other"

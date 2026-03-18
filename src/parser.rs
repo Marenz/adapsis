@@ -9,6 +9,7 @@ pub enum Operation {
     Call(CallDecl),
     Check(CheckDecl),
     Branch(BranchDecl),
+    If(IfDecl),
     Return(ReturnDecl),
     Each(EachDecl),
     Replace(ReplaceMutation),
@@ -115,6 +116,14 @@ pub struct EachDecl {
     pub item: String,
     pub item_type: TypeExpr,
     pub body: Vec<Operation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IfDecl {
+    pub condition: Expr,
+    pub then_body: Vec<Operation>,
+    pub elif_branches: Vec<(Expr, Vec<Operation>)>,
+    pub else_body: Vec<Operation>,
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +352,42 @@ impl<'a> Parser<'a> {
             let decl = parse_branch_decl(line.number, rest.trim())?;
             self.index += 1;
             return Ok(Operation::Branch(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+if") {
+            let condition = parse_expr(line.number, rest.trim())?;
+            self.index += 1;
+            let then_body = self.parse_nested_block(indent)?;
+
+            let mut elif_branches = Vec::new();
+            let mut else_body = Vec::new();
+
+            // Parse +elif and +else at the same indentation
+            loop {
+                let next = match self.current() {
+                    Some(l) if l.indent == indent => l,
+                    _ => break,
+                };
+                if let Some(rest) = next.text.strip_prefix("+elif") {
+                    let elif_cond = parse_expr(next.number, rest.trim())?;
+                    self.index += 1;
+                    let elif_body = self.parse_nested_block(indent)?;
+                    elif_branches.push((elif_cond, elif_body));
+                } else if next.text == "+else" {
+                    self.index += 1;
+                    else_body = self.parse_nested_block(indent)?;
+                    break;
+                } else {
+                    break;
+                }
+            }
+
+            return Ok(Operation::If(IfDecl {
+                condition,
+                then_body,
+                elif_branches,
+                else_body,
+            }));
         }
 
         if let Some(rest) = text.strip_prefix("+return") {

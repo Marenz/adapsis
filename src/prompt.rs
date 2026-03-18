@@ -36,7 +36,12 @@ Pure functions have no effect annotation.
   +let name:Type = expr              — bind a value
   +call name:Type = func(args)       — call a function and bind result
   +check label condition ~err_label  — assert condition, fail with label if false
-  +branch name ident -> label | ident -> label  — pattern match
+  +if condition                      — conditional (body indented below)
+    +return "yes"
+  +elif other_condition              — optional elif chain
+    +return "maybe"
+  +else                              — optional else
+    +return "no"
   +return expr                       — return from function
   +each collection item:Type         — loop over collection (body indented below)
     +call result:Type = process(item)
@@ -89,18 +94,18 @@ Shows step-by-step execution of a function with the given input.
 3. Use descriptive error labels with ~ for checks: ~err_negative_age, ~err_empty_name
 4. One statement per line. Indentation marks nesting (2 spaces).
 5. Only modules end with `end`. Functions and test blocks do NOT use `end`.
-9. For conditional dispatch, use multiple check statements with early returns rather than +branch (branch is for tagged union pattern matching only).
-6. No closures, no inheritance, no operator overloading, no exceptions.
-7. String concatenation uses concat(), not +.
-8. Result types use Ok/Err, Option types use Some/None.
+6. Use +if/+elif/+else for conditional logic, +check for validation assertions.
+7. No closures, no inheritance, no operator overloading, no exceptions.
+8. String concatenation uses concat(), not +.
+9. Result types use Ok/Err, Option types use Some/None.
+10. Modulo operator: use % for remainder (e.g., n % 2 == 0 for even check).
 
-## Example: Complete Function with Tests
+## Example 1: Validation with checks
 
 <code>
 +type Request = {age:Int, email:String, name:String}
-+type Valid = {age:Int, email:String, name:String}
 
-+fn validate (input:Request)->Result<Valid> [fail]
++fn validate (input:Request)->Result<Request> [fail]
   +check age input.age>=0 ~err_negative_age
   +check age_max input.age<=150 ~err_age_too_high
   +check name input.name.len>0 ~err_empty_name
@@ -111,6 +116,28 @@ Shows step-by-step execution of a function with the given input.
   +with {age: -1, email: "foo@bar.com", name: "alice"} -> expect Err(err_negative_age)
   +with {age: 200, email: "foo@bar.com", name: "alice"} -> expect Err(err_age_too_high)
   +with {age: 25, email: "foo@bar.com", name: ""} -> expect Err(err_empty_name)
+</code>
+
+## Example 2: Conditional logic with if/elif/else
+
+<code>
++fn fizzbuzz (n:Int)->String
+  +let mod3:Int = n % 3
+  +let mod5:Int = n % 5
+  +if mod3 == 0 AND mod5 == 0
+    +return "fizzbuzz"
+  +elif mod3 == 0
+    +return "fizz"
+  +elif mod5 == 0
+    +return "buzz"
+  +else
+    +return "other"
+
+!test fizzbuzz
+  +with 15 -> expect "fizzbuzz"
+  +with 3 -> expect "fizz"
+  +with 5 -> expect "buzz"
+  +with 7 -> expect "other"
 </code>
 
 When the runtime reports errors, fix them with targeted !replace operations or by regenerating the affected function.

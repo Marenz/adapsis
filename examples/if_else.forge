@@ -1,0 +1,19 @@
++fn classify_age (age:Int)->String
+  +if age < 13
+    +return "child"
+  +elif age < 18
+    +return "teen"
+  +elif age < 65
+    +return "adult"
+  +else
+    +return "senior"
+
+!test classify_age
+  +with 5 -> expect "child"
+  +with 15 -> expect "teen"
+  +with 30 -> expect "adult"
+  +with 70 -> expect "senior"
+  +with 12 -> expect "child"
+  +with 13 -> expect "teen"
+  +with 18 -> expect "adult"
+  +with 65 -> expect "senior"

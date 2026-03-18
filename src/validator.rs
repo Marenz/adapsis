@@ -52,6 +52,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         | parser::Operation::Call(_)
         | parser::Operation::Check(_)
         | parser::Operation::Branch(_)
+        | parser::Operation::If(_)
         | parser::Operation::Return(_)
         | parser::Operation::Each(_) => {
             bail!("statement outside of function body")
@@ -319,6 +320,59 @@ fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
                 stmt.kind
             } else {
                 bail!("empty branch")
+            }
+        }
+        parser::Operation::If(decl) => {
+            let condition = convert_expr(&decl.condition)?;
+            let mut then_body = vec![];
+            for (i, op) in decl.then_body.iter().enumerate() {
+                let mut stmt = convert_statement_op(op)?;
+                stmt.id = format!("if.then.s{}", i + 1);
+                then_body.push(stmt);
+            }
+
+            // Build else body: chain elif branches into nested Branch nodes
+            let else_body = if !decl.elif_branches.is_empty() {
+                // Build from the last elif backwards, ending with the else body
+                let mut current_else = vec![];
+                for (i, op) in decl.else_body.iter().enumerate() {
+                    let mut stmt = convert_statement_op(op)?;
+                    stmt.id = format!("if.else.s{}", i + 1);
+                    current_else.push(stmt);
+                }
+
+                for (elif_cond, elif_body) in decl.elif_branches.iter().rev() {
+                    let cond = convert_expr(elif_cond)?;
+                    let mut elif_stmts = vec![];
+                    for (i, op) in elif_body.iter().enumerate() {
+                        let mut stmt = convert_statement_op(op)?;
+                        stmt.id = format!("if.elif.s{}", i + 1);
+                        elif_stmts.push(stmt);
+                    }
+                    current_else = vec![ast::Statement {
+                        id: String::new(),
+                        kind: ast::StatementKind::Branch {
+                            condition: cond,
+                            then_body: elif_stmts,
+                            else_body: current_else,
+                        },
+                    }];
+                }
+                current_else
+            } else {
+                let mut else_stmts = vec![];
+                for (i, op) in decl.else_body.iter().enumerate() {
+                    let mut stmt = convert_statement_op(op)?;
+                    stmt.id = format!("if.else.s{}", i + 1);
+                    else_stmts.push(stmt);
+                }
+                else_stmts
+            };
+
+            ast::StatementKind::Branch {
+                condition,
+                then_body,
+                else_body,
             }
         }
         parser::Operation::Return(decl) => ast::StatementKind::Return {
