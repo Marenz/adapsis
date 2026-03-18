@@ -6,7 +6,9 @@ mod llm;
 mod orchestrator;
 mod parser;
 mod prompt;
+mod repl;
 mod server;
+mod session;
 mod typeck;
 mod validator;
 
@@ -100,6 +102,17 @@ enum Command {
         /// Arguments (comma-separated integers)
         #[arg(short, long, default_value = "")]
         args: String,
+    },
+
+    /// Interactive REPL
+    Repl {
+        /// LLM server URL (OpenAI-compatible)
+        #[arg(short, long, default_value = "http://127.0.0.1:8081")]
+        url: String,
+
+        /// Session file path (auto-saves)
+        #[arg(short, long)]
+        session: Option<String>,
     },
 }
 
@@ -291,6 +304,11 @@ async fn main() -> Result<()> {
             println!("Calling {}({})...", func, args);
             let result = compiled.call_i64(&func, &int_args)?;
             println!("Result: {result}");
+        }
+        Command::Repl { url, session } => {
+            let llm_client = llm::LlmClient::new(&url);
+            let session_path = session.map(std::path::PathBuf::from);
+            repl::run_repl(llm_client, session_path).await?;
         }
     }
 
