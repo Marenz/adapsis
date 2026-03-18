@@ -194,13 +194,14 @@ async fn process_input(input: &str, session: &mut Session) {
                 session.record_test(&test.function_name, passed, failed, details);
             }
             parser::Operation::Eval(ev) => {
-                match eval::eval_call_with_input(
+                match eval::eval_compiled_or_interpreted(
                     &session.program,
                     &ev.function_name,
                     &ev.input,
                 ) {
-                    Ok(result) => {
-                        println!("  = {result}");
+                    Ok((result, compiled)) => {
+                        let tag = if compiled { " [compiled]" } else { "" };
+                        println!("  = {result}{tag}");
                         session.record_eval(
                             &ev.function_name,
                             &format!("{:?}", ev.input),
@@ -297,6 +298,29 @@ async fn handle_slash_command<B: LlmBackend>(
             println!("  Mutations: {}", session.mutations.len());
             println!("  History entries: {}", session.history.len());
             println!("  {}", session.program);
+            // Show which functions are compilable
+            for func in &session.program.functions {
+                let compilable = crate::compiler::is_compilable_function(func);
+                let tag = if compilable { "compilable" } else { "interpreted" };
+                println!("    {} — {tag}", func.name);
+            }
+        }
+        "/compile" | "/c" => {
+            if crate::compiler::is_fully_compilable(&session.program) {
+                match crate::compiler::compile(&session.program) {
+                    Ok(_) => {
+                        println!("  Compiled {} function(s) to native code",
+                            session.program.functions.len());
+                    }
+                    Err(e) => eprintln!("  Compile error: {e}"),
+                }
+            } else {
+                println!("  Not fully compilable. Compilable functions:");
+                for func in &session.program.functions {
+                    let ok = crate::compiler::is_compilable_function(func);
+                    println!("    {} — {}", func.name, if ok { "OK" } else { "needs interpreter" });
+                }
+            }
         }
         "/ask" => {
             if arg.is_empty() {
