@@ -1,0 +1,20 @@
++fn add (a:Int, b:Int)->Int
+  +return a + b
+
++fn fizz_type (n:Int)->Int
+  +let mod3:Int = n % 3
+  +let mod5:Int = n % 5
+  +if mod3 == 0 AND mod5 == 0
+    +return 3
+  +elif mod3 == 0
+    +return 1
+  +elif mod5 == 0
+    +return 2
+  +else
+    +return 0
+
+!eval add a=3 b=4
+!eval add a=100 b=200
+!eval fizz_type 15
+!eval fizz_type 3
+!eval fizz_type 7

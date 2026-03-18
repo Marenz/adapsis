@@ -257,12 +257,15 @@ async fn main() -> Result<()> {
                         }
                     }
                     parser::Operation::Eval(ev) => {
-                        match eval::eval_call_with_input(
+                        match eval::eval_compiled_or_interpreted(
                             &program,
                             &ev.function_name,
                             &ev.input,
                         ) {
-                            Ok(result) => println!("  eval {}(...) = {result}", ev.function_name),
+                            Ok((result, compiled)) => {
+                                let tag = if compiled { " [compiled]" } else { "" };
+                                println!("  eval {}(...) = {result}{tag}", ev.function_name);
+                            }
                             Err(e) => eprintln!("  EVAL ERROR: {e}"),
                         }
                     }

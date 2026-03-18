@@ -165,13 +165,14 @@ impl<B: LlmBackend> Orchestrator<B> {
                     }
                     parser::Operation::Eval(ev) => {
                         print!("  eval {}(...) = ", ev.function_name);
-                        match eval::eval_call_with_input(
+                        match eval::eval_compiled_or_interpreted(
                             &program,
                             &ev.function_name,
                             &ev.input,
                         ) {
-                            Ok(result) => {
-                                println!("{result}");
+                            Ok((result, compiled)) => {
+                                let tag = if compiled { " [compiled]" } else { "" };
+                                println!("{result}{tag}");
                                 self.emit(ForgeEvent::MutationOk {
                                     message: format!(
                                         "eval {}(...) = {result}",
