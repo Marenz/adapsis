@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Result};
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 
 use crate::ast;
 
@@ -64,6 +64,55 @@ impl CompiledProgram {
             }
         }
     }
+
+    /// Call a compiled function that returns a String (ptr, len pair).
+    /// String args are passed as (ptr, len) pairs — so 1 string param = 2 i64 args.
+    pub fn call_string(&mut self, name: &str, args: &[i64]) -> Result<String> {
+        let func_id = self
+            .functions
+            .get(name)
+            .ok_or_else(|| anyhow!("compiled function `{name}` not found"))?;
+        let func_ptr = self.module.get_finalized_function(*func_id);
+
+        // For string returns, the function returns (ptr: i64, len: i64)
+        // We use a struct return convention
+        #[repr(C)]
+        struct StringReturn {
+            ptr: i64,
+            len: i64,
+        }
+
+        unsafe {
+            let ret: StringReturn = match args.len() {
+                0 => {
+                    let f: fn() -> StringReturn = std::mem::transmute(func_ptr);
+                    f()
+                }
+                1 => {
+                    let f: fn(i64) -> StringReturn = std::mem::transmute(func_ptr);
+                    f(args[0])
+                }
+                2 => {
+                    let f: fn(i64, i64) -> StringReturn = std::mem::transmute(func_ptr);
+                    f(args[0], args[1])
+                }
+                3 => {
+                    let f: fn(i64, i64, i64) -> StringReturn = std::mem::transmute(func_ptr);
+                    f(args[0], args[1], args[2])
+                }
+                4 => {
+                    let f: fn(i64, i64, i64, i64) -> StringReturn = std::mem::transmute(func_ptr);
+                    f(args[0], args[1], args[2], args[3])
+                }
+                n => bail!("call_string: unsupported argument count {n} (max 4)"),
+            };
+
+            let slice = std::slice::from_raw_parts(ret.ptr as *const u8, ret.len as usize);
+            Ok(std::str::from_utf8(slice)
+                .unwrap_or("<invalid utf8>")
+                .to_string())
+        }
+    }
 }
 
 /// Check if a function can be compiled (only numeric types).
@@ -84,7 +133,11 @@ pub fn is_compilable_function(func: &ast::FunctionDecl) -> bool {
 
 fn is_compilable_type(ty: &ast::Type) -> bool {
     match ty {
-        ast::Type::Int | ast::Type::Float | ast::Type::Bool | ast::Type::Byte => true,
+        ast::Type::Int
+        | ast::Type::Float
+        | ast::Type::Bool
+        | ast::Type::Byte
+        | ast::Type::String => true,
         ast::Type::Result(inner) => is_compilable_type(inner),
         _ => false,
     }
@@ -116,7 +169,7 @@ fn is_compilable_body(stmts: &[ast::Statement]) -> bool {
 
 fn is_compilable_expr(expr: &ast::Expr) -> bool {
     match expr {
-        ast::Expr::Literal(lit) => !matches!(lit, ast::Literal::String(_)),
+        ast::Expr::Literal(_) => true,
         ast::Expr::Identifier(_) => true,
         ast::Expr::Binary { left, right, .. } => {
             is_compilable_expr(left) && is_compilable_expr(right)
@@ -132,6 +185,53 @@ pub fn is_fully_compilable(program: &ast::Program) -> bool {
     program.functions.iter().all(is_compilable_function)
 }
 
+// === String runtime functions (called from JIT code) ===
+// Strings are (ptr: *const u8, len: i64) pairs.
+// These functions are imported into the JIT module as symbols.
+
+/// Allocate and return a new string from concatenating two strings.
+/// Returns (ptr, len) packed as two i64 values via out-pointer.
+extern "C" fn rt_string_concat(
+    a_ptr: *const u8,
+    a_len: i64,
+    b_ptr: *const u8,
+    b_len: i64,
+    out_ptr: *mut i64, // writes [ptr, len] here
+) {
+    unsafe {
+        let a = std::slice::from_raw_parts(a_ptr, a_len as usize);
+        let b = std::slice::from_raw_parts(b_ptr, b_len as usize);
+        let mut result = Vec::with_capacity(a.len() + b.len());
+        result.extend_from_slice(a);
+        result.extend_from_slice(b);
+        let boxed = result.into_boxed_slice();
+        let ptr = Box::into_raw(boxed);
+        *out_ptr = (*ptr).as_ptr() as i64;
+        *out_ptr.add(1) = (a_len + b_len) as i64;
+    }
+}
+
+/// Compare two strings for equality. Returns 1 if equal, 0 if not.
+extern "C" fn rt_string_eq(a_ptr: *const u8, a_len: i64, b_ptr: *const u8, b_len: i64) -> i64 {
+    if a_len != b_len {
+        return 0;
+    }
+    unsafe {
+        let a = std::slice::from_raw_parts(a_ptr, a_len as usize);
+        let b = std::slice::from_raw_parts(b_ptr, b_len as usize);
+        if a == b {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// Return the length of a string.
+extern "C" fn rt_string_len(_ptr: *const u8, len: i64) -> i64 {
+    len
+}
+
 /// Compile a Forge program to native code via Cranelift JIT.
 pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     let mut flag_builder = settings::builder();
@@ -144,10 +244,39 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
         .finish(settings::Flags::new(flag_builder))
         .map_err(|e| anyhow!("{e}"))?;
 
-    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+
+    // Register string runtime functions
+    builder.symbol("rt_string_concat", rt_string_concat as *const u8);
+    builder.symbol("rt_string_eq", rt_string_eq as *const u8);
+    builder.symbol("rt_string_len", rt_string_len as *const u8);
+
     let mut module = JITModule::new(builder);
 
     let mut compiled_functions: HashMap<String, FuncId> = HashMap::new();
+
+    // Declare string runtime functions
+    let mut rt_concat_sig = module.make_signature();
+    rt_concat_sig.params.push(AbiParam::new(types::I64)); // a_ptr
+    rt_concat_sig.params.push(AbiParam::new(types::I64)); // a_len
+    rt_concat_sig.params.push(AbiParam::new(types::I64)); // b_ptr
+    rt_concat_sig.params.push(AbiParam::new(types::I64)); // b_len
+    rt_concat_sig.params.push(AbiParam::new(types::I64)); // out_ptr
+    let rt_concat_id =
+        module.declare_function("rt_string_concat", Linkage::Import, &rt_concat_sig)?;
+
+    let mut rt_eq_sig = module.make_signature();
+    rt_eq_sig.params.push(AbiParam::new(types::I64)); // a_ptr
+    rt_eq_sig.params.push(AbiParam::new(types::I64)); // a_len
+    rt_eq_sig.params.push(AbiParam::new(types::I64)); // b_ptr
+    rt_eq_sig.params.push(AbiParam::new(types::I64)); // b_len
+    rt_eq_sig.returns.push(AbiParam::new(types::I64)); // 1 or 0
+    let rt_eq_id = module.declare_function("rt_string_eq", Linkage::Import, &rt_eq_sig)?;
+
+    let runtime_funcs = RuntimeFuncs {
+        concat_id: rt_concat_id,
+        eq_id: rt_eq_id,
+    };
 
     // First pass: declare all functions (so they can call each other)
     let mut signatures: HashMap<String, Signature> = HashMap::new();
@@ -166,7 +295,13 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
 
-        compile_function(&mut module, &mut ctx, func, &compiled_functions)?;
+        compile_function(
+            &mut module,
+            &mut ctx,
+            func,
+            &compiled_functions,
+            &runtime_funcs,
+        )?;
 
         module.define_function(func_id, &mut ctx)?;
         module.clear_context(&mut ctx);
@@ -186,31 +321,46 @@ fn build_signature(module: &mut JITModule, func: &ast::FunctionDecl) -> Result<S
     let mut sig = module.make_signature();
 
     for param in &func.params {
-        let cl_type = forge_type_to_cranelift(&param.ty)?;
-        sig.params.push(AbiParam::new(cl_type));
+        if is_string_type(&param.ty) {
+            // String is (ptr: i64, len: i64)
+            sig.params.push(AbiParam::new(types::I64)); // ptr
+            sig.params.push(AbiParam::new(types::I64)); // len
+        } else {
+            let cl_type = forge_type_to_cranelift(&param.ty)?;
+            sig.params.push(AbiParam::new(cl_type));
+        }
     }
 
-    let ret_type = forge_type_to_cranelift(&func.return_type)?;
-    sig.returns.push(AbiParam::new(ret_type));
+    if is_string_type(&func.return_type) {
+        // String return is (ptr: i64, len: i64)
+        sig.returns.push(AbiParam::new(types::I64)); // ptr
+        sig.returns.push(AbiParam::new(types::I64)); // len
+    } else {
+        let ret_type = forge_type_to_cranelift(&func.return_type)?;
+        sig.returns.push(AbiParam::new(ret_type));
+    }
 
     Ok(sig)
 }
 
 /// Map Forge types to Cranelift types.
-/// Phase 5 only supports numeric types.
+/// String is represented as two i64 values (ptr, len).
 fn forge_type_to_cranelift(ty: &ast::Type) -> Result<types::Type> {
     match ty {
         ast::Type::Int => Ok(types::I64),
         ast::Type::Float => Ok(types::F64),
         ast::Type::Bool => Ok(types::I8),
         ast::Type::Byte => Ok(types::I8),
-        // Result<T> is compiled as T for now (error handling via traps)
+        ast::Type::String => Ok(types::I64), // ptr half — len is a second value
         ast::Type::Result(inner) => forge_type_to_cranelift(inner),
-        _ => bail!(
-            "type {:?} not yet supported in compiler (Phase 5 supports Int, Float, Bool)",
-            ty
-        ),
+        _ => bail!("type {:?} not yet supported in compiler", ty),
     }
+}
+
+/// Check if a type is a string (needs two values: ptr + len).
+fn is_string_type(ty: &ast::Type) -> bool {
+    matches!(ty, ast::Type::String)
+        || matches!(ty, ast::Type::Result(inner) if matches!(inner.as_ref(), ast::Type::String))
 }
 
 /// Compile a single function body to Cranelift IR.
@@ -219,6 +369,7 @@ fn compile_function(
     ctx: &mut codegen::Context,
     func: &ast::FunctionDecl,
     all_functions: &HashMap<String, FuncId>,
+    runtime_funcs: &RuntimeFuncs,
 ) -> Result<()> {
     let mut builder_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
@@ -229,44 +380,82 @@ fn compile_function(
     builder.seal_block(entry_block);
 
     // Map parameter names to SSA values
+    // For strings, we create two variables: name_ptr and name_len
     let mut vars: HashMap<String, Variable> = HashMap::new();
     let mut var_counter: u32 = 0;
+    let mut block_param_idx: usize = 0;
 
-    for (i, param) in func.params.iter().enumerate() {
-        let val = builder.block_params(entry_block)[i];
-        let var = Variable::new(var_counter as usize);
-        var_counter += 1;
-        let cl_type = forge_type_to_cranelift(&param.ty)?;
-        builder.declare_var(var, cl_type);
-        builder.def_var(var, val);
-        vars.insert(param.name.clone(), var);
+    for param in &func.params {
+        if is_string_type(&param.ty) {
+            // String param → two block params (ptr, len)
+            let ptr_val = builder.block_params(entry_block)[block_param_idx];
+            let len_val = builder.block_params(entry_block)[block_param_idx + 1];
+            block_param_idx += 2;
+
+            let ptr_var = Variable::new(var_counter as usize);
+            var_counter += 1;
+            builder.declare_var(ptr_var, types::I64);
+            builder.def_var(ptr_var, ptr_val);
+            vars.insert(format!("{}_ptr", param.name), ptr_var);
+
+            let len_var = Variable::new(var_counter as usize);
+            var_counter += 1;
+            builder.declare_var(len_var, types::I64);
+            builder.def_var(len_var, len_val);
+            vars.insert(format!("{}_len", param.name), len_var);
+
+            // Also store the ptr var under the plain name (for passing to functions)
+            vars.insert(param.name.clone(), ptr_var);
+        } else {
+            let val = builder.block_params(entry_block)[block_param_idx];
+            block_param_idx += 1;
+            let var = Variable::new(var_counter as usize);
+            var_counter += 1;
+            let cl_type = forge_type_to_cranelift(&param.ty)?;
+            builder.declare_var(var, cl_type);
+            builder.def_var(var, val);
+            vars.insert(param.name.clone(), var);
+        }
     }
 
+    let mut string_literals = Vec::new();
     let mut comp_ctx = CompilationContext {
         module,
         builder: &mut builder,
         vars: &mut vars,
         var_counter: &mut var_counter,
         all_functions,
+        runtime_funcs,
         return_type: &func.return_type,
         terminated: false,
+        string_literals: &mut string_literals,
     };
 
     compile_body(&mut comp_ctx, &func.body)?;
 
     // If we get here without a return, emit a default return
     if !comp_ctx.terminated {
-        let ret_type = forge_type_to_cranelift(&func.return_type)?;
-        let default_val = if ret_type == types::F64 {
-            comp_ctx.builder.ins().f64const(0.0)
+        if is_string_type(&func.return_type) {
+            let zero = comp_ctx.builder.ins().iconst(types::I64, 0);
+            comp_ctx.builder.ins().return_(&[zero, zero]);
         } else {
-            comp_ctx.builder.ins().iconst(ret_type, 0)
-        };
-        comp_ctx.builder.ins().return_(&[default_val]);
+            let ret_type = forge_type_to_cranelift(&func.return_type)?;
+            let default_val = if ret_type == types::F64 {
+                comp_ctx.builder.ins().f64const(0.0)
+            } else {
+                comp_ctx.builder.ins().iconst(ret_type, 0)
+            };
+            comp_ctx.builder.ins().return_(&[default_val]);
+        }
     }
 
     builder.finalize();
     Ok(())
+}
+
+struct RuntimeFuncs {
+    concat_id: FuncId,
+    eq_id: FuncId,
 }
 
 struct CompilationContext<'a, 'b> {
@@ -275,8 +464,11 @@ struct CompilationContext<'a, 'b> {
     vars: &'b mut HashMap<String, Variable>,
     var_counter: &'b mut u32,
     all_functions: &'b HashMap<String, FuncId>,
+    runtime_funcs: &'b RuntimeFuncs,
     return_type: &'b ast::Type,
     terminated: bool,
+    /// String literal data: (bytes, data_id) for embedding in the module
+    string_literals: &'b mut Vec<(String, cranelift_module::DataId)>,
 }
 
 fn alloc_var(ctx: &mut CompilationContext, name: &str, ty: types::Type) -> Variable {
@@ -345,9 +537,19 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
         }
 
         ast::StatementKind::Return { value } => {
-            let ret_cl_type = forge_type_to_cranelift(ctx.return_type)?;
-            let val = compile_expr(ctx, value, ret_cl_type)?;
-            ctx.builder.ins().return_(&[val]);
+            if is_string_type(ctx.return_type) {
+                let ptr = compile_expr(ctx, value, types::I64)?;
+                let len = if let Some(len_var) = ctx.vars.get("_last_str_len") {
+                    ctx.builder.use_var(*len_var)
+                } else {
+                    ctx.builder.ins().iconst(types::I64, 0)
+                };
+                ctx.builder.ins().return_(&[ptr, len]);
+            } else {
+                let ret_cl_type = forge_type_to_cranelift(ctx.return_type)?;
+                let val = compile_expr(ctx, value, ret_cl_type)?;
+                ctx.builder.ins().return_(&[val]);
+            }
             ctx.terminated = true;
             Ok(())
         }
@@ -444,8 +646,28 @@ fn compile_expr(
             }
             ast::Literal::Float(f) => Ok(ctx.builder.ins().f64const(*f)),
             ast::Literal::Bool(b) => Ok(ctx.builder.ins().iconst(types::I8, *b as i64)),
-            ast::Literal::String(_) => {
-                bail!("string literals not yet supported in compiler")
+            ast::Literal::String(s) => {
+                // Create a data section for the string bytes
+                let data_id = ctx.module.declare_anonymous_data(false, false)?;
+                let mut data_desc = DataDescription::new();
+                data_desc.define(s.as_bytes().to_vec().into_boxed_slice());
+                ctx.module.define_data(data_id, &data_desc)?;
+                ctx.string_literals.push((s.clone(), data_id));
+
+                // Get a pointer to the data
+                let gv = ctx.module.declare_data_in_func(data_id, ctx.builder.func);
+                let ptr = ctx.builder.ins().global_value(types::I64, gv);
+
+                // Store the length in a temp variable so it can be retrieved
+                let len = ctx.builder.ins().iconst(types::I64, s.len() as i64);
+                let len_var = Variable::new(*ctx.var_counter as usize);
+                *ctx.var_counter += 1;
+                ctx.builder.declare_var(len_var, types::I64);
+                ctx.builder.def_var(len_var, len);
+                // Use a convention: _last_str_len holds the len of the last string expr
+                ctx.vars.insert("_last_str_len".to_string(), len_var);
+
+                Ok(ptr)
             }
         },
 
@@ -458,6 +680,40 @@ fn compile_expr(
         }
 
         ast::Expr::Binary { left, op, right } => {
+            // Check for string comparison
+            let is_str = is_string_ast_expr(left) || is_string_ast_expr(right);
+            if is_str && matches!(op, ast::BinaryOp::Equal | ast::BinaryOp::NotEqual) {
+                // String comparison via runtime function
+                let lhs_ptr = compile_expr(ctx, left, types::I64)?;
+                let lhs_len = if let Some(v) = ctx.vars.get("_last_str_len") {
+                    ctx.builder.use_var(*v)
+                } else {
+                    ctx.builder.ins().iconst(types::I64, 0)
+                };
+
+                let rhs_ptr = compile_expr(ctx, right, types::I64)?;
+                let rhs_len = if let Some(v) = ctx.vars.get("_last_str_len") {
+                    ctx.builder.use_var(*v)
+                } else {
+                    ctx.builder.ins().iconst(types::I64, 0)
+                };
+
+                let eq_func = ctx
+                    .module
+                    .declare_func_in_func(ctx.runtime_funcs.eq_id, ctx.builder.func);
+                let inst = ctx
+                    .builder
+                    .ins()
+                    .call(eq_func, &[lhs_ptr, lhs_len, rhs_ptr, rhs_len]);
+                let result = ctx.builder.inst_results(inst)[0];
+
+                if matches!(op, ast::BinaryOp::NotEqual) {
+                    let one = ctx.builder.ins().iconst(types::I64, 1);
+                    return Ok(ctx.builder.ins().bxor(result, one));
+                }
+                return Ok(result);
+            }
+
             // Determine if we're doing float or int arithmetic
             let is_float =
                 expected_type == types::F64 || is_float_expr(left) || is_float_expr(right);
@@ -550,6 +806,17 @@ fn compile_expr(
         ast::Expr::StructInit { .. } => {
             bail!("struct construction not yet supported in compiler")
         }
+    }
+}
+
+/// Heuristic: check if an expression is a string.
+fn is_string_ast_expr(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::Literal(ast::Literal::String(_)) => true,
+        ast::Expr::Binary { left, right, .. } => {
+            is_string_ast_expr(left) || is_string_ast_expr(right)
+        }
+        _ => false,
     }
 }
 

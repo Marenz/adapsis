@@ -320,9 +320,21 @@ async fn main() -> Result<()> {
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
 
+            // Find the function to check its return type
+            let returns_string = program
+                .functions
+                .iter()
+                .find(|f| f.name == func)
+                .is_some_and(|f| matches!(f.return_type, ast::Type::String));
+
             println!("Calling {}({})...", func, args);
-            let result = compiled.call_i64(&func, &int_args)?;
-            println!("Result: {result}");
+            if returns_string {
+                let result = compiled.call_string(&func, &int_args)?;
+                println!("Result: \"{result}\"");
+            } else {
+                let result = compiled.call_i64(&func, &int_args)?;
+                println!("Result: {result}");
+            }
         }
         Command::Repl { url, session } => {
             let llm_client = llm::LlmClient::new(&url);
