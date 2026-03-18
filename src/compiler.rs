@@ -612,6 +612,66 @@ fn compile_call(
     call: &ast::CallExpr,
     _expected_type: types::Type,
 ) -> Result<Value> {
+    // Handle builtin functions
+    match call.callee.as_str() {
+        "concat" => {
+            if call.args.len() != 2 {
+                bail!("concat() expects 2 arguments in compiler");
+            }
+            // Compile both string args → (ptr, len) each
+            let a_ptr = compile_expr(ctx, &call.args[0], types::I64)?;
+            let a_len = if let Some(v) = ctx.vars.get("_last_str_len") {
+                ctx.builder.use_var(*v)
+            } else {
+                ctx.builder.ins().iconst(types::I64, 0)
+            };
+
+            let b_ptr = compile_expr(ctx, &call.args[1], types::I64)?;
+            let b_len = if let Some(v) = ctx.vars.get("_last_str_len") {
+                ctx.builder.use_var(*v)
+            } else {
+                ctx.builder.ins().iconst(types::I64, 0)
+            };
+
+            // Allocate stack space for the result (2 x i64: ptr, len)
+            let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                16,
+                3, // align to 8 bytes
+            ));
+            let out_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+
+            // Call rt_string_concat(a_ptr, a_len, b_ptr, b_len, out_ptr)
+            let concat_func = ctx
+                .module
+                .declare_func_in_func(ctx.runtime_funcs.concat_id, ctx.builder.func);
+            ctx.builder
+                .ins()
+                .call(concat_func, &[a_ptr, a_len, b_ptr, b_len, out_ptr]);
+
+            // Read result ptr and len from the stack slot
+            let result_ptr = ctx
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::new(), out_ptr, 0);
+            let result_len = ctx
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::new(), out_ptr, 8);
+
+            // Store len for the next expression that needs it
+            let len_var = Variable::new(*ctx.var_counter as usize);
+            *ctx.var_counter += 1;
+            ctx.builder.declare_var(len_var, types::I64);
+            ctx.builder.def_var(len_var, result_len);
+            ctx.vars.insert("_last_str_len".to_string(), len_var);
+
+            return Ok(result_ptr);
+        }
+        _ => {}
+    }
+
+    // Regular function call
     let func_id = ctx
         .all_functions
         .get(&call.callee)
@@ -621,13 +681,31 @@ fn compile_call(
 
     let mut arg_vals = Vec::new();
     for arg in &call.args {
-        // Infer type from the argument (simplified: assume i64 for now)
         let val = compile_expr(ctx, arg, types::I64)?;
-        arg_vals.push(val);
+        // If the arg was a string, also pass the len
+        if is_string_ast_expr(arg) {
+            arg_vals.push(val);
+            if let Some(v) = ctx.vars.get("_last_str_len") {
+                arg_vals.push(ctx.builder.use_var(*v));
+            }
+        } else {
+            arg_vals.push(val);
+        }
     }
 
     let inst = ctx.builder.ins().call(local_callee, &arg_vals);
-    Ok(ctx.builder.inst_results(inst)[0])
+    let results: Vec<Value> = ctx.builder.inst_results(inst).to_vec();
+
+    // If the called function returns a string (2 values), store the len
+    if results.len() == 2 {
+        let len_var = Variable::new(*ctx.var_counter as usize);
+        *ctx.var_counter += 1;
+        ctx.builder.declare_var(len_var, types::I64);
+        ctx.builder.def_var(len_var, results[1]);
+        ctx.vars.insert("_last_str_len".to_string(), len_var);
+    }
+
+    Ok(results[0])
 }
 
 fn compile_expr(
