@@ -11,7 +11,8 @@ See `forge-design-doc.md` for the full design document.
 cargo build
 cargo run -- check examples/validate.forge    # Parse and validate a .forge file
 cargo run -- test examples/validate.forge     # Run tests in a .forge file
-cargo run -- run --task "description" -m 10   # Run the LLM feedback loop
+cargo run -- run --task "description" -m 10   # Run the LLM feedback loop (CLI)
+cargo run -- serve --task "description" -m 10 # Run with browser UI at http://127.0.0.1:3000
 ```
 
 ## Architecture
@@ -27,6 +28,10 @@ src/
   llm.rs           — LLM client (OpenAI-compatible HTTP API, streaming SSE, backend trait)
   orchestrator.rs  — The feedback loop: prompt → LLM → parse → validate → typecheck → test → feedback → repeat
   prompt.rs        — System prompt and feedback message construction
+  events.rs        — ForgeEvent enum, EventBus (broadcast channel), ProgramSnapshot
+  server.rs        — axum HTTP + WebSocket server for browser interface
+web/
+  index.html       — Single-file browser UI (vanilla JS, no build step)
 ```
 
 ## Key Design Decisions
@@ -68,3 +73,6 @@ cargo run -- test examples/trace_test.forge   # Tests trace and query features
 - `clap` — CLI argument parsing
 - `anyhow` — error handling
 - `tracing` — logging
+- `axum` — HTTP/WebSocket server
+- `tower-http` — CORS middleware
+- `futures` — async utilities
