@@ -1,0 +1,1389 @@
+use anyhow::{anyhow, bail, Context, Result};
+
+#[derive(Debug, Clone)]
+pub enum Operation {
+    Module(ModuleDecl),
+    Type(TypeDecl),
+    Function(FunctionDecl),
+    Let(LetDecl),
+    Call(CallDecl),
+    Check(CheckDecl),
+    Branch(BranchDecl),
+    Return(ReturnDecl),
+    Each(EachDecl),
+    Replace(ReplaceMutation),
+    Test(TestMutation),
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleDecl {
+    pub name: String,
+    pub body: Vec<Operation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeDecl {
+    pub name: String,
+    pub body: TypeBody,
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeBody {
+    Struct(Vec<FieldType>),
+    Union(Vec<VariantType>),
+    Alias(TypeExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldType {
+    pub name: String,
+    pub ty: TypeExpr,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariantType {
+    pub name: String,
+    pub payload: Option<TypeExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: TypeExpr,
+    pub effects: Vec<String>,
+    pub body: Vec<Operation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Param {
+    pub name: String,
+    pub ty: TypeExpr,
+}
+
+#[derive(Debug, Clone)]
+pub struct LetDecl {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub expr: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallDecl {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub expr: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckDecl {
+    pub name: String,
+    pub expr: Expr,
+    pub err_label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchDecl {
+    pub name: String,
+    pub ident: String,
+    pub left_label: String,
+    pub right_ident: String,
+    pub right_label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReturnDecl {
+    pub expr: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct EachDecl {
+    pub collection: Expr,
+    pub item: String,
+    pub item_type: TypeExpr,
+    pub body: Vec<Operation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplaceMutation {
+    pub target: String,
+    pub body: Vec<Operation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TestMutation {
+    pub function_name: String,
+    pub cases: Vec<TestCase>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TestCase {
+    pub input: Expr,
+    pub expected: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeExpr {
+    Named(String),
+    Generic { name: String, args: Vec<TypeExpr> },
+    Struct(Vec<FieldType>),
+}
+
+#[derive(Debug, Clone)]
+pub enum Expr {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    Ident(String),
+    FieldAccess {
+        base: Box<Expr>,
+        field: String,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    StructLiteral(Vec<FieldValue>),
+    Cast {
+        expr: Box<Expr>,
+        ty: TypeExpr,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldValue {
+    pub name: String,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Gte,
+    Lte,
+    Eq,
+    Neq,
+    Gt,
+    Lt,
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone)]
+pub enum UnaryOp {
+    Not,
+    Neg,
+}
+
+pub fn parse(source: &str) -> Result<Vec<Operation>> {
+    Parser::new(source).parse()
+}
+
+struct Parser<'a> {
+    lines: Vec<SourceLine<'a>>,
+    index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SourceLine<'a> {
+    number: usize,
+    indent: usize,
+    text: &'a str,
+}
+
+impl<'a> Parser<'a> {
+    fn new(source: &'a str) -> Self {
+        let mut lines = Vec::new();
+
+        for (idx, raw) in source.lines().enumerate() {
+            let number = idx + 1;
+            let trimmed = raw.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with("//")
+                || trimmed.starts_with('#')
+                || trimmed == "```"
+                || trimmed.starts_with("```forge")
+                || trimmed == "<code>"
+                || trimmed == "</code>"
+            {
+                continue;
+            }
+
+            let indent = count_indent(raw);
+            let text = raw.trim_start_matches([' ', '\t']);
+            lines.push(SourceLine {
+                number,
+                indent,
+                text,
+            });
+        }
+
+        Self { lines, index: 0 }
+    }
+
+    fn parse(mut self) -> Result<Vec<Operation>> {
+        let ops = self.parse_block(0, BlockMode::TopLevel)?;
+        if let Some(line) = self.current() {
+            bail!(
+                "line {}: unexpected trailing input `{}`",
+                line.number,
+                line.text
+            );
+        }
+        Ok(ops)
+    }
+
+    fn parse_block(&mut self, indent: usize, _mode: BlockMode) -> Result<Vec<Operation>> {
+        let mut ops = Vec::new();
+
+        while let Some(line) = self.current() {
+            if line.indent < indent {
+                break;
+            }
+
+            if line.indent > indent {
+                bail!("line {}: unexpected indentation", line.number);
+            }
+
+            // Skip stray `end` tokens (LLMs often add these after test blocks)
+            if line.text == "end" {
+                self.index += 1;
+                continue;
+            }
+
+            ops.push(self.parse_operation(indent)?);
+        }
+
+        Ok(ops)
+    }
+
+    fn parse_operation(&mut self, indent: usize) -> Result<Operation> {
+        let line = self.current().context("internal parser state error")?;
+        let text = line.text;
+
+        if let Some(rest) = text.strip_prefix("+module") {
+            let name = rest.trim();
+            if name.is_empty() {
+                bail!("line {}: expected module name", line.number);
+            }
+            self.index += 1;
+            let body = self.parse_module_body(indent)?;
+            return Ok(Operation::Module(ModuleDecl {
+                name: name.to_string(),
+                body,
+            }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+type") {
+            let decl = parse_type_decl(line.number, rest.trim())?;
+            self.index += 1;
+            return Ok(Operation::Type(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+fn") {
+            let header = parse_function_header(line.number, rest.trim())?;
+            self.index += 1;
+            let body = self.parse_nested_block(indent)?;
+            return Ok(Operation::Function(FunctionDecl {
+                name: header.name,
+                params: header.params,
+                return_type: header.return_type,
+                effects: header.effects,
+                body,
+            }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+let") {
+            let decl = parse_binding_decl(line.number, rest.trim(), false)?;
+            self.index += 1;
+            return Ok(Operation::Let(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+call") {
+            let decl = parse_call_decl(line.number, rest.trim())?;
+            self.index += 1;
+            return Ok(Operation::Call(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+check") {
+            let decl = parse_check_decl(line.number, rest.trim())?;
+            self.index += 1;
+            return Ok(Operation::Check(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+branch") {
+            let decl = parse_branch_decl(line.number, rest.trim())?;
+            self.index += 1;
+            return Ok(Operation::Branch(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+return") {
+            let expr_text = rest.trim();
+            if expr_text.is_empty() {
+                bail!("line {}: expected return expression", line.number);
+            }
+            let expr = parse_expr(line.number, expr_text)?;
+            self.index += 1;
+            return Ok(Operation::Return(ReturnDecl { expr }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+each") {
+            let (collection, item, item_type) = parse_each_header(line.number, rest.trim())?;
+            self.index += 1;
+            let body = self.parse_nested_block(indent)?;
+            return Ok(Operation::Each(EachDecl {
+                collection,
+                item,
+                item_type,
+                body,
+            }));
+        }
+
+        if let Some(rest) = text.strip_prefix("!replace") {
+            let target = rest.trim();
+            if target.is_empty() {
+                bail!("line {}: expected replace target", line.number);
+            }
+            self.index += 1;
+            let body = self.parse_nested_block(indent)?;
+            return Ok(Operation::Replace(ReplaceMutation {
+                target: target.to_string(),
+                body,
+            }));
+        }
+
+        if let Some(rest) = text.strip_prefix("!test") {
+            let function_name = rest.trim();
+            if function_name.is_empty() {
+                bail!("line {}: expected function name after !test", line.number);
+            }
+            self.index += 1;
+            let cases = self.parse_test_cases(indent)?;
+            return Ok(Operation::Test(TestMutation {
+                function_name: function_name.to_string(),
+                cases,
+            }));
+        }
+
+        bail!("line {}: unknown operation `{}`", line.number, line.text)
+    }
+
+    fn parse_test_cases(&mut self, parent_indent: usize) -> Result<Vec<TestCase>> {
+        let mut cases = Vec::new();
+        let Some(indent) = self.child_indent(parent_indent) else {
+            let line = self
+                .lines
+                .get(self.index.saturating_sub(1))
+                .map(|line| line.number)
+                .unwrap_or(1);
+            bail!(
+                "line {}: !test requires at least one indented `+with` case",
+                line
+            );
+        };
+
+        while let Some(line) = self.current() {
+            if line.indent < indent {
+                break;
+            }
+
+            if line.indent > indent {
+                bail!("line {}: unexpected indentation in test block", line.number);
+            }
+
+            let rest = line
+                .text
+                .strip_prefix("+with")
+                .ok_or_else(|| anyhow!("line {}: expected `+with` test case", line.number))?
+                .trim();
+
+            let (input_text, expected_text) = split_test_case(line.number, rest)?;
+            let input = parse_expr(line.number, input_text.trim())?;
+            let expected = parse_expr(line.number, expected_text.trim())?;
+            cases.push(TestCase { input, expected });
+            self.index += 1;
+        }
+
+        if cases.is_empty() {
+            let line = self
+                .lines
+                .get(self.index.saturating_sub(1))
+                .map(|line| line.number)
+                .unwrap_or(1);
+            bail!("line {}: !test requires at least one `+with` case", line);
+        }
+
+        Ok(cases)
+    }
+
+    fn parse_nested_block(&mut self, parent_indent: usize) -> Result<Vec<Operation>> {
+        let Some(indent) = self.child_indent(parent_indent) else {
+            return Ok(Vec::new());
+        };
+        self.parse_block(indent, BlockMode::Normal)
+    }
+
+    fn parse_module_body(&mut self, module_indent: usize) -> Result<Vec<Operation>> {
+        let mut ops = Vec::new();
+        let child_indent = self.child_indent(module_indent);
+
+        while let Some(line) = self.current() {
+            if line.indent == module_indent && line.text == "end" {
+                self.index += 1;
+                return Ok(ops);
+            }
+
+            let Some(indent) = child_indent else {
+                bail!(
+                    "line {}: expected `end` after module declaration",
+                    line.number
+                );
+            };
+
+            if line.indent < indent {
+                bail!("line {}: module block is missing `end`", line.number);
+            }
+
+            if line.indent != indent {
+                bail!("line {}: unexpected indentation inside module", line.number);
+            }
+
+            ops.push(self.parse_operation(indent)?);
+        }
+
+        let line = self.lines.last().map(|line| line.number).unwrap_or(1);
+        bail!("line {}: module block is missing `end`", line)
+    }
+
+    fn child_indent(&self, parent_indent: usize) -> Option<usize> {
+        let line = self.current()?;
+        if line.indent > parent_indent {
+            Some(line.indent)
+        } else {
+            None
+        }
+    }
+
+    fn current(&self) -> Option<SourceLine<'a>> {
+        self.lines.get(self.index).copied()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlockMode {
+    TopLevel,
+    Normal,
+}
+
+struct FunctionHeader {
+    name: String,
+    params: Vec<Param>,
+    return_type: TypeExpr,
+    effects: Vec<String>,
+}
+
+fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
+    let (name, rest) =
+        take_ident(input).ok_or_else(|| anyhow!("line {}: expected type name", line))?;
+    let rest = rest.trim();
+    let value = rest
+        .strip_prefix('=')
+        .ok_or_else(|| anyhow!("line {}: expected `=` in type declaration", line))?
+        .trim();
+
+    if value.starts_with('{') {
+        let ty = parse_type(line, value)?;
+        let TypeExpr::Struct(fields) = ty else {
+            bail!("line {}: invalid struct type declaration", line);
+        };
+        return Ok(TypeDecl {
+            name: name.to_string(),
+            body: TypeBody::Struct(fields),
+        });
+    }
+
+    if value.contains('|') {
+        let mut variants = Vec::new();
+        for part in split_top_level(value, '|') {
+            let part = part.trim();
+            if part.is_empty() {
+                bail!("line {}: empty union variant", line);
+            }
+
+            if let Some(open) = find_matching_open_paren_variant(part) {
+                let close = part
+                    .rfind(')')
+                    .ok_or_else(|| anyhow!("line {}: malformed union variant `{}`", line, part))?;
+                if close != part.len() - 1 {
+                    bail!("line {}: malformed union variant `{}`", line, part);
+                }
+                let variant_name = part[..open].trim();
+                let payload_text = part[open + 1..close].trim();
+                if variant_name.is_empty() {
+                    bail!("line {}: missing variant name", line);
+                }
+                let payload = if payload_text.is_empty() {
+                    None
+                } else {
+                    Some(parse_type(line, payload_text)?)
+                };
+                variants.push(VariantType {
+                    name: variant_name.to_string(),
+                    payload,
+                });
+            } else {
+                variants.push(VariantType {
+                    name: part.to_string(),
+                    payload: None,
+                });
+            }
+        }
+
+        return Ok(TypeDecl {
+            name: name.to_string(),
+            body: TypeBody::Union(variants),
+        });
+    }
+
+    Ok(TypeDecl {
+        name: name.to_string(),
+        body: TypeBody::Alias(parse_type(line, value)?),
+    })
+}
+
+fn parse_function_header(line: usize, input: &str) -> Result<FunctionHeader> {
+    let (name, rest) =
+        take_ident(input).ok_or_else(|| anyhow!("line {}: expected function name", line))?;
+    let rest = rest.trim();
+
+    let params_start = rest
+        .find('(')
+        .ok_or_else(|| anyhow!("line {}: expected parameter list", line))?;
+    if params_start != 0 {
+        bail!("line {}: unexpected text before parameter list", line);
+    }
+
+    let params_end = find_matching_delim(rest, 0, '(', ')')
+        .ok_or_else(|| anyhow!("line {}: unclosed parameter list", line))?;
+    let params_text = &rest[1..params_end];
+    let mut tail = rest[params_end + 1..].trim();
+    tail = tail
+        .strip_prefix("->")
+        .ok_or_else(|| anyhow!("line {}: expected `->` after parameters", line))?
+        .trim();
+
+    let (return_text, effects_text) = split_effects(tail);
+    if return_text.trim().is_empty() {
+        bail!("line {}: expected return type", line);
+    }
+
+    Ok(FunctionHeader {
+        name: name.to_string(),
+        params: parse_params(line, params_text)?,
+        return_type: parse_type(line, return_text.trim())?,
+        effects: parse_effects(line, effects_text)?,
+    })
+}
+
+fn parse_params(line: usize, input: &str) -> Result<Vec<Param>> {
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    split_top_level(input, ',')
+        .into_iter()
+        .map(|part| {
+            let part = part.trim();
+            let (name, ty_text) = split_once_required(line, part, ":")?;
+            Ok(Param {
+                name: name.trim().to_string(),
+                ty: parse_type(line, ty_text.trim())?,
+            })
+        })
+        .collect()
+}
+
+fn parse_effects(line: usize, input: Option<&str>) -> Result<Vec<String>> {
+    let Some(input) = input else {
+        return Ok(Vec::new());
+    };
+
+    let inner = input.trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    split_top_level(inner, ',')
+        .into_iter()
+        .map(|effect| {
+            let effect = effect.trim();
+            if effect.is_empty() {
+                bail!("line {}: empty effect name", line);
+            }
+            Ok(effect.to_string())
+        })
+        .collect()
+}
+
+fn parse_binding_decl(line: usize, input: &str, _allow_call_expr: bool) -> Result<LetDecl> {
+    let (name, rest) =
+        take_ident(input).ok_or_else(|| anyhow!("line {}: expected binding name", line))?;
+    let rest = rest.trim();
+    let rest = rest
+        .strip_prefix(':')
+        .ok_or_else(|| anyhow!("line {}: expected `:` after binding name", line))?
+        .trim();
+    let (type_text, expr_text) = split_once_required(line, rest, "=")?;
+    Ok(LetDecl {
+        name: name.to_string(),
+        ty: parse_type(line, type_text.trim())?,
+        expr: parse_expr(line, expr_text.trim())?,
+    })
+}
+
+fn parse_call_decl(line: usize, input: &str) -> Result<CallDecl> {
+    let let_decl = parse_binding_decl(line, input, true)?;
+    Ok(CallDecl {
+        name: let_decl.name,
+        ty: let_decl.ty,
+        expr: let_decl.expr,
+    })
+}
+
+fn parse_check_decl(line: usize, input: &str) -> Result<CheckDecl> {
+    let (name, rest) =
+        take_ident(input).ok_or_else(|| anyhow!("line {}: expected check name", line))?;
+    let (expr_text, err_label) = split_once_required(line, rest.trim(), "~")?;
+    let err_label = err_label.trim();
+    if err_label.is_empty() {
+        bail!("line {}: expected error label after `~`", line);
+    }
+    Ok(CheckDecl {
+        name: name.to_string(),
+        expr: parse_expr(line, expr_text.trim())?,
+        err_label: err_label.to_string(),
+    })
+}
+
+fn parse_branch_decl(line: usize, input: &str) -> Result<BranchDecl> {
+    let (name, rest) =
+        take_ident(input).ok_or_else(|| anyhow!("line {}: expected branch name", line))?;
+    let (left_ident, rest) = take_ident(rest.trim())
+        .ok_or_else(|| anyhow!("line {}: expected branch identifier", line))?;
+    let (left_label, right_side) = split_once_required(line, rest.trim(), "|")?;
+    let (_, left_target) = split_once_required(line, left_label.trim(), "->")?;
+    let left_target = left_target.trim();
+    let (right_ident, right_label) = split_once_required(line, right_side.trim(), "->")?;
+    let right_ident = right_ident.trim();
+    let right_label = right_label.trim();
+
+    if left_target.is_empty() || right_ident.is_empty() || right_label.is_empty() {
+        bail!("line {}: malformed branch declaration", line);
+    }
+
+    Ok(BranchDecl {
+        name: name.to_string(),
+        ident: left_ident.to_string(),
+        left_label: left_target.to_string(),
+        right_ident: right_ident.to_string(),
+        right_label: right_label.to_string(),
+    })
+}
+
+fn parse_each_header(line: usize, input: &str) -> Result<(Expr, String, TypeExpr)> {
+    let mut split_at = None;
+    let mut depth_paren = 0usize;
+    let mut depth_brace = 0usize;
+    let mut depth_angle = 0usize;
+    let chars: Vec<(usize, char)> = input.char_indices().collect();
+
+    for (idx, ch) in chars.iter().copied() {
+        match ch {
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            '<' => depth_angle += 1,
+            '>' => depth_angle = depth_angle.saturating_sub(1),
+            ' ' if depth_paren == 0 && depth_brace == 0 && depth_angle == 0 => {
+                let next = input[idx..].trim_start();
+                if let Some((item, tail)) = take_ident(next) {
+                    let tail = tail.trim();
+                    if tail.starts_with(':') {
+                        split_at = Some((idx, item.to_string(), tail[1..].trim().to_string()));
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (idx, item, ty_text) =
+        split_at.ok_or_else(|| anyhow!("line {}: expected `collection item:Type`", line))?;
+    let collection_text = input[..idx].trim();
+    if collection_text.is_empty() {
+        bail!("line {}: expected collection expression", line);
+    }
+
+    Ok((
+        parse_expr(line, collection_text)?,
+        item,
+        parse_type(line, &ty_text)?,
+    ))
+}
+
+fn parse_type(line: usize, input: &str) -> Result<TypeExpr> {
+    let input = input.trim();
+    if input.is_empty() {
+        bail!("line {}: expected type", line);
+    }
+
+    if input.starts_with('{') {
+        if !input.ends_with('}') {
+            bail!("line {}: unclosed struct type", line);
+        }
+        let inner = &input[1..input.len() - 1];
+        let mut fields = Vec::new();
+        if !inner.trim().is_empty() {
+            for field in split_top_level(inner, ',') {
+                let (name, ty_text) = split_once_required(line, field.trim(), ":")?;
+                fields.push(FieldType {
+                    name: name.trim().to_string(),
+                    ty: parse_type(line, ty_text.trim())?,
+                });
+            }
+        }
+        return Ok(TypeExpr::Struct(fields));
+    }
+
+    let (name, rest) =
+        take_ident(input).ok_or_else(|| anyhow!("line {}: invalid type `{}`", line, input))?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(TypeExpr::Named(name.to_string()));
+    }
+
+    if rest.starts_with('<') {
+        let close = find_matching_delim(rest, 0, '<', '>')
+            .ok_or_else(|| anyhow!("line {}: unclosed generic type `{}`", line, input))?;
+        if close != rest.len() - 1 {
+            bail!(
+                "line {}: unexpected trailing characters in type `{}`",
+                line,
+                input
+            );
+        }
+        let inner = &rest[1..close];
+        let args = if inner.trim().is_empty() {
+            Vec::new()
+        } else {
+            split_top_level(inner, ',')
+                .into_iter()
+                .map(|part| parse_type(line, part.trim()))
+                .collect::<Result<Vec<_>>>()?
+        };
+        return Ok(TypeExpr::Generic {
+            name: name.to_string(),
+            args,
+        });
+    }
+
+    bail!("line {}: could not parse type `{}`", line, input)
+}
+
+fn parse_expr(line: usize, input: &str) -> Result<Expr> {
+    let tokens = tokenize_expr(line, input)?;
+    let mut parser = ExprParser {
+        tokens: &tokens,
+        index: 0,
+        line,
+    };
+    let expr = parser.parse_bp(0)?;
+    if !parser.is_done() {
+        bail!(
+            "line {}: unexpected token in expression near `{}`",
+            line,
+            parser.remaining_text()
+        );
+    }
+    Ok(expr)
+}
+
+#[derive(Clone, Debug)]
+enum Token {
+    Ident(String),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Symbol(char),
+    Arrow,
+    EqEq,
+    NotEq,
+    Gte,
+    Lte,
+    Gt,
+    Lt,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+}
+
+struct ExprParser<'a> {
+    tokens: &'a [Token],
+    index: usize,
+    line: usize,
+}
+
+impl<'a> ExprParser<'a> {
+    fn parse_bp(&mut self, min_bp: u8) -> Result<Expr> {
+        let mut lhs = self.parse_prefix()?;
+
+        loop {
+            if let Some(Token::Symbol('.')) = self.peek() {
+                if 9 < min_bp {
+                    break;
+                }
+                self.index += 1;
+                let field = self.expect_ident()?;
+                lhs = Expr::FieldAccess {
+                    base: Box::new(lhs),
+                    field,
+                };
+                continue;
+            }
+
+            if let Some(Token::Symbol('(')) = self.peek() {
+                if 9 < min_bp {
+                    break;
+                }
+                self.index += 1;
+                let mut args = Vec::new();
+                if !matches!(self.peek(), Some(Token::Symbol(')'))) {
+                    loop {
+                        args.push(self.parse_bp(0)?);
+                        if matches!(self.peek(), Some(Token::Symbol(','))) {
+                            self.index += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect_symbol(')')?;
+                lhs = Expr::Call {
+                    callee: Box::new(lhs),
+                    args,
+                };
+                continue;
+            }
+
+            if matches!(self.peek_ident(), Some("as")) {
+                if 8 < min_bp {
+                    break;
+                }
+                self.index += 1;
+                let ty_text = self.collect_type_tokens();
+                if ty_text.is_empty() {
+                    bail!("line {}: expected type after `as`", self.line);
+                }
+                lhs = Expr::Cast {
+                    expr: Box::new(lhs),
+                    ty: parse_type(self.line, &ty_text)?,
+                };
+                continue;
+            }
+
+            let (left_bp, right_bp, op) = match self.peek() {
+                Some(Token::Ident(op)) if op == "OR" => (1, 2, BinaryOp::Or),
+                Some(Token::Ident(op)) if op == "AND" => (3, 4, BinaryOp::And),
+                Some(Token::EqEq) => (5, 6, BinaryOp::Eq),
+                Some(Token::NotEq) => (5, 6, BinaryOp::Neq),
+                Some(Token::Gte) => (5, 6, BinaryOp::Gte),
+                Some(Token::Lte) => (5, 6, BinaryOp::Lte),
+                Some(Token::Gt) => (5, 6, BinaryOp::Gt),
+                Some(Token::Lt) => (5, 6, BinaryOp::Lt),
+                Some(Token::Plus) => (7, 8, BinaryOp::Add),
+                Some(Token::Minus) => (7, 8, BinaryOp::Sub),
+                Some(Token::Star) => (9, 10, BinaryOp::Mul),
+                Some(Token::Slash) => (9, 10, BinaryOp::Div),
+                _ => break,
+            };
+
+            if left_bp < min_bp {
+                break;
+            }
+
+            self.index += 1;
+            let rhs = self.parse_bp(right_bp)?;
+            lhs = Expr::Binary {
+                op,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            };
+        }
+
+        Ok(lhs)
+    }
+
+    fn parse_prefix(&mut self) -> Result<Expr> {
+        match self.next().cloned() {
+            Some(Token::Int(value)) => Ok(Expr::Int(value)),
+            Some(Token::Float(value)) => Ok(Expr::Float(value)),
+            Some(Token::String(value)) => Ok(Expr::String(value)),
+            Some(Token::Ident(value)) if value == "true" => Ok(Expr::Bool(true)),
+            Some(Token::Ident(value)) if value == "false" => Ok(Expr::Bool(false)),
+            Some(Token::Ident(value)) if value == "NOT" => Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(self.parse_bp(11)?),
+            }),
+            Some(Token::Minus) => Ok(Expr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(self.parse_bp(11)?),
+            }),
+            Some(Token::Ident(value)) => Ok(Expr::Ident(value)),
+            Some(Token::Symbol('(')) => {
+                let expr = self.parse_bp(0)?;
+                self.expect_symbol(')')?;
+                Ok(expr)
+            }
+            Some(Token::Symbol('{')) => self.parse_struct_literal(),
+            Some(token) => bail!(
+                "line {}: unexpected token {:?} in expression",
+                self.line,
+                token
+            ),
+            None => bail!("line {}: expected expression", self.line),
+        }
+    }
+
+    fn parse_struct_literal(&mut self) -> Result<Expr> {
+        let mut fields = Vec::new();
+        if matches!(self.peek(), Some(Token::Symbol('}'))) {
+            self.index += 1;
+            return Ok(Expr::StructLiteral(fields));
+        }
+
+        loop {
+            let name = self.expect_ident()?;
+            self.expect_symbol(':')?;
+            let value = self.parse_bp(0)?;
+            fields.push(FieldValue { name, value });
+
+            match self.peek() {
+                Some(Token::Symbol(',')) => {
+                    self.index += 1;
+                }
+                Some(Token::Symbol('}')) => {
+                    self.index += 1;
+                    break;
+                }
+                _ => bail!("line {}: expected `,` or `}}` in struct literal", self.line),
+            }
+        }
+
+        Ok(Expr::StructLiteral(fields))
+    }
+
+    fn collect_type_tokens(&mut self) -> String {
+        let start = self.index;
+        let mut depth_angle = 0usize;
+        let mut depth_brace = 0usize;
+        let mut depth_paren = 0usize;
+
+        while let Some(token) = self.peek() {
+            match token {
+                Token::Symbol('(') => depth_paren += 1,
+                Token::Symbol(')') => {
+                    if depth_paren == 0 {
+                        break;
+                    }
+                    depth_paren -= 1;
+                }
+                Token::Symbol('{') => depth_brace += 1,
+                Token::Symbol('}') => {
+                    if depth_brace == 0 {
+                        break;
+                    }
+                    depth_brace -= 1;
+                }
+                Token::Lt => depth_angle += 1,
+                Token::Gt => {
+                    if depth_angle > 0 {
+                        depth_angle -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                Token::Ident(op)
+                    if depth_angle == 0
+                        && depth_brace == 0
+                        && depth_paren == 0
+                        && (op == "AND" || op == "OR" || op == "as") =>
+                {
+                    break
+                }
+                Token::EqEq | Token::NotEq | Token::Gte | Token::Lte
+                    if depth_angle == 0 && depth_brace == 0 && depth_paren == 0 =>
+                {
+                    break
+                }
+                Token::Plus | Token::Minus | Token::Star | Token::Slash
+                    if depth_angle == 0 && depth_brace == 0 && depth_paren == 0 =>
+                {
+                    break
+                }
+                Token::Gt | Token::Lt
+                    if depth_angle == 0 && depth_brace == 0 && depth_paren == 0 =>
+                {
+                    break
+                }
+                _ => {}
+            }
+            self.index += 1;
+        }
+
+        self.tokens[start..self.index]
+            .iter()
+            .map(token_text)
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn expect_ident(&mut self) -> Result<String> {
+        match self.next().cloned() {
+            Some(Token::Ident(value)) => Ok(value),
+            _ => bail!("line {}: expected identifier", self.line),
+        }
+    }
+
+    fn expect_symbol(&mut self, ch: char) -> Result<()> {
+        match self.next() {
+            Some(Token::Symbol(found)) if *found == ch => Ok(()),
+            _ => bail!("line {}: expected `{}`", self.line, ch),
+        }
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.index)
+    }
+
+    fn peek_ident(&self) -> Option<&str> {
+        match self.peek() {
+            Some(Token::Ident(value)) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    fn next(&mut self) -> Option<&Token> {
+        let token = self.tokens.get(self.index);
+        if token.is_some() {
+            self.index += 1;
+        }
+        token
+    }
+
+    fn is_done(&self) -> bool {
+        self.index >= self.tokens.len()
+    }
+
+    fn remaining_text(&self) -> String {
+        self.tokens[self.index..]
+            .iter()
+            .map(token_text)
+            .collect::<Vec<_>>()
+            .join("")
+    }
+}
+
+fn tokenize_expr(line: usize, input: &str) -> Result<Vec<Token>> {
+    let mut chars = input.char_indices().peekable();
+    let mut tokens = Vec::new();
+
+    while let Some((idx, ch)) = chars.next() {
+        if ch.is_whitespace() {
+            continue;
+        }
+
+        match ch {
+            '(' | ')' | '{' | '}' | ',' | ':' | '.' => tokens.push(Token::Symbol(ch)),
+            '+' => tokens.push(Token::Plus),
+            '*' => tokens.push(Token::Star),
+            '/' => tokens.push(Token::Slash),
+            '-' => {
+                if matches!(chars.peek(), Some((_, '>'))) {
+                    chars.next();
+                    tokens.push(Token::Arrow);
+                } else {
+                    tokens.push(Token::Minus);
+                }
+            }
+            '>' => {
+                if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    tokens.push(Token::Gte);
+                } else {
+                    tokens.push(Token::Gt);
+                }
+            }
+            '<' => {
+                if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    tokens.push(Token::Lte);
+                } else {
+                    tokens.push(Token::Lt);
+                }
+            }
+            '=' => {
+                if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    tokens.push(Token::EqEq);
+                } else {
+                    tokens.push(Token::Symbol('='));
+                }
+            }
+            '!' => {
+                if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    tokens.push(Token::NotEq);
+                } else {
+                    bail!("line {}: unexpected `!` in expression", line);
+                }
+            }
+            '"' => {
+                let mut value = String::new();
+                let mut terminated = false;
+                while let Some((_, next)) = chars.next() {
+                    match next {
+                        '"' => {
+                            terminated = true;
+                            break;
+                        }
+                        '\\' => {
+                            let (_, escaped) = chars.next().ok_or_else(|| {
+                                anyhow!("line {}: unfinished escape sequence", line)
+                            })?;
+                            value.push(match escaped {
+                                'n' => '\n',
+                                'r' => '\r',
+                                't' => '\t',
+                                '\\' => '\\',
+                                '"' => '"',
+                                other => other,
+                            });
+                        }
+                        other => value.push(other),
+                    }
+                }
+                if !terminated {
+                    bail!("line {}: unterminated string literal", line);
+                }
+                tokens.push(Token::String(value));
+            }
+            c if c.is_ascii_digit() => {
+                let mut end = idx + c.len_utf8();
+                while let Some((next_idx, next)) = chars.peek().copied() {
+                    if next.is_ascii_digit() || next == '.' {
+                        chars.next();
+                        end = next_idx + next.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let slice = &input[idx..end];
+                tokens.push(parse_number_token(line, slice)?);
+            }
+            c if is_ident_start(c) => {
+                let mut end = idx + c.len_utf8();
+                while let Some((next_idx, next)) = chars.peek().copied() {
+                    if is_ident_continue(next) {
+                        chars.next();
+                        end = next_idx + next.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(Token::Ident(input[idx..end].to_string()));
+            }
+            _ => bail!("line {}: unexpected character `{}` in expression", line, ch),
+        }
+    }
+
+    Ok(tokens)
+}
+
+fn parse_number_token(line: usize, value: &str) -> Result<Token> {
+    if value.contains('.') {
+        Ok(Token::Float(value.parse().with_context(|| {
+            format!("line {}: invalid float literal `{}`", line, value)
+        })?))
+    } else {
+        Ok(Token::Int(value.parse().with_context(|| {
+            format!("line {}: invalid integer literal `{}`", line, value)
+        })?))
+    }
+}
+
+fn token_text(token: &Token) -> String {
+    match token {
+        Token::Ident(value) => value.clone(),
+        Token::Int(value) => value.to_string(),
+        Token::Float(value) => value.to_string(),
+        Token::String(value) => format!("\"{}\"", value),
+        Token::Symbol(ch) => ch.to_string(),
+        Token::Arrow => "->".to_string(),
+        Token::EqEq => "==".to_string(),
+        Token::NotEq => "!=".to_string(),
+        Token::Gte => ">=".to_string(),
+        Token::Lte => "<=".to_string(),
+        Token::Gt => ">".to_string(),
+        Token::Lt => "<".to_string(),
+        Token::Plus => "+".to_string(),
+        Token::Minus => "-".to_string(),
+        Token::Star => "*".to_string(),
+        Token::Slash => "/".to_string(),
+    }
+}
+
+fn split_effects(input: &str) -> (&str, Option<&str>) {
+    let input = input.trim();
+    if let Some(open) = input.rfind('[') {
+        if input.ends_with(']') {
+            return (&input[..open], Some(&input[open + 1..input.len() - 1]));
+        }
+    }
+    (input, None)
+}
+
+fn split_once_required<'a>(
+    line: usize,
+    input: &'a str,
+    needle: &str,
+) -> Result<(&'a str, &'a str)> {
+    input
+        .split_once(needle)
+        .ok_or_else(|| anyhow!("line {}: expected `{}` in `{}`", line, needle, input))
+}
+
+fn split_test_case<'a>(line: usize, input: &'a str) -> Result<(&'a str, &'a str)> {
+    let (left, right) = split_once_required(line, input, "->")?;
+    let right = right.trim();
+    let expected = right
+        .strip_prefix("expect")
+        .ok_or_else(|| anyhow!("line {}: expected `expect` after `->`", line))?;
+    Ok((left, expected))
+}
+
+fn take_ident(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    let mut chars = input.char_indices();
+    let (_, first) = chars.next()?;
+    if !is_ident_start(first) {
+        return None;
+    }
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if is_ident_continue(ch) {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    Some((&input[..end], &input[end..]))
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn count_indent(input: &str) -> usize {
+    input
+        .chars()
+        .take_while(|ch| *ch == ' ' || *ch == '\t')
+        .map(|ch| if ch == '\t' { 2 } else { 1 })
+        .sum()
+}
+
+fn find_matching_delim(input: &str, start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (idx, ch) in input.char_indices().skip(start) {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn split_top_level(input: &str, needle: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren = 0usize;
+    let mut brace = 0usize;
+    let mut angle = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '(' => paren += 1,
+            ')' => paren = paren.saturating_sub(1),
+            '{' => brace += 1,
+            '}' => brace = brace.saturating_sub(1),
+            '<' => angle += 1,
+            '>' => angle = angle.saturating_sub(1),
+            _ if ch == needle && paren == 0 && brace == 0 && angle == 0 => {
+                parts.push(&input[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(&input[start..]);
+    parts
+}
+
+fn find_matching_open_paren_variant(input: &str) -> Option<usize> {
+    let open = input.find('(')?;
+    if input.ends_with(')') {
+        Some(open)
+    } else {
+        None
+    }
+}
