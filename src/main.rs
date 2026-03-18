@@ -348,7 +348,7 @@ async fn main() -> Result<()> {
                 .route(
                     "/",
                     axum::routing::get(|| async {
-                        axum::response::Html(include_str!("../web/index.html"))
+                        axum::response::Html(include_str!("../web/forgeos.html"))
                     }),
                 )
                 .layer(tower_http::cors::CorsLayer::permissive());
