@@ -280,6 +280,343 @@ impl<B: LlmBackend> Orchestrator<B> {
         self.emit(ForgeEvent::Done);
         Ok(())
     }
+
+    /// Architect mode: design first, then implement per-function.
+    pub async fn run_architect(&mut self, task: &str) -> Result<()> {
+        let mut program = ast::Program::default();
+
+        println!("=== Forge Architect Mode ===");
+        println!("Task: {task}");
+        println!();
+
+        // Phase 1: Design
+        println!("--- Phase 1: Design ---");
+        self.emit(ForgeEvent::IterationStart {
+            iteration: 1,
+            max_iterations: self.max_iterations,
+        });
+
+        let mut messages = vec![
+            ChatMessage::system(prompt::architect_system_prompt()),
+            ChatMessage::user(prompt::architect_design_message(task)),
+        ];
+
+        let mut design_ok = false;
+        for attempt in 1..=3 {
+            println!("  Design attempt {attempt}/3...");
+            let output = self.llm.generate(messages.clone()).await?;
+            println!();
+
+            if !output.thinking.is_empty() {
+                self.emit(ForgeEvent::Thinking {
+                    text: output.thinking.clone(),
+                });
+            }
+
+            let code = if output.code.is_empty() {
+                extract_forge_code(&output.text)
+            } else {
+                output.code.clone()
+            };
+
+            if !code.is_empty() {
+                self.emit(ForgeEvent::Code { text: code.clone() });
+            }
+
+            messages.push(ChatMessage::assistant(&output.text));
+
+            let operations = match parser::parse(&code) {
+                Ok(ops) => ops,
+                Err(e) => {
+                    let error_msg = format!("Parse error: {e}");
+                    println!("  {error_msg}");
+                    self.emit(ForgeEvent::MutationError {
+                        message: error_msg.clone(),
+                    });
+                    let feedback = prompt::architect_design_feedback(
+                        &[(error_msg, false)],
+                        &validator::program_summary(&program),
+                        &[],
+                    );
+                    messages.push(ChatMessage::user(feedback));
+                    continue;
+                }
+            };
+
+            program = ast::Program::default();
+            let mut results: Vec<(String, bool)> = vec![];
+
+            for op in &operations {
+                match op {
+                    parser::Operation::Test(_)
+                    | parser::Operation::Trace(_)
+                    | parser::Operation::Query(_) => {}
+                    _ => match validator::apply_and_validate(&mut program, op) {
+                        Ok(msg) => {
+                            println!("  OK: {msg}");
+                            self.emit(ForgeEvent::MutationOk {
+                                message: msg.clone(),
+                            });
+                            results.push((msg, true));
+                        }
+                        Err(e) => {
+                            let msg = format!("{e}");
+                            println!("  ERROR: {msg}");
+                            self.emit(ForgeEvent::MutationError {
+                                message: msg.clone(),
+                            });
+                            results.push((msg, false));
+                        }
+                    },
+                }
+            }
+
+            self.emit(events::snapshot_program(&program));
+
+            let all_ok = results.iter().all(|(_, s)| *s);
+            let stub_names: Vec<String> = program
+                .functions
+                .iter()
+                .map(|f| f.name.clone())
+                .chain(
+                    program
+                        .modules
+                        .iter()
+                        .flat_map(|m| m.functions.iter().map(|f| format!("{}.{}", m.name, f.name))),
+                )
+                .collect();
+
+            let feedback = prompt::architect_design_feedback(
+                &results,
+                &validator::program_summary(&program),
+                &stub_names,
+            );
+            messages.push(ChatMessage::user(feedback));
+
+            if all_ok && !stub_names.is_empty() {
+                println!(
+                    "\n  Design validated! {} functions to implement: {}",
+                    stub_names.len(),
+                    stub_names.join(", ")
+                );
+                design_ok = true;
+                break;
+            }
+        }
+
+        if !design_ok {
+            println!("\n=== Design phase failed after 3 attempts ===");
+            self.emit(ForgeEvent::Done);
+            return Ok(());
+        }
+
+        // Phase 2: Implement each function
+        let functions_to_implement: Vec<String> = program
+            .functions
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+
+        // Also collect module functions
+        let module_functions: Vec<String> = program
+            .modules
+            .iter()
+            .flat_map(|m| m.functions.iter().map(|f| f.name.clone()))
+            .collect();
+
+        let all_functions: Vec<String> = functions_to_implement
+            .iter()
+            .chain(module_functions.iter())
+            .cloned()
+            .collect();
+
+        for (fn_idx, fn_name) in all_functions.iter().enumerate() {
+            println!(
+                "\n--- Phase 2: Implement `{fn_name}` ({}/{}) ---",
+                fn_idx + 1,
+                all_functions.len()
+            );
+            self.emit(ForgeEvent::IterationStart {
+                iteration: fn_idx + 2,
+                max_iterations: all_functions.len() + 1,
+            });
+
+            let implement_msg = prompt::architect_implement_message(
+                fn_name,
+                &validator::program_summary(&program),
+            );
+            messages.push(ChatMessage::user(implement_msg));
+
+            let mut fn_ok = false;
+            for attempt in 1..=self.max_iterations {
+                println!("  Attempt {attempt}...");
+                let output = self.llm.generate(messages.clone()).await?;
+                println!();
+
+                if !output.thinking.is_empty() {
+                    self.emit(ForgeEvent::Thinking {
+                        text: output.thinking.clone(),
+                    });
+                }
+
+                let code = if output.code.is_empty() {
+                    extract_forge_code(&output.text)
+                } else {
+                    output.code.clone()
+                };
+
+                if !code.is_empty() {
+                    self.emit(ForgeEvent::Code { text: code.clone() });
+                }
+
+                if code.trim() == "DONE" {
+                    break;
+                }
+
+                messages.push(ChatMessage::assistant(&output.text));
+
+                let operations = match parser::parse(&code) {
+                    Ok(ops) => ops,
+                    Err(e) => {
+                        let error_msg = format!("Parse error: {e}");
+                        println!("  {error_msg}");
+                        self.emit(ForgeEvent::MutationError {
+                            message: error_msg.clone(),
+                        });
+                        let feedback = prompt::feedback_message(
+                            &[(error_msg, false)],
+                            &[],
+                            &validator::program_summary(&program),
+                        );
+                        messages.push(ChatMessage::user(feedback));
+                        continue;
+                    }
+                };
+
+                // Replace the function in the program (don't reset everything)
+                // Remove existing function with same name, then add new one
+                let mut results: Vec<(String, bool)> = vec![];
+                let mut test_ops: Vec<parser::TestMutation> = vec![];
+
+                for op in &operations {
+                    match op {
+                        parser::Operation::Function(fd) if fd.name == *fn_name => {
+                            // Remove old stub
+                            program.functions.retain(|f| f.name != *fn_name);
+                            // Also remove from modules
+                            for m in &mut program.modules {
+                                m.functions.retain(|f| f.name != *fn_name);
+                            }
+                            match validator::apply_and_validate(&mut program, op) {
+                                Ok(msg) => {
+                                    println!("  OK: {msg}");
+                                    self.emit(ForgeEvent::MutationOk {
+                                        message: msg.clone(),
+                                    });
+                                    results.push((msg, true));
+                                }
+                                Err(e) => {
+                                    let msg = format!("{e}");
+                                    println!("  ERROR: {msg}");
+                                    self.emit(ForgeEvent::MutationError {
+                                        message: msg.clone(),
+                                    });
+                                    results.push((msg, false));
+                                }
+                            }
+                        }
+                        parser::Operation::Test(test) => {
+                            test_ops.push(test.clone());
+                        }
+                        parser::Operation::Type(_) => {
+                            // Allow adding new types during implementation
+                            match validator::apply_and_validate(&mut program, op) {
+                                Ok(msg) => {
+                                    results.push((msg, true));
+                                }
+                                Err(_) => {} // Duplicate type is fine — already defined in design
+                            }
+                        }
+                        _ => {
+                            // Skip other operations (other functions, etc.)
+                        }
+                    }
+                }
+
+                // Type check
+                {
+                    let table = typeck::build_symbol_table(&program);
+                    for func in &program.functions {
+                        if func.name == *fn_name {
+                            for error in typeck::check_function(&table, func) {
+                                println!("  TYPE WARNING: {error}");
+                                self.emit(ForgeEvent::TypeWarning {
+                                    message: error.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                self.emit(events::snapshot_program(&program));
+
+                // Run tests
+                let mut test_results: Vec<(String, bool)> = vec![];
+                for test in &test_ops {
+                    println!("  Testing {}:", test.function_name);
+                    for (i, case) in test.cases.iter().enumerate() {
+                        match eval::eval_test_case(&program, &test.function_name, case) {
+                            Ok(msg) => {
+                                println!("    PASS [{i}]: {msg}");
+                                self.emit(ForgeEvent::TestPass {
+                                    function: test.function_name.clone(),
+                                    index: i,
+                                    message: msg.clone(),
+                                });
+                                test_results.push((msg, true));
+                            }
+                            Err(e) => {
+                                let msg = format!("{e}");
+                                println!("    FAIL [{i}]: {msg}");
+                                self.emit(ForgeEvent::TestFail {
+                                    function: test.function_name.clone(),
+                                    index: i,
+                                    message: msg.clone(),
+                                });
+                                test_results.push((msg, false));
+                            }
+                        }
+                    }
+                }
+
+                let all_ok =
+                    results.iter().all(|(_, s)| *s) && test_results.iter().all(|(_, s)| *s);
+
+                let feedback = prompt::feedback_message(
+                    &results,
+                    &test_results,
+                    &validator::program_summary(&program),
+                );
+                messages.push(ChatMessage::user(feedback));
+
+                if all_ok && !results.is_empty() {
+                    println!("  `{fn_name}` implemented successfully!");
+                    fn_ok = true;
+                    break;
+                }
+            }
+
+            if !fn_ok {
+                println!("  WARNING: `{fn_name}` implementation incomplete after max iterations");
+            }
+        }
+
+        println!("\n=== Architect mode complete ===");
+        println!("{program}");
+        self.emit(events::snapshot_program(&program));
+        self.emit(ForgeEvent::Done);
+        Ok(())
+    }
 }
 
 /// Try to extract Forge code from raw text when <code> tags are missing.

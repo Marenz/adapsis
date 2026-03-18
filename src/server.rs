@@ -95,7 +95,7 @@ async fn run_handler<B: LlmBackend + Send + Sync + 'static>(
     "ok"
 }
 
-async fn ws_handler<B: LlmBackend + Send + Sync + 'static>(
+pub async fn ws_handler<B: LlmBackend + Send + Sync + 'static>(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState<B>>>,
 ) -> impl IntoResponse {

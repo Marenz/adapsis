@@ -277,6 +277,30 @@ fn eval_call(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Res
 
     // Check for built-in functions
     match call.callee.as_str() {
+        "Ok" => {
+            if args.len() == 1 {
+                Ok(Value::Ok(Box::new(args.into_iter().next().unwrap())))
+            } else {
+                Ok(Value::Ok(Box::new(Value::None)))
+            }
+        }
+        "Err" => {
+            if args.len() == 1 {
+                match &args[0] {
+                    Value::String(s) => Ok(Value::Err(s.clone())),
+                    other => Ok(Value::Err(format!("{other}"))),
+                }
+            } else {
+                Ok(Value::Err("unknown".to_string()))
+            }
+        }
+        "Some" => {
+            if args.len() == 1 {
+                Ok(Value::Ok(Box::new(args.into_iter().next().unwrap())))
+            } else {
+                Ok(Value::Ok(Box::new(Value::None)))
+            }
+        }
         "len" | "length" => {
             if args.len() != 1 {
                 bail!("len() expects 1 argument");

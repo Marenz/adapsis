@@ -37,6 +37,25 @@ enum Command {
         max_iterations: usize,
     },
 
+    /// Architect mode: design first, then implement per-function
+    Architect {
+        /// Natural language task description for the model
+        #[arg(short, long)]
+        task: String,
+
+        /// LLM server URL (OpenAI-compatible)
+        #[arg(short, long, default_value = "http://127.0.0.1:8081")]
+        url: String,
+
+        /// Maximum feedback loop iterations per function
+        #[arg(short, long, default_value_t = 5)]
+        max_iterations: usize,
+
+        /// Web server port (0 to disable browser UI)
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+    },
+
     /// Run with browser interface
     Serve {
         /// Natural language task description for the model
@@ -86,6 +105,59 @@ async fn main() -> Result<()> {
             let llm_client = llm::LlmClient::new(&url);
             let mut orch = orchestrator::Orchestrator::new(llm_client, max_iterations);
             orch.run(&task).await?;
+        }
+        Command::Architect {
+            task,
+            url,
+            max_iterations,
+            port,
+        } => {
+            let llm_client = llm::LlmClient::new(&url);
+            if port > 0 {
+                // Run with browser UI
+                let event_bus = events::EventBus::new();
+                let state = std::sync::Arc::new(server::AppState {
+                    event_bus: event_bus.clone(),
+                    program: tokio::sync::Mutex::new(ast::Program::default()),
+                    llm: llm_client.clone(),
+                    max_iterations,
+                });
+
+                let app = axum::Router::new()
+                    .route("/", axum::routing::get(|| async {
+                        axum::response::Html(include_str!("../web/index.html"))
+                    }))
+                    .route("/ws", axum::routing::get(server::ws_handler))
+                    .layer(tower_http::cors::CorsLayer::permissive())
+                    .with_state(state);
+
+                let listener =
+                    tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+                println!("Forge architect UI at http://127.0.0.1:{port}");
+
+                let server_task = axum::serve(listener, app);
+                let orch_task = async {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let mut orch = orchestrator::Orchestrator::with_event_bus(
+                        llm_client,
+                        max_iterations,
+                        event_bus,
+                    );
+                    orch.run_architect(&task).await
+                };
+
+                tokio::select! {
+                    r = server_task => { r?; }
+                    r = orch_task => {
+                        r?;
+                        println!("Architect complete. Server still running — Ctrl+C to stop.");
+                        std::future::pending::<()>().await;
+                    }
+                }
+            } else {
+                let mut orch = orchestrator::Orchestrator::new(llm_client, max_iterations);
+                orch.run_architect(&task).await?;
+            }
         }
         Command::Serve {
             task,

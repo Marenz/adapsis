@@ -160,6 +160,92 @@ pub fn task_message(task: &str) -> String {
     )
 }
 
+// --- Architect mode prompts ---
+
+/// System prompt for architect mode — teaches the two-phase workflow.
+pub fn architect_system_prompt() -> String {
+    let base = system_prompt();
+    // Replace the workflow notes with architect-specific ones
+    let mut prompt = base.replace(
+        "## Important Workflow Notes\n\n\
+         - Each <code> block you send is applied to a FRESH program state. Include ALL types and functions you need in each response.\n\
+         - Work step by step — I'll validate each response and give you feedback.\n\
+         - When everything passes, put just `DONE` in your <code> block.\n",
+        "## Architect Workflow\n\n\
+         You work in two phases:\n\n\
+         **Phase 1 — Design:** Define all types and function signatures with stub bodies.\n\
+         Stub bodies should be minimal: just `+return 0` for Int, `+return \"\"` for String, etc.\n\
+         The runtime will validate that types and signatures are consistent.\n\n\
+         **Phase 2 — Implement:** You will be asked to implement one function at a time.\n\
+         The runtime tells you which function to implement and shows you the full program context.\n\
+         Write ONLY the function being requested (with `+fn ... end` and `!test`).\n\
+         The runtime keeps previous functions — you don't need to repeat them.\n\n\
+         When all functions are implemented and tests pass, respond with `DONE`.\n",
+    );
+    prompt
+}
+
+/// Initial message for architect mode — asks for the design.
+pub fn architect_design_message(task: &str) -> String {
+    format!(
+        "Design the architecture for the following system in Forge:\n\n\
+         {task}\n\n\
+         **Phase 1 — Design only.** Define all types and function signatures with stub bodies.\n\
+         Use `+return 0` for Int returns, `+return \"\"` for String, `+return input` for struct returns, etc.\n\
+         Do NOT write real implementations yet. Focus on:\n\
+         - What types are needed\n\
+         - What functions exist, their parameters, return types, and effects\n\
+         - How functions relate to each other (which calls which)\n\n\
+         I'll validate the architecture, then ask you to implement each function one at a time."
+    )
+}
+
+/// Message asking the model to implement a specific function.
+pub fn architect_implement_message(function_name: &str, program_state: &str) -> String {
+    format!(
+        "**Phase 2 — Implement `{function_name}`.**\n\n\
+         Here is the current program state:\n\
+         {program_state}\n\n\
+         Write the full implementation for `{function_name}`. Include:\n\
+         - The complete function with `+fn {function_name} ...` and its body\n\
+         - `!test {function_name}` with test cases covering normal and edge cases\n\n\
+         Write ONLY this function and its tests. The runtime will merge it into the existing program."
+    )
+}
+
+/// Feedback after design phase.
+pub fn architect_design_feedback(
+    results: &[(String, bool)],
+    program_state: &str,
+    stub_functions: &[String],
+) -> String {
+    let mut msg = String::new();
+
+    msg.push_str("## Design Validation\n\n");
+    for (result, success) in results {
+        if *success {
+            msg.push_str(&format!("OK: {result}\n"));
+        } else {
+            msg.push_str(&format!("ERROR: {result}\n"));
+        }
+    }
+
+    let all_ok = results.iter().all(|(_, s)| *s);
+
+    if all_ok {
+        msg.push_str("\nArchitecture validated. Functions to implement:\n");
+        for name in stub_functions {
+            msg.push_str(&format!("  - {name}\n"));
+        }
+        msg.push_str("\nI'll now ask you to implement each function one at a time.\n");
+    } else {
+        msg.push_str("\nThere were errors in the architecture. Fix them and resend all types and signatures.\n");
+    }
+
+    msg.push_str(&format!("\n{program_state}"));
+    msg
+}
+
 /// Build feedback message after validating the model's output.
 pub fn feedback_message(
     results: &[(String, bool)],
