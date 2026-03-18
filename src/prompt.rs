@@ -33,7 +33,8 @@ Functions declare their effects: [io], [mut], [fail], [async], [rand], [yield], 
 Pure functions have no effect annotation.
 
 ### Statements (inside function body, indented)
-  +let name:Type = expr              — bind a value
+  +let name:Type = expr              — bind a value (immutable)
+  +set name = expr                   — reassign a variable (mutable update)
   +call name:Type = func(args)       — call a function and bind result
   +check label condition ~err_label  — assert condition, fail with label if false
   +if condition                      — conditional (body indented below)
@@ -42,9 +43,29 @@ Pure functions have no effect annotation.
     +return "maybe"
   +else                              — optional else
     +return "no"
+  +while condition                   — loop while condition is true
+    +set i = i + 1
   +return expr                       — return from function
   +each collection item:Type         — loop over collection (body indented below)
     +call result:Type = process(item)
+
+### Built-in Functions
+  concat(a, b)              — concatenate two strings
+  char_at(s, i)             — get character at index i as a String
+  substring(s, start, end)  — get substring from start to end
+  starts_with(s, prefix)    — check if string starts with prefix
+  contains(s, substr)       — check if string contains substring
+  index_of(s, substr)       — find index of substring (-1 if not found)
+  split(s, delim)           — split string into List<String>
+  trim(s)                   — remove leading/trailing whitespace
+  to_string(x)              — convert any value to String
+  len(x)                    — length of string or list (also x.len)
+  list()                    — create empty list
+  push(list, item)          — returns NEW list with item appended (functional, not mutating)
+  get(list, index)          — get item at index
+  join(list, delim)         — join list items into string with delimiter
+  abs(x), sqrt(x), pow(x,y), floor(x), min(x,y), max(x,y)
+  Ok(value), Err(label)     — Result constructors
 
 ### Modules
 +module Name

@@ -1,0 +1,127 @@
+// A simple tokenizer written in Forge.
+// Splits an input string into a list of tokens.
+// Handles: identifiers, numbers, strings, operators, whitespace skipping.
+
++fn is_digit (ch:String)->Bool
+  +if ch == "0" OR ch == "1" OR ch == "2" OR ch == "3" OR ch == "4"
+    +return true
+  +elif ch == "5" OR ch == "6" OR ch == "7" OR ch == "8" OR ch == "9"
+    +return true
+  +else
+    +return false
+
++fn is_letter (ch:String)->Bool
+  +if ch == "_"
+    +return true
+  +else
+    +let code:Int = index_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", ch)
+    +return code >= 0
+
++fn is_whitespace (ch:String)->Bool
+  +if ch == " " OR ch == "\t" OR ch == "\n"
+    +return true
+  +else
+    +return false
+
++fn is_operator (ch:String)->Bool
+  +if ch == "+" OR ch == "-" OR ch == "*" OR ch == "/" OR ch == "%" OR ch == "="
+    +return true
+  +elif ch == ">" OR ch == "<" OR ch == "!" OR ch == "~"
+    +return true
+  +elif ch == "(" OR ch == ")" OR ch == "{" OR ch == "}" OR ch == "," OR ch == ":"
+    +return true
+  +else
+    +return false
+
++fn read_number (input:String, start:Int)->String
+  +let i:Int = start
+  +while i < input.len
+    +let ch:String = char_at(input, i)
+    +if is_digit(ch)
+      +set i = i + 1
+    +else
+      +return substring(input, start, i)
+  +return substring(input, start, i)
+
++fn read_identifier (input:String, start:Int)->String
+  +let i:Int = start
+  +while i < input.len
+    +let ch:String = char_at(input, i)
+    +if is_letter(ch) OR is_digit(ch)
+      +set i = i + 1
+    +else
+      +return substring(input, start, i)
+  +return substring(input, start, i)
+
++fn read_string_literal (input:String, start:Int)->String
+  +let i:Int = start + 1
+  +while i < input.len
+    +let ch:String = char_at(input, i)
+    +if ch == "\""
+      +return substring(input, start, i + 1)
+    +else
+      +set i = i + 1
+  +return substring(input, start, i)
+
++fn tokenize (input:String)->List<String>
+  +let tokens:List<String> = list()
+  +let i:Int = 0
+  +while i < input.len
+    +let ch:String = char_at(input, i)
+    +if is_whitespace(ch)
+      +set i = i + 1
+    +elif is_digit(ch)
+      +let num:String = read_number(input, i)
+      +set tokens = push(tokens, num)
+      +set i = i + num.len
+    +elif is_letter(ch)
+      +let ident:String = read_identifier(input, i)
+      +set tokens = push(tokens, ident)
+      +set i = i + ident.len
+    +elif ch == "\""
+      +let str_lit:String = read_string_literal(input, i)
+      +set tokens = push(tokens, str_lit)
+      +set i = i + str_lit.len
+    +elif is_operator(ch)
+      +set tokens = push(tokens, ch)
+      +set i = i + 1
+    +else
+      +set tokens = push(tokens, ch)
+      +set i = i + 1
+  +return tokens
+
++fn token_count (input:String)->Int
+  +let tokens:List<String> = tokenize(input)
+  +return tokens.len
+
+!test is_digit
+  +with "5" -> expect true
+  +with "a" -> expect false
+  +with "0" -> expect true
+
+!test is_letter
+  +with "a" -> expect true
+  +with "Z" -> expect true
+  +with "_" -> expect true
+  +with "5" -> expect false
+
+!test is_operator
+  +with "+" -> expect true
+  +with "(" -> expect true
+  +with "a" -> expect false
+
+!test read_number
+  +with input="123abc" start=0 -> expect "123"
+  +with input="42" start=0 -> expect "42"
+
+!test read_identifier
+  +with input="hello world" start=0 -> expect "hello"
+  +with input="foo_bar()" start=0 -> expect "foo_bar"
+
+!test token_count
+  +with "x + 42" -> expect 3
+  +with "foo(bar, 123)" -> expect 6
+
+!eval tokenize "x + 42"
+!eval tokenize "fn add(a, b)"
+!eval tokenize "+let x:Int = 42"
