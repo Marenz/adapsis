@@ -504,6 +504,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                 Value::Err(e) => match field.as_str() {
                     "is_ok" => Ok(Value::Bool(false)),
                     "is_err" => Ok(Value::Bool(true)),
+                    "error" | "unwrap_err" => Ok(Value::String(e.clone())),
                     "unwrap" => bail!("unwrap on Err({e})"),
                     _ => bail!("cannot access field `{field}` on Err({e})"),
                 },

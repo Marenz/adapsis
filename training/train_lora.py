@@ -14,7 +14,7 @@ from trl import SFTTrainer, SFTConfig
 
 def main():
     data_path = Path(__file__).parent / "forge_training_data.jsonl"
-    output_dir = Path(__file__).parent / "forge-lora-qwen3.5-4b"
+    output_dir = Path(__file__).parent / "forge-lora-qwen3.5-9b"
 
     # Load training data
     print("Loading training data...")
@@ -27,7 +27,7 @@ def main():
     # Load model with 4-bit quantization
     print("Loading Qwen3.5-4B with 4-bit quantization...")
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="Qwen/Qwen3.5-4B",
+        model_name="Qwen/Qwen3.5-9B",
         max_seq_length=4096,
         dtype=None,  # auto-detect
         load_in_4bit=True,
@@ -107,7 +107,7 @@ def main():
     tokenizer.save_pretrained(output_dir)
 
     # Export to GGUF for llama.cpp
-    gguf_dir = Path(__file__).parent / "forge-lora-qwen3.5-4b-gguf"
+    gguf_dir = Path(__file__).parent / "forge-lora-qwen3.5-9b-gguf"
     print(f"\nExporting merged model to GGUF at {gguf_dir}...")
     try:
         model.save_pretrained_gguf(
@@ -119,7 +119,7 @@ def main():
 
         # Copy GGUF to models directory
         for gguf_file in gguf_dir.glob("*.gguf"):
-            target = Path.home() / "models" / f"Qwen3.5-4B-Forge-LoRA-Q4_K_M.gguf"
+            target = Path.home() / "models" / f"Qwen3.5-9B-Forge-LoRA-Q4_K_M.gguf"
             import shutil
 
             shutil.copy2(gguf_file, target)
