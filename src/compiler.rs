@@ -66,6 +66,72 @@ impl CompiledProgram {
     }
 }
 
+/// Check if a function can be compiled (only numeric types).
+pub fn is_compilable_function(func: &ast::FunctionDecl) -> bool {
+    // Check return type
+    if !is_compilable_type(&func.return_type) {
+        return false;
+    }
+    // Check param types
+    for param in &func.params {
+        if !is_compilable_type(&param.ty) {
+            return false;
+        }
+    }
+    // Check body for unsupported operations
+    is_compilable_body(&func.body)
+}
+
+fn is_compilable_type(ty: &ast::Type) -> bool {
+    match ty {
+        ast::Type::Int | ast::Type::Float | ast::Type::Bool | ast::Type::Byte => true,
+        ast::Type::Result(inner) => is_compilable_type(inner),
+        _ => false,
+    }
+}
+
+fn is_compilable_body(stmts: &[ast::Statement]) -> bool {
+    stmts.iter().all(|s| match &s.kind {
+        ast::StatementKind::Let { ty, value, .. } => {
+            is_compilable_type(ty) && is_compilable_expr(value)
+        }
+        ast::StatementKind::Call { call, binding, .. } => {
+            call.args.iter().all(is_compilable_expr)
+                && binding.as_ref().is_none_or(|b| is_compilable_type(&b.ty))
+        }
+        ast::StatementKind::Check { condition, .. } => is_compilable_expr(condition),
+        ast::StatementKind::Return { value } => is_compilable_expr(value),
+        ast::StatementKind::Branch {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            is_compilable_expr(condition)
+                && is_compilable_body(then_body)
+                && is_compilable_body(else_body)
+        }
+        _ => false,
+    })
+}
+
+fn is_compilable_expr(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::Literal(lit) => !matches!(lit, ast::Literal::String(_)),
+        ast::Expr::Identifier(_) => true,
+        ast::Expr::Binary { left, right, .. } => {
+            is_compilable_expr(left) && is_compilable_expr(right)
+        }
+        ast::Expr::Unary { expr, .. } => is_compilable_expr(expr),
+        ast::Expr::Call(call) => call.args.iter().all(is_compilable_expr),
+        ast::Expr::FieldAccess { .. } | ast::Expr::StructInit { .. } => false,
+    }
+}
+
+/// Check if an entire program can be fully compiled.
+pub fn is_fully_compilable(program: &ast::Program) -> bool {
+    program.functions.iter().all(is_compilable_function)
+}
+
 /// Compile a Forge program to native code via Cranelift JIT.
 pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     let mut flag_builder = settings::builder();
@@ -257,7 +323,9 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
         }
 
         ast::StatementKind::Check {
-            condition, on_fail: _, ..
+            condition,
+            on_fail: _,
+            ..
         } => {
             // Compile condition, trap if false
             let cond = compile_expr(ctx, condition, types::I8)?;

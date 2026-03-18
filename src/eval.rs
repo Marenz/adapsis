@@ -118,6 +118,60 @@ impl Env {
     }
 }
 
+/// Try to evaluate using the JIT compiler, falling back to the interpreter.
+/// Returns (result_string, was_compiled).
+pub fn eval_compiled_or_interpreted(
+    program: &ast::Program,
+    function_name: &str,
+    input: &parser::Expr,
+) -> Result<(String, bool)> {
+    let func = program
+        .get_function(function_name)
+        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+
+    // Try compiled path
+    if crate::compiler::is_compilable_function(func) {
+        if let Ok(mut compiled) = crate::compiler::compile(program) {
+            // Convert input to i64 args
+            if let Ok(args) = input_to_i64_args(input, func) {
+                if let Ok(result) = compiled.call_i64(function_name, &args) {
+                    return Ok((format!("{result}"), true));
+                }
+            }
+        }
+    }
+
+    // Fall back to interpreter
+    let result = eval_call_with_input(program, function_name, input)?;
+    Ok((result, false))
+}
+
+/// Try to convert a parser expression to i64 args for the compiler.
+fn input_to_i64_args(input: &parser::Expr, func: &ast::FunctionDecl) -> Result<Vec<i64>> {
+    match input {
+        parser::Expr::Int(n) => Ok(vec![*n]),
+        parser::Expr::Bool(b) => Ok(vec![*b as i64]),
+        parser::Expr::StructLiteral(fields) => {
+            // Match field names to param order
+            let mut args = Vec::new();
+            for param in &func.params {
+                let field = fields
+                    .iter()
+                    .find(|f| f.name == param.name)
+                    .ok_or_else(|| anyhow!("missing field `{}`", param.name))?;
+                match &field.value {
+                    parser::Expr::Int(n) => args.push(*n),
+                    parser::Expr::Bool(b) => args.push(*b as i64),
+                    parser::Expr::Float(f) => args.push(f.to_bits() as i64), // bit-cast
+                    _ => bail!("unsupported arg type for compiled call"),
+                }
+            }
+            Ok(args)
+        }
+        _ => bail!("unsupported input format for compiled call"),
+    }
+}
+
 /// Evaluate a function call with given input, returning the result as a displayable string.
 pub fn eval_call_with_input(
     program: &ast::Program,

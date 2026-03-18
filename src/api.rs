@@ -75,6 +75,8 @@ pub struct EvalRequest {
 pub struct EvalResponse {
     pub result: String,
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiled: Option<bool>,
 }
 
 pub async fn eval_fn(
@@ -91,24 +93,27 @@ pub async fn eval_fn(
             return Json(EvalResponse {
                 result: format!("parse error: {e}"),
                 success: false,
+                compiled: None,
             });
         }
     };
 
     for op in &operations {
         if let parser::Operation::Eval(ev) = op {
-            match eval::eval_call_with_input(&session.program, &ev.function_name, &ev.input) {
-                Ok(result) => {
+            match eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
+                Ok((result, compiled)) => {
                     session.record_eval(&ev.function_name, &req.input, &result);
                     return Json(EvalResponse {
                         result,
                         success: true,
+                        compiled: Some(compiled),
                     });
                 }
                 Err(e) => {
                     return Json(EvalResponse {
                         result: format!("{e}"),
                         success: false,
+                        compiled: None,
                     });
                 }
             }
@@ -118,6 +123,7 @@ pub async fn eval_fn(
     Json(EvalResponse {
         result: "no eval operation found".to_string(),
         success: false,
+        compiled: None,
     })
 }
 
