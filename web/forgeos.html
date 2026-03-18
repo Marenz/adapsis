@@ -6,174 +6,101 @@
 <title>ForgeOS</title>
 <style>
 :root {
-  --bg: #1a1b26;
-  --surface: #24283b;
-  --surface2: #2f3347;
-  --border: #3b4261;
-  --text: #c0caf5;
-  --text-dim: #565f89;
-  --green: #9ece6a;
-  --red: #f7768e;
-  --blue: #7aa2f7;
-  --yellow: #e0af68;
-  --purple: #bb9af7;
-  --cyan: #7dcfff;
+  --bg: #1a1b26; --surface: #24283b; --surface2: #2f3347;
+  --border: #3b4261; --text: #c0caf5; --text-dim: #565f89;
+  --green: #9ece6a; --red: #f7768e; --blue: #7aa2f7;
+  --yellow: #e0af68; --purple: #bb9af7; --cyan: #7dcfff;
   --orange: #ff9e64;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-header {
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  padding: 8px 16px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
+body { background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
+header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 16px; }
 header h1 { font-size: 16px; color: var(--blue); font-weight: 600; }
-header .rev { color: var(--text-dim); font-size: 12px; }
-main {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
-.panel {
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--border);
-  overflow: hidden;
-}
+header .info { color: var(--text-dim); font-size: 12px; }
+main { flex: 1; display: flex; overflow: hidden; }
+.panel { display: flex; flex-direction: column; border-right: 1px solid var(--border); overflow: hidden; }
 .panel:last-child { border-right: none; }
-.panel-header {
-  background: var(--surface);
-  padding: 6px 12px;
-  font-size: 11px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.panel-content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-}
-/* Editor panel */
-#editor-panel { flex: 1.5; }
-#code-input {
-  width: 100%;
-  height: calc(100% - 40px);
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  padding: 8px;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  resize: none;
-  border-radius: 4px;
-}
+.panel-header { background: var(--surface); padding: 6px 12px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+.panel-content { flex: 1; overflow-y: auto; padding: 8px; }
+
+/* Editor */
+#editor-panel { flex: 1.4; display: flex; flex-direction: column; }
+#code-input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 8px; font-family: var(--font-mono); font-size: 13px; resize: none; border-radius: 4px; min-height: 100px; }
 #code-input:focus { outline: 1px solid var(--blue); }
-.btn-row {
-  display: flex;
-  gap: 6px;
-  padding: 6px 0;
-}
-.btn {
-  background: var(--surface2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  padding: 4px 12px;
-  border-radius: 4px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  cursor: pointer;
-}
+.btn-row { display: flex; gap: 6px; padding: 6px 8px; flex-wrap: wrap; }
+.btn { background: var(--surface2); color: var(--text); border: 1px solid var(--border); padding: 4px 10px; border-radius: 4px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; }
 .btn:hover { background: var(--border); }
 .btn-primary { background: var(--blue); color: var(--bg); border-color: var(--blue); }
-.btn-primary:hover { opacity: 0.9; }
-/* Program panel */
+.btn-green { background: var(--green); color: var(--bg); border-color: var(--green); }
+.btn-purple { background: var(--purple); color: var(--bg); border-color: var(--purple); }
+#output { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin: 4px 8px 8px; font-size: 12px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; display: none; }
+#output.ok { color: var(--green); } #output.error { color: var(--red); }
+
+/* Program */
 #program-panel { flex: 1; }
-.fn-card, .type-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px;
-  margin-bottom: 6px;
-}
-.fn-card h3 { color: var(--blue); font-size: 13px; margin-bottom: 4px; }
-.type-card h3 { color: var(--yellow); font-size: 13px; margin-bottom: 4px; }
-.fn-sig { color: var(--text-dim); font-size: 12px; }
-.fn-stmt { padding: 2px 0 2px 12px; font-size: 12px; border-left: 2px solid var(--border); margin: 2px 0; }
+.type-card, .fn-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: border-color 0.15s; }
+.type-card:hover, .fn-card:hover { border-color: var(--blue); }
+.type-card h3 { color: var(--yellow); font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; }
+.fn-card h3 { color: var(--blue); font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; }
+.fn-sig { color: var(--text-dim); font-size: 12px; margin-bottom: 4px; }
+.fn-effects { color: var(--orange); font-size: 11px; }
+.fn-stmt { padding: 2px 0 2px 12px; font-size: 12px; border-left: 2px solid var(--border); margin: 2px 0; color: var(--text-dim); }
+.fn-stmt:hover { border-left-color: var(--blue); color: var(--text); }
 .field { color: var(--text-dim); font-size: 12px; padding-left: 12px; }
-/* History panel */
-#history-panel { flex: 0.8; }
-.hist-entry { padding: 3px 0; font-size: 12px; border-bottom: 1px solid var(--surface2); }
-.hist-entry.mutation { color: var(--cyan); }
-.hist-entry.eval { color: var(--green); }
-.hist-entry.test { color: var(--purple); }
-.hist-entry.query { color: var(--text-dim); }
-.hist-rev { color: var(--text-dim); font-size: 11px; }
-/* Output area */
-.output {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 6px 8px;
-  margin-top: 6px;
-  font-size: 12px;
-  max-height: 200px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-}
-.output.ok { color: var(--green); }
-.output.error { color: var(--red); }
+.tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; }
+.tag-compiled { background: var(--green); color: var(--bg); }
+.tag-interpreted { background: var(--surface2); color: var(--text-dim); }
+.fn-actions { display: flex; gap: 4px; margin-top: 6px; }
+
+/* History */
+#history-panel { flex: 0.7; }
+.hist-entry { padding: 3px 4px; font-size: 11px; border-bottom: 1px solid var(--surface2); }
+.hist-rev { color: var(--text-dim); }
+.hist-mutation { color: var(--cyan); }
+.hist-eval { color: var(--green); }
+.hist-test { color: var(--purple); }
+.hist-query { color: var(--text-dim); }
+
+/* Quick eval bar */
+.eval-bar { display: flex; gap: 4px; padding: 4px 8px; background: var(--surface); border-top: 1px solid var(--border); }
+.eval-bar input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 4px 8px; font-family: var(--font-mono); font-size: 12px; border-radius: 4px; }
+.eval-bar input:focus { outline: 1px solid var(--blue); }
 </style>
 </head>
 <body>
 <header>
   <h1>ForgeOS</h1>
-  <span id="rev-display" class="rev">rev 0</span>
-  <span id="fn-count" class="rev">0 functions</span>
-  <span id="type-count" class="rev">0 types</span>
+  <span id="rev" class="info">rev 0</span>
+  <span id="counts" class="info"></span>
 </header>
 <main>
   <div class="panel" id="editor-panel">
-    <div class="panel-header">
-      Editor
-      <span style="font-size:10px; color: var(--text-dim)">Ctrl+Enter to apply</span>
+    <div class="panel-header">Editor <span style="font-size:10px">Ctrl+Enter to apply</span></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="applyCode()">Apply</button>
+      <button class="btn btn-green" onclick="runAllTests()">Test All</button>
+      <button class="btn" onclick="querySymbols()">?symbols</button>
+      <button class="btn" onclick="doRewind()">Rewind</button>
     </div>
     <div class="panel-content">
-      <div class="btn-row">
-        <button class="btn btn-primary" onclick="applyCode()">Apply</button>
-        <button class="btn" onclick="evalCode()">Eval</button>
-        <button class="btn" onclick="querySymbols()">?symbols</button>
-        <button class="btn" onclick="rewind()">Rewind</button>
-      </div>
-      <textarea id="code-input" placeholder="Type Forge code here...
+      <textarea id="code-input" placeholder="Type Forge code...
+
 +fn add (a:Int, b:Int)->Int
   +return a + b
 
 !test add
   +with a=3 b=4 -> expect 7
-
-!eval add a=10 b=20"></textarea>
-      <div id="output" class="output" style="display:none"></div>
+"></textarea>
+    </div>
+    <div id="output"></div>
+    <div class="eval-bar">
+      <input id="eval-input" placeholder="!eval add a=3 b=4" onkeydown="if(event.key==='Enter')quickEval()">
+      <button class="btn btn-green" onclick="quickEval()">Eval</button>
     </div>
   </div>
   <div class="panel" id="program-panel">
-    <div class="panel-header">Program State</div>
+    <div class="panel-header">Program</div>
     <div class="panel-content" id="program"></div>
   </div>
   <div class="panel" id="history-panel">
@@ -183,13 +110,11 @@ main {
 </main>
 
 <script>
-const API = '';
-
 async function api(path, body) {
   const opts = body !== undefined
     ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) }
     : {};
-  const res = await fetch(API + path, opts);
+  const res = await fetch(path, opts);
   return res.json();
 }
 
@@ -197,186 +122,249 @@ function showOutput(text, isError) {
   const el = document.getElementById('output');
   el.style.display = 'block';
   el.textContent = text;
-  el.className = 'output ' + (isError ? 'error' : 'ok');
+  el.className = isError ? 'error' : 'ok';
 }
 
-async function refreshStatus() {
-  const status = await api('/api/status');
-  document.getElementById('rev-display').textContent = `rev ${status.revision}`;
-  document.getElementById('fn-count').textContent = `${status.functions.length} functions`;
-  document.getElementById('type-count').textContent = `${status.types.length} types`;
-  return status;
+async function refresh() {
+  const [status, prog, hist] = await Promise.all([
+    api('/api/status'),
+    api('/api/program'),
+    api('/api/history', {limit: 50}),
+  ]);
+  document.getElementById('rev').textContent = `rev ${status.revision}`;
+  document.getElementById('counts').textContent = `${status.functions.length} fn · ${status.types.length} types`;
+  renderProgram(prog);
+  renderHistory(hist);
 }
 
-async function refreshProgram() {
-  const status = await api('/api/status');
-  const container = document.getElementById('program');
-  // For now, show the summary. Could be enhanced with structured data.
-  container.innerHTML = '';
-
-  if (status.types.length === 0 && status.functions.length === 0) {
-    container.innerHTML = '<div style="color:var(--text-dim);padding:20px;text-align:center">No program yet</div>';
+function renderProgram(prog) {
+  const el = document.getElementById('program');
+  el.innerHTML = '';
+  if (prog.types.length === 0 && prog.functions.length === 0) {
+    el.innerHTML = '<div style="color:var(--text-dim);padding:20px;text-align:center">Empty program</div>';
     return;
   }
-
-  // Re-fetch with query for details
-  for (const t of status.types) {
-    const q = await api('/api/query', {query: `?type ${t}`});
+  for (const t of prog.types) {
     const card = document.createElement('div');
     card.className = 'type-card';
-    card.innerHTML = `<h3>type ${t}</h3><div class="field">${q.response.replace(/\n/g, '<br>')}</div>`;
-    container.appendChild(card);
+    card.innerHTML = `<h3>${t.kind} ${t.name}</h3>` +
+      t.fields.map(f => `<div class="field">${f.name}: ${f.ty}</div>`).join('');
+    card.onclick = () => loadTypeInEditor(t);
+    el.appendChild(card);
   }
-
-  for (const f of status.functions) {
-    const q = await api('/api/query', {query: `?symbols ${f}`});
+  for (const f of prog.functions) {
+    const tag = f.compilable
+      ? '<span class="tag tag-compiled">compiled</span>'
+      : '<span class="tag tag-interpreted">interpreted</span>';
+    const effects = f.effects.length ? ` [${f.effects.join(',')}]` : '';
+    const params = f.params.map(p => `${p.name}:${p.ty}`).join(', ');
     const card = document.createElement('div');
     card.className = 'fn-card';
-    card.innerHTML = `<h3>fn ${f}</h3><div class="fn-sig">${q.response.replace(/\n/g, '<br>')}</div>`;
-    container.appendChild(card);
+    card.innerHTML =
+      `<h3>fn ${f.name} ${tag}</h3>` +
+      `<div class="fn-sig">(${params}) → ${f.return_type}${effects}</div>` +
+      f.statements.map(s => `<div class="fn-stmt" title="${s.id}">${s.summary}</div>`).join('') +
+      `<div class="fn-actions">` +
+        `<button class="btn" onclick="event.stopPropagation(); testFn('${f.name}')">Test</button>` +
+        `<button class="btn" onclick="event.stopPropagation(); evalFn('${f.name}')">Eval</button>` +
+        `<button class="btn" onclick="event.stopPropagation(); traceFn('${f.name}')">Trace</button>` +
+      `</div>`;
+    card.onclick = () => loadFnInEditor(f);
+    el.appendChild(card);
   }
 }
 
-async function refreshHistory() {
-  const data = await api('/api/history', {limit: 50});
-  const container = document.getElementById('history');
-  container.innerHTML = '';
-
-  // Show mutations
-  for (const m of (data.mutations || []).reverse()) {
-    const el = document.createElement('div');
-    el.className = 'hist-entry mutation';
-    el.innerHTML = `<span class="hist-rev">[${m.revision}]</span> ${m.summary}`;
-    container.appendChild(el);
+function renderHistory(hist) {
+  const el = document.getElementById('history');
+  el.innerHTML = '';
+  const entries = [];
+  for (const m of hist.mutations || []) {
+    entries.push({rev: m.revision, cls: 'hist-mutation', text: m.summary, ts: m.timestamp});
   }
-
-  // Show history entries
-  for (const h of (data.history || []).reverse()) {
-    const el = document.createElement('div');
-    el.className = `hist-entry ${h.kind.toLowerCase()}`;
+  for (const h of hist.history || []) {
     switch (h.kind) {
       case 'Eval':
-        el.innerHTML = `<span class="hist-rev">[${h.revision}]</span> eval ${h.function}() = ${h.result}`;
+        entries.push({rev: h.revision, cls: 'hist-eval', text: `eval ${h.function}() = ${h.result}`});
         break;
       case 'Test':
-        el.innerHTML = `<span class="hist-rev">[${h.revision}]</span> test ${h.function}: ${h.passed}P/${h.failed}F`;
+        entries.push({rev: h.revision, cls: 'hist-test', text: `test ${h.function}: ${h.passed}P/${h.failed}F`});
         break;
       case 'Query':
-        el.innerHTML = `<span class="hist-rev">[${h.revision}]</span> ${h.query}`;
+        entries.push({rev: h.revision, cls: 'hist-query', text: h.query});
         break;
-      default:
-        el.textContent = JSON.stringify(h);
     }
-    container.appendChild(el);
   }
+  entries.sort((a, b) => (b.rev - a.rev) || 0);
+  for (const e of entries) {
+    const div = document.createElement('div');
+    div.className = `hist-entry ${e.cls}`;
+    div.innerHTML = `<span class="hist-rev">[${e.rev}]</span> ${e.text}`;
+    el.appendChild(div);
+  }
+}
+
+function loadFnInEditor(f) {
+  const effects = f.effects.length ? ` [${f.effects.map(e => e.toLowerCase()).join(',')}]` : '';
+  const params = f.params.map(p => `${p.name}:${p.ty}`).join(', ');
+  let code = `+fn ${f.name} (${params})->${f.return_type}${effects}\n`;
+  for (const s of f.statements) {
+    code += `  +${s.summary}\n`;
+  }
+  document.getElementById('code-input').value = code;
+  document.getElementById('code-input').focus();
+}
+
+function loadTypeInEditor(t) {
+  if (t.kind === 'struct') {
+    const fields = t.fields.map(f => `${f.name}:${f.ty}`).join(', ');
+    document.getElementById('code-input').value = `+type ${t.name} = {${fields}}\n`;
+  } else {
+    const variants = t.fields.map(f => f.ty ? `${f.name}(${f.ty})` : f.name).join(' | ');
+    document.getElementById('code-input').value = `+type ${t.name} = ${variants}\n`;
+  }
+  document.getElementById('code-input').focus();
 }
 
 async function applyCode() {
-  const input = document.getElementById('code-input');
-  const source = input.value.trim();
+  const source = document.getElementById('code-input').value.trim();
   if (!source) return;
 
-  // Separate mutations from evals/tests/queries
+  let output = '';
+  let hasError = false;
+
+  // Split into mutations and actions
   const lines = source.split('\n');
-  let mutationLines = [];
-  let actionLines = [];
+  let mutLines = [], testBlocks = [], evalLines = [], queryLines = [];
+  let inTest = false, currentTest = [];
 
   for (const line of lines) {
     const t = line.trim();
-    if (t.startsWith('!eval') || t.startsWith('!test') || t.startsWith('?')) {
-      actionLines.push(line);
+    if (t.startsWith('!test ')) {
+      if (inTest && currentTest.length) testBlocks.push(currentTest.join('\n'));
+      currentTest = [line]; inTest = true;
+    } else if (inTest && (t.startsWith('+with') || t === '')) {
+      if (t) currentTest.push(line);
     } else {
-      mutationLines.push(line);
+      if (inTest && currentTest.length) { testBlocks.push(currentTest.join('\n')); currentTest = []; inTest = false; }
+      if (t.startsWith('!eval ')) evalLines.push(t);
+      else if (t.startsWith('?')) queryLines.push(t);
+      else mutLines.push(line);
     }
   }
-
-  let output = '';
+  if (inTest && currentTest.length) testBlocks.push(currentTest.join('\n'));
 
   // Apply mutations
-  if (mutationLines.some(l => l.trim().length > 0)) {
-    const mutSource = mutationLines.join('\n');
-    const res = await api('/api/mutate', {source: mutSource});
+  if (mutLines.some(l => l.trim())) {
+    const res = await api('/api/mutate', {source: mutLines.join('\n')});
     for (const r of res.results) {
-      output += (r.success ? 'OK: ' : 'ERROR: ') + r.message + '\n';
+      output += (r.success ? 'OK' : 'ERROR') + ': ' + r.message + '\n';
+      if (!r.success) hasError = true;
     }
   }
 
-  // Handle evals
-  for (const line of actionLines) {
-    const t = line.trim();
-    if (t.startsWith('!eval ')) {
-      const rest = t.substring(6).trim();
-      const spaceIdx = rest.indexOf(' ');
-      const fn = spaceIdx > 0 ? rest.substring(0, spaceIdx) : rest;
-      const inp = spaceIdx > 0 ? rest.substring(spaceIdx + 1) : '';
-      const res = await api('/api/eval', {function: fn, input: inp});
-      output += `eval ${fn}() = ${res.result}\n`;
-    } else if (t.startsWith('!test ')) {
-      // Collect test block (this line + following indented lines)
-      const testBlock = [line];
-      const idx = actionLines.indexOf(line);
-      for (let i = idx + 1; i < actionLines.length; i++) {
-        if (actionLines[i].startsWith('  ')) {
-          testBlock.push(actionLines[i]);
-        } else break;
-      }
-      const res = await api('/api/test', {source: testBlock.join('\n')});
-      output += `test: ${res.passed}P/${res.failed}F\n`;
-      for (const r of res.results) {
-        output += `  ${r.pass ? 'PASS' : 'FAIL'}: ${r.message}\n`;
-      }
-    } else if (t.startsWith('?')) {
-      const res = await api('/api/query', {query: t});
-      output += res.response + '\n';
+  // Run tests
+  for (const block of testBlocks) {
+    const res = await api('/api/test', {source: block});
+    for (const r of res.results) {
+      output += (r.pass ? 'PASS' : 'FAIL') + ': ' + r.message + '\n';
+      if (!r.pass) hasError = true;
     }
   }
 
-  showOutput(output.trim(), output.includes('ERROR'));
-  await refreshStatus();
-  await refreshProgram();
-  await refreshHistory();
+  // Run evals
+  for (const line of evalLines) {
+    const rest = line.substring(6).trim();
+    const sp = rest.indexOf(' ');
+    const fn_name = sp > 0 ? rest.substring(0, sp) : rest;
+    const input = sp > 0 ? rest.substring(sp + 1) : '';
+    const res = await api('/api/eval', {function: fn_name, input});
+    const tag = res.compiled ? ' [compiled]' : '';
+    output += `= ${res.result}${tag}\n`;
+  }
+
+  // Run queries
+  for (const q of queryLines) {
+    const res = await api('/api/query', {query: q});
+    output += res.response + '\n';
+  }
+
+  if (output) showOutput(output.trim(), hasError);
+  await refresh();
 }
 
-async function evalCode() {
-  const input = document.getElementById('code-input');
-  const source = input.value.trim();
-  // Try to parse as "function arg1 arg2" or use as-is
-  const res = await api('/api/eval', {function: source.split(' ')[0], input: source.split(' ').slice(1).join(' ')});
-  showOutput(`= ${res.result}`, !res.success);
-  await refreshHistory();
+async function quickEval() {
+  const input = document.getElementById('eval-input').value.trim();
+  if (!input) return;
+  // Parse: !eval fn args or just fn args
+  const text = input.startsWith('!eval ') ? input.substring(6) : input;
+  const sp = text.indexOf(' ');
+  const fn_name = sp > 0 ? text.substring(0, sp) : text;
+  const args = sp > 0 ? text.substring(sp + 1) : '';
+  const res = await api('/api/eval', {function: fn_name, input: args});
+  const tag = res.compiled ? ' [compiled]' : '';
+  showOutput(`${fn_name}(${args}) = ${res.result}${tag}`, !res.success);
+  await refresh();
 }
 
-async function querySymbols() {
-  const res = await api('/api/query', {query: '?symbols'});
-  showOutput(res.response, false);
-  await refreshHistory();
+async function testFn(name) {
+  // We don't have stored tests — prompt the user
+  const input = prompt(`Enter test for ${name}:\nExample: +with a=3 b=4 -> expect 7`);
+  if (!input) return;
+  const source = `!test ${name}\n  ${input}`;
+  const res = await api('/api/test', {source});
+  let out = '';
+  for (const r of res.results) out += (r.pass ? 'PASS' : 'FAIL') + ': ' + r.message + '\n';
+  showOutput(out.trim(), res.failed > 0);
+  await refresh();
 }
 
-async function rewind() {
+async function evalFn(name) {
+  document.getElementById('eval-input').value = `${name} `;
+  document.getElementById('eval-input').focus();
+}
+
+async function traceFn(name) {
+  const input = prompt(`Trace ${name} with input:\nExample: a=3 b=4`);
+  if (!input) return;
+  // Use mutate with !trace since we don't have a trace endpoint
+  const source = `!trace ${name} ${input}`;
+  // For now just eval — trace endpoint would be better
+  showOutput(`Trace not yet available via API — use REPL`, false);
+}
+
+async function runAllTests() {
+  showOutput('Running all tests...', false);
+  // Get all functions and try to find test blocks in the editor
+  const source = document.getElementById('code-input').value;
+  if (source.includes('!test')) {
+    await applyCode();
+  } else {
+    showOutput('No !test blocks in editor. Write tests first.', false);
+  }
+}
+
+function querySymbols() {
+  document.getElementById('code-input').value = '?symbols';
+  applyCode();
+}
+
+function doRewind() {
   const rev = prompt('Rewind to revision:');
   if (rev === null) return;
-  const res = await api('/api/rewind', {revision: parseInt(rev)});
-  showOutput(res.message, !res.success);
-  await refreshStatus();
-  await refreshProgram();
-  await refreshHistory();
+  api('/api/rewind', {revision: parseInt(rev)}).then(res => {
+    showOutput(res.message, !res.success);
+    refresh();
+  });
 }
 
-// Keyboard shortcut
-document.getElementById('code-input').addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key === 'Enter') {
-    e.preventDefault();
-    applyCode();
-  }
+document.getElementById('code-input').addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); applyCode(); }
+  // Tab inserts 2 spaces
+  if (e.key === 'Tab') { e.preventDefault(); const t = e.target; const s = t.selectionStart; t.value = t.value.substring(0, s) + '  ' + t.value.substring(t.selectionEnd); t.selectionStart = t.selectionEnd = s + 2; }
 });
 
-// Initial load
-refreshStatus();
-refreshProgram();
-refreshHistory();
-
-// Auto-refresh every 5 seconds
-setInterval(() => { refreshStatus(); }, 5000);
+refresh();
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>

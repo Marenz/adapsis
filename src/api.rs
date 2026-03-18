@@ -306,6 +306,133 @@ pub async fn rewind(
     }
 }
 
+// === Detailed program endpoint ===
+
+#[derive(Serialize)]
+pub struct ProgramResponse {
+    pub revision: usize,
+    pub types: Vec<TypeDetail>,
+    pub functions: Vec<FunctionDetail>,
+}
+
+#[derive(Serialize)]
+pub struct TypeDetail {
+    pub name: String,
+    pub kind: String,
+    pub fields: Vec<FieldDetail>,
+}
+
+#[derive(Serialize)]
+pub struct FieldDetail {
+    pub name: String,
+    pub ty: String,
+}
+
+#[derive(Serialize)]
+pub struct FunctionDetail {
+    pub name: String,
+    pub params: Vec<FieldDetail>,
+    pub return_type: String,
+    pub effects: Vec<String>,
+    pub statements: Vec<StatementDetail>,
+    pub compilable: bool,
+}
+
+#[derive(Serialize)]
+pub struct StatementDetail {
+    pub id: String,
+    pub kind: String,
+    pub summary: String,
+}
+
+fn format_type(ty: &crate::ast::Type) -> String {
+    match ty {
+        crate::ast::Type::Int => "Int".into(),
+        crate::ast::Type::Float => "Float".into(),
+        crate::ast::Type::Bool => "Bool".into(),
+        crate::ast::Type::String => "String".into(),
+        crate::ast::Type::Byte => "Byte".into(),
+        crate::ast::Type::List(t) => format!("List<{}>", format_type(t)),
+        crate::ast::Type::Set(t) => format!("Set<{}>", format_type(t)),
+        crate::ast::Type::Map(k, v) => format!("Map<{},{}>", format_type(k), format_type(v)),
+        crate::ast::Type::Option(t) => format!("Option<{}>", format_type(t)),
+        crate::ast::Type::Result(t) => format!("Result<{}>", format_type(t)),
+        crate::ast::Type::Struct(name) => name.clone(),
+        crate::ast::Type::TaggedUnion(name) => name.clone(),
+    }
+}
+
+fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
+    match kind {
+        crate::ast::StatementKind::Let { name, ty, .. } => {
+            ("let".into(), format!("let {}:{}", name, format_type(ty)))
+        }
+        crate::ast::StatementKind::Call { binding, call, .. } => {
+            let bind = binding.as_ref().map(|b| format!("{}:{}", b.name, format_type(&b.ty))).unwrap_or_default();
+            ("call".into(), format!("call {} = {}()", bind, call.callee))
+        }
+        crate::ast::StatementKind::Check { label, on_fail, .. } => {
+            ("check".into(), format!("check {} ~{}", label, on_fail))
+        }
+        crate::ast::StatementKind::Return { .. } => ("return".into(), "return ...".into()),
+        crate::ast::StatementKind::Branch { .. } => ("branch".into(), "if/else".into()),
+        crate::ast::StatementKind::Each { binding, .. } => {
+            ("each".into(), format!("each {}:{}", binding.name, format_type(&binding.ty)))
+        }
+        crate::ast::StatementKind::Yield { .. } => ("yield".into(), "yield ...".into()),
+    }
+}
+
+pub async fn program(State(session): State<SharedSession>) -> Json<ProgramResponse> {
+    let session = session.lock().await;
+
+    let types = session.program.types.iter().map(|td| {
+        match td {
+            crate::ast::TypeDecl::Struct(s) => TypeDetail {
+                name: s.name.clone(),
+                kind: "struct".into(),
+                fields: s.fields.iter().map(|f| FieldDetail {
+                    name: f.name.clone(),
+                    ty: format_type(&f.ty),
+                }).collect(),
+            },
+            crate::ast::TypeDecl::TaggedUnion(u) => TypeDetail {
+                name: u.name.clone(),
+                kind: "union".into(),
+                fields: u.variants.iter().map(|v| FieldDetail {
+                    name: v.name.clone(),
+                    ty: v.payload.as_ref().map(format_type).unwrap_or_default(),
+                }).collect(),
+            },
+        }
+    }).collect();
+
+    let functions = session.program.functions.iter().map(|f| {
+        let (stmts, _) = f.body.iter().map(|s| {
+            let (kind, summary) = stmt_summary(&s.kind);
+            StatementDetail { id: s.id.clone(), kind, summary }
+        }).fold((Vec::new(), ()), |(mut v, _), s| { v.push(s); (v, ()) });
+
+        FunctionDetail {
+            name: f.name.clone(),
+            params: f.params.iter().map(|p| FieldDetail {
+                name: p.name.clone(),
+                ty: format_type(&p.ty),
+            }).collect(),
+            return_type: format_type(&f.return_type),
+            effects: f.effects.iter().map(|e| format!("{e:?}")).collect(),
+            statements: stmts,
+            compilable: crate::compiler::is_compilable_function(f),
+        }
+    }).collect();
+
+    Json(ProgramResponse {
+        revision: session.revision,
+        types,
+        functions,
+    })
+}
+
 /// Build the API router.
 pub fn router(session: SharedSession) -> axum::Router {
     use axum::routing::{get, post};
@@ -316,6 +443,7 @@ pub fn router(session: SharedSession) -> axum::Router {
         .route("/api/test", post(test_fn))
         .route("/api/query", post(query))
         .route("/api/status", get(status))
+        .route("/api/program", get(program))
         .route("/api/history", post(history))
         .route("/api/rewind", post(rewind))
         .with_state(session)
