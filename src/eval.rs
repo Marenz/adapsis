@@ -206,9 +206,35 @@ fn eval_function_body(
                 env.set(name, val);
             }
             ast::StatementKind::Call { binding, call } => {
-                let val = eval_call(program, call, env)?;
-                if let Some(binding) = binding {
-                    env.set(&binding.name, val);
+                let wants_result = binding
+                    .as_ref()
+                    .is_some_and(|b| matches!(&b.ty, ast::Type::Result(_)));
+
+                if wants_result {
+                    // Binding is Result<T> — catch errors instead of propagating
+                    match eval_call(program, call, env) {
+                        Ok(val) => {
+                            if let Some(binding) = binding {
+                                // Wrap success in Ok
+                                let wrapped = match &val {
+                                    Value::Ok(_) | Value::Err(_) => val,
+                                    _ => Value::Ok(Box::new(val)),
+                                };
+                                env.set(&binding.name, wrapped);
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(binding) = binding {
+                                env.set(&binding.name, Value::Err(e.to_string()));
+                            }
+                        }
+                    }
+                } else {
+                    // Binding is plain T — errors propagate (like Rust's ?)
+                    let val = eval_call(program, call, env)?;
+                    if let Some(binding) = binding {
+                        env.set(&binding.name, val);
+                    }
                 }
             }
             ast::StatementKind::Check {
@@ -401,15 +427,29 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                     .cloned()
                     .ok_or_else(|| anyhow!("field `{field}` not found on {base_val}")),
                 Value::Ok(inner) => {
-                    // Allow field access on Ok values
-                    match inner.as_ref() {
-                        Value::Struct(_, fields) => fields
-                            .get(field)
-                            .cloned()
-                            .ok_or_else(|| anyhow!("field `{field}` not found")),
-                        _ => bail!("cannot access field `{field}` on {base_val}"),
+                    // Special methods on Result values
+                    match field.as_str() {
+                        "is_ok" => Ok(Value::Bool(true)),
+                        "is_err" => Ok(Value::Bool(false)),
+                        "unwrap" => Ok(inner.as_ref().clone()),
+                        _ => {
+                            // Transparent field access on Ok values
+                            match inner.as_ref() {
+                                Value::Struct(_, fields) => fields
+                                    .get(field)
+                                    .cloned()
+                                    .ok_or_else(|| anyhow!("field `{field}` not found")),
+                                _ => bail!("cannot access field `{field}` on {base_val}"),
+                            }
+                        }
                     }
                 }
+                Value::Err(e) => match field.as_str() {
+                    "is_ok" => Ok(Value::Bool(false)),
+                    "is_err" => Ok(Value::Bool(true)),
+                    "unwrap" => bail!("unwrap on Err({e})"),
+                    _ => bail!("cannot access field `{field}` on Err({e})"),
+                },
                 // Special methods
                 _ => match field.as_str() {
                     "len" => match &base_val {

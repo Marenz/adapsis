@@ -99,6 +99,12 @@ Shows step-by-step execution of a function with the given input.
 8. String concatenation uses concat(), not +.
 9. Result types use Ok/Err, Option types use Some/None.
 10. Modulo operator: use % for remainder (e.g., n % 2 == 0 for even check).
+11. Error handling — two patterns:
+    a. Auto-propagate (like Rust's ?): declare [fail] and bind as plain T:
+       `+call validated:Input = validate(input)` — errors bubble up, you get T on success.
+    b. Explicit handling: bind as Result<T>:
+       `+call result:Result<Input> = validate(input)` — use result.is_ok, result.unwrap, result.is_err.
+    Use pattern (a) when your function also has [fail]. Use pattern (b) when you want to handle errors yourself.
 
 ## Example 1: Validation with checks
 

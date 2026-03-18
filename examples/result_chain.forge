@@ -1,0 +1,34 @@
++type Input = {name:String, age:Int}
++type Output = {greeting:String}
+
++fn validate (input:Input)->Result<Input> [fail]
+  +check name input.name.len>0 ~err_empty_name
+  +check age input.age>=0 ~err_negative_age
+  +return input
+
+// Path 1: [fail] effect — errors auto-propagate (like Rust's ?)
++fn greet_risky (input:Input)->Result<Output> [fail]
+  +call validated:Input = validate(input)
+  +let greeting:String = concat("Hello, ", validated.name)
+  +return {greeting: greeting}
+
+// Path 2: No [fail] — handle Result explicitly
++fn greet_safe (input:Input)->Output
+  +call result:Result<Input> = validate(input)
+  +if result.is_ok
+    +let greeting:String = concat("Hello, ", result.unwrap.name)
+    +return {greeting: greeting}
+  +else
+    +return {greeting: "anonymous"}
+
+!test validate
+  +with {name: "alice", age: 25} -> expect Ok
+  +with {name: "", age: 25} -> expect Err(err_empty_name)
+
+!test greet_risky
+  +with {name: "alice", age: 25} -> expect Ok
+  +with {name: "", age: 25} -> expect Err(err_empty_name)
+
+!test greet_safe
+  +with {name: "alice", age: 25} -> expect {greeting: "Hello, alice"}
+  +with {name: "", age: 25} -> expect {greeting: "anonymous"}
