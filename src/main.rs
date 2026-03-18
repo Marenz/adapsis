@@ -4,6 +4,7 @@ mod llm;
 mod orchestrator;
 mod parser;
 mod prompt;
+mod typeck;
 mod validator;
 
 use anyhow::Result;
@@ -70,9 +71,21 @@ async fn main() -> Result<()> {
             let operations = parser::parse(&source)?;
             let mut program = ast::Program::default();
             for op in &operations {
-                match validator::apply_and_validate(&mut program, op) {
-                    Ok(msg) => println!("OK: {msg}"),
-                    Err(e) => eprintln!("ERROR: {e}"),
+                match op {
+                    parser::Operation::Test(_)
+                    | parser::Operation::Trace(_)
+                    | parser::Operation::Query(_) => {} // skip in check mode
+                    _ => match validator::apply_and_validate(&mut program, op) {
+                        Ok(msg) => println!("OK: {msg}"),
+                        Err(e) => eprintln!("ERROR: {e}"),
+                    },
+                }
+            }
+            // Type check
+            let table = typeck::build_symbol_table(&program);
+            for func in &program.functions {
+                for error in typeck::check_function(&table, func) {
+                    eprintln!("TYPE WARNING: {error}");
                 }
             }
             println!("\n--- Program state ---");
@@ -86,6 +99,22 @@ async fn main() -> Result<()> {
             for op in &operations {
                 match op {
                     parser::Operation::Test(_) => test_ops.push(op.clone()),
+                    parser::Operation::Trace(trace) => {
+                        println!("\n--- Tracing {} ---", trace.function_name);
+                        match eval::trace_function(&program, &trace.function_name, &trace.input) {
+                            Ok(steps) => {
+                                for step in &steps {
+                                    println!("  > {step}");
+                                }
+                            }
+                            Err(e) => eprintln!("  TRACE ERROR: {e}"),
+                        }
+                    }
+                    parser::Operation::Query(query) => {
+                        let table = typeck::build_symbol_table(&program);
+                        let response = typeck::handle_query(&program, &table, query);
+                        println!("\n--- Query: {query} ---\n{response}");
+                    }
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => println!("OK: {msg}"),
                         Err(e) => eprintln!("ERROR: {e}"),

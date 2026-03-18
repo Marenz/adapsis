@@ -13,6 +13,14 @@ pub enum Operation {
     Each(EachDecl),
     Replace(ReplaceMutation),
     Test(TestMutation),
+    Trace(TraceMutation),
+    Query(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceMutation {
+    pub function_name: String,
+    pub input: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -376,6 +384,25 @@ impl<'a> Parser<'a> {
                 function_name: function_name.to_string(),
                 cases,
             }));
+        }
+
+        if let Some(rest) = text.strip_prefix("!trace") {
+            let rest = rest.trim();
+            // Parse: !trace function_name {input_expr}
+            let (fn_name, input_text) = rest.split_once(' ').unwrap_or((rest, "{}"));
+            let input = parse_expr(line.number, input_text.trim())?;
+            self.index += 1;
+            return Ok(Operation::Trace(TraceMutation {
+                function_name: fn_name.to_string(),
+                input,
+            }));
+        }
+
+        if text.starts_with('?') {
+            // Semantic query — pass through as-is
+            let query = text.to_string();
+            self.index += 1;
+            return Ok(Operation::Query(query));
         }
 
         bail!("line {}: unknown operation `{}`", line.number, line.text)

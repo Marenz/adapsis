@@ -1,0 +1,14 @@
++type Request = {age:Int, email:String, name:String}
+
++fn validate (input:Request)->Result<Request> [fail]
+  +check age input.age>=0 ~err_negative_age
+  +check age_max input.age<=150 ~err_age_too_high
+  +check name input.name.len>0 ~err_empty_name
+  +return input
+
+!trace validate {age: 25, email: "foo@bar.com", name: "alice"}
+!trace validate {age: -1, email: "foo@bar.com", name: "alice"}
+
+?symbols
+?effects validate
+?type Request

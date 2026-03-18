@@ -591,3 +591,199 @@ fn parser_callee_name(expr: &parser::Expr) -> String {
         _ => format!("{:?}", expr),
     }
 }
+
+/// A single step in an execution trace.
+#[derive(Debug, Clone)]
+pub struct TraceStep {
+    pub stmt_id: String,
+    pub description: String,
+    pub result: String,
+    pub status: TraceStatus,
+}
+
+#[derive(Debug, Clone)]
+pub enum TraceStatus {
+    Pass,
+    Fail,
+    Return,
+}
+
+impl std::fmt::Display for TraceStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let marker = match self.status {
+            TraceStatus::Pass => "pass",
+            TraceStatus::Fail => "FAIL",
+            TraceStatus::Return => "return",
+        };
+        write!(
+            f,
+            "{}: {} | {} | {}",
+            self.stmt_id, self.description, self.result, marker
+        )
+    }
+}
+
+/// Execute a function with tracing, returning each step.
+pub fn trace_function(
+    program: &ast::Program,
+    function_name: &str,
+    input: &parser::Expr,
+) -> Result<Vec<TraceStep>> {
+    let func = program
+        .get_function(function_name)
+        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+
+    let input_val = eval_parser_expr_standalone(input)?;
+    let mut env = Env::new();
+
+    // Bind params
+    match (&input_val, func.params.len()) {
+        (_, 0) => {}
+        (Value::Struct(_, fields), _) => {
+            if func.params.len() == 1 {
+                env.set(&func.params[0].name, input_val.clone());
+                for (k, v) in fields {
+                    env.set(k, v.clone());
+                }
+            } else {
+                for param in &func.params {
+                    if let Some(val) = fields.get(&param.name) {
+                        env.set(&param.name, val.clone());
+                    }
+                }
+            }
+        }
+        (_, 1) => {
+            env.set(&func.params[0].name, input_val.clone());
+        }
+        _ => {
+            env.set(&func.params[0].name, input_val.clone());
+        }
+    }
+
+    let mut steps = vec![];
+    trace_body(program, &func.body, &mut env, &mut steps);
+    Ok(steps)
+}
+
+fn trace_body(
+    program: &ast::Program,
+    body: &[ast::Statement],
+    env: &mut Env,
+    steps: &mut Vec<TraceStep>,
+) -> Option<Value> {
+    for stmt in body {
+        match &stmt.kind {
+            ast::StatementKind::Let { name, value, ty } => {
+                match eval_ast_expr(program, value, env) {
+                    Ok(val) => {
+                        steps.push(TraceStep {
+                            stmt_id: stmt.id.clone(),
+                            description: format!("let {name}:{ty:?}"),
+                            result: format!("{val}"),
+                            status: TraceStatus::Pass,
+                        });
+                        env.set(name, val);
+                    }
+                    Err(e) => {
+                        steps.push(TraceStep {
+                            stmt_id: stmt.id.clone(),
+                            description: format!("let {name}:{ty:?}"),
+                            result: format!("ERROR: {e}"),
+                            status: TraceStatus::Fail,
+                        });
+                        return Some(Value::Err(e.to_string()));
+                    }
+                }
+            }
+            ast::StatementKind::Call { binding, call } => match eval_call(program, call, env) {
+                Ok(val) => {
+                    let desc = if let Some(b) = binding {
+                        format!("call {}:{:?} = {}()", b.name, b.ty, call.callee)
+                    } else {
+                        format!("call {}()", call.callee)
+                    };
+                    steps.push(TraceStep {
+                        stmt_id: stmt.id.clone(),
+                        description: desc,
+                        result: format!("{val}"),
+                        status: TraceStatus::Pass,
+                    });
+                    if let Some(b) = binding {
+                        env.set(&b.name, val);
+                    }
+                }
+                Err(e) => {
+                    steps.push(TraceStep {
+                        stmt_id: stmt.id.clone(),
+                        description: format!("call {}()", call.callee),
+                        result: format!("ERROR: {e}"),
+                        status: TraceStatus::Fail,
+                    });
+                    return Some(Value::Err(e.to_string()));
+                }
+            },
+            ast::StatementKind::Check {
+                label,
+                condition,
+                on_fail,
+            } => match eval_ast_expr(program, condition, env) {
+                Ok(val) => {
+                    let is_true = val.is_truthy();
+                    steps.push(TraceStep {
+                        stmt_id: stmt.id.clone(),
+                        description: format!("check {label}"),
+                        result: format!("{val} = {is_true}"),
+                        status: if is_true {
+                            TraceStatus::Pass
+                        } else {
+                            TraceStatus::Fail
+                        },
+                    });
+                    if !is_true {
+                        return Some(Value::Err(on_fail.clone()));
+                    }
+                }
+                Err(e) => {
+                    steps.push(TraceStep {
+                        stmt_id: stmt.id.clone(),
+                        description: format!("check {label}"),
+                        result: format!("ERROR: {e}"),
+                        status: TraceStatus::Fail,
+                    });
+                    return Some(Value::Err(e.to_string()));
+                }
+            },
+            ast::StatementKind::Return { value } => match eval_ast_expr(program, value, env) {
+                Ok(val) => {
+                    steps.push(TraceStep {
+                        stmt_id: stmt.id.clone(),
+                        description: "return".to_string(),
+                        result: format!("{val}"),
+                        status: TraceStatus::Return,
+                    });
+                    return Some(val);
+                }
+                Err(e) => {
+                    steps.push(TraceStep {
+                        stmt_id: stmt.id.clone(),
+                        description: "return".to_string(),
+                        result: format!("ERROR: {e}"),
+                        status: TraceStatus::Fail,
+                    });
+                    return Some(Value::Err(e.to_string()));
+                }
+            },
+            _ => {
+                // Branch, Each, Yield — simplified tracing
+                steps.push(TraceStep {
+                    stmt_id: stmt.id.clone(),
+                    description: format!("{:?}", std::mem::discriminant(&stmt.kind)),
+                    result: "...".to_string(),
+                    status: TraceStatus::Pass,
+                });
+            }
+        }
+    }
+    None
+}

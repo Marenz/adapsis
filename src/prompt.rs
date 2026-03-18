@@ -71,6 +71,17 @@ For functions with multiple parameters, wrap inputs in a struct literal with fie
   +with {age: 25, email: "foo@bar.com"} -> expect Ok
   +with {age: -1, email: "foo@bar.com"} -> expect Err(err_negative)
 
+### Tracing
+!trace function_name {input: "value", age: 25}
+Shows step-by-step execution of a function with the given input.
+
+### Semantic Queries
+?symbols                    — list all defined types and functions
+?symbols function_name      — show details of a specific function
+?callers function_name      — who calls this function?
+?effects function_name      — what effects does this function have?
+?type TypeName              — show type definition
+
 ## Important Rules
 
 1. Every function must declare its effects. Pure functions have no brackets.
@@ -78,6 +89,7 @@ For functions with multiple parameters, wrap inputs in a struct literal with fie
 3. Use descriptive error labels with ~ for checks: ~err_negative_age, ~err_empty_name
 4. One statement per line. Indentation marks nesting (2 spaces).
 5. Only modules end with `end`. Functions and test blocks do NOT use `end`.
+9. For conditional dispatch, use multiple check statements with early returns rather than +branch (branch is for tagged union pattern matching only).
 6. No closures, no inheritance, no operator overloading, no exceptions.
 7. String concatenation uses concat(), not +.
 8. Result types use Ok/Err, Option types use Some/None.

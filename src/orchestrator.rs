@@ -6,6 +6,7 @@ use crate::eval;
 use crate::llm::{ChatMessage, LlmBackend, LlmClient};
 use crate::parser;
 use crate::prompt;
+use crate::typeck;
 use crate::validator;
 
 pub struct Orchestrator<B: LlmBackend = crate::llm::OpenAiBackend> {
@@ -97,6 +98,28 @@ impl<B: LlmBackend> Orchestrator<B> {
                     parser::Operation::Test(test) => {
                         test_ops.push(test.clone());
                     }
+                    parser::Operation::Trace(trace) => {
+                        println!("  Tracing {}:", trace.function_name);
+                        match eval::trace_function(&program, &trace.function_name, &trace.input) {
+                            Ok(steps) => {
+                                for step in &steps {
+                                    println!("    > {step}");
+                                }
+                                results.push((format!("traced {} ({} steps)", trace.function_name, steps.len()), true));
+                            }
+                            Err(e) => {
+                                let msg = format!("trace error: {e}");
+                                println!("    {msg}");
+                                results.push((msg, false));
+                            }
+                        }
+                    }
+                    parser::Operation::Query(query) => {
+                        let table = typeck::build_symbol_table(&program);
+                        let response = typeck::handle_query(&program, &table, query);
+                        println!("  Query `{query}`:\n{response}");
+                        results.push((format!("query: {query}"), true));
+                    }
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => {
                             println!("  OK: {msg}");
@@ -108,6 +131,27 @@ impl<B: LlmBackend> Orchestrator<B> {
                             results.push((msg, false));
                         }
                     },
+                }
+            }
+
+            // Run type checking on the updated program
+            {
+                let table = typeck::build_symbol_table(&program);
+                for func in &program.functions {
+                    let errors = typeck::check_function(&table, func);
+                    for error in errors {
+                        println!("  TYPE WARNING: {error}");
+                        results.push((format!("type warning: {error}"), true)); // warnings, not errors
+                    }
+                }
+                for module in &program.modules {
+                    for func in &module.functions {
+                        let errors = typeck::check_function(&table, func);
+                        for error in errors {
+                            println!("  TYPE WARNING: {error}");
+                            results.push((format!("type warning in {}.{}: {}", module.name, func.name, error), true));
+                        }
+                    }
                 }
             }
 
