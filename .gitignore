@@ -6,3 +6,4 @@ training/__pycache__/
 training/unsloth_compiled_cache/
 training/download-*.log
 *.gguf
+training/nvcc-fix/
