@@ -1,3 +1,4 @@
+mod api;
 mod ast;
 mod compiler;
 mod eval;
@@ -113,6 +114,21 @@ enum Command {
         /// Session file path (auto-saves)
         #[arg(short, long)]
         session: Option<String>,
+    },
+
+    /// Start ForgeOS — HTTP API + browser UI + session persistence
+    Os {
+        /// HTTP port
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+
+        /// Session file path
+        #[arg(short, long, default_value = "forgeos-session.json")]
+        session: String,
+
+        /// LLM server URL (OpenAI-compatible)
+        #[arg(short, long, default_value = "http://127.0.0.1:8081")]
+        url: String,
     },
 }
 
@@ -309,6 +325,54 @@ async fn main() -> Result<()> {
             let llm_client = llm::LlmClient::new(&url);
             let session_path = session.map(std::path::PathBuf::from);
             repl::run_repl(llm_client, session_path).await?;
+        }
+        Command::Os { port, session, url } => {
+            let session_path = std::path::Path::new(&session);
+            let sess = if session_path.exists() {
+                println!("Loading session from {session}...");
+                let s = session::Session::load(session_path)?;
+                println!(
+                    "Loaded: revision {}, {} mutations",
+                    s.revision,
+                    s.mutations.len()
+                );
+                s
+            } else {
+                println!("New session (saving to {session})");
+                session::Session::new()
+            };
+
+            let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
+
+            let app = api::router(shared_session.clone())
+                .route(
+                    "/",
+                    axum::routing::get(|| async {
+                        axum::response::Html(include_str!("../web/index.html"))
+                    }),
+                )
+                .layer(tower_http::cors::CorsLayer::permissive());
+
+            let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+            println!("ForgeOS running at http://127.0.0.1:{port}");
+            println!("  API:     http://127.0.0.1:{port}/api/");
+            println!("  Browser: http://127.0.0.1:{port}/");
+            println!();
+
+            // Auto-save session periodically
+            let save_session = shared_session.clone();
+            let save_path = session.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let session = save_session.lock().await;
+                    if let Err(e) = session.save(std::path::Path::new(&save_path)) {
+                        eprintln!("auto-save failed: {e}");
+                    }
+                }
+            });
+
+            axum::serve(listener, app).await?;
         }
     }
 
