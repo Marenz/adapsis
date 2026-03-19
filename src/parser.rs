@@ -21,6 +21,10 @@ pub enum Operation {
     Test(TestMutation),
     Trace(TraceMutation),
     Eval(EvalMutation),
+    Move {
+        function_names: Vec<String>,
+        target_module: String,
+    },
     Query(String),
 }
 
@@ -570,6 +574,27 @@ impl<'a> Parser<'a> {
                 function_name: function_name.to_string(),
                 cases,
             }));
+        }
+
+        if let Some(rest) = text.strip_prefix("!move") {
+            // !move fn1 fn2 fn3 ModuleName (last arg is module)
+            let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+            if parts.len() < 2 {
+                bail!(
+                    "line {}: expected `!move function_name(s) ModuleName`",
+                    line.number
+                );
+            }
+            let target_module = parts.last().unwrap().to_string();
+            let function_names = parts[..parts.len() - 1]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            self.index += 1;
+            return Ok(Operation::Move {
+                function_names,
+                target_module,
+            });
         }
 
         if let Some(rest) = text.strip_prefix("!trace") {
@@ -1842,9 +1867,9 @@ fn parse_case_pattern(
     };
 
     let variant = input[..paren].trim().to_string();
-    let close = input.rfind(')').ok_or_else(|| {
-        anyhow!("line {line_num}: expected ')' in +case")
-    })?;
+    let close = input
+        .rfind(')')
+        .ok_or_else(|| anyhow!("line {line_num}: expected ')' in +case"))?;
     let inner = &input[paren + 1..close];
 
     // Parse the inner patterns
@@ -1906,12 +1931,12 @@ fn parse_match_pattern(line_num: usize, input: &str) -> Result<MatchPatternDecl>
 
     // Variant with sub-patterns: e.g. Literal(x) or Add(Literal(0), y)
     if let Some(paren) = input.find('(') {
-        let close = input.rfind(')').ok_or_else(|| {
-            anyhow!("line {line_num}: expected ')' in nested pattern")
-        })?;
+        let close = input
+            .rfind(')')
+            .ok_or_else(|| anyhow!("line {line_num}: expected ')' in nested pattern"))?;
         let variant = input[..paren].trim().to_string();
         let inner = &input[paren + 1..close];
-    let parts = split_top_level(inner, ',');
+        let parts = split_top_level(inner, ',');
         let mut sub_patterns = Vec::new();
         for part in &parts {
             sub_patterns.push(parse_match_pattern(line_num, part.trim())?);

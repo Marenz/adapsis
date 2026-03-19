@@ -609,6 +609,14 @@ pub async fn ask(
                             }
                         }
                     }
+                    crate::parser::Operation::Query(query) => {
+                        let table = crate::typeck::build_symbol_table(&session.program);
+                        let response = crate::typeck::handle_query(&session.program, &table, query);
+                        results.push(MutationResult {
+                            message: response,
+                            success: true,
+                        });
+                    }
                     _ => {}
                 }
             }

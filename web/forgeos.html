@@ -157,17 +157,52 @@ async function sendMessage() {
   const isForge = text.startsWith('+') || text.startsWith('!') || text.startsWith('?');
 
   if (isForge) {
-    // Direct Forge code
+    // Direct Forge code — route to the right API
     try {
-      const res = await fetch('/api/mutate', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({source: text}),
-      }).then(r => r.json());
-
       const msg = addMessage('system', '');
-      for (const r of res.results || []) {
-        addResult(msg, (r.success ? 'OK: ' : 'ERROR: ') + r.message, r.success ? 'ok' : 'error');
+
+      if (text.startsWith('!eval ')) {
+        // Extract function and args: !eval func arg1 arg2 or !eval func key=val
+        const rest = text.substring(6).trim();
+        const sp = rest.indexOf(' ');
+        const fn_name = sp > 0 ? rest.substring(0, sp) : rest;
+        const input = sp > 0 ? rest.substring(sp + 1) : '';
+        const res = await fetch('/api/eval', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({function: fn_name, input}),
+        }).then(r => r.json());
+        const tag = res.compiled ? ' [compiled]' : '';
+        addResult(msg, (res.success ? '= ' : 'Error: ') + res.result + tag, res.success ? 'ok' : 'error');
+
+      } else if (text.startsWith('!test ')) {
+        const res = await fetch('/api/test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({source: text}),
+        }).then(r => r.json());
+        for (const r of res.results || []) {
+          addResult(msg, (r.pass ? 'PASS: ' : 'FAIL: ') + r.message, r.pass ? 'pass' : 'fail');
+        }
+
+      } else if (text.startsWith('?')) {
+        const res = await fetch('/api/query', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({query: text}),
+        }).then(r => r.json());
+        msg.querySelector('.msg-body').textContent = res.response;
+
+      } else {
+        // Mutations (+fn, +type, +let, etc.)
+        const res = await fetch('/api/mutate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({source: text}),
+        }).then(r => r.json());
+        for (const r of res.results || []) {
+          addResult(msg, (r.success ? 'OK: ' : 'ERROR: ') + r.message, r.success ? 'ok' : 'error');
+        }
       }
     } catch (e) {
       addMessage('system', 'Error: ' + e.message);

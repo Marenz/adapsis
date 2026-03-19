@@ -54,6 +54,10 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             // Tests are handled separately, not applied to program state
             Ok("test block (skipped during validation)".to_string())
         }
+        parser::Operation::Move {
+            function_names,
+            target_module,
+        } => apply_move(program, function_names, target_module),
         parser::Operation::Trace(_) => Ok("trace (handled by evaluator)".to_string()),
         parser::Operation::Eval(_) => Ok("eval (handled by evaluator)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
@@ -861,6 +865,169 @@ fn is_builtin_name(name: &str) -> bool {
             | "get_state"
             | "set_state"
     )
+}
+
+fn apply_move(
+    program: &mut ast::Program,
+    function_names: &[String],
+    target_module: &str,
+) -> Result<String> {
+    let mut moved = Vec::new();
+    let mut not_found = Vec::new();
+    let mut funcs_to_move = Vec::new();
+
+    // Collect functions from top-level
+    for name in function_names {
+        if let Some(idx) = program.functions.iter().position(|f| f.name == *name) {
+            funcs_to_move.push(program.functions.remove(idx));
+            moved.push(name.clone());
+        } else {
+            // Check other modules
+            let mut found = false;
+            for module in &mut program.modules {
+                if module.name == target_module {
+                    continue;
+                }
+                if let Some(idx) = module.functions.iter().position(|f| f.name == *name) {
+                    funcs_to_move.push(module.functions.remove(idx));
+                    moved.push(name.clone());
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                not_found.push(name.clone());
+            }
+        }
+    }
+
+    if funcs_to_move.is_empty() {
+        bail!("no functions found to move: {}", not_found.join(", "));
+    }
+
+    // Find or create target module
+    if !program.modules.iter().any(|m| m.name == target_module) {
+        program.modules.push(ast::Module {
+            id: target_module.to_string(),
+            name: target_module.to_string(),
+            types: vec![],
+            functions: vec![],
+        });
+    }
+    let target = program
+        .modules
+        .iter_mut()
+        .find(|m| m.name == target_module)
+        .unwrap();
+    for func in funcs_to_move {
+        target.functions.push(func);
+    }
+
+    // Update call sites outside the target module
+    let moved_set: std::collections::HashSet<String> = moved.iter().cloned().collect();
+
+    for func in &mut program.functions {
+        update_call_sites(&mut func.body, &moved_set, target_module);
+    }
+    for module in &mut program.modules {
+        if module.name == target_module {
+            continue;
+        }
+        for func in &mut module.functions {
+            update_call_sites(&mut func.body, &moved_set, target_module);
+        }
+    }
+
+    let mut msg = format!("moved [{}] into `{target_module}`", moved.join(", "));
+    if !not_found.is_empty() {
+        msg.push_str(&format!(" (not found: {})", not_found.join(", ")));
+    }
+    Ok(msg)
+}
+
+fn update_call_sites(
+    stmts: &mut [ast::Statement],
+    moved: &std::collections::HashSet<String>,
+    module: &str,
+) {
+    for stmt in stmts {
+        match &mut stmt.kind {
+            ast::StatementKind::Let { value, .. }
+            | ast::StatementKind::Set { value, .. }
+            | ast::StatementKind::Return { value }
+            | ast::StatementKind::Check {
+                condition: value, ..
+            } => {
+                update_expr_calls(value, moved, module);
+            }
+            ast::StatementKind::Call { call, .. }
+            | ast::StatementKind::Await { call, .. }
+            | ast::StatementKind::Spawn { call } => {
+                if moved.contains(&call.callee) {
+                    call.callee = format!("{module}.{}", call.callee);
+                }
+                for arg in &mut call.args {
+                    update_expr_calls(arg, moved, module);
+                }
+            }
+            ast::StatementKind::Branch {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                update_expr_calls(condition, moved, module);
+                update_call_sites(then_body, moved, module);
+                update_call_sites(else_body, moved, module);
+            }
+            ast::StatementKind::While { condition, body } => {
+                update_expr_calls(condition, moved, module);
+                update_call_sites(body, moved, module);
+            }
+            ast::StatementKind::Each { body, .. } => {
+                update_call_sites(body, moved, module);
+            }
+            ast::StatementKind::Match { expr, arms } => {
+                update_expr_calls(expr, moved, module);
+                for arm in arms {
+                    update_call_sites(&mut arm.body, moved, module);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn update_expr_calls(
+    expr: &mut ast::Expr,
+    moved: &std::collections::HashSet<String>,
+    module: &str,
+) {
+    match expr {
+        ast::Expr::Call(call) => {
+            if moved.contains(&call.callee) {
+                call.callee = format!("{module}.{}", call.callee);
+            }
+            for arg in &mut call.args {
+                update_expr_calls(arg, moved, module);
+            }
+        }
+        ast::Expr::Binary { left, right, .. } => {
+            update_expr_calls(left, moved, module);
+            update_expr_calls(right, moved, module);
+        }
+        ast::Expr::Unary { expr: inner, .. } => {
+            update_expr_calls(inner, moved, module);
+        }
+        ast::Expr::FieldAccess { base, .. } => {
+            update_expr_calls(base, moved, module);
+        }
+        ast::Expr::StructInit { fields, .. } => {
+            for f in fields {
+                update_expr_calls(&mut f.value, moved, module);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn program_summary(program: &ast::Program) -> String {
