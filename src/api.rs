@@ -321,6 +321,14 @@ pub struct ProgramResponse {
     pub revision: usize,
     pub types: Vec<TypeDetail>,
     pub functions: Vec<FunctionDetail>,
+    pub modules: Vec<ModuleDetail>,
+}
+
+#[derive(Serialize)]
+pub struct ModuleDetail {
+    pub name: String,
+    pub types: Vec<TypeDetail>,
+    pub functions: Vec<FunctionDetail>,
 }
 
 #[derive(Serialize)]
@@ -445,10 +453,56 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
         }
     }).collect();
 
+    let modules = session.program.modules.iter().map(|m| {
+        let mod_types = m.types.iter().map(|td| match td {
+            crate::ast::TypeDecl::Struct(s) => TypeDetail {
+                name: s.name.clone(),
+                kind: "struct".into(),
+                fields: s.fields.iter().map(|f| FieldDetail {
+                    name: f.name.clone(),
+                    ty: format_type(&f.ty),
+                }).collect(),
+            },
+            crate::ast::TypeDecl::TaggedUnion(u) => TypeDetail {
+                name: u.name.clone(),
+                kind: "union".into(),
+                fields: u.variants.iter().map(|v| FieldDetail {
+                    name: v.name.clone(),
+                    ty: v.payload.iter().map(format_type).collect::<Vec<_>>().join(", "),
+                }).collect(),
+            },
+        }).collect();
+
+        let mod_funcs = m.functions.iter().map(|f| {
+            let stmts = f.body.iter().map(|s| {
+                let (kind, summary) = stmt_summary(&s.kind);
+                StatementDetail { id: s.id.clone(), kind, summary }
+            }).collect();
+            FunctionDetail {
+                name: f.name.clone(),
+                params: f.params.iter().map(|p| FieldDetail {
+                    name: p.name.clone(),
+                    ty: format_type(&p.ty),
+                }).collect(),
+                return_type: format_type(&f.return_type),
+                effects: f.effects.iter().map(|e| format!("{e:?}")).collect(),
+                statements: stmts,
+                compilable: crate::compiler::is_compilable_function(f),
+            }
+        }).collect();
+
+        ModuleDetail {
+            name: m.name.clone(),
+            types: mod_types,
+            functions: mod_funcs,
+        }
+    }).collect();
+
     Json(ProgramResponse {
         revision: session.revision,
         types,
         functions,
+        modules,
     })
 }
 

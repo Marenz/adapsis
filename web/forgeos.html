@@ -262,36 +262,81 @@ async function refreshProgram() {
   } catch (e) {}
 }
 
+function renderFn(f) {
+  const tag = f.compilable ? '<span class="tag tag-compiled">compiled</span>' : '<span class="tag tag-interpreted">interpreted</span>';
+  const effects = f.effects.length ? ` [${f.effects.join(',')}]` : '';
+  const params = f.params.map(p => `${p.name}:${p.ty}`).join(', ');
+  const card = document.createElement('div');
+  card.className = 'fn-card';
+  const stmtTree = f.statements.map(s => {
+    const kind = s.kind;
+    const icon = kind === 'return' ? '↩' : kind === 'let' ? '📦' : kind.startsWith('call') ? '📞' : kind.startsWith('check') ? '✓' : kind === 'branch' ? '🔀' : kind.startsWith('set') ? '✏' : kind === 'while' ? '🔄' : kind === 'match' ? '🎯' : kind === 'await' ? '⏳' : kind === 'spawn' ? '🚀' : '•';
+    return `<div class="fn-stmt" title="${s.id}">${icon} ${s.summary}</div>`;
+  }).join('');
+  card.innerHTML =
+    `<h3>fn ${f.name} ${tag}</h3>` +
+    `<div class="fn-sig">(${params}) → ${f.return_type}${effects}</div>` +
+    stmtTree;
+  return card;
+}
+
+function renderType(t) {
+  const card = document.createElement('div');
+  card.className = 'type-card';
+  card.innerHTML = `<h3>${t.kind} ${t.name}</h3>` +
+    t.fields.map(f => `<div class="field">${f.name}${f.ty ? ': ' + f.ty : ''}</div>`).join('');
+  return card;
+}
+
 function renderProgram(prog) {
   const el = document.getElementById('program');
   el.innerHTML = '';
-  if (prog.types.length === 0 && prog.functions.length === 0) {
+
+  const hasContent = prog.types.length > 0 || prog.functions.length > 0 || (prog.modules || []).length > 0;
+  if (!hasContent) {
     el.innerHTML = '<div class="empty-state">No program yet</div>';
     return;
   }
+
+  // Top-level types
   for (const t of prog.types) {
-    const card = document.createElement('div');
-    card.className = 'type-card';
-    card.innerHTML = `<h3>${t.kind} ${t.name}</h3>` +
-      t.fields.map(f => `<div class="field">${f.name}: ${f.ty}</div>`).join('');
-    el.appendChild(card);
+    el.appendChild(renderType(t));
   }
+
+  // Top-level functions
   for (const f of prog.functions) {
-    const tag = f.compilable ? '<span class="tag tag-compiled">compiled</span>' : '<span class="tag tag-interpreted">interpreted</span>';
-    const effects = f.effects.length ? ` [${f.effects.join(',')}]` : '';
-    const params = f.params.map(p => `${p.name}:${p.ty}`).join(', ');
-    const card = document.createElement('div');
-    card.className = 'fn-card';
-    const stmtTree = f.statements.map(s => {
-      const kind = s.kind;
-      const icon = kind === 'return' ? '↩' : kind === 'let' ? '📦' : kind.startsWith('call') ? '📞' : kind.startsWith('check') ? '✓' : kind === 'branch' ? '🔀' : kind.startsWith('set') ? '✏' : kind === 'while' ? '🔄' : kind === 'match' ? '🎯' : '•';
-      return `<div class="fn-stmt" title="${s.id}">${icon} ${s.summary}</div>`;
-    }).join('');
-    card.innerHTML =
-      `<h3>fn ${f.name} ${tag}</h3>` +
-      `<div class="fn-sig">(${params}) → ${f.return_type}${effects}</div>` +
-      stmtTree;
-    el.appendChild(card);
+    el.appendChild(renderFn(f));
+  }
+
+  // Modules (collapsible)
+  for (const m of prog.modules || []) {
+    const moduleDiv = document.createElement('div');
+    moduleDiv.style.marginBottom = '8px';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;';
+    header.innerHTML = `<span style="color:var(--orange);font-weight:600;">📦 module ${m.name}</span><span style="color:var(--text-dim);font-size:11px;">${m.functions.length} fn, ${m.types.length} types ▾</span>`;
+
+    const content = document.createElement('div');
+    content.style.cssText = 'padding-left:12px;border-left:2px solid var(--orange);margin-left:6px;margin-top:4px;';
+
+    for (const t of m.types) {
+      content.appendChild(renderType(t));
+    }
+    for (const f of m.functions) {
+      content.appendChild(renderFn(f));
+    }
+
+    let collapsed = false;
+    header.onclick = () => {
+      collapsed = !collapsed;
+      content.style.display = collapsed ? 'none' : 'block';
+      header.querySelector('span:last-child').textContent = `${m.functions.length} fn, ${m.types.length} types ${collapsed ? '▸' : '▾'}`;
+    };
+
+    moduleDiv.appendChild(header);
+    moduleDiv.appendChild(content);
+    el.appendChild(moduleDiv);
   }
 }
 
