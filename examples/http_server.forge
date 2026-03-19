@@ -1,0 +1,25 @@
+// HTTP server with request counter — written in Forge
+// Uses coroutines (+await) and shared state
+
++fn build_response (body:String)->String
+  +let content_len:String = to_string(body.len)
+  +let response:String = concat("HTTP/1.1 200 OK\r\nContent-Length: ", content_len)
+  +set response = concat(response, "\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n")
+  +set response = concat(response, body)
+  +return response
+
++fn handle_request (request:String, counter:Int)->String
+  +let body:String = concat("Hello Forge World! Request #", to_string(counter))
+  +return build_response(body)
+
++fn main ()->Int [io,async]
+  +let counter:Int = 0
+  +await server:Int = tcp_listen(8080)
+  +while true
+    +await conn:Int = tcp_accept(server)
+    +await request:String = tcp_read(conn)
+    +set counter = counter + 1
+    +let response:String = handle_request(request, counter)
+    +await ok:Int = tcp_write(conn, response)
+    +await ok2:Int = tcp_close(conn)
+  +return 0

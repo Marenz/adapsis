@@ -207,6 +207,14 @@ pub enum StatementKind {
         name: Identifier,
         value: Expr,
     },
+    Await {
+        name: Identifier,
+        ty: Type,
+        call: CallExpr,
+    },
+    Spawn {
+        call: CallExpr,
+    },
     While {
         condition: Expr,
         body: Vec<Statement>,

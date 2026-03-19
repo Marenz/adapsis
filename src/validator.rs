@@ -57,7 +57,9 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         | parser::Operation::If(_)
         | parser::Operation::Return(_)
         | parser::Operation::Each(_)
-        | parser::Operation::While(_) => {
+        | parser::Operation::While(_)
+        | parser::Operation::Await(_)
+        | parser::Operation::Spawn(_) => {
             bail!("statement outside of function body")
         }
     }
@@ -289,6 +291,18 @@ fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
                 body.push(stmt);
             }
             ast::StatementKind::While { condition, body }
+        }
+        parser::Operation::Await(decl) => {
+            let call = extract_call_expr(&decl.call)?;
+            ast::StatementKind::Await {
+                name: decl.name.clone(),
+                ty: convert_type(&decl.ty)?,
+                call,
+            }
+        }
+        parser::Operation::Spawn(decl) => {
+            let call = extract_call_expr(&decl.call)?;
+            ast::StatementKind::Spawn { call }
         }
         parser::Operation::Call(decl) => ast::StatementKind::Call {
             binding: Some(ast::Binding {

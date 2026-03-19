@@ -383,6 +383,12 @@ fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
             ("set".into(), format!("set {name} = ..."))
         }
         crate::ast::StatementKind::While { .. } => ("while".into(), "while ...".into()),
+        crate::ast::StatementKind::Await { name, call, .. } => {
+            ("await".into(), format!("await {name} = {}()", call.callee))
+        }
+        crate::ast::StatementKind::Spawn { call } => {
+            ("spawn".into(), format!("spawn {}()", call.callee))
+        }
         crate::ast::StatementKind::Yield { .. } => ("yield".into(), "yield ...".into()),
     }
 }

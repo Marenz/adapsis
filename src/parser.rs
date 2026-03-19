@@ -14,11 +14,25 @@ pub enum Operation {
     Return(ReturnDecl),
     Each(EachDecl),
     While(WhileDecl),
+    Await(AwaitDecl),
+    Spawn(SpawnDecl),
     Replace(ReplaceMutation),
     Test(TestMutation),
     Trace(TraceMutation),
     Eval(EvalMutation),
     Query(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AwaitDecl {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub call: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnDecl {
+    pub call: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -376,6 +390,23 @@ impl<'a> Parser<'a> {
             self.index += 1;
             let body = self.parse_nested_block(indent)?;
             return Ok(Operation::While(WhileDecl { condition, body }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+await") {
+            // Format: +await name:Type = func(args)
+            let decl = parse_binding_decl(line.number, rest.trim(), false)?;
+            self.index += 1;
+            return Ok(Operation::Await(AwaitDecl {
+                name: decl.name,
+                ty: decl.ty,
+                call: decl.expr,
+            }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+spawn") {
+            let expr = parse_expr(line.number, rest.trim())?;
+            self.index += 1;
+            return Ok(Operation::Spawn(SpawnDecl { call: expr }));
         }
 
         if let Some(rest) = text.strip_prefix("+call") {

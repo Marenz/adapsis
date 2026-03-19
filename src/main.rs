@@ -1,6 +1,7 @@
 mod api;
 mod ast;
 mod compiler;
+mod coroutine;
 mod eval;
 mod events;
 mod llm;
@@ -103,6 +104,16 @@ enum Command {
         /// Arguments (comma-separated integers)
         #[arg(short, long, default_value = "")]
         args: String,
+    },
+
+    /// Run a Forge program with async IO (coroutine runtime)
+    RunAsync {
+        /// Path to .forge file
+        path: String,
+
+        /// Function to call (default: main)
+        #[arg(short, long, default_value = "main")]
+        func: String,
     },
 
     /// Interactive REPL
@@ -334,6 +345,62 @@ async fn main() -> Result<()> {
             } else {
                 let result = compiled.call_i64(&func, &int_args)?;
                 println!("Result: {result}");
+            }
+        }
+        Command::RunAsync { path, func } => {
+            let source = std::fs::read_to_string(&path)?;
+            let operations = parser::parse(&source)?;
+            let mut program = ast::Program::default();
+            for op in &operations {
+                match op {
+                    parser::Operation::Test(_)
+                    | parser::Operation::Trace(_)
+                    | parser::Operation::Eval(_)
+                    | parser::Operation::Query(_) => {}
+                    _ => {
+                        validator::apply_and_validate(&mut program, op)?;
+                    }
+                }
+            }
+
+            println!("Running {func}() with coroutine runtime...");
+
+            let (runtime, mut io_rx) = coroutine::Runtime::new();
+            let runtime = std::sync::Arc::new(runtime);
+            let handle = coroutine::CoroutineHandle::new(runtime.io_sender());
+
+            // Spawn the main evaluator on a blocking thread
+            let program_clone = program.clone();
+            let func_clone = func.clone();
+            let eval_task = tokio::task::spawn_blocking(move || {
+                let func_decl = program_clone.get_function(&func_clone)
+                    .ok_or_else(|| anyhow::anyhow!("function `{func_clone}` not found"))?;
+
+                let mut env = eval::Env::new();
+                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+
+                eval::eval_function_body_pub(&program_clone, &func_decl.body, &mut env)
+            });
+
+            // Event loop — process IO requests from coroutines
+            let rt = runtime.clone();
+            let io_loop = async move {
+                while let Some(request) = io_rx.recv().await {
+                    let rt = rt.clone();
+                    tokio::spawn(async move {
+                        rt.handle_io(request).await;
+                    });
+                }
+            };
+
+            tokio::select! {
+                result = eval_task => {
+                    match result? {
+                        Ok(val) => println!("Result: {val}"),
+                        Err(e) => eprintln!("Error: {e}"),
+                    }
+                }
+                _ = io_loop => {}
             }
         }
         Command::Repl { url, session } => {

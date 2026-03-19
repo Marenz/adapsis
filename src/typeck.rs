@@ -276,6 +276,18 @@ fn check_statements(
                 }
                 check_statements(table, body, &mut locals.clone(), return_type, errors);
             }
+            StatementKind::Await { name, ty, call } => {
+                // Check that the function exists
+                if let Some(_sig) = table.resolve_function(&call.callee) {
+                    // Could verify arg types here
+                }
+                locals.insert(name.clone(), ty.clone());
+            }
+            StatementKind::Spawn { call } => {
+                if table.resolve_function(&call.callee).is_none() {
+                    // Builtin IO functions won't be in the table — that's fine
+                }
+            }
             StatementKind::Yield { .. } => {}
         }
     }

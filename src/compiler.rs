@@ -616,6 +616,12 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
             bail!("each loops not yet supported in compiler")
         }
 
+        ast::StatementKind::Await { .. } => {
+            bail!("await not yet supported in compiler")
+        }
+        ast::StatementKind::Spawn { .. } => {
+            bail!("spawn not yet supported in compiler")
+        }
         ast::StatementKind::Yield { .. } => {
             bail!("yield not yet supported in compiler")
         }

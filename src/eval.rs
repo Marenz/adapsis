@@ -9,6 +9,8 @@ use crate::parser;
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Value {
+    CoroutineHandle(crate::coroutine::CoroutineHandle),
+    StateHandle(std::sync::Arc<std::sync::Mutex<Value>>),
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -50,6 +52,11 @@ impl fmt::Display for Value {
             Value::Ok(v) => write!(f, "Ok({v})"),
             Value::Err(msg) => write!(f, "Err({msg})"),
             Value::None => write!(f, "None"),
+            Value::CoroutineHandle(_) => write!(f, "<coroutine>"),
+            Value::StateHandle(s) => {
+                let val = s.lock().unwrap();
+                write!(f, "<state:{val}>")
+            }
         }
     }
 }
@@ -96,18 +103,18 @@ impl Value {
 }
 
 /// Evaluation environment (scope).
-struct Env {
-    vars: HashMap<String, Value>,
+pub struct Env {
+    pub vars: HashMap<String, Value>,
 }
 
 impl Env {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             vars: HashMap::new(),
         }
     }
 
-    fn set(&mut self, name: &str, value: Value) {
+    pub fn set(&mut self, name: &str, value: Value) {
         self.vars.insert(name.to_string(), value);
     }
 
@@ -362,6 +369,15 @@ pub fn eval_test_case(
     }
 }
 
+/// Public entry point for running a function body with an env.
+pub fn eval_function_body_pub(
+    program: &ast::Program,
+    body: &[ast::Statement],
+    env: &mut Env,
+) -> Result<Value> {
+    eval_function_body(program, body, env)
+}
+
 fn eval_function_body(
     program: &ast::Program,
     body: &[ast::Statement],
@@ -456,6 +472,35 @@ fn eval_function_body(
             ast::StatementKind::Set { name, value } => {
                 let val = eval_ast_expr(program, value, env)?;
                 env.set(name, val);
+            }
+            ast::StatementKind::Await { name, call, .. } => {
+                let handle = match env.vars.get("__coroutine_handle") {
+                    Some(Value::CoroutineHandle(h)) => h.clone(),
+                    _ => bail!("+await requires async context — use 'forge run-async'"),
+                };
+                let args: Vec<Value> = call
+                    .args
+                    .iter()
+                    .map(|a| eval_ast_expr(program, a, env))
+                    .collect::<Result<Vec<_>>>()?;
+                let result = handle.execute_await(&call.callee, &args)?;
+                env.set(name, result);
+            }
+            ast::StatementKind::Spawn { call } => {
+                let handle = match env.vars.get("__coroutine_handle") {
+                    Some(Value::CoroutineHandle(h)) => h.clone(),
+                    _ => bail!("+spawn requires async context"),
+                };
+                let args: Vec<Value> = call
+                    .args
+                    .iter()
+                    .map(|a| eval_ast_expr(program, a, env))
+                    .collect::<Result<Vec<_>>>()?;
+                let io_tx = handle.io_sender();
+                let _ = io_tx.blocking_send(crate::coroutine::IoRequest::Spawn {
+                    function_name: call.callee.clone(),
+                    args,
+                });
             }
             ast::StatementKind::While { condition, body } => {
                 let mut iterations = 0;
@@ -722,6 +767,41 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                     Ok(Value::String(parts.join(delim)))
                 }
                 _ => bail!("join expects (List, String)"),
+            }
+        }
+        // Shared state operations
+        "state" => {
+            // state(initial_value) → StateHandle
+            if args.len() != 1 {
+                bail!("state(initial_value) expects 1 argument");
+            }
+            Ok(Value::StateHandle(std::sync::Arc::new(
+                std::sync::Mutex::new(args.into_iter().next().unwrap()),
+            )))
+        }
+        "get_state" => {
+            if args.len() != 1 {
+                bail!("get_state(handle) expects 1 argument");
+            }
+            match &args[0] {
+                Value::StateHandle(s) => {
+                    let val = s.lock().unwrap().clone();
+                    Ok(val)
+                }
+                _ => bail!("get_state expects a StateHandle"),
+            }
+        }
+        "set_state" => {
+            if args.len() != 2 {
+                bail!("set_state(handle, value) expects 2 arguments");
+            }
+            match &args[0] {
+                Value::StateHandle(s) => {
+                    let mut guard = s.lock().unwrap();
+                    *guard = args[1].clone();
+                    Ok(Value::Int(0))
+                }
+                _ => bail!("set_state expects (StateHandle, value)"),
             }
         }
         "abs" => {
