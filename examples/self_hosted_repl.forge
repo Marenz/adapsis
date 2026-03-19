@@ -5,7 +5,7 @@
 // ============================================================
 
 // === AST Types ===
-+type Expr = Literal(Int) | Var(String) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr) | Gt(Expr, Expr) | Eq(Expr, Expr) | CallE(String, Expr)
++type Expr = Literal(Int) | Var(String) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr) | Div(Expr, Expr) | Gt(Expr, Expr) | Eq(Expr, Expr) | CallE(String, Expr)
 +type Stmt = LetBinding(String, Expr) | ReturnStmt(Expr) | IfElseStmt(Expr, Stmt, Stmt) | ExprStmt(Expr)
 
 // === Parse state types ===
@@ -87,9 +87,14 @@
   +let left:ParseResult = parse_atom(s, p)
   +set p = skip_ws(s, left.pos)
   +while p < s.len
-    +if char_at(s, p) == "*"
+    +let ch:String = char_at(s, p)
+    +if ch == "*"
       +let right:ParseResult = parse_atom(s, p + 1)
       +set left = {expr: Mul(left.expr, right.expr), pos: right.pos}
+      +set p = skip_ws(s, left.pos)
+    +elif ch == "/"
+      +let right:ParseResult = parse_atom(s, p + 1)
+      +set left = {expr: Div(left.expr, right.expr), pos: right.pos}
       +set p = skip_ws(s, left.pos)
     +else
       +return left
@@ -183,6 +188,10 @@
     +let l:Int = eval_e(env, funcs, left)
     +let r:Int = eval_e(env, funcs, right)
     +return l * r
+  +case Div(left, right)
+    +let l:Int = eval_e(env, funcs, left)
+    +let r:Int = eval_e(env, funcs, right)
+    +return l / r
   +case Gt(left, right)
     +let l:Int = eval_e(env, funcs, left)
     +let r:Int = eval_e(env, funcs, right)
