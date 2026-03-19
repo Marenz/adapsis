@@ -1212,6 +1212,23 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
         }
         ast::Expr::Call(call) => eval_call(program, call, env),
         ast::Expr::Binary { left, op, right } => {
+            // Short-circuit AND and OR
+            if matches!(op, ast::BinaryOp::And) {
+                let lhs = eval_ast_expr(program, left, env)?;
+                if !lhs.is_truthy() {
+                    return Ok(Value::Bool(false));
+                }
+                let rhs = eval_ast_expr(program, right, env)?;
+                return Ok(Value::Bool(rhs.is_truthy()));
+            }
+            if matches!(op, ast::BinaryOp::Or) {
+                let lhs = eval_ast_expr(program, left, env)?;
+                if lhs.is_truthy() {
+                    return Ok(Value::Bool(true));
+                }
+                let rhs = eval_ast_expr(program, right, env)?;
+                return Ok(Value::Bool(rhs.is_truthy()));
+            }
             let lhs = eval_ast_expr(program, left, env)?;
             let rhs = eval_ast_expr(program, right, env)?;
             eval_binary_op(&lhs, op, &rhs)
