@@ -179,7 +179,6 @@ fn is_compilable_expr(expr: &ast::Expr) -> bool {
         }
         ast::Expr::Unary { expr, .. } => is_compilable_expr(expr),
         ast::Expr::Call(call) => call.args.iter().all(is_compilable_expr),
-        ast::Expr::FieldAccess { .. } | ast::Expr::StructInit { .. } => false,
     }
 }
 
@@ -494,11 +493,6 @@ fn get_struct_field_types(program: &ast::Program, name: &str) -> Option<Vec<(Str
     None
 }
 
-/// Compute the number of i64 "slots" a type occupies when flattened.
-fn flat_slot_count(ty: &ast::Type, program: &ast::Program) -> usize {
-    flatten_type(ty, program).len()
-}
-
 struct CompilationContext<'a, 'b> {
     module: &'a mut JITModule,
     builder: &'b mut FunctionBuilder<'a>,
@@ -506,6 +500,7 @@ struct CompilationContext<'a, 'b> {
     var_counter: &'b mut u32,
     all_functions: &'b HashMap<String, FuncId>,
     runtime_funcs: &'b RuntimeFuncs,
+    #[allow(dead_code)]
     program: &'b ast::Program,
     return_type: &'b ast::Type,
     terminated: bool,

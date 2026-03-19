@@ -130,6 +130,10 @@ enum Command {
         #[arg(short, long, default_value = "http://127.0.0.1:8081")]
         url: String,
 
+        /// Model name
+        #[arg(long, default_value = "default")]
+        model: String,
+
         /// Session file path (auto-saves)
         #[arg(short, long)]
         session: Option<String>,
@@ -138,7 +142,7 @@ enum Command {
     /// Start ForgeOS — HTTP API + browser UI + session persistence
     Os {
         /// HTTP port
-        #[arg(short, long, default_value_t = 3000)]
+        #[arg(short, long, default_value_t = 3001)]
         port: u16,
 
         /// Session file path
@@ -446,8 +450,8 @@ async fn main() -> Result<()> {
                 _ = io_loop => {}
             }
         }
-        Command::Repl { url, session } => {
-            let llm_client = llm::LlmClient::new(&url);
+        Command::Repl { url, model, session } => {
+            let llm_client = llm::LlmClient::new_with_model(&url, &model);
             let session_path = session.map(std::path::PathBuf::from);
             repl::run_repl(llm_client, session_path).await?;
         }
@@ -469,16 +473,19 @@ async fn main() -> Result<()> {
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
-            let app = api::router(shared_session.clone())
+            let app = axum::Router::new()
                 .route(
                     "/",
                     axum::routing::get(|| async {
                         axum::response::Html(include_str!("../web/forgeos.html"))
                     }),
                 )
+                .merge(api::router(shared_session.clone()))
                 .layer(tower_http::cors::CorsLayer::permissive());
 
-            let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+            let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+                .await
+                .map_err(|e| anyhow::anyhow!("Cannot bind port {port}: {e}. Try -p {}", port + 1))?;
             println!("ForgeOS running at http://127.0.0.1:{port}");
             println!("  API:     http://127.0.0.1:{port}/api/");
             println!("  Browser: http://127.0.0.1:{port}/");

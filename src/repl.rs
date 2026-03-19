@@ -50,7 +50,7 @@ pub async fn run_repl<B: LlmBackend>(
 
     let mut llm_messages = vec![ChatMessage::system(prompt::system_prompt())];
 
-    println!("Forge REPL — type Forge code, /help for commands, /quit to exit");
+    println!("Forge REPL — just talk, or type Forge code (+fn, !eval, ?symbols)");
     println!("revision: {}", session.revision);
     println!();
 
@@ -88,35 +88,50 @@ pub async fn run_repl<B: LlmBackend>(
             continue;
         }
 
-        // Collect multi-line input for Forge code
-        input.push_str(first_line);
-        input.push('\n');
+        // Check if this is Forge code or natural language
+        let is_forge = first_line.starts_with('+')
+            || first_line.starts_with('!')
+            || first_line.starts_with('?');
 
-        // If the line starts a block (+fn, +module, !test, +if), read until dedent
-        let needs_body = first_line.starts_with("+fn ")
-            || first_line.starts_with("+module ")
-            || first_line.starts_with("!test ")
-            || first_line.starts_with("+if ")
-            || first_line.starts_with("+each ");
+        if is_forge {
+            // Collect multi-line input for Forge code
+            input.push_str(first_line);
+            input.push('\n');
 
-        if needs_body {
-            loop {
-                print!("  ... ");
-                stdout.flush()?;
-                let mut line = String::new();
-                if reader.read_line(&mut line)? == 0 {
-                    break;
+            let needs_body = first_line.starts_with("+fn ")
+                || first_line.starts_with("+module ")
+                || first_line.starts_with("!test ")
+                || first_line.starts_with("+if ")
+                || first_line.starts_with("+each ")
+                || first_line.starts_with("+while ");
+
+            if needs_body {
+                loop {
+                    print!("  ... ");
+                    stdout.flush()?;
+                    let mut line = String::new();
+                    if reader.read_line(&mut line)? == 0 {
+                        break;
+                    }
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    input.push_str(&line);
                 }
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    break;
-                }
-                input.push_str(&line);
             }
-        }
 
-        // Process the input
-        process_input(&input, &mut session).await;
+            process_input(&input, &mut session).await;
+        } else {
+            // Natural language → send to LLM with feedback loop
+            ask_and_apply(
+                first_line,
+                &mut session,
+                &llm,
+                &mut llm_messages,
+            )
+            .await;
+        }
 
         // Auto-save if path is set
         if let Some(ref path) = session_path {
@@ -235,6 +250,172 @@ async fn process_input(input: &str, session: &mut Session) {
             _ => {} // mutations already handled
         }
     }
+}
+
+/// Send natural language to the LLM, apply generated code, retry on errors.
+async fn ask_and_apply<B: LlmBackend>(
+    user_input: &str,
+    session: &mut Session,
+    llm: &LlmClient<B>,
+    llm_messages: &mut Vec<ChatMessage>,
+) {
+    let max_retries = 5;
+
+    // Build context with program state and history
+    let context = format!(
+        "{}\n\n{}\n\nUser request: {user_input}",
+        validator::program_summary(&session.program),
+        session.format_recent_history(10)
+    );
+    llm_messages.push(ChatMessage::user(context));
+
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            println!("  [retry {attempt}/{max_retries}...]");
+        } else {
+            println!("  [asking LLM...]");
+        }
+
+        let output = match llm.generate(llm_messages.clone()).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("  LLM error: {e}");
+                return;
+            }
+        };
+        println!();
+
+        llm_messages.push(ChatMessage::assistant(&output.text));
+
+        // Extract code from the response
+        let code = if output.code.is_empty() {
+            let mut lines = Vec::new();
+            for line in output.text.lines() {
+                let t = line.trim();
+                if t.starts_with('+') || t.starts_with('!') || t.starts_with('?') || t == "end" {
+                    lines.push(line.to_string());
+                }
+            }
+            lines.join("\n")
+        } else {
+            output.code
+        };
+
+        if code.is_empty() || code.trim() == "DONE" {
+            // LLM responded with text only, no code — that's fine
+            return;
+        }
+
+        // Try to apply the code
+        println!("  [applying code...]");
+        let operations = match session.parse_operations(&code) {
+            Ok(ops) => ops,
+            Err(e) => {
+                let error_msg = format!("Parse error: {e}");
+                eprintln!("  {error_msg}");
+                // Feed error back to LLM for retry
+                llm_messages.push(ChatMessage::user(format!(
+                    "Your code had an error:\n{error_msg}\n\nPlease fix and resend the complete code."
+                )));
+                continue;
+            }
+        };
+
+        // Apply mutations
+        let mut errors = Vec::new();
+        let has_mutations = operations.iter().any(|op| {
+            !matches!(
+                op,
+                parser::Operation::Test(_)
+                    | parser::Operation::Trace(_)
+                    | parser::Operation::Eval(_)
+                    | parser::Operation::Query(_)
+            )
+        });
+
+        if has_mutations {
+            match session.apply(&code) {
+                Ok(results) => {
+                    for (msg, ok) in &results {
+                        if *ok {
+                            println!("  OK: {msg}");
+                        } else {
+                            eprintln!("  ERROR: {msg}");
+                            errors.push(msg.clone());
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{e}");
+                    eprintln!("  ERROR: {msg}");
+                    errors.push(msg);
+                }
+            }
+        }
+
+        // Run tests and evals
+        for op in &operations {
+            match op {
+                parser::Operation::Test(test) => {
+                    println!("  Testing {}:", test.function_name);
+                    let mut passed = 0;
+                    let mut failed = 0;
+                    for (i, case) in test.cases.iter().enumerate() {
+                        match eval::eval_test_case(&session.program, &test.function_name, case) {
+                            Ok(msg) => {
+                                println!("    PASS [{i}]: {msg}");
+                                passed += 1;
+                            }
+                            Err(e) => {
+                                let msg = format!("{e}");
+                                eprintln!("    FAIL [{i}]: {msg}");
+                                failed += 1;
+                                errors.push(format!("test fail: {msg}"));
+                            }
+                        }
+                    }
+                    session.record_test(&test.function_name, passed, failed, vec![]);
+                }
+                parser::Operation::Eval(ev) => {
+                    match eval::eval_compiled_or_interpreted(
+                        &session.program,
+                        &ev.function_name,
+                        &ev.input,
+                    ) {
+                        Ok((result, compiled)) => {
+                            let tag = if compiled { " [compiled]" } else { "" };
+                            println!("  = {result}{tag}");
+                            session.record_eval(&ev.function_name, "", &result);
+                        }
+                        Err(e) => {
+                            eprintln!("  Eval error: {e}");
+                            errors.push(format!("eval error: {e}"));
+                        }
+                    }
+                }
+                parser::Operation::Query(query) => {
+                    let table = typeck::build_symbol_table(&session.program);
+                    let response = typeck::handle_query(&session.program, &table, query);
+                    println!("  {response}");
+                }
+                _ => {} // mutations already applied
+            }
+        }
+
+        if errors.is_empty() {
+            // Everything succeeded
+            return;
+        }
+
+        // Feed errors back to LLM for retry
+        let error_summary = errors.join("\n");
+        llm_messages.push(ChatMessage::user(format!(
+            "There were errors:\n{error_summary}\n\n\
+             Please fix the issues and resend the complete corrected code."
+        )));
+    }
+
+    eprintln!("  Max retries reached. Some errors remain.");
 }
 
 async fn handle_slash_command<B: LlmBackend>(
@@ -363,13 +544,17 @@ async fn handle_slash_command<B: LlmBackend>(
             }
         }
         "/help" => {
-            println!("  Forge REPL commands:");
-            println!("    +fn, +type, +let, ...  — Forge mutations");
+            println!("  Natural language is sent to the AI automatically.");
+            println!("  The AI generates Forge code, errors auto-retry.");
+            println!();
+            println!("  Forge code (prefix with +, !, or ?):");
+            println!("    +fn, +type, +let, ...  — mutations");
             println!("    !test func             — run tests");
             println!("    !eval func args        — evaluate a function");
             println!("    !trace func args       — trace execution");
             println!("    ?symbols               — list types and functions");
-            println!("    /ask <text>            — ask the LLM");
+            println!();
+            println!("  Commands:");
             println!("    /status                — show program state");
             println!("    /history [N]           — show recent history");
             println!("    /rewind <rev>          — rewind to revision");
