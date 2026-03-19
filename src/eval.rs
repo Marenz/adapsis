@@ -1069,6 +1069,118 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 _ => Ok(Value::Bool(false)),
             }
         }
+        // Bitwise operations
+        "bit_and" => {
+            if args.len() != 2 {
+                bail!("bit_and(a, b) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a & b)),
+                _ => bail!("bit_and expects (Int, Int)"),
+            }
+        }
+        "bit_or" => {
+            if args.len() != 2 {
+                bail!("bit_or(a, b) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a | b)),
+                _ => bail!("bit_or expects (Int, Int)"),
+            }
+        }
+        "bit_xor" => {
+            if args.len() != 2 {
+                bail!("bit_xor(a, b) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a ^ b)),
+                _ => bail!("bit_xor expects (Int, Int)"),
+            }
+        }
+        "bit_not" => {
+            if args.len() != 1 {
+                bail!("bit_not(a) expects 1 argument");
+            }
+            match &args[0] {
+                Value::Int(a) => Ok(Value::Int(!a)),
+                _ => bail!("bit_not expects Int"),
+            }
+        }
+        "bit_shl" | "shl" => {
+            if args.len() != 2 {
+                bail!("bit_shl(a, n) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(n)) => Ok(Value::Int(a << n)),
+                _ => bail!("bit_shl expects (Int, Int)"),
+            }
+        }
+        "bit_shr" | "shr" => {
+            if args.len() != 2 {
+                bail!("bit_shr(a, n) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(n)) => Ok(Value::Int(a >> n)),
+                _ => bail!("bit_shr expects (Int, Int)"),
+            }
+        }
+        "left_rotate" | "rotl" => {
+            if args.len() != 2 {
+                bail!("left_rotate(val, n) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(val), Value::Int(n)) => {
+                    // 32-bit left rotation
+                    let v = *val as u32;
+                    let n = (*n as u32) % 32;
+                    Ok(Value::Int(v.rotate_left(n) as i64))
+                }
+                _ => bail!("left_rotate expects (Int, Int)"),
+            }
+        }
+        "to_hex" => {
+            if args.len() != 1 {
+                bail!("to_hex(n) expects 1 argument");
+            }
+            match &args[0] {
+                Value::Int(n) => Ok(Value::String(format!("{:08x}", *n as u32))),
+                _ => bail!("to_hex expects Int"),
+            }
+        }
+        "char_code" | "ord" => {
+            if args.len() != 1 {
+                bail!("char_code(ch) expects 1 argument");
+            }
+            match &args[0] {
+                Value::String(s) => {
+                    if s.len() == 1 {
+                        Ok(Value::Int(s.bytes().next().unwrap() as i64))
+                    } else {
+                        bail!("char_code expects single character string")
+                    }
+                }
+                _ => bail!("char_code expects String"),
+            }
+        }
+        "from_char_code" | "chr" => {
+            if args.len() != 1 {
+                bail!("from_char_code(n) expects 1 argument");
+            }
+            match &args[0] {
+                Value::Int(n) => Ok(Value::String(String::from(*n as u8 as char))),
+                _ => bail!("from_char_code expects Int"),
+            }
+        }
+        "u32_wrap" => {
+            // Wrap to unsigned 32-bit
+            if args.len() != 1 {
+                bail!("u32_wrap(n) expects 1 argument");
+            }
+            match &args[0] {
+                Value::Int(n) => Ok(Value::Int((*n as u32) as i64)),
+                _ => bail!("u32_wrap expects Int"),
+            }
+        }
         "max" => {
             if args.len() != 2 {
                 bail!("max() expects 2 arguments");

@@ -15,57 +15,57 @@
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
+
 header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 16px; }
 header h1 { font-size: 16px; color: var(--blue); font-weight: 600; }
 header .info { color: var(--text-dim); font-size: 12px; }
+
 main { flex: 1; display: flex; overflow: hidden; }
-.panel { display: flex; flex-direction: column; border-right: 1px solid var(--border); overflow: hidden; }
-.panel:last-child { border-right: none; }
-.panel-header { background: var(--surface); padding: 6px 12px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-.panel-content { flex: 1; overflow-y: auto; padding: 8px; }
 
-/* Editor */
-#editor-panel { flex: 1.4; display: flex; flex-direction: column; }
-#code-input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 8px; font-family: var(--font-mono); font-size: 13px; resize: none; border-radius: 4px; min-height: 100px; }
-#code-input:focus { outline: 1px solid var(--blue); }
-.btn-row { display: flex; gap: 6px; padding: 6px 8px; flex-wrap: wrap; }
-.btn { background: var(--surface2); color: var(--text); border: 1px solid var(--border); padding: 4px 10px; border-radius: 4px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; }
-.btn:hover { background: var(--border); }
-.btn-primary { background: var(--blue); color: var(--bg); border-color: var(--blue); }
-.btn-green { background: var(--green); color: var(--bg); border-color: var(--green); }
-.btn-purple { background: var(--purple); color: var(--bg); border-color: var(--purple); }
-#output { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin: 4px 8px 8px; font-size: 12px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; display: none; }
-#output.ok { color: var(--green); } #output.error { color: var(--red); }
+/* Chat panel — primary */
+#chat-panel { flex: 1.5; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+.panel-header { background: var(--surface); padding: 6px 12px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); }
+#chat-messages { flex: 1; overflow-y: auto; padding: 12px; }
+.msg { margin-bottom: 12px; }
+.msg-user { }
+.msg-user .msg-label { color: var(--blue); font-size: 11px; margin-bottom: 2px; }
+.msg-ai .msg-label { color: var(--purple); font-size: 11px; margin-bottom: 2px; }
+.msg-system .msg-label { color: var(--text-dim); font-size: 11px; margin-bottom: 2px; }
+.msg-body { padding: 8px 12px; border-radius: 6px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.msg-user .msg-body { background: var(--surface2); }
+.msg-ai .msg-body { background: var(--surface); border: 1px solid var(--border); }
+.msg-system .msg-body { background: transparent; color: var(--text-dim); font-size: 12px; }
+.msg-code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; margin: 6px 0; font-size: 12px; color: var(--cyan); overflow-x: auto; }
+.msg-result { font-size: 12px; margin: 4px 0; }
+.msg-result.ok { color: var(--green); }
+.msg-result.error { color: var(--red); }
+.msg-result.pass { color: var(--green); }
+.msg-result.fail { color: var(--red); }
+.thinking { color: var(--text-dim); font-style: italic; font-size: 12px; }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-/* Program */
-#program-panel { flex: 1; }
-.type-card, .fn-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: border-color 0.15s; }
-.type-card:hover, .fn-card:hover { border-color: var(--blue); }
-.type-card h3 { color: var(--yellow); font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; }
+#chat-input-bar { display: flex; gap: 8px; padding: 8px 12px; background: var(--surface); border-top: 1px solid var(--border); }
+#chat-input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 8px 12px; border-radius: 6px; font-family: var(--font-mono); font-size: 13px; resize: none; min-height: 40px; max-height: 120px; }
+#chat-input:focus { outline: 1px solid var(--blue); }
+#send-btn { background: var(--blue); color: var(--bg); border: none; padding: 8px 20px; border-radius: 6px; font-family: var(--font-mono); font-size: 13px; cursor: pointer; font-weight: 600; align-self: flex-end; }
+#send-btn:hover { opacity: 0.9; }
+#send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Program panel */
+#program-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#program-panel .panel-content { flex: 1; overflow-y: auto; padding: 8px; }
+.type-card, .fn-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+.type-card h3 { color: var(--yellow); font-size: 13px; margin-bottom: 4px; }
 .fn-card h3 { color: var(--blue); font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; }
 .fn-sig { color: var(--text-dim); font-size: 12px; margin-bottom: 4px; }
 .fn-effects { color: var(--orange); font-size: 11px; }
 .fn-stmt { padding: 2px 0 2px 12px; font-size: 12px; border-left: 2px solid var(--border); margin: 2px 0; color: var(--text-dim); }
-.fn-stmt:hover { border-left-color: var(--blue); color: var(--text); }
 .field { color: var(--text-dim); font-size: 12px; padding-left: 12px; }
 .tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; }
 .tag-compiled { background: var(--green); color: var(--bg); }
 .tag-interpreted { background: var(--surface2); color: var(--text-dim); }
-.fn-actions { display: flex; gap: 4px; margin-top: 6px; }
-
-/* History */
-#history-panel { flex: 0.7; }
-.hist-entry { padding: 3px 4px; font-size: 11px; border-bottom: 1px solid var(--surface2); }
-.hist-rev { color: var(--text-dim); }
-.hist-mutation { color: var(--cyan); }
-.hist-eval { color: var(--green); }
-.hist-test { color: var(--purple); }
-.hist-query { color: var(--text-dim); }
-
-/* Quick eval bar */
-.eval-bar { display: flex; gap: 4px; padding: 4px 8px; background: var(--surface); border-top: 1px solid var(--border); }
-.eval-bar input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 4px 8px; font-family: var(--font-mono); font-size: 12px; border-radius: 4px; }
-.eval-bar input:focus { outline: 1px solid var(--blue); }
+.empty-state { color: var(--text-dim); padding: 20px; text-align: center; }
 </style>
 </head>
 <body>
@@ -75,73 +75,166 @@ main { flex: 1; display: flex; overflow: hidden; }
   <span id="counts" class="info"></span>
 </header>
 <main>
-  <div class="panel" id="editor-panel">
-    <div class="panel-header">Editor <span style="font-size:10px">Ctrl+Enter to apply</span></div>
-    <div class="btn-row">
-      <button class="btn btn-primary" onclick="applyCode()">Apply</button>
-      <button class="btn btn-green" onclick="runAllTests()">Test All</button>
-      <button class="btn" onclick="querySymbols()">?symbols</button>
-      <button class="btn" onclick="doRewind()">Rewind</button>
+  <div id="chat-panel">
+    <div class="panel-header">Chat</div>
+    <div id="chat-messages">
+      <div class="msg msg-system">
+        <div class="msg-label">system</div>
+        <div class="msg-body">Welcome to ForgeOS. Just talk — the AI will write Forge code for you.
+You can also type Forge code directly (prefix with + ! or ?).
+Try: "write a function that doubles a number"</div>
+      </div>
     </div>
-    <div class="panel-content">
-      <textarea id="code-input" placeholder="Type Forge code...
-
-+fn add (a:Int, b:Int)->Int
-  +return a + b
-
-!test add
-  +with a=3 b=4 -> expect 7
-"></textarea>
-    </div>
-    <div id="output"></div>
-    <div class="eval-bar">
-      <input id="eval-input" placeholder="!eval add a=3 b=4" onkeydown="if(event.key==='Enter')quickEval()">
-      <button class="btn btn-green" onclick="quickEval()">Eval</button>
+    <div id="chat-input-bar">
+      <textarea id="chat-input" placeholder="Talk to the AI or type Forge code..." rows="1"></textarea>
+      <button id="send-btn" onclick="sendMessage()">Send</button>
     </div>
   </div>
-  <div class="panel" id="program-panel">
-    <div class="panel-header">Program</div>
-    <div class="panel-content" id="program"></div>
-  </div>
-  <div class="panel" id="history-panel">
-    <div class="panel-header">History</div>
-    <div class="panel-content" id="history"></div>
+  <div id="program-panel">
+    <div class="panel-header">Program State</div>
+    <div class="panel-content" id="program">
+      <div class="empty-state">No program yet</div>
+    </div>
   </div>
 </main>
 
 <script>
-async function api(path, body) {
-  const opts = body !== undefined
-    ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) }
-    : {};
-  const res = await fetch(path, opts);
-  return res.json();
+const chatEl = document.getElementById('chat-messages');
+const inputEl = document.getElementById('chat-input');
+const sendBtn = document.getElementById('send-btn');
+let sending = false;
+
+function addMessage(role, content) {
+  const msg = document.createElement('div');
+  msg.className = `msg msg-${role}`;
+  msg.innerHTML = `<div class="msg-label">${role}</div><div class="msg-body">${escapeHtml(content)}</div>`;
+  chatEl.appendChild(msg);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  return msg;
 }
 
-function showOutput(text, isError) {
-  const el = document.getElementById('output');
-  el.style.display = 'block';
+function addCodeBlock(parent, code) {
+  const el = document.createElement('div');
+  el.className = 'msg-code';
+  el.textContent = code;
+  parent.querySelector('.msg-body').appendChild(el);
+}
+
+function addResult(parent, text, cls) {
+  const el = document.createElement('div');
+  el.className = `msg-result ${cls}`;
   el.textContent = text;
-  el.className = isError ? 'error' : 'ok';
+  parent.querySelector('.msg-body').appendChild(el);
 }
 
-async function refresh() {
-  const [status, prog, hist] = await Promise.all([
-    api('/api/status'),
-    api('/api/program'),
-    api('/api/history', {limit: 50}),
-  ]);
-  document.getElementById('rev').textContent = `rev ${status.revision}`;
-  document.getElementById('counts').textContent = `${status.functions.length} fn · ${status.types.length} types`;
-  renderProgram(prog);
-  renderHistory(hist);
+function addSpinner() {
+  const msg = document.createElement('div');
+  msg.className = 'msg msg-ai';
+  msg.id = 'spinner-msg';
+  msg.innerHTML = '<div class="msg-label">ai</div><div class="msg-body"><span class="spinner"></span> thinking...</div>';
+  chatEl.appendChild(msg);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function removeSpinner() {
+  const el = document.getElementById('spinner-msg');
+  if (el) el.remove();
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || sending) return;
+
+  addMessage('user', text);
+  inputEl.value = '';
+  sending = true;
+  sendBtn.disabled = true;
+
+  const isForge = text.startsWith('+') || text.startsWith('!') || text.startsWith('?');
+
+  if (isForge) {
+    // Direct Forge code
+    try {
+      const res = await fetch('/api/mutate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({source: text}),
+      }).then(r => r.json());
+
+      const msg = addMessage('system', '');
+      for (const r of res.results || []) {
+        addResult(msg, (r.success ? 'OK: ' : 'ERROR: ') + r.message, r.success ? 'ok' : 'error');
+      }
+    } catch (e) {
+      addMessage('system', 'Error: ' + e.message);
+    }
+  } else {
+    // Natural language → ask LLM
+    addSpinner();
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: text}),
+      }).then(r => r.json());
+
+      removeSpinner();
+      const msg = addMessage('ai', '');
+
+      if (res.reply) {
+        const thinkEl = document.createElement('div');
+        thinkEl.className = 'thinking';
+        thinkEl.textContent = res.reply.substring(0, 500) + (res.reply.length > 500 ? '...' : '');
+        msg.querySelector('.msg-body').appendChild(thinkEl);
+      }
+
+      if (res.code) {
+        addCodeBlock(msg, res.code);
+      }
+
+      for (const r of res.results || []) {
+        addResult(msg, (r.success ? 'OK: ' : 'ERROR: ') + r.message, r.success ? 'ok' : 'error');
+      }
+
+      for (const r of res.test_results || []) {
+        addResult(msg, (r.pass ? 'PASS: ' : 'FAIL: ') + r.message, r.pass ? 'pass' : 'fail');
+      }
+
+      if (!res.reply && !res.code && res.results?.length === 0) {
+        msg.querySelector('.msg-body').textContent = '(no response)';
+      }
+    } catch (e) {
+      removeSpinner();
+      addMessage('system', 'Error: ' + e.message);
+    }
+  }
+
+  sending = false;
+  sendBtn.disabled = false;
+  refreshProgram();
+}
+
+async function refreshProgram() {
+  try {
+    const [status, prog] = await Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/api/program').then(r => r.json()),
+    ]);
+    document.getElementById('rev').textContent = `rev ${status.revision}`;
+    document.getElementById('counts').textContent = `${status.functions.length} fn · ${status.types.length} types`;
+    renderProgram(prog);
+  } catch (e) {}
 }
 
 function renderProgram(prog) {
   const el = document.getElementById('program');
   el.innerHTML = '';
   if (prog.types.length === 0 && prog.functions.length === 0) {
-    el.innerHTML = '<div style="color:var(--text-dim);padding:20px;text-align:center">Empty program</div>';
+    el.innerHTML = '<div class="empty-state">No program yet</div>';
     return;
   }
   for (const t of prog.types) {
@@ -149,13 +242,10 @@ function renderProgram(prog) {
     card.className = 'type-card';
     card.innerHTML = `<h3>${t.kind} ${t.name}</h3>` +
       t.fields.map(f => `<div class="field">${f.name}: ${f.ty}</div>`).join('');
-    card.onclick = () => loadTypeInEditor(t);
     el.appendChild(card);
   }
   for (const f of prog.functions) {
-    const tag = f.compilable
-      ? '<span class="tag tag-compiled">compiled</span>'
-      : '<span class="tag tag-interpreted">interpreted</span>';
+    const tag = f.compilable ? '<span class="tag tag-compiled">compiled</span>' : '<span class="tag tag-interpreted">interpreted</span>';
     const effects = f.effects.length ? ` [${f.effects.join(',')}]` : '';
     const params = f.params.map(p => `${p.name}:${p.ty}`).join(', ');
     const card = document.createElement('div');
@@ -163,208 +253,28 @@ function renderProgram(prog) {
     card.innerHTML =
       `<h3>fn ${f.name} ${tag}</h3>` +
       `<div class="fn-sig">(${params}) → ${f.return_type}${effects}</div>` +
-      f.statements.map(s => `<div class="fn-stmt" title="${s.id}">${s.summary}</div>`).join('') +
-      `<div class="fn-actions">` +
-        `<button class="btn" onclick="event.stopPropagation(); testFn('${f.name}')">Test</button>` +
-        `<button class="btn" onclick="event.stopPropagation(); evalFn('${f.name}')">Eval</button>` +
-        `<button class="btn" onclick="event.stopPropagation(); traceFn('${f.name}')">Trace</button>` +
-      `</div>`;
-    card.onclick = () => loadFnInEditor(f);
+      f.statements.map(s => `<div class="fn-stmt">${s.summary}</div>`).join('');
     el.appendChild(card);
   }
 }
 
-function renderHistory(hist) {
-  const el = document.getElementById('history');
-  el.innerHTML = '';
-  const entries = [];
-  for (const m of hist.mutations || []) {
-    entries.push({rev: m.revision, cls: 'hist-mutation', text: m.summary, ts: m.timestamp});
+// Input handling
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
   }
-  for (const h of hist.history || []) {
-    switch (h.kind) {
-      case 'Eval':
-        entries.push({rev: h.revision, cls: 'hist-eval', text: `eval ${h.function}() = ${h.result}`});
-        break;
-      case 'Test':
-        entries.push({rev: h.revision, cls: 'hist-test', text: `test ${h.function}: ${h.passed}P/${h.failed}F`});
-        break;
-      case 'Query':
-        entries.push({rev: h.revision, cls: 'hist-query', text: h.query});
-        break;
-    }
-  }
-  entries.sort((a, b) => (b.rev - a.rev) || 0);
-  for (const e of entries) {
-    const div = document.createElement('div');
-    div.className = `hist-entry ${e.cls}`;
-    div.innerHTML = `<span class="hist-rev">[${e.rev}]</span> ${e.text}`;
-    el.appendChild(div);
-  }
-}
-
-function loadFnInEditor(f) {
-  const effects = f.effects.length ? ` [${f.effects.map(e => e.toLowerCase()).join(',')}]` : '';
-  const params = f.params.map(p => `${p.name}:${p.ty}`).join(', ');
-  let code = `+fn ${f.name} (${params})->${f.return_type}${effects}\n`;
-  for (const s of f.statements) {
-    code += `  +${s.summary}\n`;
-  }
-  document.getElementById('code-input').value = code;
-  document.getElementById('code-input').focus();
-}
-
-function loadTypeInEditor(t) {
-  if (t.kind === 'struct') {
-    const fields = t.fields.map(f => `${f.name}:${f.ty}`).join(', ');
-    document.getElementById('code-input').value = `+type ${t.name} = {${fields}}\n`;
-  } else {
-    const variants = t.fields.map(f => f.ty ? `${f.name}(${f.ty})` : f.name).join(' | ');
-    document.getElementById('code-input').value = `+type ${t.name} = ${variants}\n`;
-  }
-  document.getElementById('code-input').focus();
-}
-
-async function applyCode() {
-  const source = document.getElementById('code-input').value.trim();
-  if (!source) return;
-
-  let output = '';
-  let hasError = false;
-
-  // Split into mutations and actions
-  const lines = source.split('\n');
-  let mutLines = [], testBlocks = [], evalLines = [], queryLines = [];
-  let inTest = false, currentTest = [];
-
-  for (const line of lines) {
-    const t = line.trim();
-    if (t.startsWith('!test ')) {
-      if (inTest && currentTest.length) testBlocks.push(currentTest.join('\n'));
-      currentTest = [line]; inTest = true;
-    } else if (inTest && (t.startsWith('+with') || t === '')) {
-      if (t) currentTest.push(line);
-    } else {
-      if (inTest && currentTest.length) { testBlocks.push(currentTest.join('\n')); currentTest = []; inTest = false; }
-      if (t.startsWith('!eval ')) evalLines.push(t);
-      else if (t.startsWith('?')) queryLines.push(t);
-      else mutLines.push(line);
-    }
-  }
-  if (inTest && currentTest.length) testBlocks.push(currentTest.join('\n'));
-
-  // Apply mutations
-  if (mutLines.some(l => l.trim())) {
-    const res = await api('/api/mutate', {source: mutLines.join('\n')});
-    for (const r of res.results) {
-      output += (r.success ? 'OK' : 'ERROR') + ': ' + r.message + '\n';
-      if (!r.success) hasError = true;
-    }
-  }
-
-  // Run tests
-  for (const block of testBlocks) {
-    const res = await api('/api/test', {source: block});
-    for (const r of res.results) {
-      output += (r.pass ? 'PASS' : 'FAIL') + ': ' + r.message + '\n';
-      if (!r.pass) hasError = true;
-    }
-  }
-
-  // Run evals
-  for (const line of evalLines) {
-    const rest = line.substring(6).trim();
-    const sp = rest.indexOf(' ');
-    const fn_name = sp > 0 ? rest.substring(0, sp) : rest;
-    const input = sp > 0 ? rest.substring(sp + 1) : '';
-    const res = await api('/api/eval', {function: fn_name, input});
-    const tag = res.compiled ? ' [compiled]' : '';
-    output += `= ${res.result}${tag}\n`;
-  }
-
-  // Run queries
-  for (const q of queryLines) {
-    const res = await api('/api/query', {query: q});
-    output += res.response + '\n';
-  }
-
-  if (output) showOutput(output.trim(), hasError);
-  await refresh();
-}
-
-async function quickEval() {
-  const input = document.getElementById('eval-input').value.trim();
-  if (!input) return;
-  // Parse: !eval fn args or just fn args
-  const text = input.startsWith('!eval ') ? input.substring(6) : input;
-  const sp = text.indexOf(' ');
-  const fn_name = sp > 0 ? text.substring(0, sp) : text;
-  const args = sp > 0 ? text.substring(sp + 1) : '';
-  const res = await api('/api/eval', {function: fn_name, input: args});
-  const tag = res.compiled ? ' [compiled]' : '';
-  showOutput(`${fn_name}(${args}) = ${res.result}${tag}`, !res.success);
-  await refresh();
-}
-
-async function testFn(name) {
-  // We don't have stored tests — prompt the user
-  const input = prompt(`Enter test for ${name}:\nExample: +with a=3 b=4 -> expect 7`);
-  if (!input) return;
-  const source = `!test ${name}\n  ${input}`;
-  const res = await api('/api/test', {source});
-  let out = '';
-  for (const r of res.results) out += (r.pass ? 'PASS' : 'FAIL') + ': ' + r.message + '\n';
-  showOutput(out.trim(), res.failed > 0);
-  await refresh();
-}
-
-async function evalFn(name) {
-  document.getElementById('eval-input').value = `${name} `;
-  document.getElementById('eval-input').focus();
-}
-
-async function traceFn(name) {
-  const input = prompt(`Trace ${name} with input:\nExample: a=3 b=4`);
-  if (!input) return;
-  // Use mutate with !trace since we don't have a trace endpoint
-  const source = `!trace ${name} ${input}`;
-  // For now just eval — trace endpoint would be better
-  showOutput(`Trace not yet available via API — use REPL`, false);
-}
-
-async function runAllTests() {
-  showOutput('Running all tests...', false);
-  // Get all functions and try to find test blocks in the editor
-  const source = document.getElementById('code-input').value;
-  if (source.includes('!test')) {
-    await applyCode();
-  } else {
-    showOutput('No !test blocks in editor. Write tests first.', false);
-  }
-}
-
-function querySymbols() {
-  document.getElementById('code-input').value = '?symbols';
-  applyCode();
-}
-
-function doRewind() {
-  const rev = prompt('Rewind to revision:');
-  if (rev === null) return;
-  api('/api/rewind', {revision: parseInt(rev)}).then(res => {
-    showOutput(res.message, !res.success);
-    refresh();
-  });
-}
-
-document.getElementById('code-input').addEventListener('keydown', e => {
-  if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); applyCode(); }
-  // Tab inserts 2 spaces
-  if (e.key === 'Tab') { e.preventDefault(); const t = e.target; const s = t.selectionStart; t.value = t.value.substring(0, s) + '  ' + t.value.substring(t.selectionEnd); t.selectionStart = t.selectionEnd = s + 2; }
 });
 
-refresh();
-setInterval(refresh, 5000);
+// Auto-resize textarea
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+});
+
+refreshProgram();
+setInterval(refreshProgram, 5000);
+inputEl.focus();
 </script>
 </body>
 </html>

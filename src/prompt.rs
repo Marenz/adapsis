@@ -85,6 +85,13 @@ Pure functions have no effect annotation.
   digit_value(ch)           — single char to digit Int ("5" -> 5, "a" -> -1)
   is_digit_char(ch)         — true if single char is 0-9
   Ok(value), Err(label)     — Result constructors
+  bit_and(a, b), bit_or(a, b), bit_xor(a, b), bit_not(a) — bitwise ops
+  shl(a, n), shr(a, n)     — shift left/right
+  left_rotate(val, n)       — 32-bit left rotation
+  to_hex(n)                 — Int to 8-char hex string (32-bit)
+  char_code(ch)             — character to ASCII code Int
+  from_char_code(n)         — ASCII code to single-char String
+  u32_wrap(n)               — wrap Int to unsigned 32-bit range
   state(initial)            — create shared state handle
   get_state(handle)         — read shared state
   set_state(handle, value)  — write shared state

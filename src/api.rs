@@ -25,6 +25,14 @@ use crate::validator;
 
 pub type SharedSession = Arc<Mutex<Session>>;
 
+/// Extended state for the API, including LLM configuration.
+#[derive(Clone)]
+pub struct AppConfig {
+    pub session: SharedSession,
+    pub llm_url: String,
+    pub llm_model: String,
+}
+
 #[derive(Deserialize)]
 pub struct MutateRequest {
     pub source: String,
@@ -444,6 +452,136 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
     })
 }
 
+// === Ask endpoint (LLM chat) ===
+
+#[derive(Deserialize)]
+pub struct AskRequest {
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct AskResponse {
+    pub reply: String,
+    pub code: String,
+    pub results: Vec<MutationResult>,
+    pub test_results: Vec<TestCaseResult>,
+}
+
+pub async fn ask(
+    State(config): State<AppConfig>,
+    Json(req): Json<AskRequest>,
+) -> Json<AskResponse> {
+    let llm = crate::llm::LlmClient::new_with_model(&config.llm_url, &config.llm_model);
+
+    let mut session = config.session.lock().await;
+    let context = format!(
+        "{}\n\n{}\n\nUser request: {}",
+        crate::validator::program_summary(&session.program),
+        session.format_recent_history(10),
+        req.message
+    );
+
+    let messages = vec![
+        crate::llm::ChatMessage::system(crate::prompt::system_prompt()),
+        crate::llm::ChatMessage::user(context),
+    ];
+
+    let output = match llm.generate(messages).await {
+        Ok(o) => o,
+        Err(e) => {
+            return Json(AskResponse {
+                reply: format!("LLM error: {e}"),
+                code: String::new(),
+                results: vec![],
+                test_results: vec![],
+            });
+        }
+    };
+
+    // Only use code from <code> blocks — don't try to extract from prose
+    let code = output.code.clone();
+    
+    // Build the reply text — use thinking if available, otherwise the raw text minus code
+    let reply_text = if !output.thinking.is_empty() {
+        output.thinking.clone()
+    } else if !output.code.is_empty() {
+        // Strip the code block from the text to get just the prose
+        let text = &output.text;
+        let without_code = text.replace(&format!("<code>\n{}\n</code>", output.code), "")
+            .replace(&format!("<code>{}</code>", output.code), "");
+        without_code.trim().to_string()
+    } else {
+        output.text.clone()
+    };
+
+    let mut results = vec![];
+    let mut test_results = vec![];
+
+    if !code.is_empty() && code.trim() != "DONE" {
+        if let Ok(ops) = crate::parser::parse(&code) {
+            let has_definitions = ops.iter().any(|op| {
+                matches!(
+                    op,
+                    crate::parser::Operation::Module(_)
+                        | crate::parser::Operation::Function(_)
+                        | crate::parser::Operation::Type(_)
+                )
+            });
+
+            // If the code has definitions, reset program state first
+            // (the model sends the complete program each time)
+            if has_definitions {
+                session.program = crate::ast::Program::default();
+            }
+
+            let has_mutations = ops.iter().any(|op| {
+                !matches!(
+                    op,
+                    crate::parser::Operation::Test(_)
+                        | crate::parser::Operation::Trace(_)
+                        | crate::parser::Operation::Eval(_)
+                        | crate::parser::Operation::Query(_)
+                )
+            });
+
+            if has_mutations {
+                match session.apply(&code) {
+                    Ok(res) => {
+                        for (msg, ok) in res {
+                            results.push(MutationResult { message: msg, success: ok });
+                        }
+                    }
+                    Err(e) => {
+                        results.push(MutationResult {
+                            message: format!("{e}"),
+                            success: false,
+                        });
+                    }
+                }
+            }
+
+            // Run tests
+            for op in &ops {
+                if let crate::parser::Operation::Test(test) = op {
+                    for case in &test.cases {
+                        match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
+                            Ok(msg) => test_results.push(TestCaseResult { message: msg, pass: true }),
+                            Err(e) => test_results.push(TestCaseResult { message: format!("{e}"), pass: false }),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Json(AskResponse {
+        reply: reply_text,
+        code,
+        results,
+        test_results,
+    })
+}
+
 /// Build the API router.
 pub fn router(session: SharedSession) -> axum::Router {
     use axum::routing::{get, post};
@@ -458,4 +596,28 @@ pub fn router(session: SharedSession) -> axum::Router {
         .route("/api/history", post(history))
         .route("/api/rewind", post(rewind))
         .with_state(session)
+}
+
+/// Build the full router with LLM support.
+pub fn router_with_llm(config: AppConfig) -> axum::Router {
+    use axum::routing::{get, post};
+
+    // The session-only routes need SharedSession state
+    let session_routes = axum::Router::new()
+        .route("/api/mutate", post(mutate))
+        .route("/api/eval", post(eval_fn))
+        .route("/api/test", post(test_fn))
+        .route("/api/query", post(query))
+        .route("/api/status", get(status))
+        .route("/api/program", get(program))
+        .route("/api/history", post(history))
+        .route("/api/rewind", post(rewind))
+        .with_state(config.session.clone());
+
+    // The ask route needs the full config
+    let ask_route = axum::Router::new()
+        .route("/api/ask", post(ask))
+        .with_state(config);
+
+    session_routes.merge(ask_route)
 }

@@ -455,7 +455,7 @@ async fn main() -> Result<()> {
             let session_path = session.map(std::path::PathBuf::from);
             repl::run_repl(llm_client, session_path).await?;
         }
-        Command::Os { port, session, url: _ } => {
+        Command::Os { port, session, url } => {
             let session_path = std::path::Path::new(&session);
             let sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -473,6 +473,12 @@ async fn main() -> Result<()> {
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
+            let config = api::AppConfig {
+                session: shared_session.clone(),
+                llm_url: url.clone(),
+                llm_model: "default".to_string(),
+            };
+
             let app = axum::Router::new()
                 .route(
                     "/",
@@ -480,7 +486,7 @@ async fn main() -> Result<()> {
                         axum::response::Html(include_str!("../web/forgeos.html"))
                     }),
                 )
-                .merge(api::router(shared_session.clone()))
+                .merge(api::router_with_llm(config))
                 .layer(tower_http::cors::CorsLayer::permissive());
 
             let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
