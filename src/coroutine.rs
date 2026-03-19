@@ -461,6 +461,32 @@ impl CoroutineHandle {
                 let values = names.into_iter().map(Value::String).collect();
                 return Ok(Value::List(values));
             }
+            "shell_exec" | "exec" => {
+                let command = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => bail!("shell_exec expects String command"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::ShellExec { command, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let (stdout, stderr, code) = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                // Return a struct-like result: {stdout, stderr, code}
+                // For simplicity, return stdout if code==0, otherwise stderr
+                if code == 0 {
+                    return Ok(Value::String(stdout));
+                } else {
+                    return Ok(Value::String(format!("EXIT {code}: {stderr}")));
+                }
+            }
+            "self_restart" | "restart" => {
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::SelfRestart { reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::String("restarting...".to_string()));
+            }
             _ => bail!("unknown await operation: {op}"),
         };
 

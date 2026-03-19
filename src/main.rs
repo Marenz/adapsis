@@ -473,10 +473,32 @@ async fn main() -> Result<()> {
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
+            // Set up coroutine runtime for async IO
+            let (runtime, mut io_rx) = coroutine::Runtime::new();
+            let runtime = std::sync::Arc::new(runtime);
+            let io_sender = runtime.io_sender();
+
+            // Spawn IO event loop
+            let rt = runtime.clone();
+            tokio::spawn(async move {
+                while let Some(request) = io_rx.recv().await {
+                    let rt = rt.clone();
+                    tokio::spawn(async move {
+                        rt.handle_io(request).await;
+                    });
+                }
+            });
+
+            let project_dir = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string());
+
             let config = api::AppConfig {
                 session: shared_session.clone(),
                 llm_url: url.clone(),
                 llm_model: "default".to_string(),
+                project_dir,
+                io_sender: Some(io_sender),
             };
 
             let app = axum::Router::new()

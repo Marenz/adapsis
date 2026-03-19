@@ -25,12 +25,14 @@ use crate::validator;
 
 pub type SharedSession = Arc<Mutex<Session>>;
 
-/// Extended state for the API, including LLM configuration.
+/// Extended state for the API, including LLM and OpenCode configuration.
 #[derive(Clone)]
 pub struct AppConfig {
     pub session: SharedSession,
     pub llm_url: String,
     pub llm_model: String,
+    pub project_dir: String,
+    pub io_sender: Option<tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
 }
 
 #[derive(Deserialize)]
@@ -646,23 +648,73 @@ pub async fn ask(
                         }
                     }
                     crate::parser::Operation::Eval(ev) => {
-                        match crate::eval::eval_compiled_or_interpreted(
-                            &session.program,
-                            &ev.function_name,
-                            &ev.input,
-                        ) {
-                            Ok((result, compiled)) => {
-                                let tag = if compiled { " [compiled]" } else { "" };
+                        // Check if the function needs async (has io/async effects)
+                        let needs_async = session.program.get_function(&ev.function_name)
+                            .is_some_and(|f| f.effects.iter().any(|e| 
+                                matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+                        
+                        if needs_async {
+                            if let Some(sender) = &config.io_sender {
+                                let program = session.program.clone();
+                                let fn_name = ev.function_name.clone();
+                                let input = ev.input.clone();
+                                let sender = sender.clone();
+                                
+                                let eval_result = tokio::task::spawn_blocking(move || {
+                                    let func = program.get_function(&fn_name)
+                                        .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                                    let handle = crate::coroutine::CoroutineHandle::new(sender);
+                                    let mut env = crate::eval::Env::new();
+                                    env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
+                                    crate::eval::bind_input_to_params(&program, func, &crate::eval::eval_parser_expr_standalone(&input)?, &mut env);
+                                    crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
+                                }).await;
+
+                                match eval_result {
+                                    Ok(Ok(val)) => {
+                                        results.push(MutationResult {
+                                            message: format!("eval {}() = {val}", ev.function_name),
+                                            success: true,
+                                        });
+                                    }
+                                    Ok(Err(e)) => {
+                                        results.push(MutationResult {
+                                            message: format!("eval error: {e}"),
+                                            success: false,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        results.push(MutationResult {
+                                            message: format!("eval task error: {e}"),
+                                            success: false,
+                                        });
+                                    }
+                                }
+                            } else {
                                 results.push(MutationResult {
-                                    message: format!("eval {}() = {result}{tag}", ev.function_name),
-                                    success: true,
-                                });
-                            }
-                            Err(e) => {
-                                results.push(MutationResult {
-                                    message: format!("eval error: {e}"),
+                                    message: "eval error: async not available (no coroutine runtime)".to_string(),
                                     success: false,
                                 });
+                            }
+                        } else {
+                            match crate::eval::eval_compiled_or_interpreted(
+                                &session.program,
+                                &ev.function_name,
+                                &ev.input,
+                            ) {
+                                Ok((result, compiled)) => {
+                                    let tag = if compiled { " [compiled]" } else { "" };
+                                    results.push(MutationResult {
+                                        message: format!("eval {}() = {result}{tag}", ev.function_name),
+                                        success: true,
+                                    });
+                                }
+                                Err(e) => {
+                                    results.push(MutationResult {
+                                        message: format!("eval error: {e}"),
+                                        success: false,
+                                    });
+                                }
                             }
                         }
                     }
@@ -721,10 +773,63 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/rewind", post(rewind))
         .with_state(config.session.clone());
 
-    // The ask route needs the full config
-    let ask_route = axum::Router::new()
+    // Routes that need the full config
+    let config_routes = axum::Router::new()
         .route("/api/ask", post(ask))
+        .route("/api/opencode", post(opencode_task))
         .with_state(config);
 
-    session_routes.merge(ask_route)
+    session_routes.merge(config_routes)
+}
+
+// === OpenCode integration ===
+
+#[derive(Deserialize)]
+pub struct OpenCodeRequest {
+    pub task: String,
+}
+
+#[derive(Serialize)]
+pub struct OpenCodeResponse {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub success: bool,
+}
+
+pub async fn opencode_task(
+    State(config): State<AppConfig>,
+    Json(req): Json<OpenCodeRequest>,
+) -> Json<OpenCodeResponse> {
+    let project_dir = &config.project_dir;
+
+    // Run opencode with the task in the project directory
+    let result = tokio::process::Command::new("opencode")
+        .arg("run")
+        .arg("--format")
+        .arg("json")
+        .arg(&req.task)
+        .current_dir(project_dir)
+        .output()
+        .await;
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let code = output.status.code().unwrap_or(-1);
+            Json(OpenCodeResponse {
+                stdout,
+                stderr,
+                exit_code: code,
+                success: code == 0,
+            })
+        }
+        Err(e) => Json(OpenCodeResponse {
+            stdout: String::new(),
+            stderr: format!("Failed to run opencode: {e}"),
+            exit_code: -1,
+            success: false,
+        }),
+    }
 }

@@ -245,7 +245,7 @@ pub fn eval_call_with_input(
 /// 1. Single param → bind directly
 /// 2. Multi-param, all fields match param names → bind each field to its param
 /// 3. Multi-param with struct params → distribute fields based on type definitions
-fn bind_input_to_params(
+pub fn bind_input_to_params(
     program: &ast::Program,
     func: &ast::FunctionDecl,
     input: &Value,
@@ -1460,7 +1460,7 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
 }
 
 /// Evaluate a parser::Expr directly (for test case inputs/expected values).
-fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
+pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
     match expr {
         parser::Expr::Int(v) => Ok(Value::Int(*v)),
         parser::Expr::Float(v) => Ok(Value::Float(*v)),

@@ -110,6 +110,8 @@ Pure functions have no effect annotation.
   read_line(prompt)         — read line from stdin with prompt, returns String
   print(text)               — print text to stdout (no newline)
   println(text)             — print text with newline
+  shell_exec(command)       — run shell command, returns stdout (or "EXIT N: stderr")
+  self_restart()            — restart the ForgeOS process (picks up recompiled binary)
   sleep(ms)                 — sleep for milliseconds
 
 ### Modules
@@ -276,6 +278,14 @@ When the runtime reports errors, fix them with targeted !replace operations or b
 - Each <code> block you send is applied to a FRESH program state. Include ALL types and functions you need in each response.
 - Work step by step — I'll validate each response and give you feedback.
 - When everything passes, put just `DONE` in your <code> block.
+
+## Self-Extension
+
+ForgeOS can modify its own Rust source code via OpenCode integration:
+- The user can send tasks to OpenCode which edits the Forge Rust codebase
+- After changes, ForgeOS can rebuild itself with shell_exec("cargo build")
+- Then restart with self_restart() to pick up the new binary
+- This allows adding new builtins, fixing bugs, or extending the language at runtime
 "#.to_string()
 }
 

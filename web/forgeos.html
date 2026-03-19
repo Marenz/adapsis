@@ -86,8 +86,9 @@ Try: "write a function that doubles a number"</div>
       </div>
     </div>
     <div id="chat-input-bar">
-      <textarea id="chat-input" placeholder="Talk to the AI or type Forge code..." rows="1"></textarea>
+      <textarea id="chat-input" placeholder="Talk to the AI, type Forge code, or prefix with /opencode for Rust changes..." rows="1"></textarea>
       <button id="send-btn" onclick="sendMessage()">Send</button>
+      <button id="oc-btn" onclick="sendOpenCode()" title="Send to OpenCode (modifies Rust source)" style="background:var(--orange);color:var(--bg);border:none;padding:8px 12px;border-radius:6px;font-family:var(--font-mono);font-size:11px;cursor:pointer;align-self:flex-end;">OC</button>
     </div>
   </div>
   <div id="program-panel">
@@ -248,7 +249,49 @@ async function sendMessage() {
 
   sending = false;
   sendBtn.disabled = false;
+  document.getElementById('oc-btn').disabled = false;
   refreshProgram();
+}
+
+async function sendOpenCode() {
+  const text = inputEl.value.trim();
+  if (!text || sending) return;
+
+  addMessage('user', '🔧 [OpenCode] ' + text);
+  inputEl.value = '';
+  sending = true;
+  sendBtn.disabled = true;
+  document.getElementById('oc-btn').disabled = true;
+
+  addSpinner();
+  try {
+    const res = await fetch('/api/opencode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({task: text}),
+    }).then(r => r.json());
+
+    removeSpinner();
+    const msg = addMessage(res.success ? 'system' : 'system', '');
+
+    if (res.stdout) {
+      const pre = document.createElement('div');
+      pre.className = 'msg-code';
+      pre.textContent = res.stdout.substring(0, 2000) + (res.stdout.length > 2000 ? '\n...(truncated)' : '');
+      msg.querySelector('.msg-body').appendChild(pre);
+    }
+    if (res.stderr && !res.success) {
+      addResult(msg, res.stderr.substring(0, 500), 'error');
+    }
+    addResult(msg, res.success ? 'OpenCode completed successfully' : `OpenCode failed (exit ${res.exit_code})`, res.success ? 'ok' : 'error');
+  } catch (e) {
+    removeSpinner();
+    addMessage('system', 'OpenCode error: ' + e.message);
+  }
+
+  sending = false;
+  sendBtn.disabled = false;
+  document.getElementById('oc-btn').disabled = false;
 }
 
 async function refreshProgram() {
