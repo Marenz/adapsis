@@ -26,7 +26,10 @@ Your reasoning about the approach, edge cases, data structures.
 Primitive: Int, Float, Bool, String, Byte
 Generic: List<T>, Map<K,V>, Set<T>, Option<T>, Result<T>
 Struct: +type Name = {field1:Type, field2:Type}
-Union: +type Name = Variant1(Type) | Variant2(Type) | Variant3
+Union: +type Name = Variant1(Type) | Variant2(Type, Type) | Variant3
+  Variants can have zero, one, or multiple payload types.
+  Variants are constructors: Literal(42), Add(left, right), Red
+  Recursive types work: +type Expr = Literal(Int) | Add(Expr, Expr)
 
 ### Effects
 Functions declare their effects: [io], [mut], [fail], [async], [rand], [yield], [parallel], [unsafe]
@@ -45,6 +48,10 @@ Pure functions have no effect annotation.
     +return "no"
   +while condition                   — loop while condition is true
     +set i = i + 1
+  +match expr                        — pattern match on union value
+  +case VariantName(binding1, binding2)  — match arm (body indented below)
+    +return binding1 + binding2
+  +case OtherVariant                 — no-payload variant match
   +return expr                       — return from function
   +each collection item:Type         — loop over collection (body indented below)
     +call result:Type = process(item)
@@ -207,6 +214,27 @@ Shows step-by-step execution of a function with the given input.
 !test create_user
   +with name="alice" email_addr="a@b.com" age=25 -> expect Ok
   +with name="alice" email_addr="" age=25 -> expect Err(err_empty_email)
+</code>
+
+## Example 4: Recursive types with pattern matching
+
+<code>
++type Expr = Literal(Int) | Add(Expr, Expr) | Mul(Expr, Expr)
+
++fn eval_expr (e:Expr)->Int
+  +match e
+  +case Literal(val)
+    +return val
+  +case Add(left, right)
+    +let l:Int = eval_expr(left)
+    +let r:Int = eval_expr(right)
+    +return l + r
+  +case Mul(left, right)
+    +let l:Int = eval_expr(left)
+    +let r:Int = eval_expr(right)
+    +return l * r
+
+!eval eval_expr Add(Literal(1), Mul(Literal(2), Literal(3)))
 </code>
 
 When the runtime reports errors, fix them with targeted !replace operations or by regenerating the affected function.

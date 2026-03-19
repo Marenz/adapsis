@@ -115,6 +115,16 @@ impl Value {
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.matches(y))
             }
+            (
+                Value::Union {
+                    variant: v1,
+                    payload: p1,
+                },
+                Value::Union {
+                    variant: v2,
+                    payload: p2,
+                },
+            ) => v1 == v2 && p1.len() == p2.len() && p1.iter().zip(p2).all(|(a, b)| a.matches(b)),
             _ => false,
         }
     }
@@ -1177,12 +1187,23 @@ fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
         parser::Expr::Bool(v) => Ok(Value::Bool(*v)),
         parser::Expr::String(v) => Ok(Value::String(v.clone())),
         parser::Expr::Ident(name) => {
-            // Handle special result constructors
             match name.as_str() {
                 "Ok" => Ok(Value::Ok(Box::new(Value::None))),
                 "None" => Ok(Value::None),
-                // Treat unknown idents as error labels: Err(name)
-                _ => Ok(Value::Err(name.clone())),
+                "true" => Ok(Value::Bool(true)),
+                "false" => Ok(Value::Bool(false)),
+                _ => {
+                    // Could be an error label (Err) or a no-payload union variant
+                    // If it starts with uppercase, treat as union variant; otherwise as error label
+                    if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        Ok(Value::Union {
+                            variant: name.clone(),
+                            payload: vec![],
+                        })
+                    } else {
+                        Ok(Value::Err(name.clone()))
+                    }
+                }
             }
         }
         parser::Expr::StructLiteral(fields) => {
@@ -1218,7 +1239,17 @@ fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         Ok(Value::Err("unknown".to_string()))
                     }
                 }
-                _ => bail!("cannot evaluate call `{name}` in test case"),
+                _ => {
+                    // Treat as union variant constructor
+                    let payload = args
+                        .iter()
+                        .map(eval_parser_expr_standalone)
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(Value::Union {
+                        variant: name,
+                        payload,
+                    })
+                }
             }
         }
         parser::Expr::FieldAccess { base, field } => {
