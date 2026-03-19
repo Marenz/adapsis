@@ -56,6 +56,7 @@ pub async fn mutate(
     State(session): State<SharedSession>,
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
+    eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
     let mut session = session.lock().await;
     match session.apply(&req.source) {
         Ok(results) => Json(MutateResponse {
@@ -93,6 +94,7 @@ pub async fn eval_fn(
     State(config): State<AppConfig>,
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
+    eprintln!("[web:eval] {} {}", req.function, req.input);
     let mut session = config.session.lock().await;
 
     let input_source = format!("!eval {} {}", req.function, req.input);
@@ -555,6 +557,7 @@ pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
+    eprintln!("\n[web:user] {}", req.message);
     let llm = crate::llm::LlmClient::new_with_model(&config.llm_url, &config.llm_model);
 
     let mut session = config.session.lock().await;
@@ -609,6 +612,14 @@ pub async fn ask(
 
     // Only use code from <code> blocks — don't try to extract from prose
     let mut code = output.code.clone();
+
+    // Echo to CLI
+    if !output.thinking.is_empty() {
+        eprintln!("[web:ai:think] {}", output.thinking.chars().take(200).collect::<String>());
+    }
+    if !code.is_empty() {
+        eprintln!("[web:ai:code]\n{code}");
+    }
 
     // Build the reply text — combine thinking + prose, strip tags
     let mut reply_text = String::new();
@@ -873,6 +884,21 @@ pub async fn ask(
             }
             code = format!("{code}\n\n// --- retry ---\n{retry_code}");
         }
+    }
+
+    // Echo results to CLI
+    for r in &results {
+        if r.success {
+            eprintln!("[web:result] OK: {}", r.message);
+        } else {
+            eprintln!("[web:result] ERROR: {}", r.message);
+        }
+    }
+    for r in &test_results {
+        eprintln!("[web:test] {}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message);
+    }
+    if !reply_text.is_empty() {
+        eprintln!("[web:reply] {}", reply_text.chars().take(300).collect::<String>());
     }
 
     Json(AskResponse {

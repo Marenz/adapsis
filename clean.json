@@ -1,0 +1,24 @@
+{
+  "mutations": [
+    {
+      "revision": 1,
+      "timestamp": "1773929684s",
+      "source": "+fn list_projects ()->String [io,async]\n  +await home_dirs:List<String> = list_dir(\".\")\n  +return join(home_dirs, \"\\n\")\n\n!eval list_projects",
+      "summary": "OK: added function `list_projects` (0 params, 2 statements, effects: [Io, Async])",
+      "success": true
+    },
+    {
+      "revision": 2,
+      "timestamp": "1773929916s",
+      "source": "+fn draw_duck ()->String [io,async]\n  +let cmd:String = concat(\"convert -size 400x400 xc:skyblue \", concat(\"-fill yellow -draw \\\"ellipse 200,250 80,100 0,360\\\" \", concat(\"-fill yellow -draw \\\"ellipse 200,150 60,80 0,360\\\" \", concat(\"-fill orange -draw \\\"polygon 140,140 120,150 140,160\\\" \", concat(\"-fill black -draw \\\"circle 180,130 180,135\\\" \", concat(\"-fill black -draw \\\"circle 220,130 220,135\\\" \", \"duck.png\"))))))\n  +await result:String = shell_exec(cmd)\n  +return concat(\"Duck drawn! Result: \", result)\n\n!eval draw_duck",
+      "summary": "OK: added function `draw_duck` (0 params, 3 statements, effects: [Io, Async])",
+      "success": true
+    }
+  ],
+  "history": [],
+  "revision": 2,
+  "sources": [
+    "+fn list_projects ()->String [io,async]\n  +await home_dirs:List<String> = list_dir(\".\")\n  +return join(home_dirs, \"\\n\")\n\n!eval list_projects",
+    "+fn draw_duck ()->String [io,async]\n  +let cmd:String = concat(\"convert -size 400x400 xc:skyblue \", concat(\"-fill yellow -draw \\\"ellipse 200,250 80,100 0,360\\\" \", concat(\"-fill yellow -draw \\\"ellipse 200,150 60,80 0,360\\\" \", concat(\"-fill orange -draw \\\"polygon 140,140 120,150 140,160\\\" \", concat(\"-fill black -draw \\\"circle 180,130 180,135\\\" \", concat(\"-fill black -draw \\\"circle 220,130 220,135\\\" \", \"duck.png\"))))))\n  +await result:String = shell_exec(cmd)\n  +return concat(\"Duck drawn! Result: \", result)\n\n!eval draw_duck"
+  ]
+}
