@@ -48,6 +48,8 @@ Pure functions have no effect annotation.
   +return expr                       — return from function
   +each collection item:Type         — loop over collection (body indented below)
     +call result:Type = process(item)
+  +await name:Type = io_op(args)     — async IO (suspends coroutine until complete)
+  +spawn function(args)              — spawn a new coroutine
 
 ### Built-in Functions
   concat(a, b)              — concatenate two strings
@@ -66,6 +68,17 @@ Pure functions have no effect annotation.
   join(list, delim)         — join list items into string with delimiter
   abs(x), sqrt(x), pow(x,y), floor(x), min(x,y), max(x,y)
   Ok(value), Err(label)     — Result constructors
+  state(initial)            — create shared state handle
+  get_state(handle)         — read shared state
+  set_state(handle, value)  — write shared state
+
+### IO Functions (require [io,async] effect, use +await)
+  tcp_listen(port)          — listen on TCP port, returns handle
+  tcp_accept(server)        — accept connection, returns handle
+  tcp_read(conn)            — read from connection, returns String
+  tcp_write(conn, data)     — write String to connection
+  tcp_close(conn)           — close connection
+  sleep(ms)                 — sleep for milliseconds
 
 ### Modules
 +module Name
@@ -175,6 +188,25 @@ Shows step-by-step execution of a function with the given input.
   +with 3 -> expect "fizz"
   +with 5 -> expect "buzz"
   +with 7 -> expect "other"
+</code>
+
+## Example 3: Struct composition with error propagation
+
+<code>
++type Email = {address:String}
++type User = {name:String, email:Email, age:Int}
+
++fn validate_email (addr:String)->Result<Email> [fail]
+  +check not_empty addr.len>0 ~err_empty_email
+  +return {address: addr}
+
++fn create_user (name:String, email_addr:String, age:Int)->Result<User> [fail]
+  +call valid_email:Email = validate_email(email_addr)
+  +return {name: name, email: valid_email, age: age}
+
+!test create_user
+  +with name="alice" email_addr="a@b.com" age=25 -> expect Ok
+  +with name="alice" email_addr="" age=25 -> expect Err(err_empty_email)
 </code>
 
 When the runtime reports errors, fix them with targeted !replace operations or by regenerating the affected function.
