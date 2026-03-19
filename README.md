@@ -128,3 +128,25 @@ This is an active research project. The core loop works — LLMs can write, test
 ## License
 
 TBD
+
+## Self-Hosting
+
+Forge can host itself — the REPL is written in Forge:
+
+```bash
+# Start the self-hosted REPL (with AI-in-the-loop)
+cargo run -- run-async examples/self_hosted_repl.forge
+
+# Features:
+#   x = 10+5           — variable assignment
+#   y = x * 2          — expressions with variables
+#   +fn double(n) = n*2 — function definitions
+#   !eval double(5)     — function calls
+#   triple(y)           — inline function calls
+#   /history            — mutation log
+#   /save               — save session to disk
+#   /quit               — save and exit
+#   natural language     — asks the AI via HTTP
+```
+
+Session persists to disk: variables, functions, and history survive restarts.
