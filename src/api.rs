@@ -562,7 +562,8 @@ pub async fn ask(
 
     let mut session = config.session.lock().await;
     let context = format!(
-        "{}\n\n{}\n\nUser request: {}",
+        "Working directory: {}\n\n{}\n\n{}\n\nUser request: {}",
+        config.project_dir,
         crate::validator::program_summary(&session.program),
         session.format_recent_history(10),
         req.message
