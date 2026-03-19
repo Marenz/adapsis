@@ -224,11 +224,13 @@ impl LlmClient<OpenAiBackend> {
     }
 
     pub fn new_with_model(base_url: &str, model: &str) -> Self {
+        // Use higher token limit for capable models
+        let max_tokens = if model.contains("opus") { 64000 } else { 32000 };
         Self {
             http: Client::new(),
             backend: OpenAiBackend::new(base_url).with_model(model),
             temperature: 0.7,
-            max_tokens: 64000,
+            max_tokens,
         }
     }
 }
