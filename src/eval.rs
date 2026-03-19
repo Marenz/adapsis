@@ -1005,6 +1005,53 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 _ => bail!("floor() expects number"),
             }
         }
+        "to_int" | "parse_int" | "int" => {
+            if args.len() != 1 {
+                bail!("to_int() expects 1 argument");
+            }
+            match &args[0] {
+                Value::Int(n) => Ok(Value::Int(*n)),
+                Value::Float(n) => Ok(Value::Int(*n as i64)),
+                Value::Bool(b) => Ok(Value::Int(*b as i64)),
+                Value::String(s) => match s.parse::<i64>() {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => bail!("to_int: cannot parse '{s}' as integer"),
+                },
+                _ => bail!("to_int() expects a value convertible to Int"),
+            }
+        }
+        "digit_value" => {
+            // digit_value("5") -> 5, digit_value("a") -> -1
+            if args.len() != 1 {
+                bail!("digit_value() expects 1 argument");
+            }
+            match &args[0] {
+                Value::String(s) => {
+                    if s.len() == 1 {
+                        let ch = s.chars().next().unwrap();
+                        if ch.is_ascii_digit() {
+                            Ok(Value::Int((ch as i64) - ('0' as i64)))
+                        } else {
+                            Ok(Value::Int(-1))
+                        }
+                    } else {
+                        Ok(Value::Int(-1))
+                    }
+                }
+                _ => bail!("digit_value expects String"),
+            }
+        }
+        "is_digit_char" => {
+            if args.len() != 1 {
+                bail!("is_digit_char() expects 1 argument");
+            }
+            match &args[0] {
+                Value::String(s) => Ok(Value::Bool(
+                    s.len() == 1 && s.chars().next().unwrap().is_ascii_digit(),
+                )),
+                _ => Ok(Value::Bool(false)),
+            }
+        }
         "max" => {
             if args.len() != 2 {
                 bail!("max() expects 2 arguments");

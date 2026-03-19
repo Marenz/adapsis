@@ -81,6 +81,9 @@ Pure functions have no effect annotation.
   get(list, index)          — get item at index
   join(list, delim)         — join list items into string with delimiter
   abs(x), sqrt(x), pow(x,y), floor(x), min(x,y), max(x,y)
+  to_int(x)                 — convert String/Float/Bool to Int ("42" -> 42)
+  digit_value(ch)           — single char to digit Int ("5" -> 5, "a" -> -1)
+  is_digit_char(ch)         — true if single char is 0-9
   Ok(value), Err(label)     — Result constructors
   state(initial)            — create shared state handle
   get_state(handle)         — read shared state
