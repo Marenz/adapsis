@@ -11,6 +11,10 @@ use crate::parser;
 pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
     StateHandle(std::sync::Arc<std::sync::Mutex<Value>>),
+    Union {
+        variant: String,
+        payload: Vec<Value>,
+    },
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -52,6 +56,20 @@ impl fmt::Display for Value {
             Value::Ok(v) => write!(f, "Ok({v})"),
             Value::Err(msg) => write!(f, "Err({msg})"),
             Value::None => write!(f, "None"),
+            Value::Union { variant, payload } => {
+                if payload.is_empty() {
+                    write!(f, "{variant}")
+                } else {
+                    write!(f, "{variant}(")?;
+                    for (i, v) in payload.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{v}")?;
+                    }
+                    write!(f, ")")
+                }
+            }
             Value::CoroutineHandle(_) => write!(f, "<coroutine>"),
             Value::StateHandle(s) => {
                 let val = s.lock().unwrap();
@@ -289,6 +307,31 @@ fn bind_input_to_params(
     }
 }
 
+/// Check if a name is a union variant constructor.
+fn is_union_variant(program: &ast::Program, name: &str) -> bool {
+    for td in &program.types {
+        if let ast::TypeDecl::TaggedUnion(u) = td {
+            for variant in &u.variants {
+                if variant.name == name {
+                    return true;
+                }
+            }
+        }
+    }
+    for module in &program.modules {
+        for td in &module.types {
+            if let ast::TypeDecl::TaggedUnion(u) = td {
+                for variant in &u.variants {
+                    if variant.name == name {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Look up struct field names from the program's type declarations.
 fn get_struct_fields(program: &ast::Program, type_name: &str) -> Option<Vec<(String, ast::Type)>> {
     for td in &program.types {
@@ -472,6 +515,29 @@ fn eval_function_body(
             ast::StatementKind::Set { name, value } => {
                 let val = eval_ast_expr(program, value, env)?;
                 env.set(name, val);
+            }
+            ast::StatementKind::Match { expr, arms } => {
+                let val = eval_ast_expr(program, expr, env)?;
+                match &val {
+                    Value::Union { variant, payload } => {
+                        for arm in arms {
+                            if arm.variant == *variant {
+                                // Bind payload values to arm bindings
+                                for (i, binding) in arm.bindings.iter().enumerate() {
+                                    if let Some(pval) = payload.get(i) {
+                                        env.set(binding, pval.clone());
+                                    }
+                                }
+                                let result = eval_function_body(program, &arm.body, env)?;
+                                if !matches!(result, Value::None) {
+                                    return Ok(result);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => bail!("+match expects a union value, got {val}"),
+                }
             }
             ast::StatementKind::Await { name, call, .. } => {
                 let handle = match env.vars.get("__coroutine_handle") {
@@ -875,7 +941,14 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 }
                 eval_function_body(program, &func.body, &mut call_env)
             } else {
-                // Unknown function — return a placeholder
+                // Check if it's a union variant constructor
+                if is_union_variant(program, &call.callee) {
+                    return Ok(Value::Union {
+                        variant: call.callee.clone(),
+                        payload: args,
+                    });
+                }
+                // Also handle no-arg variant (called without parens — comes as Ident)
                 bail!(
                     "undefined function `{}` (called with {} args)",
                     call.callee,
@@ -895,11 +968,23 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             ast::Literal::String(v) => Ok(Value::String(v.clone())),
         },
         ast::Expr::Identifier(name) => {
-            // Handle special identifiers
             match name.as_str() {
                 "true" => Ok(Value::Bool(true)),
                 "false" => Ok(Value::Bool(false)),
-                _ => env.get(name).cloned(),
+                _ => {
+                    // Try variable first
+                    if let Ok(val) = env.get(name) {
+                        Ok(val.clone())
+                    } else if is_union_variant(program, name) {
+                        // No-payload union variant
+                        Ok(Value::Union {
+                            variant: name.clone(),
+                            payload: vec![],
+                        })
+                    } else {
+                        bail!("undefined variable `{name}`")
+                    }
+                }
             }
         }
         ast::Expr::FieldAccess { base, field } => {

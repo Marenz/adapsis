@@ -733,6 +733,9 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
         ast::StatementKind::Spawn { .. } => {
             bail!("spawn not yet supported in compiler")
         }
+        ast::StatementKind::Match { .. } => {
+            bail!("match not yet supported in compiler")
+        }
         ast::StatementKind::Yield { .. } => {
             bail!("yield not yet supported in compiler")
         }

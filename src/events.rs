@@ -172,6 +172,7 @@ fn snapshot_function(func: &crate::ast::FunctionDecl) -> FunctionSnapshot {
                     crate::ast::StatementKind::While { .. } => "while".to_string(),
                     crate::ast::StatementKind::Await { name, .. } => format!("await {name}"),
                     crate::ast::StatementKind::Spawn { call } => format!("spawn {}", call.callee),
+                    crate::ast::StatementKind::Match { .. } => "match".to_string(),
                     crate::ast::StatementKind::Yield { .. } => "yield".to_string(),
                 },
                 description: format!("{:?}", s.kind),
@@ -204,9 +205,10 @@ fn snapshot_type(td: &crate::ast::TypeDecl) -> TypeSnapshot {
                     name: v.name.clone(),
                     ty: v
                         .payload
-                        .as_ref()
+                        .iter()
                         .map(|t| format!("{t:?}"))
-                        .unwrap_or_default(),
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 })
                 .collect(),
         },

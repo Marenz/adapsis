@@ -1,0 +1,26 @@
+// Recursive data structures in Forge
+// An expression tree with pattern matching
+
++type Expr = Literal(Int) | Neg(Expr) | Add(Expr, Expr) | Mul(Expr, Expr)
+
++fn eval_expr (e:Expr)->Int
+  +match e
+  +case Literal(val)
+    +return val
+  +case Neg(inner)
+    +let inner_val:Int = eval_expr(inner)
+    +return 0 - inner_val
+  +case Add(left, right)
+    +let l:Int = eval_expr(left)
+    +let r:Int = eval_expr(right)
+    +return l + r
+  +case Mul(left, right)
+    +let l:Int = eval_expr(left)
+    +let r:Int = eval_expr(right)
+    +return l * r
+
++fn make_example ()->Int
+  +let expr:Expr = Add(Literal(1), Mul(Literal(2), Literal(3)))
+  +return eval_expr(expr)
+
+!eval make_example

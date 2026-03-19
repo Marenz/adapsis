@@ -113,7 +113,7 @@ pub struct TaggedUnionDecl {
 pub struct UnionVariant {
     pub id: NodeId,
     pub name: Identifier,
-    pub payload: Option<Type>,
+    pub payload: Vec<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -207,6 +207,10 @@ pub enum StatementKind {
         name: Identifier,
         value: Expr,
     },
+    Match {
+        expr: Expr,
+        arms: Vec<MatchArm>,
+    },
     Await {
         name: Identifier,
         ty: Type,
@@ -258,6 +262,13 @@ pub enum Expr {
 pub struct CallExpr {
     pub callee: Identifier,
     pub args: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchArm {
+    pub variant: Identifier,
+    pub bindings: Vec<Identifier>,
+    pub body: Vec<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

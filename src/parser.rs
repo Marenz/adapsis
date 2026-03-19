@@ -14,6 +14,7 @@ pub enum Operation {
     Return(ReturnDecl),
     Each(EachDecl),
     While(WhileDecl),
+    Match(MatchDecl),
     Await(AwaitDecl),
     Spawn(SpawnDecl),
     Replace(ReplaceMutation),
@@ -21,6 +22,19 @@ pub enum Operation {
     Trace(TraceMutation),
     Eval(EvalMutation),
     Query(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchDecl {
+    pub expr: Expr,
+    pub arms: Vec<MatchArmDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArmDecl {
+    pub variant: String,
+    pub bindings: Vec<String>,
+    pub body: Vec<Operation>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +101,7 @@ pub struct FieldType {
 #[derive(Debug, Clone)]
 pub struct VariantType {
     pub name: String,
-    pub payload: Option<TypeExpr>,
+    pub payload: Vec<TypeExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +404,49 @@ impl<'a> Parser<'a> {
             self.index += 1;
             let body = self.parse_nested_block(indent)?;
             return Ok(Operation::While(WhileDecl { condition, body }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+match") {
+            let expr = parse_expr(line.number, rest.trim())?;
+            self.index += 1;
+
+            // Parse +case arms at the same indent level
+            let mut arms = Vec::new();
+            loop {
+                let next = match self.current() {
+                    Some(l) if l.indent == indent => l,
+                    _ => break,
+                };
+                if let Some(case_rest) = next.text.strip_prefix("+case") {
+                    let case_rest = case_rest.trim();
+                    // Parse: VariantName or VariantName(binding1, binding2)
+                    let (variant, bindings) = if let Some(paren) = case_rest.find('(') {
+                        let variant = case_rest[..paren].trim().to_string();
+                        let close = case_rest.rfind(')').ok_or_else(|| {
+                            anyhow!("line {}: expected ')' in +case", next.number)
+                        })?;
+                        let binds: Vec<String> = case_rest[paren + 1..close]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        (variant, binds)
+                    } else {
+                        (case_rest.to_string(), vec![])
+                    };
+                    self.index += 1;
+                    let body = self.parse_nested_block(indent)?;
+                    arms.push(MatchArmDecl {
+                        variant,
+                        bindings,
+                        body,
+                    });
+                } else {
+                    break;
+                }
+            }
+
+            return Ok(Operation::Match(MatchDecl { expr, arms }));
         }
 
         if let Some(rest) = text.strip_prefix("+await") {
@@ -704,9 +761,13 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
                     bail!("line {}: missing variant name", line);
                 }
                 let payload = if payload_text.is_empty() {
-                    None
+                    vec![]
                 } else {
-                    Some(parse_type(line, payload_text)?)
+                    // Parse comma-separated types
+                    payload_text
+                        .split(',')
+                        .map(|s| parse_type(line, s.trim()))
+                        .collect::<Result<Vec<_>>>()?
                 };
                 variants.push(VariantType {
                     name: variant_name.to_string(),
@@ -715,7 +776,7 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
             } else {
                 variants.push(VariantType {
                     name: part.to_string(),
-                    payload: None,
+                    payload: vec![],
                 });
             }
         }

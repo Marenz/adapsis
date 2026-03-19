@@ -58,6 +58,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         | parser::Operation::Return(_)
         | parser::Operation::Each(_)
         | parser::Operation::While(_)
+        | parser::Operation::Match(_)
         | parser::Operation::Await(_)
         | parser::Operation::Spawn(_) => {
             bail!("statement outside of function body")
@@ -214,10 +215,15 @@ fn convert_type_decl(decl: &parser::TypeDecl) -> Result<ast::TypeDecl> {
         parser::TypeBody::Union(variants) => {
             let mut ast_variants = vec![];
             for (i, variant) in variants.iter().enumerate() {
+                let payload_types = variant
+                    .payload
+                    .iter()
+                    .map(convert_type)
+                    .collect::<Result<Vec<_>>>()?;
                 ast_variants.push(ast::UnionVariant {
                     id: format!("{}.v{}", decl.name, i),
                     name: variant.name.clone(),
-                    payload: variant.payload.as_ref().map(convert_type).transpose()?,
+                    payload: payload_types,
                 });
             }
             Ok(ast::TypeDecl::TaggedUnion(ast::TaggedUnionDecl {
@@ -291,6 +297,24 @@ fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
                 body.push(stmt);
             }
             ast::StatementKind::While { condition, body }
+        }
+        parser::Operation::Match(decl) => {
+            let expr = convert_expr(&decl.expr)?;
+            let mut arms = Vec::new();
+            for arm in &decl.arms {
+                let mut body = vec![];
+                for (i, op) in arm.body.iter().enumerate() {
+                    let mut stmt = convert_statement_op(op)?;
+                    stmt.id = format!("match.{}.s{}", arm.variant, i + 1);
+                    body.push(stmt);
+                }
+                arms.push(ast::MatchArm {
+                    variant: arm.variant.clone(),
+                    bindings: arm.bindings.clone(),
+                    body,
+                });
+            }
+            ast::StatementKind::Match { expr, arms }
         }
         parser::Operation::Await(decl) => {
             let call = extract_call_expr(&decl.call)?;

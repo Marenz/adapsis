@@ -24,7 +24,7 @@ pub struct SymbolTable {
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
     pub fields: Vec<(String, Type)>,
-    pub variants: Vec<(String, Option<Type>)>,
+    pub variants: Vec<(String, Vec<Type>)>,
     pub is_union: bool,
 }
 
@@ -283,6 +283,17 @@ fn check_statements(
                 }
                 locals.insert(name.clone(), ty.clone());
             }
+            StatementKind::Match { expr: _, arms } => {
+                for arm in arms {
+                    // Bind arm variables for type checking
+                    let mut arm_locals = locals.clone();
+                    for binding in &arm.bindings {
+                        // We don't know the exact type without looking up the union — use generic
+                        arm_locals.insert(binding.clone(), Type::Int);
+                    }
+                    check_statements(table, &arm.body, &mut arm_locals, return_type, errors);
+                }
+            }
             StatementKind::Spawn { call } => {
                 if table.resolve_function(&call.callee).is_none() {
                     // Builtin IO functions won't be in the table — that's fine
@@ -454,10 +465,16 @@ fn query_symbols(_program: &Program, table: &SymbolTable, scope: &str) -> String
                     info.variants
                         .iter()
                         .map(|(n, p)| {
-                            if let Some(ty) = p {
-                                format!("{n}({ty:?})")
-                            } else {
+                            if p.is_empty() {
                                 n.clone()
+                            } else {
+                                format!(
+                                    "{n}({})",
+                                    p.iter()
+                                        .map(|t| format!("{t:?}"))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
                             }
                         })
                         .collect::<Vec<_>>()
@@ -583,10 +600,16 @@ fn query_type(table: &SymbolTable, target: &str) -> String {
                 info.variants
                     .iter()
                     .map(|(n, p)| {
-                        if let Some(ty) = p {
-                            format!("{n}({ty:?})")
-                        } else {
+                        if p.is_empty() {
                             n.clone()
+                        } else {
+                            format!(
+                                "{n}({})",
+                                p.iter()
+                                    .map(|t| format!("{t:?}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
                         }
                     })
                     .collect::<Vec<_>>()

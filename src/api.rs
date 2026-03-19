@@ -389,6 +389,7 @@ fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
         crate::ast::StatementKind::Spawn { call } => {
             ("spawn".into(), format!("spawn {}()", call.callee))
         }
+        crate::ast::StatementKind::Match { .. } => ("match".into(), "match ...".into()),
         crate::ast::StatementKind::Yield { .. } => ("yield".into(), "yield ...".into()),
     }
 }
@@ -411,7 +412,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
                 kind: "union".into(),
                 fields: u.variants.iter().map(|v| FieldDetail {
                     name: v.name.clone(),
-                    ty: v.payload.as_ref().map(format_type).unwrap_or_default(),
+                    ty: v.payload.iter().map(format_type).collect::<Vec<_>>().join(", "),
                 }).collect(),
             },
         }
