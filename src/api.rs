@@ -329,6 +329,7 @@ pub struct ModuleDetail {
     pub name: String,
     pub types: Vec<TypeDetail>,
     pub functions: Vec<FunctionDetail>,
+    pub modules: Vec<ModuleDetail>,
 }
 
 #[derive(Serialize)]
@@ -454,48 +455,32 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
     }).collect();
 
     let modules = session.program.modules.iter().map(|m| {
-        let mod_types = m.types.iter().map(|td| match td {
-            crate::ast::TypeDecl::Struct(s) => TypeDetail {
-                name: s.name.clone(),
-                kind: "struct".into(),
-                fields: s.fields.iter().map(|f| FieldDetail {
-                    name: f.name.clone(),
-                    ty: format_type(&f.ty),
-                }).collect(),
-            },
-            crate::ast::TypeDecl::TaggedUnion(u) => TypeDetail {
-                name: u.name.clone(),
-                kind: "union".into(),
-                fields: u.variants.iter().map(|v| FieldDetail {
-                    name: v.name.clone(),
-                    ty: v.payload.iter().map(format_type).collect::<Vec<_>>().join(", "),
-                }).collect(),
-            },
-        }).collect();
-
-        let mod_funcs = m.functions.iter().map(|f| {
-            let stmts = f.body.iter().map(|s| {
-                let (kind, summary) = stmt_summary(&s.kind);
-                StatementDetail { id: s.id.clone(), kind, summary }
+        fn build_module_detail(m: &crate::ast::Module) -> ModuleDetail {
+            let mod_types = m.types.iter().map(|td| match td {
+                crate::ast::TypeDecl::Struct(s) => TypeDetail {
+                    name: s.name.clone(), kind: "struct".into(),
+                    fields: s.fields.iter().map(|f| FieldDetail { name: f.name.clone(), ty: format_type(&f.ty) }).collect(),
+                },
+                crate::ast::TypeDecl::TaggedUnion(u) => TypeDetail {
+                    name: u.name.clone(), kind: "union".into(),
+                    fields: u.variants.iter().map(|v| FieldDetail { name: v.name.clone(), ty: v.payload.iter().map(format_type).collect::<Vec<_>>().join(", ") }).collect(),
+                },
             }).collect();
-            FunctionDetail {
-                name: f.name.clone(),
-                params: f.params.iter().map(|p| FieldDetail {
-                    name: p.name.clone(),
-                    ty: format_type(&p.ty),
-                }).collect(),
-                return_type: format_type(&f.return_type),
-                effects: f.effects.iter().map(|e| format!("{e:?}")).collect(),
-                statements: stmts,
-                compilable: crate::compiler::is_compilable_function(f),
-            }
-        }).collect();
-
-        ModuleDetail {
-            name: m.name.clone(),
-            types: mod_types,
-            functions: mod_funcs,
+            let mod_funcs = m.functions.iter().map(|f| {
+                let stmts = f.body.iter().map(|s| { let (kind, summary) = stmt_summary(&s.kind); StatementDetail { id: s.id.clone(), kind, summary } }).collect();
+                FunctionDetail {
+                    name: f.name.clone(),
+                    params: f.params.iter().map(|p| FieldDetail { name: p.name.clone(), ty: format_type(&p.ty) }).collect(),
+                    return_type: format_type(&f.return_type),
+                    effects: f.effects.iter().map(|e| format!("{e:?}")).collect(),
+                    statements: stmts,
+                    compilable: crate::compiler::is_compilable_function(f),
+                }
+            }).collect();
+            let sub_modules = m.modules.iter().map(build_module_detail).collect();
+            ModuleDetail { name: m.name.clone(), types: mod_types, functions: mod_funcs, modules: sub_modules }
         }
+        build_module_detail(m)
     }).collect();
 
     Json(ProgramResponse {
@@ -535,8 +520,16 @@ pub async fn ask(
         req.message
     );
 
+    let system = format!(
+        "{}\n\n## IMPORTANT: Persistent State\n\
+         The program state persists between responses. Do NOT resend existing types or functions.\n\
+         Only send NEW code or modifications. Use !replace to modify existing functions.\n\
+         Use !move to reorganize code into modules.",
+        crate::prompt::system_prompt()
+    );
+
     let messages = vec![
-        crate::llm::ChatMessage::system(crate::prompt::system_prompt()),
+        crate::llm::ChatMessage::system(system),
         crate::llm::ChatMessage::user(context),
     ];
 
@@ -599,10 +592,20 @@ pub async fn ask(
                 )
             });
 
-            // If the code has definitions, reset program state first
-            // (the model sends the complete program each time)
+            // Remove duplicates before applying — allow the model to redefine things
             if has_definitions {
-                session.program = crate::ast::Program::default();
+                for op in &ops {
+                    match op {
+                        crate::parser::Operation::Function(f) => {
+                            session.program.functions.retain(|existing| existing.name != f.name);
+                        }
+                        crate::parser::Operation::Type(t) => {
+                            let name = t.name.clone();
+                            session.program.types.retain(|existing| existing.name() != name);
+                        }
+                        _ => {}
+                    }
+                }
             }
 
             let has_mutations = ops.iter().any(|op| {

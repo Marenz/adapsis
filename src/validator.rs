@@ -89,6 +89,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
         name: decl.name.clone(),
         types: vec![],
         functions: vec![],
+        modules: vec![],
     };
 
     for op in &decl.body {
@@ -943,6 +944,7 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
             name: target_module.to_string(),
             types: vec![],
             functions: vec![],
+            modules: vec![],
         });
     }
     let target = program
@@ -957,14 +959,9 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
     for ty in types_to_move {
         target.types.push(ty);
     }
-    // Merge sub-modules: move their contents into the target
+    // Nest sub-modules inside the target
     for sub in modules_to_merge {
-        for func in sub.functions {
-            target.functions.push(func);
-        }
-        for ty in sub.types {
-            target.types.push(ty);
-        }
+        target.modules.push(sub);
     }
 
     // Update call sites for moved functions

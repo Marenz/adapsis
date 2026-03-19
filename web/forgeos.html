@@ -309,40 +309,41 @@ function renderProgram(prog) {
     el.appendChild(renderFn(f));
   }
 
-  // Modules (collapsible, state preserved across refreshes)
-  for (const m of prog.modules || []) {
+  // Modules (collapsible, recursive)
+  function renderModule(m, parentPath) {
+    const path = parentPath ? `${parentPath}.${m.name}` : m.name;
     const moduleDiv = document.createElement('div');
     moduleDiv.style.marginBottom = '8px';
 
-    const isCollapsed = collapsedModules.has(m.name);
+    const isCollapsed = collapsedModules.has(path);
+    const subCount = (m.modules || []).length;
+    const summary = `${m.functions.length} fn, ${m.types.length} types${subCount ? ', ' + subCount + ' modules' : ''}`;
 
     const header = document.createElement('div');
     header.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;';
-    header.innerHTML = `<span style="color:var(--orange);font-weight:600;">📦 module ${m.name}</span><span style="color:var(--text-dim);font-size:11px;">${m.functions.length} fn, ${m.types.length} types ${isCollapsed ? '▸' : '▾'}</span>`;
+    header.innerHTML = `<span style="color:var(--orange);font-weight:600;">📦 module ${m.name}</span><span style="color:var(--text-dim);font-size:11px;">${summary} ${isCollapsed ? '▸' : '▾'}</span>`;
 
     const content = document.createElement('div');
     content.style.cssText = 'padding-left:12px;border-left:2px solid var(--orange);margin-left:6px;margin-top:4px;';
     content.style.display = isCollapsed ? 'none' : 'block';
 
-    for (const t of m.types) {
-      content.appendChild(renderType(t));
-    }
-    for (const f of m.functions) {
-      content.appendChild(renderFn(f));
-    }
+    for (const t of m.types) content.appendChild(renderType(t));
+    for (const f of m.functions) content.appendChild(renderFn(f));
+    for (const sub of m.modules || []) content.appendChild(renderModule(sub, path));
 
     header.onclick = () => {
-      if (collapsedModules.has(m.name)) {
-        collapsedModules.delete(m.name);
-      } else {
-        collapsedModules.add(m.name);
-      }
+      if (collapsedModules.has(path)) collapsedModules.delete(path);
+      else collapsedModules.add(path);
       refreshProgram();
     };
 
     moduleDiv.appendChild(header);
     moduleDiv.appendChild(content);
-    el.appendChild(moduleDiv);
+    return moduleDiv;
+  }
+
+  for (const m of prog.modules || []) {
+    el.appendChild(renderModule(m, ''));
   }
 }
 

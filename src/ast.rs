@@ -78,6 +78,7 @@ pub struct Module {
     pub name: Identifier,
     pub types: Vec<TypeDecl>,
     pub functions: Vec<FunctionDecl>,
+    pub modules: Vec<Module>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

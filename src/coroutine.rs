@@ -35,6 +35,8 @@ pub enum IoRequest {
     FileExists { path: String, reply: oneshot::Sender<Result<bool>> },
     ListDir { path: String, reply: oneshot::Sender<Result<Vec<String>>> },
     TcpConnect { host: String, port: u16, reply: oneshot::Sender<Result<Handle>> },
+    ShellExec { command: String, reply: oneshot::Sender<Result<(String, String, i32)>> },
+    SelfRestart { reply: oneshot::Sender<Result<()>> },
     StdinReadLine { prompt: String, reply: oneshot::Sender<Result<String>> },
     Print { text: String, newline: bool, reply: oneshot::Sender<Result<()>> },
     Sleep { ms: u64, reply: oneshot::Sender<Result<()>> },
@@ -187,8 +189,35 @@ impl Runtime {
                     Err(e) => { let _ = reply.send(Err(e.into())); }
                 }
             }
+            IoRequest::ShellExec { command, reply } => {
+                tokio::task::spawn_blocking(move || {
+                    let output = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&command)
+                        .output();
+                    match output {
+                        Ok(out) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                            let code = out.status.code().unwrap_or(-1);
+                            reply.send(Ok((stdout, stderr, code)))
+                        }
+                        Err(e) => reply.send(Err(e.into())),
+                    }
+                }).await.ok();
+            }
+            IoRequest::SelfRestart { reply } => {
+                // Save session, then exec() the same binary with same args
+                let _ = reply.send(Ok(()));
+                // Give a moment for the reply to be sent
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let exe = std::env::current_exe().unwrap_or_default();
+                let args: Vec<String> = std::env::args().collect();
+                eprintln!("ForgeOS restarting: {} {}", exe.display(), args[1..].join(" "));
+                let err = exec::execvp(&exe, &args);
+                eprintln!("restart failed: {err}");
+            }
             IoRequest::StdinReadLine { prompt, reply } => {
-                // Run stdin read on a blocking task since it blocks
                 tokio::task::spawn_blocking(move || {
                     use std::io::Write;
                     print!("{prompt}");
