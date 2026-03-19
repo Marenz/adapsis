@@ -186,10 +186,7 @@ async function sendMessage() {
       const msg = addMessage('ai', '');
 
       if (res.reply) {
-        const thinkEl = document.createElement('div');
-        thinkEl.className = 'thinking';
-        thinkEl.textContent = res.reply.substring(0, 500) + (res.reply.length > 500 ? '...' : '');
-        msg.querySelector('.msg-body').appendChild(thinkEl);
+        msg.querySelector('.msg-body').textContent = res.reply;
       }
 
       if (res.code) {
@@ -204,7 +201,7 @@ async function sendMessage() {
         addResult(msg, (r.pass ? 'PASS: ' : 'FAIL: ') + r.message, r.pass ? 'pass' : 'fail');
       }
 
-      if (!res.reply && !res.code && res.results?.length === 0) {
+      if (!res.reply && !res.code && (res.results?.length || 0) === 0) {
         msg.querySelector('.msg-body').textContent = '(no response)';
       }
     } catch (e) {
@@ -250,10 +247,15 @@ function renderProgram(prog) {
     const params = f.params.map(p => `${p.name}:${p.ty}`).join(', ');
     const card = document.createElement('div');
     card.className = 'fn-card';
+    const stmtTree = f.statements.map(s => {
+      const kind = s.kind;
+      const icon = kind === 'return' ? '↩' : kind === 'let' ? '📦' : kind.startsWith('call') ? '📞' : kind.startsWith('check') ? '✓' : kind === 'branch' ? '🔀' : kind.startsWith('set') ? '✏' : kind === 'while' ? '🔄' : kind === 'match' ? '🎯' : '•';
+      return `<div class="fn-stmt" title="${s.id}">${icon} ${s.summary}</div>`;
+    }).join('');
     card.innerHTML =
       `<h3>fn ${f.name} ${tag}</h3>` +
       `<div class="fn-sig">(${params}) → ${f.return_type}${effects}</div>` +
-      f.statements.map(s => `<div class="fn-stmt">${s.summary}</div>`).join('');
+      stmtTree;
     el.appendChild(card);
   }
 }

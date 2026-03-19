@@ -500,19 +500,36 @@ pub async fn ask(
 
     // Only use code from <code> blocks — don't try to extract from prose
     let code = output.code.clone();
-    
-    // Build the reply text — use thinking if available, otherwise the raw text minus code
-    let reply_text = if !output.thinking.is_empty() {
-        output.thinking.clone()
-    } else if !output.code.is_empty() {
-        // Strip the code block from the text to get just the prose
-        let text = &output.text;
-        let without_code = text.replace(&format!("<code>\n{}\n</code>", output.code), "")
-            .replace(&format!("<code>{}</code>", output.code), "");
-        without_code.trim().to_string()
-    } else {
-        output.text.clone()
-    };
+
+    // Build the reply text — combine thinking + prose, strip tags
+    let mut reply_text = String::new();
+    if !output.thinking.is_empty() {
+        reply_text.push_str(&output.thinking);
+        reply_text.push_str("\n\n");
+    }
+    // Get the raw text without <think> and <code> blocks
+    let mut clean_text = output.text.clone();
+    // Strip <think>...</think>
+    while let Some(start) = clean_text.find("<think>") {
+        if let Some(end) = clean_text.find("</think>") {
+            clean_text.replace_range(start..end + 8, "");
+        } else {
+            break;
+        }
+    }
+    // Strip <code>...</code>
+    while let Some(start) = clean_text.find("<code>") {
+        if let Some(end) = clean_text.find("</code>") {
+            clean_text.replace_range(start..end + 7, "");
+        } else {
+            break;
+        }
+    }
+    let clean_text = clean_text.trim();
+    if !clean_text.is_empty() {
+        reply_text.push_str(clean_text);
+    }
+    let reply_text = reply_text.trim().to_string();
 
     let mut results = vec![];
     let mut test_results = vec![];
