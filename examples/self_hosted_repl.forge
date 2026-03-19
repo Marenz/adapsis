@@ -1,111 +1,460 @@
-// Self-Hosted Forge REPL — written entirely in Forge
-// Reads input, classifies as Forge code or natural language,
-// sends natural language to LLM, applies Forge mutations, prints results.
+// ============================================================
+// Self-Hosted Forge REPL — complete implementation in Forge
+// Supports: variables, expressions, +fn definitions, !eval,
+//           session persistence, AI-in-the-loop
+// ============================================================
 
-// === HTTP client for LLM communication ===
+// === AST Types ===
++type Expr = Literal(Int) | Var(String) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr) | Gt(Expr, Expr) | Eq(Expr, Expr) | CallE(String, Expr)
++type Stmt = LetBinding(String, Expr) | ReturnStmt(Expr) | IfElseStmt(Expr, Stmt, Stmt) | ExprStmt(Expr)
 
-+fn http_request (host:String, port:Int, method:String, path:String, body:String)->String [io,async]
-  +await conn:Int = tcp_connect(host, port)
-  +let content_len:String = to_string(body.len)
-  +let request:String = concat(method, concat(" ", concat(path, " HTTP/1.1\r\n")))
-  +set request = concat(request, concat("Host: ", concat(host, "\r\n")))
-  +set request = concat(request, concat("Content-Type: application/json\r\n", ""))
-  +set request = concat(request, concat("Content-Length: ", concat(content_len, "\r\n")))
-  +set request = concat(request, "\r\n")
-  +set request = concat(request, body)
-  +await ok:Int = tcp_write(conn, request)
-  +await response:String = tcp_read(conn)
-  +await ok2:Int = tcp_close(conn)
-  +return response
+// === Parse state types ===
++type ParseResult = {expr:Expr, pos:Int}
++type StmtResult = {stmt:Stmt, pos:Int}
 
-+fn extract_json_field (json:String, field:String)->String
-  +let search:String = concat("\"", concat(field, "\":\""))
-  +let idx:Int = index_of(json, search)
-  +if idx < 0
-    +return ""
-  +else
-    +let start:Int = idx + search.len
-    +let end:Int = index_of(substring(json, start, json.len), "\"")
-    +if end < 0
-      +return substring(json, start, json.len)
+// === Runtime types ===
++type Env = {names:List<String>, values:List<Int>}
++type FuncInfo = {name:String, param_name:String, body_source:String}
++type ProgramState = {funcs:List<FuncInfo>, log:List<String>, revision:Int}
+
+// ============================================================
+// PARSER
+// ============================================================
+
++fn skip_ws (s:String, p:Int)->Int
+  +while p < s.len
+    +let ch:String = char_at(s, p)
+    +if ch == " " OR ch == "\t"
+      +set p = p + 1
     +else
-      +return substring(json, start, start + end)
+      +return p
+  +return p
 
-+fn ask_llm (host:String, port:Int, model:String, prompt:String)->String [io,async]
-  +let escaped_prompt:String = prompt
-  +let body:String = concat("{\"model\":\"", concat(model, "\",\"messages\":[{\"role\":\"user\",\"content\":\""))
-  +set body = concat(body, concat(escaped_prompt, "\"}],\"max_tokens\":4000}"))
-  +let response:String = http_request(host, port, "POST", "/v1/chat/completions", body)
-  +let content:String = extract_json_field(response, "content")
-  +return content
-
-// === Input classification ===
-
-+fn is_forge_code (input:String)->Bool
-  +if input.len == 0
++fn is_letter (ch:String)->Bool
+  +if index_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_", ch) >= 0
+    +return true
+  +else
     +return false
+
++fn parse_num (s:String, p:Int)->ParseResult [fail]
+  +set p = skip_ws(s, p)
+  +check has_input p < s.len ~err_eof
+  +check is_num is_digit_char(char_at(s, p)) ~err_expected_number
+  +let result:Int = 0
+  +while p < s.len
+    +if is_digit_char(char_at(s, p))
+      +set result = result * 10 + digit_value(char_at(s, p))
+      +set p = p + 1
+    +else
+      +return {expr: Literal(result), pos: p}
+  +return {expr: Literal(result), pos: p}
+
++fn read_ident (s:String, p:Int)->List<String> [fail]
+  +set p = skip_ws(s, p)
+  +check has_input p < s.len ~err_eof
+  +let name:String = ""
+  +while p < s.len
+    +let ch:String = char_at(s, p)
+    +if is_letter(ch) OR is_digit_char(ch)
+      +set name = concat(name, ch)
+      +set p = p + 1
+    +else
+      +return push(push(list(), name), to_string(p))
+  +return push(push(list(), name), to_string(p))
+
++fn parse_atom (s:String, p:Int)->ParseResult [fail]
+  +set p = skip_ws(s, p)
+  +check has_input p < s.len ~err_eof
+  +let ch:String = char_at(s, p)
+  +if is_digit_char(ch)
+    +return parse_num(s, p)
+  +elif is_letter(ch)
+    +let id:List<String> = read_ident(s, p)
+    +let name:String = get(id, 0)
+    +let np:Int = to_int(get(id, 1))
+    +let np2:Int = skip_ws(s, np)
+    +if np2 < s.len AND char_at(s, np2) == "("
+      +let arg_result:ParseResult = parse_expression(s, np2 + 1)
+      +let close_pos:Int = skip_ws(s, arg_result.pos)
+      +return {expr: CallE(name, arg_result.expr), pos: close_pos + 1}
+    +else
+      +return {expr: Var(name), pos: np}
   +else
-    +let first:String = char_at(input, 0)
-    +if first == "+"
-      +return true
-    +elif first == "!"
-      +return true
-    +elif first == "?"
-      +return true
-    +elif starts_with(input, "/")
-      +return true
+    +check fail false ~err_unexpected_char
+    +return {expr: Literal(0), pos: p}
+
++fn parse_factor (s:String, p:Int)->ParseResult [fail]
+  +let left:ParseResult = parse_atom(s, p)
+  +set p = skip_ws(s, left.pos)
+  +while p < s.len
+    +if char_at(s, p) == "*"
+      +let right:ParseResult = parse_atom(s, p + 1)
+      +set left = {expr: Mul(left.expr, right.expr), pos: right.pos}
+      +set p = skip_ws(s, left.pos)
     +else
-      +return false
+      +return left
+  +return left
 
-// === Session log ===
-
-+fn log_entry (log:List<String>, entry:String)->List<String>
-  +return push(log, entry)
-
-+fn format_log (log:List<String>)->String
-  +let result:String = ""
-  +let i:Int = 0
-  +while i < log.len
-    +let entry:String = get(log, i)
-    +set result = concat(result, concat("[", concat(to_string(i), concat("] ", concat(entry, "\n")))))
-    +set i = i + 1
-  +return result
-
-// === The REPL loop ===
-
-+fn repl_loop (llm_host:String, llm_port:Int, llm_model:String)->Int [io,async]
-  +let log:List<String> = list()
-  +let revision:Int = 0
-  +await ok:Int = println("=== Forge Self-Hosted REPL ===")
-  +await ok2:Int = println("Type Forge code (+fn, !eval, ?symbols) or natural language for the AI.")
-  +await ok3:Int = println("Commands: /history, /quit")
-  +await ok4:Int = println("")
-  +while true
-    +let prompt:String = concat("forge[", concat(to_string(revision), "]> "))
-    +await input:String = read_line(prompt)
-    +if input == "/quit" OR input == "/exit"
-      +await bye:Int = println("Goodbye.")
-      +return 0
-    +elif input == "/history"
-      +let hist:String = format_log(log)
-      +await ph:Int = println(hist)
-    +elif input == ""
-      +let dummy:Int = 0
-    +elif is_forge_code(input)
-      +set log = log_entry(log, concat("forge: ", input))
-      +set revision = revision + 1
-      +await pf:Int = println(concat("  [applied rev ", concat(to_string(revision), "]")))
++fn parse_sum (s:String, p:Int)->ParseResult [fail]
+  +let left:ParseResult = parse_factor(s, p)
+  +set p = skip_ws(s, left.pos)
+  +while p < s.len
+    +let ch:String = char_at(s, p)
+    +if ch == "+"
+      +let right:ParseResult = parse_factor(s, p + 1)
+      +set left = {expr: Add(left.expr, right.expr), pos: right.pos}
+      +set p = skip_ws(s, left.pos)
+    +elif ch == "-"
+      +let right:ParseResult = parse_factor(s, p + 1)
+      +set left = {expr: Sub(left.expr, right.expr), pos: right.pos}
+      +set p = skip_ws(s, left.pos)
     +else
-      +await thinking:Int = println("  [asking LLM...]")
-      +await llm_response:String = ask_llm(llm_host, llm_port, llm_model, input)
-      +set log = log_entry(log, concat("ask: ", input))
-      +set log = log_entry(log, concat("llm: ", llm_response))
-      +await pr:Int = println(concat("  ", llm_response))
+      +return left
+  +return left
+
++fn parse_cmp (s:String, p:Int)->ParseResult [fail]
+  +let left:ParseResult = parse_sum(s, p)
+  +set p = skip_ws(s, left.pos)
+  +if p >= s.len
+    +return left
+  +else
+    +let ch:String = char_at(s, p)
+    +if ch == ">"
+      +let right:ParseResult = parse_sum(s, p + 1)
+      +return {expr: Gt(left.expr, right.expr), pos: right.pos}
+    +elif ch == "=" AND p + 1 < s.len
+      +if char_at(s, p + 1) == "="
+        +let right:ParseResult = parse_sum(s, p + 2)
+        +return {expr: Eq(left.expr, right.expr), pos: right.pos}
+      +else
+        +return left
+    +else
+      +return left
+
++fn parse_expression (s:String, p:Int)->ParseResult [fail]
+  +return parse_cmp(s, p)
+
+// ============================================================
+// EVALUATOR
+// ============================================================
+
++fn env_new ()->Env
+  +return {names: list(), values: list()}
+
++fn env_set (env:Env, name:String, val:Int)->Env
+  +return {names: push(env.names, name), values: push(env.values, val)}
+
++fn env_lookup (env:Env, name:String)->Int [fail]
+  +let i:Int = env.names.len - 1
+  +while i >= 0
+    +if get(env.names, i) == name
+      +return get(env.values, i)
+    +else
+      +set i = i - 1
+  +check found false ~err_var_not_found
   +return 0
 
-// === Entry point ===
++fn find_func (funcs:List<FuncInfo>, name:String)->FuncInfo [fail]
+  +let i:Int = funcs.len - 1
+  +while i >= 0
+    +let f:FuncInfo = get(funcs, i)
+    +if f.name == name
+      +return f
+    +else
+      +set i = i - 1
+  +check found false ~err_func_not_found
+  +return get(funcs, 0)
+
++fn eval_e (env:Env, funcs:List<FuncInfo>, e:Expr)->Int [fail]
+  +match e
+  +case Literal(val)
+    +return val
+  +case Var(name)
+    +return env_lookup(env, name)
+  +case Add(left, right)
+    +let l:Int = eval_e(env, funcs, left)
+    +let r:Int = eval_e(env, funcs, right)
+    +return l + r
+  +case Sub(left, right)
+    +let l:Int = eval_e(env, funcs, left)
+    +let r:Int = eval_e(env, funcs, right)
+    +return l - r
+  +case Mul(left, right)
+    +let l:Int = eval_e(env, funcs, left)
+    +let r:Int = eval_e(env, funcs, right)
+    +return l * r
+  +case Gt(left, right)
+    +let l:Int = eval_e(env, funcs, left)
+    +let r:Int = eval_e(env, funcs, right)
+    +if l > r
+      +return 1
+    +else
+      +return 0
+  +case Eq(left, right)
+    +let l:Int = eval_e(env, funcs, left)
+    +let r:Int = eval_e(env, funcs, right)
+    +if l == r
+      +return 1
+    +else
+      +return 0
+  +case CallE(name, arg)
+    +let arg_val:Int = eval_e(env, funcs, arg)
+    +let func:FuncInfo = find_func(funcs, name)
+    +let func_env:Env = env_set(env_new(), func.param_name, arg_val)
+    +let body_result:ParseResult = parse_expression(func.body_source, 0)
+    +return eval_e(func_env, funcs, body_result.expr)
+
+// ============================================================
+// LINE HANDLERS
+// ============================================================
+
++fn try_eval_line (input:String, env:Env, funcs:List<FuncInfo>)->Int [fail]
+  +let result:ParseResult = parse_expression(input, 0)
+  +let remaining:Int = skip_ws(input, result.pos)
+  +check consumed remaining >= input.len ~err_not_pure_expr
+  +return eval_e(env, funcs, result.expr)
+
++fn try_assign_line (input:String, env:Env, funcs:List<FuncInfo>)->Env [fail]
+  +let id:List<String> = read_ident(input, 0)
+  +let name:String = get(id, 0)
+  +let p:Int = to_int(get(id, 1))
+  +set p = skip_ws(input, p)
+  +check has_more p < input.len ~err_no_equals
+  +check has_eq char_at(input, p) == "=" ~err_no_equals
+  +let expr_result:ParseResult = parse_expression(input, p + 1)
+  +let val:Int = eval_e(env, funcs, expr_result.expr)
+  +return env_set(env, name, val)
+
++fn parse_fn_def (input:String)->FuncInfo [fail]
+  +let p:Int = 3
+  +set p = skip_ws(input, p)
+  +let id:List<String> = read_ident(input, p)
+  +let name:String = get(id, 0)
+  +set p = to_int(get(id, 1))
+  +set p = skip_ws(input, p)
+  +check open_paren char_at(input, p) == "(" ~err_expected_paren
+  +set p = p + 1
+  +let param_id:List<String> = read_ident(input, p)
+  +let param_name:String = get(param_id, 0)
+  +set p = to_int(get(param_id, 1))
+  +set p = skip_ws(input, p)
+  +if char_at(input, p) == ":"
+    +set p = p + 1
+    +let type_id:List<String> = read_ident(input, p)
+    +set p = to_int(get(type_id, 1))
+  +else
+    +let dummy:Int = 0
+  +set p = skip_ws(input, p)
+  +check close_paren char_at(input, p) == ")" ~err_expected_close_paren
+  +set p = p + 1
+  +set p = skip_ws(input, p)
+  +if p < input.len AND char_at(input, p) == "="
+    +set p = p + 1
+    +let body:String = trim(substring(input, p, input.len))
+    +return {name: name, param_name: param_name, body_source: body}
+  +else
+    +let body:String = trim(substring(input, p, input.len))
+    +return {name: name, param_name: param_name, body_source: body}
+
+// ============================================================
+// HTTP CLIENT for LLM
+// ============================================================
+
++fn http_post (host:String, port:Int, path:String, body:String)->String [io,async]
+  +await conn:Int = tcp_connect(host, port)
+  +let cl:String = to_string(body.len)
+  +let req:String = concat("POST ", concat(path, " HTTP/1.1\r\n"))
+  +set req = concat(req, concat("Host: ", concat(host, "\r\n")))
+  +set req = concat(req, "Content-Type: application/json\r\n")
+  +set req = concat(req, concat("Content-Length: ", concat(cl, "\r\n\r\n")))
+  +set req = concat(req, body)
+  +await ok:Int = tcp_write(conn, req)
+  +await resp:String = tcp_read(conn)
+  +await ok2:Int = tcp_close(conn)
+  +return resp
+
++fn extract_content (json:String)->String
+  +let search:String = "\"content\":\""
+  +let idx:Int = index_of(json, search)
+  +if idx < 0
+    +return "(no response)"
+  +else
+    +let start:Int = idx + search.len
+    +let rest:String = substring(json, start, json.len)
+    +let end_idx:Int = index_of(rest, "\"")
+    +if end_idx < 0
+      +return rest
+    +else
+      +return substring(rest, 0, end_idx)
+
++fn ask_llm (host:String, port:Int, model:String, question:String)->String [io,async]
+  +let body:String = concat("{\"model\":\"", concat(model, "\",\"messages\":[{\"role\":\"user\",\"content\":\""))
+  +set body = concat(body, concat(question, "\"}],\"max_tokens\":2000}"))
+  +let resp:String = http_post(host, port, "/v1/chat/completions", body)
+  +return extract_content(resp)
+
+// ============================================================
+// SESSION PERSISTENCE
+// ============================================================
+
++fn save_session (path:String, state:ProgramState, env:Env)->Int [io,async]
+  +let data:String = concat("revision:", to_string(state.revision))
+  +let i:Int = 0
+  +while i < state.log.len
+    +set data = concat(data, concat("\nlog:", get(state.log, i)))
+    +set i = i + 1
+  +set i = 0
+  +while i < env.names.len
+    +let name:String = get(env.names, i)
+    +let val:String = to_string(get(env.values, i))
+    +set data = concat(data, concat("\nvar:", concat(name, concat("=", val))))
+    +set i = i + 1
+  +set i = 0
+  +while i < state.funcs.len
+    +let f:FuncInfo = get(state.funcs, i)
+    +set data = concat(data, concat("\nfunc:", concat(f.name, concat("|", concat(f.param_name, concat("|", f.body_source))))))
+    +set i = i + 1
+  +await ok:Int = file_write(path, data)
+  +return 0
+
++fn load_session (path:String)->List<String> [io,async]
+  +await exists:Bool = file_exists(path)
+  +if exists
+    +await data:String = file_read(path)
+    +return split(data, "\n")
+  +else
+    +return list()
+
++fn restore_state (lines:List<String>)->ProgramState
+  +let log:List<String> = list()
+  +let funcs:List<FuncInfo> = list()
+  +let rev:Int = 0
+  +let i:Int = 0
+  +while i < lines.len
+    +let line:String = get(lines, i)
+    +if starts_with(line, "revision:")
+      +set rev = to_int(substring(line, 9, line.len))
+    +elif starts_with(line, "log:")
+      +set log = push(log, substring(line, 4, line.len))
+    +elif starts_with(line, "func:")
+      +let rest:String = substring(line, 5, line.len)
+      +let parts:List<String> = split(rest, "|")
+      +if parts.len >= 3
+        +set funcs = push(funcs, {name: get(parts, 0), param_name: get(parts, 1), body_source: get(parts, 2)})
+      +else
+        +let dummy:Int = 0
+    +else
+      +let dummy:Int = 0
+    +set i = i + 1
+  +return {funcs: funcs, log: log, revision: rev}
+
++fn restore_env (lines:List<String>)->Env
+  +let env:Env = env_new()
+  +let i:Int = 0
+  +while i < lines.len
+    +let line:String = get(lines, i)
+    +if starts_with(line, "var:")
+      +let rest:String = substring(line, 4, line.len)
+      +let eq_idx:Int = index_of(rest, "=")
+      +if eq_idx >= 0
+        +let name:String = substring(rest, 0, eq_idx)
+        +let val:Int = to_int(substring(rest, eq_idx + 1, rest.len))
+        +set env = env_set(env, name, val)
+      +else
+        +let dummy:Int = 0
+    +else
+      +let dummy:Int = 0
+    +set i = i + 1
+  +return env
+
+// ============================================================
+// REPL LOOP
+// ============================================================
+
++fn repl (session_path:String, llm_host:String, llm_port:Int, llm_model:String)->Int [io,async]
+  +await session_lines:List<String> = load_session(session_path)
+  +let state:ProgramState = restore_state(session_lines)
+  +let env:Env = restore_env(session_lines)
+  +await ok1:Int = println("=== Forge Self-Hosted REPL ===")
+  +await ok2:Int = println("  Expressions: x=10+5  y=x*2  y")
+  +await ok3:Int = println("  Functions:   +fn double(x:Int) = x*2")
+  +await ok4:Int = println("  Eval:        !eval double(5)")
+  +await ok5:Int = println("  AI:          just type natural language")
+  +await ok6:Int = println("  Commands:    /status /history /save /quit")
+  +if state.revision > 0
+    +await ok7:Int = println(concat("  Loaded session: rev ", concat(to_string(state.revision), concat(", ", concat(to_string(env.names.len), " vars")))))
+  +else
+    +let dummy:Int = 0
+  +await ok8:Int = println("")
+  +while true
+    +let prompt:String = concat("forge[", concat(to_string(state.revision), "]> "))
+    +await input:String = read_line(prompt)
+    +if input == "/quit" OR input == "/exit"
+      +await sv:Int = save_session(session_path, state, env)
+      +await bye:Int = println("Session saved. Goodbye.")
+      +return 0
+    +elif input == "/history"
+      +let i:Int = 0
+      +while i < state.log.len
+        +await ph:Int = println(concat("  [", concat(to_string(i), concat("] ", get(state.log, i)))))
+        +set i = i + 1
+    +elif input == "/save"
+      +await sv:Int = save_session(session_path, state, env)
+      +await ps:Int = println("  Session saved.")
+    +elif input == "/status"
+      +await ps1:Int = println(concat("  Revision:  ", to_string(state.revision)))
+      +await ps2:Int = println(concat("  Variables: ", to_string(env.names.len)))
+      +await ps3:Int = println(concat("  Functions: ", to_string(state.funcs.len)))
+      +await ps4:Int = println(concat("  Log:       ", to_string(state.log.len)))
+    +elif input == ""
+      +let dummy:Int = 0
+    +elif starts_with(input, "+fn ")
+      +call fn_result:Result<FuncInfo> = parse_fn_def(input)
+      +if fn_result.is_ok
+        +let fi:FuncInfo = fn_result.unwrap
+        +set state = {funcs: push(state.funcs, fi), log: push(state.log, concat("fn: ", fi.name)), revision: state.revision + 1}
+        +await pf:Int = println(concat("  Defined ", concat(fi.name, concat("(", concat(fi.param_name, concat(") [rev ", concat(to_string(state.revision), "]")))))))
+      +else
+        +await pe:Int = println(concat("  Parse error: ", fn_result.error))
+    +elif starts_with(input, "!eval ")
+      +let eval_input:String = substring(input, 6, input.len)
+      +call eval_result:Result<Int> = try_eval_line(eval_input, env, state.funcs)
+      +if eval_result.is_ok
+        +let val:Int = eval_result.unwrap
+        +set state = {funcs: state.funcs, log: push(state.log, concat("eval: ", concat(eval_input, concat(" = ", to_string(val))))), revision: state.revision}
+        +await pe:Int = println(concat("  = ", to_string(val)))
+      +else
+        +await pe:Int = println(concat("  Error: ", eval_result.error))
+    +elif starts_with(input, "/")
+      +await pu:Int = println(concat("  Unknown command: ", input))
+    +else
+      +let first_ch:String = char_at(input, 0)
+      +if is_letter(first_ch) OR is_digit_char(first_ch)
+        +call eval_result:Result<Int> = try_eval_line(input, env, state.funcs)
+        +if eval_result.is_ok
+          +let val:Int = eval_result.unwrap
+          +set state = {funcs: state.funcs, log: push(state.log, concat("eval: ", concat(input, concat(" = ", to_string(val))))), revision: state.revision}
+          +await pe:Int = println(concat("  = ", to_string(val)))
+        +else
+          +call assign_result:Result<Env> = try_assign_line(input, env, state.funcs)
+          +if assign_result.is_ok
+            +set env = assign_result.unwrap
+            +set state = {funcs: state.funcs, log: push(state.log, concat("let: ", input)), revision: state.revision + 1}
+            +await pa:Int = println(concat("  [rev ", concat(to_string(state.revision), "]")))
+          +else
+            +await asking:Int = println("  [asking LLM...]")
+            +await llm_resp:String = ask_llm(llm_host, llm_port, llm_model, input)
+            +set state = {funcs: state.funcs, log: push(state.log, concat("ask: ", input)), revision: state.revision}
+            +set state = {funcs: state.funcs, log: push(state.log, concat("llm: ", llm_resp)), revision: state.revision}
+            +await pl:Int = println(concat("  ", llm_resp))
+      +else
+        +await asking:Int = println("  [asking LLM...]")
+        +await llm_resp:String = ask_llm(llm_host, llm_port, llm_model, input)
+        +set state = {funcs: state.funcs, log: push(state.log, concat("ask: ", input)), revision: state.revision}
+        +set state = {funcs: state.funcs, log: push(state.log, concat("llm: ", llm_resp)), revision: state.revision}
+        +await pl:Int = println(concat("  ", llm_resp))
+  +return 0
 
 +fn main ()->Int [io,async]
-  +await ok:Int = println("Starting self-hosted Forge REPL...")
-  +let result:Int = repl_loop("localhost", 3000, "claude-opus-4-6-20250610")
+  +let result:Int = repl("/tmp/forge-session.txt", "localhost", 3000, "claude-opus-4-6-20250610")
   +return result

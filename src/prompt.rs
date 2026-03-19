@@ -92,9 +92,17 @@ Pure functions have no effect annotation.
 ### IO Functions (require [io,async] effect, use +await)
   tcp_listen(port)          — listen on TCP port, returns handle
   tcp_accept(server)        — accept connection, returns handle
+  tcp_connect(host, port)   — connect to TCP server, returns handle
   tcp_read(conn)            — read from connection, returns String
   tcp_write(conn, data)     — write String to connection
   tcp_close(conn)           — close connection
+  file_read(path)           — read entire file as String
+  file_write(path, data)    — write String to file
+  file_exists(path)         — check if file exists, returns Bool
+  list_dir(path)            — list directory entries, returns List<String>
+  read_line(prompt)         — read line from stdin with prompt, returns String
+  print(text)               — print text to stdout (no newline)
+  println(text)             — print text with newline
   sleep(ms)                 — sleep for milliseconds
 
 ### Modules
