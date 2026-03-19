@@ -90,12 +90,11 @@ pub struct EvalResponse {
 }
 
 pub async fn eval_fn(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
-    let mut session = session.lock().await;
+    let mut session = config.session.lock().await;
 
-    // Parse the input as a test input expression
     let input_source = format!("!eval {} {}", req.function, req.input);
     let operations = match parser::parse(&input_source) {
         Ok(ops) => ops,
@@ -110,6 +109,50 @@ pub async fn eval_fn(
 
     for op in &operations {
         if let parser::Operation::Eval(ev) = op {
+            let needs_async = session.program.get_function(&ev.function_name)
+                .is_some_and(|f| f.effects.iter().any(|e|
+                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
+            if needs_async {
+                if let Some(sender) = &config.io_sender {
+                    let program = session.program.clone();
+                    let fn_name = ev.function_name.clone();
+                    let input = ev.input.clone();
+                    let sender = sender.clone();
+
+                    drop(session); // release lock before blocking
+
+                    let eval_result = tokio::task::spawn_blocking(move || {
+                        let func = program.get_function(&fn_name)
+                            .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                        let handle = crate::coroutine::CoroutineHandle::new(sender);
+                        let mut env = eval::Env::new();
+                        env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+                        let input_val = eval::eval_parser_expr_standalone(&input)?;
+                        eval::bind_input_to_params(&program, func, &input_val, &mut env);
+                        eval::eval_function_body_pub(&program, &func.body, &mut env)
+                    }).await;
+
+                    return match eval_result {
+                        Ok(Ok(val)) => Json(EvalResponse {
+                            result: format!("{val}"),
+                            success: true,
+                            compiled: Some(false),
+                        }),
+                        Ok(Err(e)) => Json(EvalResponse {
+                            result: format!("{e}"),
+                            success: false,
+                            compiled: None,
+                        }),
+                        Err(e) => Json(EvalResponse {
+                            result: format!("task error: {e}"),
+                            success: false,
+                            compiled: None,
+                        }),
+                    };
+                }
+            }
+
             match eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
                 Ok((result, compiled)) => {
                     session.record_eval(&ev.function_name, &req.input, &result);
@@ -523,13 +566,30 @@ pub async fn ask(
     );
 
     let system = format!(
-        "{}\n\n## IMPORTANT: Persistent State\n\
-         The program state persists between responses. Do NOT resend existing types or functions.\n\
+        "{}\n\n## IMPORTANT: ForgeOS Interactive Mode\n\
+         \n\
+         The program state PERSISTS between responses. Do NOT resend existing types or functions.\n\
          Only send NEW code or modifications. Use !replace to modify existing functions.\n\
-         Use !move to reorganize code into modules.",
+         Use !move to reorganize code into modules.\n\
+         \n\
+         ## IO Builtins as Tools\n\
+         \n\
+         IO builtins (file_read, list_dir, shell_exec, etc.) serve two purposes:\n\
+         1. As TOOLS: for quick answers, write a minimal function and !eval it immediately.\n\
+            Example: user asks 'what files are in /tmp?' →\n\
+            +fn q ()->List<String> [io,async]\\n  +await r:List<String> = list_dir(\"/tmp\")\\n  +return r\\n!eval q\n\
+         2. As BUILDING BLOCKS: for larger programs, compose them into proper functions.\n\
+         \n\
+         For questions, prefer the tool pattern — minimal function, immediate eval.\n\
+         For building software, create well-named reusable functions.\n\
+         \n\
+         If an eval fails with an error, FIX the issue and try again — don't give up.\n\
+         Always follow up on errors until the user's request is fulfilled.",
         crate::prompt::system_prompt()
     );
 
+    let system_clone = system.clone();
+    let context_clone = context.clone();
     let messages = vec![
         crate::llm::ChatMessage::system(system),
         crate::llm::ChatMessage::user(context),
@@ -548,7 +608,7 @@ pub async fn ask(
     };
 
     // Only use code from <code> blocks — don't try to extract from prose
-    let code = output.code.clone();
+    let mut code = output.code.clone();
 
     // Build the reply text — combine thinking + prose, strip tags
     let mut reply_text = String::new();
@@ -578,7 +638,7 @@ pub async fn ask(
     if !clean_text.is_empty() {
         reply_text.push_str(clean_text);
     }
-    let reply_text = reply_text.trim().to_string();
+    let mut reply_text = reply_text.trim().to_string();
 
     let mut results = vec![];
     let mut test_results = vec![];
@@ -732,6 +792,89 @@ pub async fn ask(
         }
     }
 
+    // If there were errors, retry with the error context
+    let has_errors = results.iter().any(|r| !r.success) || test_results.iter().any(|r| !r.pass);
+
+    if has_errors {
+        let error_summary: String = results.iter()
+            .filter(|r| !r.success)
+            .map(|r| r.message.clone())
+            .chain(test_results.iter().filter(|r| !r.pass).map(|r| r.message.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let retry_context = format!(
+            "Your code had errors:\n{error_summary}\n\nFix the issues and try again. The program state is:\n{}",
+            crate::validator::program_summary(&session.program)
+        );
+
+        drop(session); // release lock for retry
+
+        let retry_messages = vec![
+            crate::llm::ChatMessage::system(system_clone),
+            crate::llm::ChatMessage::user(context_clone),
+            crate::llm::ChatMessage::assistant(&output.text),
+            crate::llm::ChatMessage::user(retry_context),
+        ];
+
+        if let Ok(retry_output) = llm.generate(retry_messages).await {
+            let retry_code = retry_output.code.clone();
+            if !retry_code.is_empty() && retry_code.trim() != "DONE" {
+                let mut session = config.session.lock().await;
+                // Remove duplicates before applying
+                if let Ok(ops) = crate::parser::parse(&retry_code) {
+                    for op in &ops {
+                        match op {
+                            crate::parser::Operation::Function(f) => {
+                                session.program.functions.retain(|existing| existing.name != f.name);
+                            }
+                            crate::parser::Operation::Type(t) => {
+                                let name = t.name.clone();
+                                session.program.types.retain(|existing| existing.name() != name);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Ok(retry_results) = session.apply(&retry_code) {
+                    let mut retry_mut_results: Vec<MutationResult> = retry_results.into_iter()
+                        .map(|(msg, ok)| MutationResult { message: msg, success: ok })
+                        .collect();
+                    results.append(&mut retry_mut_results);
+                }
+                // Re-run evals from retry code
+                if let Ok(ops) = crate::parser::parse(&retry_code) {
+                    for op in &ops {
+                        if let crate::parser::Operation::Eval(ev) = op {
+                            match crate::eval::eval_compiled_or_interpreted(
+                                &session.program, &ev.function_name, &ev.input,
+                            ) {
+                                Ok((result, compiled)) => {
+                                    let tag = if compiled { " [compiled]" } else { "" };
+                                    results.push(MutationResult {
+                                        message: format!("[retry] eval {}() = {result}{tag}", ev.function_name),
+                                        success: true,
+                                    });
+                                }
+                                Err(e) => {
+                                    results.push(MutationResult {
+                                        message: format!("[retry] eval error: {e}"),
+                                        success: false,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Append retry thinking
+            if !retry_output.thinking.is_empty() {
+                reply_text.push_str(&format!("\n\n[retry] {}", retry_output.thinking));
+            }
+            code = format!("{code}\n\n// --- retry ---\n{retry_code}");
+        }
+    }
+
     Json(AskResponse {
         reply: reply_text,
         code,
@@ -747,7 +890,6 @@ pub fn router(session: SharedSession) -> axum::Router {
 
     axum::Router::new()
         .route("/api/mutate", post(mutate))
-        .route("/api/eval", post(eval_fn))
         .route("/api/test", post(test_fn))
         .route("/api/query", post(query))
         .route("/api/status", get(status))
@@ -764,7 +906,6 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
     // The session-only routes need SharedSession state
     let session_routes = axum::Router::new()
         .route("/api/mutate", post(mutate))
-        .route("/api/eval", post(eval_fn))
         .route("/api/test", post(test_fn))
         .route("/api/query", post(query))
         .route("/api/status", get(status))
@@ -773,8 +914,9 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/rewind", post(rewind))
         .with_state(config.session.clone());
 
-    // Routes that need the full config
+    // Routes that need the full config (async IO, LLM, OpenCode)
     let config_routes = axum::Router::new()
+        .route("/api/eval", post(eval_fn))
         .route("/api/ask", post(ask))
         .route("/api/opencode", post(opencode_task))
         .with_state(config);
