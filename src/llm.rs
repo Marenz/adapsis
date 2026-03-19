@@ -219,7 +219,7 @@ impl LlmClient<OpenAiBackend> {
             http: Client::new(),
             backend: OpenAiBackend::new(base_url),
             temperature: 0.7,
-            max_tokens: 32000,
+            max_tokens: 64000,
         }
     }
 
@@ -228,7 +228,7 @@ impl LlmClient<OpenAiBackend> {
             http: Client::new(),
             backend: OpenAiBackend::new(base_url).with_model(model),
             temperature: 0.7,
-            max_tokens: 32000,
+            max_tokens: 64000,
         }
     }
 }

@@ -528,6 +528,11 @@ fn eval_function_body(
                 } else {
                     // Binding is plain T — errors propagate (like Rust's ?)
                     let val = eval_call(program, call, env)?;
+                    // Unwrap Ok() if the function returned a Result but the caller wants plain T
+                    let val = match val {
+                        Value::Ok(inner) => *inner,
+                        other => other,
+                    };
                     if let Some(binding) = binding {
                         env.set(&binding.name, val);
                     }
