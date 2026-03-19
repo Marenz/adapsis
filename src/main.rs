@@ -384,12 +384,45 @@ async fn main() -> Result<()> {
 
             // Event loop — process IO requests from coroutines
             let rt = runtime.clone();
+            let program_for_spawn = program.clone();
+            let io_sender_for_spawn = runtime.io_sender();
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
-                    let rt = rt.clone();
-                    tokio::spawn(async move {
-                        rt.handle_io(request).await;
-                    });
+                    match request {
+                        coroutine::IoRequest::Spawn { function_name, args } => {
+                            // Spawn a new coroutine for this function
+                            let prog = program_for_spawn.clone();
+                            let sender = io_sender_for_spawn.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let func_decl = match prog.get_function(&function_name) {
+                                    Some(f) => f,
+                                    None => {
+                                        eprintln!("spawn: function `{function_name}` not found");
+                                        return;
+                                    }
+                                };
+                                let handle = coroutine::CoroutineHandle::new(sender);
+                                let mut env = eval::Env::new();
+                                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+                                // Bind args to params
+                                for (i, param) in func_decl.params.iter().enumerate() {
+                                    if let Some(val) = args.get(i) {
+                                        env.set(&param.name, val.clone());
+                                    }
+                                }
+                                if let Err(e) = eval::eval_function_body_pub(&prog, &func_decl.body, &mut env) {
+                                    // Errors in spawned coroutines are logged, not fatal
+                                    eprintln!("spawn {function_name}: {e}");
+                                }
+                            });
+                        }
+                        _ => {
+                            let rt = rt.clone();
+                            tokio::spawn(async move {
+                                rt.handle_io(request).await;
+                            });
+                        }
+                    }
                 }
             };
 
