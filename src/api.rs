@@ -577,15 +577,39 @@ pub async fn ask(
                 }
             }
 
-            // Run tests
+            // Run tests and evals
             for op in &ops {
-                if let crate::parser::Operation::Test(test) = op {
-                    for case in &test.cases {
-                        match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
-                            Ok(msg) => test_results.push(TestCaseResult { message: msg, pass: true }),
-                            Err(e) => test_results.push(TestCaseResult { message: format!("{e}"), pass: false }),
+                match op {
+                    crate::parser::Operation::Test(test) => {
+                        for case in &test.cases {
+                            match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
+                                Ok(msg) => test_results.push(TestCaseResult { message: msg, pass: true }),
+                                Err(e) => test_results.push(TestCaseResult { message: format!("{e}"), pass: false }),
+                            }
                         }
                     }
+                    crate::parser::Operation::Eval(ev) => {
+                        match crate::eval::eval_compiled_or_interpreted(
+                            &session.program,
+                            &ev.function_name,
+                            &ev.input,
+                        ) {
+                            Ok((result, compiled)) => {
+                                let tag = if compiled { " [compiled]" } else { "" };
+                                results.push(MutationResult {
+                                    message: format!("eval {}() = {result}{tag}", ev.function_name),
+                                    success: true,
+                                });
+                            }
+                            Err(e) => {
+                                results.push(MutationResult {
+                                    message: format!("eval error: {e}"),
+                                    success: false,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -599,7 +623,8 @@ pub async fn ask(
     })
 }
 
-/// Build the API router.
+/// Build the API router (without LLM support).
+#[allow(dead_code)]
 pub fn router(session: SharedSession) -> axum::Router {
     use axum::routing::{get, post};
 
