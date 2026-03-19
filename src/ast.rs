@@ -268,7 +268,22 @@ pub struct CallExpr {
 pub struct MatchArm {
     pub variant: Identifier,
     pub bindings: Vec<Identifier>,
+    pub patterns: Option<Vec<MatchPattern>>,
     pub body: Vec<Statement>,
+}
+
+/// A nested pattern for matching inside union payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MatchPattern {
+    /// Just bind the value to a name (or "_" to ignore)
+    Binding(Identifier),
+    /// Match a specific variant with sub-patterns: e.g. Literal(x)
+    Variant {
+        variant: Identifier,
+        sub_patterns: Vec<MatchPattern>,
+    },
+    /// Match a literal value: e.g. 0, "hello", true
+    Literal(Literal),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

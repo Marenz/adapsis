@@ -342,6 +342,65 @@ fn is_union_variant(program: &ast::Program, name: &str) -> bool {
     false
 }
 
+/// Check if nested patterns match the payload values, binding variables on success.
+fn match_nested_patterns(
+    program: &ast::Program,
+    patterns: &[ast::MatchPattern],
+    values: &[Value],
+    env: &mut Env,
+) -> Result<bool> {
+    for (pattern, value) in patterns.iter().zip(values.iter()) {
+        if !match_single_pattern(program, pattern, value, env)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Match a single pattern against a value, binding variables on success.
+fn match_single_pattern(
+    program: &ast::Program,
+    pattern: &ast::MatchPattern,
+    value: &Value,
+    env: &mut Env,
+) -> Result<bool> {
+    match pattern {
+        ast::MatchPattern::Binding(name) => {
+            if name != "_" {
+                env.set(name, value.clone());
+            }
+            Ok(true)
+        }
+        ast::MatchPattern::Literal(lit) => {
+            let expected = match lit {
+                ast::Literal::Int(n) => Value::Int(*n),
+                ast::Literal::Float(f) => Value::Float(*f),
+                ast::Literal::Bool(b) => Value::Bool(*b),
+                ast::Literal::String(s) => Value::String(s.clone()),
+            };
+            Ok(value.matches(&expected))
+        }
+        ast::MatchPattern::Variant {
+            variant,
+            sub_patterns,
+        } => {
+            if let Value::Union {
+                variant: v,
+                payload,
+            } = value
+            {
+                if v == variant {
+                    match_nested_patterns(program, sub_patterns, payload, env)
+                } else {
+                    Ok(false)
+                }
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
 /// Look up struct field names from the program's type declarations.
 fn get_struct_fields(program: &ast::Program, type_name: &str) -> Option<Vec<(String, ast::Type)>> {
     for td in &program.types {
@@ -530,20 +589,44 @@ fn eval_function_body(
                 let val = eval_ast_expr(program, expr, env)?;
                 match &val {
                     Value::Union { variant, payload } => {
+                        let mut matched = false;
                         for arm in arms {
                             if arm.variant == *variant {
-                                // Bind payload values to arm bindings
+                                // Exact variant match — bind payload values
                                 for (i, binding) in arm.bindings.iter().enumerate() {
-                                    if let Some(pval) = payload.get(i) {
-                                        env.set(binding, pval.clone());
+                                    if binding != "_" {
+                                        if let Some(pval) = payload.get(i) {
+                                            env.set(binding, pval.clone());
+                                        }
+                                    }
+                                }
+                                // Check nested pattern guards
+                                if let Some(ref patterns) = arm.patterns {
+                                    if !match_nested_patterns(program, patterns, payload, env)? {
+                                        continue; // nested pattern didn't match, try next arm
                                     }
                                 }
                                 let result = eval_function_body(program, &arm.body, env)?;
                                 if !matches!(result, Value::None) {
                                     return Ok(result);
                                 }
+                                matched = true;
+                                break;
+                            } else if arm.variant == "_" {
+                                // Wildcard/default case — bind the whole value if there's a binding
+                                if arm.bindings.len() == 1 && arm.bindings[0] != "_" {
+                                    env.set(&arm.bindings[0], val.clone());
+                                }
+                                let result = eval_function_body(program, &arm.body, env)?;
+                                if !matches!(result, Value::None) {
+                                    return Ok(result);
+                                }
+                                matched = true;
                                 break;
                             }
+                        }
+                        if !matched {
+                            bail!("+match: no arm matched variant `{variant}`");
                         }
                     }
                     _ => bail!("+match expects a union value, got {val}"),

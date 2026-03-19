@@ -20,7 +20,9 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             Ok(msg)
         }
         parser::Operation::Function(fn_decl) => {
-            let converted = convert_function(fn_decl)?;
+            let mut converted = convert_function(fn_decl)?;
+            // Resolve union type references: Struct(name) → TaggedUnion(name) where appropriate
+            resolve_union_types_in_function(&mut converted, program);
             // Check for duplicate function name at top level
             if program.functions.iter().any(|f| f.name == converted.name) {
                 bail!("duplicate function: `{}`", converted.name);
@@ -92,7 +94,21 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 module.types.push(converted);
             }
             parser::Operation::Function(fd) => {
-                let converted = convert_function(fd)?;
+                let mut converted = convert_function(fd)?;
+                // Resolve union types: need both program-level and module-level unions
+                let mut union_names = collect_union_names(program);
+                for td in &module.types {
+                    if let ast::TypeDecl::TaggedUnion(u) = td {
+                        union_names.insert(u.name.clone());
+                    }
+                }
+                if !union_names.is_empty() {
+                    resolve_type(&mut converted.return_type, &union_names);
+                    for param in &mut converted.params {
+                        resolve_type(&mut param.ty, &union_names);
+                    }
+                    resolve_union_types_in_stmts(&mut converted.body, &union_names);
+                }
                 if module.functions.iter().any(|f| f.name == converted.name) {
                     bail!(
                         "duplicate function `{}` in module `{}`",
@@ -308,9 +324,14 @@ fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
                     stmt.id = format!("match.{}.s{}", arm.variant, i + 1);
                     body.push(stmt);
                 }
+                let patterns = arm
+                    .patterns
+                    .as_ref()
+                    .map(|pats| pats.iter().map(convert_match_pattern).collect());
                 arms.push(ast::MatchArm {
                     variant: arm.variant.clone(),
                     bindings: arm.bindings.clone(),
+                    patterns,
                     body,
                 });
             }
@@ -554,6 +575,28 @@ fn convert_expr(expr: &parser::Expr) -> Result<ast::Expr> {
     }
 }
 
+fn convert_match_pattern(pat: &parser::MatchPatternDecl) -> ast::MatchPattern {
+    match pat {
+        parser::MatchPatternDecl::Binding(name) => ast::MatchPattern::Binding(name.clone()),
+        parser::MatchPatternDecl::Variant {
+            variant,
+            sub_patterns,
+        } => ast::MatchPattern::Variant {
+            variant: variant.clone(),
+            sub_patterns: sub_patterns.iter().map(convert_match_pattern).collect(),
+        },
+        parser::MatchPatternDecl::LiteralInt(n) => {
+            ast::MatchPattern::Literal(ast::Literal::Int(*n))
+        }
+        parser::MatchPatternDecl::LiteralBool(b) => {
+            ast::MatchPattern::Literal(ast::Literal::Bool(*b))
+        }
+        parser::MatchPatternDecl::LiteralString(s) => {
+            ast::MatchPattern::Literal(ast::Literal::String(s.clone()))
+        }
+    }
+}
+
 fn convert_type(ty: &parser::TypeExpr) -> Result<ast::Type> {
     match ty {
         parser::TypeExpr::Named(name) => match name.as_str() {
@@ -654,6 +697,93 @@ fn convert_unary_op(op: &parser::UnaryOp) -> ast::UnaryOp {
     match op {
         parser::UnaryOp::Not => ast::UnaryOp::Not,
         parser::UnaryOp::Neg => ast::UnaryOp::Neg,
+    }
+}
+
+/// Collect all union type names from the program (including modules).
+fn collect_union_names(program: &ast::Program) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for td in &program.types {
+        if let ast::TypeDecl::TaggedUnion(u) = td {
+            names.insert(u.name.clone());
+        }
+    }
+    for module in &program.modules {
+        for td in &module.types {
+            if let ast::TypeDecl::TaggedUnion(u) = td {
+                names.insert(u.name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Resolve Type::Struct(name) → Type::TaggedUnion(name) for names that are actually unions.
+fn resolve_type(ty: &mut ast::Type, union_names: &std::collections::HashSet<String>) {
+    match ty {
+        ast::Type::Struct(name) if union_names.contains(name) => {
+            *ty = ast::Type::TaggedUnion(name.clone());
+        }
+        ast::Type::List(inner) | ast::Type::Option(inner) | ast::Type::Result(inner) | ast::Type::Set(inner) => {
+            resolve_type(inner, union_names);
+        }
+        ast::Type::Map(k, v) => {
+            resolve_type(k, union_names);
+            resolve_type(v, union_names);
+        }
+        _ => {}
+    }
+}
+
+/// Walk a function's types and resolve union references.
+fn resolve_union_types_in_function(func: &mut ast::FunctionDecl, program: &ast::Program) {
+    let union_names = collect_union_names(program);
+    if union_names.is_empty() {
+        return;
+    }
+    // Fix return type
+    resolve_type(&mut func.return_type, &union_names);
+    // Fix parameter types
+    for param in &mut func.params {
+        resolve_type(&mut param.ty, &union_names);
+    }
+    // Fix types in statements
+    resolve_union_types_in_stmts(&mut func.body, &union_names);
+}
+
+/// Walk statements and resolve union type references.
+fn resolve_union_types_in_stmts(stmts: &mut [ast::Statement], union_names: &std::collections::HashSet<String>) {
+    for stmt in stmts {
+        match &mut stmt.kind {
+            ast::StatementKind::Let { ty, .. } => {
+                resolve_type(ty, union_names);
+            }
+            ast::StatementKind::Call { binding, .. } => {
+                if let Some(b) = binding {
+                    resolve_type(&mut b.ty, union_names);
+                }
+            }
+            ast::StatementKind::Branch { then_body, else_body, .. } => {
+                resolve_union_types_in_stmts(then_body, union_names);
+                resolve_union_types_in_stmts(else_body, union_names);
+            }
+            ast::StatementKind::Each { binding, body, .. } => {
+                resolve_type(&mut binding.ty, union_names);
+                resolve_union_types_in_stmts(body, union_names);
+            }
+            ast::StatementKind::Match { arms, .. } => {
+                for arm in arms {
+                    resolve_union_types_in_stmts(&mut arm.body, union_names);
+                }
+            }
+            ast::StatementKind::While { body, .. } => {
+                resolve_union_types_in_stmts(body, union_names);
+            }
+            ast::StatementKind::Await { ty, .. } => {
+                resolve_type(ty, union_names);
+            }
+            _ => {}
+        }
     }
 }
 

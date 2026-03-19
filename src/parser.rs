@@ -34,7 +34,24 @@ pub struct MatchDecl {
 pub struct MatchArmDecl {
     pub variant: String,
     pub bindings: Vec<String>,
+    pub patterns: Option<Vec<MatchPatternDecl>>,
     pub body: Vec<Operation>,
+}
+
+/// Parsed pattern for nested matching inside +case arms.
+#[derive(Debug, Clone)]
+pub enum MatchPatternDecl {
+    /// Simple binding: `x` or `_`
+    Binding(String),
+    /// Nested variant match: `Literal(x)` or `Add(Literal(0), y)`
+    Variant {
+        variant: String,
+        sub_patterns: Vec<MatchPatternDecl>,
+    },
+    /// Literal value match: `0`, `true`, `"hello"`
+    LiteralInt(i64),
+    LiteralBool(bool),
+    LiteralString(String),
 }
 
 #[derive(Debug, Clone)]
@@ -419,26 +436,13 @@ impl<'a> Parser<'a> {
                 };
                 if let Some(case_rest) = next.text.strip_prefix("+case") {
                     let case_rest = case_rest.trim();
-                    // Parse: VariantName or VariantName(binding1, binding2)
-                    let (variant, bindings) = if let Some(paren) = case_rest.find('(') {
-                        let variant = case_rest[..paren].trim().to_string();
-                        let close = case_rest.rfind(')').ok_or_else(|| {
-                            anyhow!("line {}: expected ')' in +case", next.number)
-                        })?;
-                        let binds: Vec<String> = case_rest[paren + 1..close]
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        (variant, binds)
-                    } else {
-                        (case_rest.to_string(), vec![])
-                    };
+                    let arm = parse_case_pattern(next.number, case_rest)?;
                     self.index += 1;
                     let body = self.parse_nested_block(indent)?;
                     arms.push(MatchArmDecl {
-                        variant,
-                        bindings,
+                        variant: arm.0,
+                        bindings: arm.1,
+                        patterns: arm.2,
                         body,
                     });
                 } else {
@@ -1815,4 +1819,109 @@ fn find_matching_open_paren_variant(input: &str) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Parse a +case pattern. Returns (variant_name, flat_bindings, optional nested patterns).
+/// Simple cases like `Literal(x)` produce flat bindings with no patterns.
+/// Nested cases like `Add(Literal(x), y)` produce patterns.
+/// Wildcard `_` produces variant="_" with no bindings.
+fn parse_case_pattern(
+    line_num: usize,
+    input: &str,
+) -> Result<(String, Vec<String>, Option<Vec<MatchPatternDecl>>)> {
+    let input = input.trim();
+
+    // Wildcard: +case _
+    if input == "_" {
+        return Ok(("_".to_string(), vec![], None));
+    }
+
+    // No parentheses: +case VariantName
+    let Some(paren) = input.find('(') else {
+        return Ok((input.to_string(), vec![], None));
+    };
+
+    let variant = input[..paren].trim().to_string();
+    let close = input.rfind(')').ok_or_else(|| {
+        anyhow!("line {line_num}: expected ')' in +case")
+    })?;
+    let inner = &input[paren + 1..close];
+
+    // Parse the inner patterns
+    let parts = split_top_level(inner, ',');
+    let mut patterns = Vec::new();
+    let mut flat_bindings = Vec::new();
+    let mut has_nested = false;
+
+    for part in &parts {
+        let p = parse_match_pattern(line_num, part.trim())?;
+        match &p {
+            MatchPatternDecl::Binding(name) => {
+                flat_bindings.push(name.clone());
+            }
+            _ => {
+                has_nested = true;
+                // For nested patterns, we need a placeholder binding
+                flat_bindings.push(format!("__pat_{}", flat_bindings.len()));
+            }
+        }
+        patterns.push(p);
+    }
+
+    if has_nested {
+        Ok((variant, flat_bindings, Some(patterns)))
+    } else {
+        Ok((variant, flat_bindings, None))
+    }
+}
+
+/// Parse a single match pattern element.
+fn parse_match_pattern(line_num: usize, input: &str) -> Result<MatchPatternDecl> {
+    let input = input.trim();
+
+    // Empty
+    if input.is_empty() {
+        return Ok(MatchPatternDecl::Binding("_".to_string()));
+    }
+
+    // Literal integer (including negative)
+    if let Ok(n) = input.parse::<i64>() {
+        return Ok(MatchPatternDecl::LiteralInt(n));
+    }
+
+    // Literal bool
+    if input == "true" {
+        return Ok(MatchPatternDecl::LiteralBool(true));
+    }
+    if input == "false" {
+        return Ok(MatchPatternDecl::LiteralBool(false));
+    }
+
+    // Literal string
+    if input.starts_with('"') && input.ends_with('"') && input.len() >= 2 {
+        return Ok(MatchPatternDecl::LiteralString(
+            input[1..input.len() - 1].to_string(),
+        ));
+    }
+
+    // Variant with sub-patterns: e.g. Literal(x) or Add(Literal(0), y)
+    if let Some(paren) = input.find('(') {
+        let close = input.rfind(')').ok_or_else(|| {
+            anyhow!("line {line_num}: expected ')' in nested pattern")
+        })?;
+        let variant = input[..paren].trim().to_string();
+        let inner = &input[paren + 1..close];
+    let parts = split_top_level(inner, ',');
+        let mut sub_patterns = Vec::new();
+        for part in &parts {
+            sub_patterns.push(parse_match_pattern(line_num, part.trim())?);
+        }
+        return Ok(MatchPatternDecl::Variant {
+            variant,
+            sub_patterns,
+        });
+    }
+
+    // Simple binding (identifier or _)
+    Ok(MatchPatternDecl::Binding(input.to_string()))
 }

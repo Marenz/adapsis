@@ -52,6 +52,13 @@ Pure functions have no effect annotation.
   +case VariantName(binding1, binding2)  — match arm (body indented below)
     +return binding1 + binding2
   +case OtherVariant                 — no-payload variant match
+  +case _                            — wildcard/default (catches anything)
+  Note: inside +case, you can use +if to inspect bound values:
+    +case Add(left, right)
+      +if right == Literal(0)
+        +return left
+      +else
+        +return e
   +return expr                       — return from function
   +each collection item:Type         — loop over collection (body indented below)
     +call result:Type = process(item)
