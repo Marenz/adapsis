@@ -103,6 +103,7 @@ const chatEl = document.getElementById('chat-messages');
 const inputEl = document.getElementById('chat-input');
 const sendBtn = document.getElementById('send-btn');
 let sending = false;
+const collapsedModules = new Set();
 
 function addMessage(role, content) {
   const msg = document.createElement('div');
@@ -308,17 +309,20 @@ function renderProgram(prog) {
     el.appendChild(renderFn(f));
   }
 
-  // Modules (collapsible)
+  // Modules (collapsible, state preserved across refreshes)
   for (const m of prog.modules || []) {
     const moduleDiv = document.createElement('div');
     moduleDiv.style.marginBottom = '8px';
 
+    const isCollapsed = collapsedModules.has(m.name);
+
     const header = document.createElement('div');
     header.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;';
-    header.innerHTML = `<span style="color:var(--orange);font-weight:600;">📦 module ${m.name}</span><span style="color:var(--text-dim);font-size:11px;">${m.functions.length} fn, ${m.types.length} types ▾</span>`;
+    header.innerHTML = `<span style="color:var(--orange);font-weight:600;">📦 module ${m.name}</span><span style="color:var(--text-dim);font-size:11px;">${m.functions.length} fn, ${m.types.length} types ${isCollapsed ? '▸' : '▾'}</span>`;
 
     const content = document.createElement('div');
     content.style.cssText = 'padding-left:12px;border-left:2px solid var(--orange);margin-left:6px;margin-top:4px;';
+    content.style.display = isCollapsed ? 'none' : 'block';
 
     for (const t of m.types) {
       content.appendChild(renderType(t));
@@ -327,11 +331,13 @@ function renderProgram(prog) {
       content.appendChild(renderFn(f));
     }
 
-    let collapsed = false;
     header.onclick = () => {
-      collapsed = !collapsed;
-      content.style.display = collapsed ? 'none' : 'block';
-      header.querySelector('span:last-child').textContent = `${m.functions.length} fn, ${m.types.length} types ${collapsed ? '▸' : '▾'}`;
+      if (collapsedModules.has(m.name)) {
+        collapsedModules.delete(m.name);
+      } else {
+        collapsedModules.add(m.name);
+      }
+      refreshProgram();
     };
 
     moduleDiv.appendChild(header);

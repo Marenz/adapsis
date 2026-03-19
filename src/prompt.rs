@@ -120,6 +120,13 @@ Pure functions have no effect annotation.
     +return validated
 end
 
+### Organizing Code
+!move symbol1 symbol2 ... ModuleName
+  Move functions, types, or modules into a target module (creates if needed).
+  Call sites are auto-updated: add(x) becomes ModuleName.add(x)
+  Functions within the same module call each other without prefix.
+  Example: !move Point Color distance Geometry
+
 ### Expressions
 - Literals: 42, 3.14, true, false, "hello"
 - Field access: user.name, input.age

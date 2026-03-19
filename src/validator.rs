@@ -867,42 +867,73 @@ fn is_builtin_name(name: &str) -> bool {
     )
 }
 
-fn apply_move(
-    program: &mut ast::Program,
-    function_names: &[String],
-    target_module: &str,
-) -> Result<String> {
+fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str) -> Result<String> {
     let mut moved = Vec::new();
     let mut not_found = Vec::new();
     let mut funcs_to_move = Vec::new();
+    let mut types_to_move = Vec::new();
+    let mut modules_to_merge = Vec::new();
 
-    // Collect functions from top-level
-    for name in function_names {
+    for name in names {
+        let mut found = false;
+
+        // Check top-level functions
         if let Some(idx) = program.functions.iter().position(|f| f.name == *name) {
             funcs_to_move.push(program.functions.remove(idx));
-            moved.push(name.clone());
-        } else {
-            // Check other modules
-            let mut found = false;
+            moved.push(format!("fn:{name}"));
+            found = true;
+        }
+
+        // Check top-level types
+        if !found {
+            if let Some(idx) = program.types.iter().position(|t| t.name() == name) {
+                types_to_move.push(program.types.remove(idx));
+                moved.push(format!("type:{name}"));
+                found = true;
+            }
+        }
+
+        // Check if it's a module (merge into target)
+        if !found {
+            if let Some(idx) = program
+                .modules
+                .iter()
+                .position(|m| m.name == *name && m.name != target_module)
+            {
+                modules_to_merge.push(program.modules.remove(idx));
+                moved.push(format!("module:{name}"));
+                found = true;
+            }
+        }
+
+        // Check functions/types in other modules
+        if !found {
             for module in &mut program.modules {
                 if module.name == target_module {
                     continue;
                 }
                 if let Some(idx) = module.functions.iter().position(|f| f.name == *name) {
                     funcs_to_move.push(module.functions.remove(idx));
-                    moved.push(name.clone());
+                    moved.push(format!("fn:{name}"));
+                    found = true;
+                    break;
+                }
+                if let Some(idx) = module.types.iter().position(|t| t.name() == name) {
+                    types_to_move.push(module.types.remove(idx));
+                    moved.push(format!("type:{name}"));
                     found = true;
                     break;
                 }
             }
-            if !found {
-                not_found.push(name.clone());
-            }
+        }
+
+        if !found {
+            not_found.push(name.clone());
         }
     }
 
-    if funcs_to_move.is_empty() {
-        bail!("no functions found to move: {}", not_found.join(", "));
+    if moved.is_empty() {
+        bail!("nothing found to move: {}", not_found.join(", "));
     }
 
     // Find or create target module
@@ -919,22 +950,35 @@ fn apply_move(
         .iter_mut()
         .find(|m| m.name == target_module)
         .unwrap();
+
     for func in funcs_to_move {
         target.functions.push(func);
     }
+    for ty in types_to_move {
+        target.types.push(ty);
+    }
+    // Merge sub-modules: move their contents into the target
+    for sub in modules_to_merge {
+        for func in sub.functions {
+            target.functions.push(func);
+        }
+        for ty in sub.types {
+            target.types.push(ty);
+        }
+    }
 
-    // Update call sites outside the target module
-    let moved_set: std::collections::HashSet<String> = moved.iter().cloned().collect();
+    // Update call sites for moved functions
+    let moved_fn_names: std::collections::HashSet<String> = names.iter().cloned().collect();
 
     for func in &mut program.functions {
-        update_call_sites(&mut func.body, &moved_set, target_module);
+        update_call_sites(&mut func.body, &moved_fn_names, target_module);
     }
     for module in &mut program.modules {
         if module.name == target_module {
             continue;
         }
         for func in &mut module.functions {
-            update_call_sites(&mut func.body, &moved_set, target_module);
+            update_call_sites(&mut func.body, &moved_fn_names, target_module);
         }
     }
 
