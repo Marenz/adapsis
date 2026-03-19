@@ -1107,7 +1107,7 @@ impl<'a> ExprParser<'a> {
 
         loop {
             if let Some(Token::Symbol('.')) = self.peek() {
-                if 9 < min_bp {
+                if 20 < min_bp {
                     break;
                 }
                 self.index += 1;
@@ -1120,7 +1120,7 @@ impl<'a> ExprParser<'a> {
             }
 
             if let Some(Token::Symbol('(')) = self.peek() {
-                if 9 < min_bp {
+                if 20 < min_bp {
                     break;
                 }
                 self.index += 1;

@@ -640,7 +640,7 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
 
             ctx.builder.switch_to_block(trap_block);
             ctx.builder.seal_block(trap_block);
-            ctx.builder.ins().trap(TrapCode::user(0).unwrap());
+            ctx.builder.ins().trap(TrapCode::user(1).unwrap());
 
             ctx.builder.switch_to_block(ok_block);
             ctx.builder.seal_block(ok_block);
