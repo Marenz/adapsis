@@ -37,6 +37,10 @@ enum Command {
         #[arg(short, long, default_value = "http://127.0.0.1:8081")]
         url: String,
 
+        /// Model name to use
+        #[arg(long, default_value = "default")]
+        model: String,
+
         /// Maximum feedback loop iterations
         #[arg(short, long, default_value_t = 20)]
         max_iterations: usize,
@@ -51,6 +55,10 @@ enum Command {
         /// LLM server URL (OpenAI-compatible)
         #[arg(short, long, default_value = "http://127.0.0.1:8081")]
         url: String,
+
+        /// Model name to use
+        #[arg(long, default_value = "default")]
+        model: String,
 
         /// Maximum feedback loop iterations per function
         #[arg(short, long, default_value_t = 5)]
@@ -155,19 +163,21 @@ async fn main() -> Result<()> {
         Command::Run {
             task,
             url,
+            model,
             max_iterations,
         } => {
-            let llm_client = llm::LlmClient::new(&url);
+            let llm_client = llm::LlmClient::new_with_model(&url, &model);
             let mut orch = orchestrator::Orchestrator::new(llm_client, max_iterations);
             orch.run(&task).await?;
         }
         Command::Architect {
             task,
             url,
+            model,
             max_iterations,
             port,
         } => {
-            let llm_client = llm::LlmClient::new(&url);
+            let llm_client = llm::LlmClient::new_with_model(&url, &model);
             if port > 0 {
                 // Run with browser UI
                 let event_bus = events::EventBus::new();

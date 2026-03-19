@@ -23,6 +23,13 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             let mut converted = convert_function(fn_decl)?;
             // Resolve union type references: Struct(name) → TaggedUnion(name) where appropriate
             resolve_union_types_in_function(&mut converted, program);
+            // Check for builtin name collision
+            if is_builtin_name(&converted.name) {
+                bail!(
+                    "function name `{}` conflicts with a built-in function — choose a different name",
+                    converted.name
+                );
+            }
             // Check for duplicate function name at top level
             if program.functions.iter().any(|f| f.name == converted.name) {
                 bail!("duplicate function: `{}`", converted.name);
@@ -724,7 +731,10 @@ fn resolve_type(ty: &mut ast::Type, union_names: &std::collections::HashSet<Stri
         ast::Type::Struct(name) if union_names.contains(name) => {
             *ty = ast::Type::TaggedUnion(name.clone());
         }
-        ast::Type::List(inner) | ast::Type::Option(inner) | ast::Type::Result(inner) | ast::Type::Set(inner) => {
+        ast::Type::List(inner)
+        | ast::Type::Option(inner)
+        | ast::Type::Result(inner)
+        | ast::Type::Set(inner) => {
             resolve_type(inner, union_names);
         }
         ast::Type::Map(k, v) => {
@@ -752,7 +762,10 @@ fn resolve_union_types_in_function(func: &mut ast::FunctionDecl, program: &ast::
 }
 
 /// Walk statements and resolve union type references.
-fn resolve_union_types_in_stmts(stmts: &mut [ast::Statement], union_names: &std::collections::HashSet<String>) {
+fn resolve_union_types_in_stmts(
+    stmts: &mut [ast::Statement],
+    union_names: &std::collections::HashSet<String>,
+) {
     for stmt in stmts {
         match &mut stmt.kind {
             ast::StatementKind::Let { ty, .. } => {
@@ -763,7 +776,11 @@ fn resolve_union_types_in_stmts(stmts: &mut [ast::Statement], union_names: &std:
                     resolve_type(&mut b.ty, union_names);
                 }
             }
-            ast::StatementKind::Branch { then_body, else_body, .. } => {
+            ast::StatementKind::Branch {
+                then_body,
+                else_body,
+                ..
+            } => {
                 resolve_union_types_in_stmts(then_body, union_names);
                 resolve_union_types_in_stmts(else_body, union_names);
             }
@@ -788,6 +805,48 @@ fn resolve_union_types_in_stmts(stmts: &mut [ast::Statement], union_names: &std:
 }
 
 /// Generate a summary of the current program state for injection into the LLM context.
+/// Check if a name conflicts with a built-in function.
+fn is_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        "concat"
+            | "len"
+            | "length"
+            | "to_string"
+            | "str"
+            | "abs"
+            | "sqrt"
+            | "pow"
+            | "floor"
+            | "min"
+            | "max"
+            | "char_at"
+            | "substring"
+            | "substr"
+            | "starts_with"
+            | "ends_with"
+            | "contains"
+            | "index_of"
+            | "split"
+            | "trim"
+            | "list"
+            | "push"
+            | "get"
+            | "join"
+            | "to_int"
+            | "parse_int"
+            | "int"
+            | "digit_value"
+            | "is_digit_char"
+            | "Ok"
+            | "Err"
+            | "Some"
+            | "state"
+            | "get_state"
+            | "set_state"
+    )
+}
+
 pub fn program_summary(program: &ast::Program) -> String {
     let mut out = String::new();
     out.push_str("=== Current Program State ===\n");
