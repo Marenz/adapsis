@@ -30,6 +30,10 @@ pub enum IoRequest {
     TcpRead { conn: Handle, reply: oneshot::Sender<Result<String>> },
     TcpWrite { conn: Handle, data: String, reply: oneshot::Sender<Result<()>> },
     TcpClose { conn: Handle, reply: oneshot::Sender<Result<()>> },
+    FileRead { path: String, reply: oneshot::Sender<Result<String>> },
+    FileWrite { path: String, data: String, reply: oneshot::Sender<Result<()>> },
+    FileExists { path: String, reply: oneshot::Sender<Result<bool>> },
+    ListDir { path: String, reply: oneshot::Sender<Result<Vec<String>>> },
     Sleep { ms: u64, reply: oneshot::Sender<Result<()>> },
     Spawn { function_name: String, args: Vec<Value> },
 }
@@ -136,6 +140,36 @@ impl Runtime {
             IoRequest::TcpClose { conn, reply } => {
                 self.connections.lock().await.remove(&conn);
                 let _ = reply.send(Ok(()));
+            }
+            IoRequest::FileRead { path, reply } => {
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(contents) => { let _ = reply.send(Ok(contents)); }
+                    Err(e) => { let _ = reply.send(Err(e.into())); }
+                }
+            }
+            IoRequest::FileWrite { path, data, reply } => {
+                match tokio::fs::write(&path, data.as_bytes()).await {
+                    Ok(()) => { let _ = reply.send(Ok(())); }
+                    Err(e) => { let _ = reply.send(Err(e.into())); }
+                }
+            }
+            IoRequest::FileExists { path, reply } => {
+                let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+                let _ = reply.send(Ok(exists));
+            }
+            IoRequest::ListDir { path, reply } => {
+                match tokio::fs::read_dir(&path).await {
+                    Ok(mut entries) => {
+                        let mut names = Vec::new();
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                names.push(name);
+                            }
+                        }
+                        let _ = reply.send(Ok(names));
+                    }
+                    Err(e) => { let _ = reply.send(Err(e.into())); }
+                }
             }
             IoRequest::Sleep { ms, reply } => {
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
@@ -249,6 +283,59 @@ impl CoroutineHandle {
                 rx.blocking_recv()
                     .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
                 return Ok(Value::Int(0));
+            }
+            "file_read" | "read_file" => {
+                let path = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => bail!("file_read expects String path"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::FileRead { path, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let contents = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::String(contents));
+            }
+            "file_write" | "write_file" => {
+                let path = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => bail!("file_write expects String path"),
+                };
+                let data = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    other => format!("{other}"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::FileWrite { path, data, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::Int(0));
+            }
+            "file_exists" => {
+                let path = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => bail!("file_exists expects String path"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::FileExists { path, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let exists = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::Bool(exists));
+            }
+            "list_dir" => {
+                let path = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => bail!("list_dir expects String path"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::ListDir { path, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let names = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let values = names.into_iter().map(Value::String).collect();
+                return Ok(Value::List(values));
             }
             _ => bail!("unknown await operation: {op}"),
         };
