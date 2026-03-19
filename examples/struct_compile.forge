@@ -1,0 +1,17 @@
++type Point = {x:Int, y:Int}
+
++fn distance_sq (p:Point)->Int
+  +return p.x * p.x + p.y * p.y
+
++fn add_points (a:Point, b:Point)->Int
+  +let ax:Int = a.x + b.x
+  +let ay:Int = a.y + b.y
+  +return ax * ax + ay * ay
+
+!test distance_sq
+  +with x=3 y=4 -> expect 25
+  +with x=0 y=0 -> expect 0
+  +with x=1 y=1 -> expect 2
+
+!eval distance_sq x=3 y=4
+!eval add_points a={x: 1, y: 2} b={x: 3, y: 4}

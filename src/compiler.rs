@@ -138,6 +138,7 @@ fn is_compilable_type(ty: &ast::Type) -> bool {
         | ast::Type::Bool
         | ast::Type::Byte
         | ast::Type::String => true,
+        ast::Type::Struct(_) => true,
         ast::Type::Result(inner) => is_compilable_type(inner),
         _ => false,
     }
@@ -171,6 +172,8 @@ fn is_compilable_expr(expr: &ast::Expr) -> bool {
     match expr {
         ast::Expr::Literal(_) => true,
         ast::Expr::Identifier(_) => true,
+        ast::Expr::FieldAccess { base, .. } => is_compilable_expr(base),
+        ast::Expr::StructInit { fields, .. } => fields.iter().all(|f| is_compilable_expr(&f.value)),
         ast::Expr::Binary { left, right, .. } => {
             is_compilable_expr(left) && is_compilable_expr(right)
         }
@@ -281,7 +284,7 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     // First pass: declare all functions (so they can call each other)
     let mut signatures: HashMap<String, Signature> = HashMap::new();
     for func in &program.functions {
-        let sig = build_signature(&mut module, func)?;
+        let sig = build_signature(&mut module, func, program)?;
         let func_id = module.declare_function(&func.name, Linkage::Local, &sig)?;
         compiled_functions.insert(func.name.clone(), func_id);
         signatures.insert(func.name.clone(), sig);
@@ -300,6 +303,7 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
             &mut ctx,
             func,
             &compiled_functions,
+            program,
             &runtime_funcs,
         )?;
 
@@ -317,27 +321,21 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
 }
 
 /// Build a Cranelift signature from a Forge function declaration.
-fn build_signature(module: &mut JITModule, func: &ast::FunctionDecl) -> Result<Signature> {
+fn build_signature(
+    module: &mut JITModule,
+    func: &ast::FunctionDecl,
+    program: &ast::Program,
+) -> Result<Signature> {
     let mut sig = module.make_signature();
 
     for param in &func.params {
-        if is_string_type(&param.ty) {
-            // String is (ptr: i64, len: i64)
-            sig.params.push(AbiParam::new(types::I64)); // ptr
-            sig.params.push(AbiParam::new(types::I64)); // len
-        } else {
-            let cl_type = forge_type_to_cranelift(&param.ty)?;
+        for cl_type in flatten_type(&param.ty, program) {
             sig.params.push(AbiParam::new(cl_type));
         }
     }
 
-    if is_string_type(&func.return_type) {
-        // String return is (ptr: i64, len: i64)
-        sig.returns.push(AbiParam::new(types::I64)); // ptr
-        sig.returns.push(AbiParam::new(types::I64)); // len
-    } else {
-        let ret_type = forge_type_to_cranelift(&func.return_type)?;
-        sig.returns.push(AbiParam::new(ret_type));
+    for cl_type in flatten_type(&func.return_type, program) {
+        sig.returns.push(AbiParam::new(cl_type));
     }
 
     Ok(sig)
@@ -369,6 +367,7 @@ fn compile_function(
     ctx: &mut codegen::Context,
     func: &ast::FunctionDecl,
     all_functions: &HashMap<String, FuncId>,
+    program: &ast::Program,
     runtime_funcs: &RuntimeFuncs,
 ) -> Result<()> {
     let mut builder_ctx = FunctionBuilderContext::new();
@@ -380,42 +379,22 @@ fn compile_function(
     builder.seal_block(entry_block);
 
     // Map parameter names to SSA values
-    // For strings, we create two variables: name_ptr and name_len
+    // Structs and strings expand to multiple block params
     let mut vars: HashMap<String, Variable> = HashMap::new();
     let mut var_counter: u32 = 0;
     let mut block_param_idx: usize = 0;
 
     for param in &func.params {
-        if is_string_type(&param.ty) {
-            // String param → two block params (ptr, len)
-            let ptr_val = builder.block_params(entry_block)[block_param_idx];
-            let len_val = builder.block_params(entry_block)[block_param_idx + 1];
-            block_param_idx += 2;
-
-            let ptr_var = Variable::new(var_counter as usize);
-            var_counter += 1;
-            builder.declare_var(ptr_var, types::I64);
-            builder.def_var(ptr_var, ptr_val);
-            vars.insert(format!("{}_ptr", param.name), ptr_var);
-
-            let len_var = Variable::new(var_counter as usize);
-            var_counter += 1;
-            builder.declare_var(len_var, types::I64);
-            builder.def_var(len_var, len_val);
-            vars.insert(format!("{}_len", param.name), len_var);
-
-            // Also store the ptr var under the plain name (for passing to functions)
-            vars.insert(param.name.clone(), ptr_var);
-        } else {
-            let val = builder.block_params(entry_block)[block_param_idx];
-            block_param_idx += 1;
-            let var = Variable::new(var_counter as usize);
-            var_counter += 1;
-            let cl_type = forge_type_to_cranelift(&param.ty)?;
-            builder.declare_var(var, cl_type);
-            builder.def_var(var, val);
-            vars.insert(param.name.clone(), var);
-        }
+        bind_param(
+            &mut builder,
+            entry_block,
+            &mut vars,
+            &mut var_counter,
+            &mut block_param_idx,
+            &param.name,
+            &param.ty,
+            program,
+        );
     }
 
     let mut string_literals = Vec::new();
@@ -426,6 +405,7 @@ fn compile_function(
         var_counter: &mut var_counter,
         all_functions,
         runtime_funcs,
+        program,
         return_type: &func.return_type,
         terminated: false,
         string_literals: &mut string_literals,
@@ -458,6 +438,67 @@ struct RuntimeFuncs {
     eq_id: FuncId,
 }
 
+/// Compute the flattened Cranelift types for a Forge type.
+/// Structs expand to their fields, strings to (ptr, len).
+fn flatten_type(ty: &ast::Type, program: &ast::Program) -> Vec<types::Type> {
+    match ty {
+        ast::Type::Int => vec![types::I64],
+        ast::Type::Float => vec![types::F64],
+        ast::Type::Bool => vec![types::I8],
+        ast::Type::Byte => vec![types::I8],
+        ast::Type::String => vec![types::I64, types::I64], // ptr, len
+        ast::Type::Result(inner) => flatten_type(inner, program),
+        ast::Type::Struct(name) => {
+            // Look up struct fields and flatten each
+            if let Some(fields) = get_struct_field_types(program, name) {
+                fields
+                    .iter()
+                    .flat_map(|(_, ty)| flatten_type(ty, program))
+                    .collect()
+            } else {
+                vec![types::I64] // unknown struct — treat as opaque pointer
+            }
+        }
+        _ => vec![types::I64], // fallback
+    }
+}
+
+/// Get field names and types for a struct from the program.
+fn get_struct_field_types(program: &ast::Program, name: &str) -> Option<Vec<(String, ast::Type)>> {
+    for td in &program.types {
+        if let ast::TypeDecl::Struct(s) = td {
+            if s.name == name {
+                return Some(
+                    s.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
+                );
+            }
+        }
+    }
+    for module in &program.modules {
+        for td in &module.types {
+            if let ast::TypeDecl::Struct(s) = td {
+                if s.name == name {
+                    return Some(
+                        s.fields
+                            .iter()
+                            .map(|f| (f.name.clone(), f.ty.clone()))
+                            .collect(),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Compute the number of i64 "slots" a type occupies when flattened.
+fn flat_slot_count(ty: &ast::Type, program: &ast::Program) -> usize {
+    flatten_type(ty, program).len()
+}
+
 struct CompilationContext<'a, 'b> {
     module: &'a mut JITModule,
     builder: &'b mut FunctionBuilder<'a>,
@@ -465,10 +506,80 @@ struct CompilationContext<'a, 'b> {
     var_counter: &'b mut u32,
     all_functions: &'b HashMap<String, FuncId>,
     runtime_funcs: &'b RuntimeFuncs,
+    program: &'b ast::Program,
     return_type: &'b ast::Type,
     terminated: bool,
-    /// String literal data: (bytes, data_id) for embedding in the module
     string_literals: &'b mut Vec<(String, cranelift_module::DataId)>,
+}
+
+/// Bind a function parameter to variables, handling struct/string flattening.
+fn bind_param(
+    builder: &mut FunctionBuilder,
+    block: cranelift::prelude::Block,
+    vars: &mut HashMap<String, Variable>,
+    var_counter: &mut u32,
+    block_param_idx: &mut usize,
+    name: &str,
+    ty: &ast::Type,
+    program: &ast::Program,
+) {
+    match ty {
+        ast::Type::String => {
+            let ptr_val = builder.block_params(block)[*block_param_idx];
+            let len_val = builder.block_params(block)[*block_param_idx + 1];
+            *block_param_idx += 2;
+
+            let ptr_var = Variable::new(*var_counter as usize);
+            *var_counter += 1;
+            builder.declare_var(ptr_var, types::I64);
+            builder.def_var(ptr_var, ptr_val);
+            vars.insert(format!("{name}_ptr"), ptr_var);
+
+            let len_var = Variable::new(*var_counter as usize);
+            *var_counter += 1;
+            builder.declare_var(len_var, types::I64);
+            builder.def_var(len_var, len_val);
+            vars.insert(format!("{name}_len"), len_var);
+
+            vars.insert(name.to_string(), ptr_var);
+        }
+        ast::Type::Struct(type_name) => {
+            if let Some(fields) = get_struct_field_types(program, type_name) {
+                for (field_name, field_ty) in &fields {
+                    let qualified = format!("{name}.{field_name}");
+                    bind_param(
+                        builder,
+                        block,
+                        vars,
+                        var_counter,
+                        block_param_idx,
+                        &qualified,
+                        field_ty,
+                        program,
+                    );
+                }
+            } else {
+                // Unknown struct — treat as single i64
+                let val = builder.block_params(block)[*block_param_idx];
+                *block_param_idx += 1;
+                let var = Variable::new(*var_counter as usize);
+                *var_counter += 1;
+                builder.declare_var(var, types::I64);
+                builder.def_var(var, val);
+                vars.insert(name.to_string(), var);
+            }
+        }
+        _ => {
+            let val = builder.block_params(block)[*block_param_idx];
+            *block_param_idx += 1;
+            let cl_type = flatten_type(ty, program)[0];
+            let var = Variable::new(*var_counter as usize);
+            *var_counter += 1;
+            builder.declare_var(var, cl_type);
+            builder.def_var(var, val);
+            vars.insert(name.to_string(), var);
+        }
+    }
 }
 
 fn alloc_var(ctx: &mut CompilationContext, name: &str, ty: types::Type) -> Variable {
@@ -898,13 +1009,79 @@ fn compile_expr(
 
         ast::Expr::Call(call) => compile_call(ctx, call, expected_type),
 
-        ast::Expr::FieldAccess { .. } => {
-            bail!("field access not yet supported in compiler")
+        ast::Expr::FieldAccess { base, field } => {
+            // Resolve to a flattened variable name like "req.name" or "req.name_ptr"
+            let base_name = expr_to_var_name(base);
+
+            // Try qualified name first: base.field
+            let qualified = format!("{base_name}.{field}");
+            if let Some(var) = ctx.vars.get(&qualified) {
+                return Ok(ctx.builder.use_var(*var));
+            }
+
+            // For strings: base.field_ptr
+            let ptr_name = format!("{qualified}_ptr");
+            let ptr_var = ctx.vars.get(&ptr_name).copied();
+            let len_name = format!("{qualified}_len");
+            let len_var = ctx.vars.get(&len_name).copied();
+
+            if let Some(pv) = ptr_var {
+                if let Some(lv) = len_var {
+                    let len_val = ctx.builder.use_var(lv);
+                    let tmp = Variable::new(*ctx.var_counter as usize);
+                    *ctx.var_counter += 1;
+                    ctx.builder.declare_var(tmp, types::I64);
+                    ctx.builder.def_var(tmp, len_val);
+                    ctx.vars.insert("_last_str_len".to_string(), tmp);
+                }
+                return Ok(ctx.builder.use_var(pv));
+            }
+
+            // .len on strings
+            if field == "len" {
+                let len_name = format!("{base_name}_len");
+                if let Some(var) = ctx.vars.get(&len_name) {
+                    return Ok(ctx.builder.use_var(*var));
+                }
+            }
+
+            bail!("cannot resolve field access `{base_name}.{field}` in compiler")
         }
 
-        ast::Expr::StructInit { .. } => {
-            bail!("struct construction not yet supported in compiler")
+        ast::Expr::StructInit { ty: _, fields } => {
+            // Struct construction — compile each field value and store in variables
+            // The "result" is just the first field's value; the caller reads all fields
+            // by their variable names
+            if fields.is_empty() {
+                return Ok(ctx.builder.ins().iconst(types::I64, 0));
+            }
+            let mut first_val = None;
+            for field in fields {
+                let val = compile_expr(ctx, &field.value, types::I64)?;
+                if first_val.is_none() {
+                    first_val = Some(val);
+                }
+                // Store each field value so it can be accessed later
+                let var = Variable::new(*ctx.var_counter as usize);
+                *ctx.var_counter += 1;
+                ctx.builder.declare_var(var, types::I64);
+                ctx.builder.def_var(var, val);
+                ctx.vars
+                    .insert(format!("_struct_field_{}", field.name), var);
+            }
+            return Ok(first_val.unwrap_or_else(|| ctx.builder.ins().iconst(types::I64, 0)));
         }
+    }
+}
+
+/// Convert an expression to a variable name for field access resolution.
+fn expr_to_var_name(expr: &ast::Expr) -> String {
+    match expr {
+        ast::Expr::Identifier(name) => name.clone(),
+        ast::Expr::FieldAccess { base, field } => {
+            format!("{}.{field}", expr_to_var_name(base))
+        }
+        _ => format!("{expr:?}"),
     }
 }
 
