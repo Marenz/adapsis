@@ -34,6 +34,9 @@ pub enum IoRequest {
     FileWrite { path: String, data: String, reply: oneshot::Sender<Result<()>> },
     FileExists { path: String, reply: oneshot::Sender<Result<bool>> },
     ListDir { path: String, reply: oneshot::Sender<Result<Vec<String>>> },
+    TcpConnect { host: String, port: u16, reply: oneshot::Sender<Result<Handle>> },
+    StdinReadLine { prompt: String, reply: oneshot::Sender<Result<String>> },
+    Print { text: String, newline: bool, reply: oneshot::Sender<Result<()>> },
     Sleep { ms: u64, reply: oneshot::Sender<Result<()>> },
     Spawn { function_name: String, args: Vec<Value> },
 }
@@ -171,6 +174,42 @@ impl Runtime {
                     Err(e) => { let _ = reply.send(Err(e.into())); }
                 }
             }
+            IoRequest::TcpConnect { host, port, reply } => {
+                match TcpStream::connect(format!("{host}:{port}")).await {
+                    Ok(stream) => {
+                        let handle = self.next_handle();
+                        self.connections.lock().await.insert(
+                            handle,
+                            Arc::new(Mutex::new(stream)),
+                        );
+                        let _ = reply.send(Ok(handle));
+                    }
+                    Err(e) => { let _ = reply.send(Err(e.into())); }
+                }
+            }
+            IoRequest::StdinReadLine { prompt, reply } => {
+                // Run stdin read on a blocking task since it blocks
+                tokio::task::spawn_blocking(move || {
+                    use std::io::Write;
+                    print!("{prompt}");
+                    std::io::stdout().flush().ok();
+                    let mut line = String::new();
+                    match std::io::stdin().read_line(&mut line) {
+                        Ok(0) => reply.send(Err(anyhow::anyhow!("EOF"))),
+                        Ok(_) => reply.send(Ok(line.trim_end_matches('\n').trim_end_matches('\r').to_string())),
+                        Err(e) => reply.send(Err(e.into())),
+                    }
+                }).await.ok();
+            }
+            IoRequest::Print { text, newline, reply } => {
+                if newline {
+                    println!("{text}");
+                } else {
+                    print!("{text}");
+                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                }
+                let _ = reply.send(Ok(()));
+            }
             IoRequest::Sleep { ms, reply } => {
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 let _ = reply.send(Ok(()));
@@ -266,6 +305,62 @@ impl CoroutineHandle {
                 let (tx, rx) = oneshot::channel();
                 let req = IoRequest::TcpClose { conn: handle, reply: tx };
                 io_tx.blocking_send(req)
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::Int(0));
+            }
+            "tcp_connect" => {
+                let host = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => bail!("tcp_connect expects String host"),
+                };
+                let port = match &args[1] {
+                    Value::Int(p) => *p as u16,
+                    _ => bail!("tcp_connect expects Int port"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::TcpConnect { host, port, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let handle = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::Int(handle));
+            }
+            "read_line" | "stdin_read_line" => {
+                let prompt = if args.is_empty() {
+                    String::new()
+                } else {
+                    match &args[0] {
+                        Value::String(s) => s.clone(),
+                        other => format!("{other}"),
+                    }
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::StdinReadLine { prompt, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let line = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::String(line));
+            }
+            "print" => {
+                let text = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    other => format!("{other}"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::Print { text, newline: false, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::Int(0));
+            }
+            "println" => {
+                let text = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    other => format!("{other}"),
+                };
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::Print { text, newline: true, reply: tx })
                     .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
                 rx.blocking_recv()
                     .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;

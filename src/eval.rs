@@ -638,17 +638,29 @@ fn eval_function_body(
                 }
             }
             ast::StatementKind::Await { name, call, .. } => {
-                let handle = match env.vars.get("__coroutine_handle") {
-                    Some(Value::CoroutineHandle(h)) => h.clone(),
-                    _ => bail!("+await requires async context — use 'forge run-async'"),
-                };
-                let args: Vec<Value> = call
-                    .args
-                    .iter()
-                    .map(|a| eval_ast_expr(program, a, env))
-                    .collect::<Result<Vec<_>>>()?;
-                let result = handle.execute_await(&call.callee, &args)?;
-                env.set(name, result);
+                // First check if the callee is a user-defined Forge function
+                // If so, call it normally (it will use +await internally for IO)
+                if program.get_function(&call.callee).is_some() {
+                    let val = eval_call(program, call, env)?;
+                    let val = match val {
+                        Value::Ok(inner) => *inner,
+                        other => other,
+                    };
+                    env.set(name, val);
+                } else {
+                    // Builtin IO operation
+                    let handle = match env.vars.get("__coroutine_handle") {
+                        Some(Value::CoroutineHandle(h)) => h.clone(),
+                        _ => bail!("+await requires async context — use 'forge run-async'"),
+                    };
+                    let args: Vec<Value> = call
+                        .args
+                        .iter()
+                        .map(|a| eval_ast_expr(program, a, env))
+                        .collect::<Result<Vec<_>>>()?;
+                    let result = handle.execute_await(&call.callee, &args)?;
+                    env.set(name, result);
+                }
             }
             ast::StatementKind::Spawn { call } => {
                 let handle = match env.vars.get("__coroutine_handle") {
@@ -1083,6 +1095,10 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 let mut call_env = Env::new();
                 for (param, arg) in func.params.iter().zip(args) {
                     call_env.set(&param.name, arg);
+                }
+                // Propagate coroutine handle to called functions
+                if let Some(handle) = env.vars.get("__coroutine_handle") {
+                    call_env.set("__coroutine_handle", handle.clone());
                 }
                 eval_function_body(program, &func.body, &mut call_env)
             } else {

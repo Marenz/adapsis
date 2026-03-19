@@ -1,0 +1,31 @@
+{
+  "mutations": [
+    {
+      "revision": 1,
+      "timestamp": "1773889452s",
+      "source": "+fn hello ()->String\n  +return \"hello\"\n\n!eval hello",
+      "summary": "OK: added function `hello` (0 params, 1 statements, effects: [])",
+      "success": true
+    }
+  ],
+  "history": [
+    {
+      "kind": "Eval",
+      "revision": 1,
+      "function": "hello",
+      "input": "StructLiteral([])",
+      "result": "94640180674560"
+    },
+    {
+      "kind": "Eval",
+      "revision": 1,
+      "function": "hello",
+      "input": "StructLiteral([])",
+      "result": "94640180727808"
+    }
+  ],
+  "revision": 1,
+  "sources": [
+    "+fn hello ()->String\n  +return \"hello\"\n\n!eval hello"
+  ]
+}

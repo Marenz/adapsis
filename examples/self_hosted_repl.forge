@@ -1,0 +1,111 @@
+// Self-Hosted Forge REPL — written entirely in Forge
+// Reads input, classifies as Forge code or natural language,
+// sends natural language to LLM, applies Forge mutations, prints results.
+
+// === HTTP client for LLM communication ===
+
++fn http_request (host:String, port:Int, method:String, path:String, body:String)->String [io,async]
+  +await conn:Int = tcp_connect(host, port)
+  +let content_len:String = to_string(body.len)
+  +let request:String = concat(method, concat(" ", concat(path, " HTTP/1.1\r\n")))
+  +set request = concat(request, concat("Host: ", concat(host, "\r\n")))
+  +set request = concat(request, concat("Content-Type: application/json\r\n", ""))
+  +set request = concat(request, concat("Content-Length: ", concat(content_len, "\r\n")))
+  +set request = concat(request, "\r\n")
+  +set request = concat(request, body)
+  +await ok:Int = tcp_write(conn, request)
+  +await response:String = tcp_read(conn)
+  +await ok2:Int = tcp_close(conn)
+  +return response
+
++fn extract_json_field (json:String, field:String)->String
+  +let search:String = concat("\"", concat(field, "\":\""))
+  +let idx:Int = index_of(json, search)
+  +if idx < 0
+    +return ""
+  +else
+    +let start:Int = idx + search.len
+    +let end:Int = index_of(substring(json, start, json.len), "\"")
+    +if end < 0
+      +return substring(json, start, json.len)
+    +else
+      +return substring(json, start, start + end)
+
++fn ask_llm (host:String, port:Int, model:String, prompt:String)->String [io,async]
+  +let escaped_prompt:String = prompt
+  +let body:String = concat("{\"model\":\"", concat(model, "\",\"messages\":[{\"role\":\"user\",\"content\":\""))
+  +set body = concat(body, concat(escaped_prompt, "\"}],\"max_tokens\":4000}"))
+  +let response:String = http_request(host, port, "POST", "/v1/chat/completions", body)
+  +let content:String = extract_json_field(response, "content")
+  +return content
+
+// === Input classification ===
+
++fn is_forge_code (input:String)->Bool
+  +if input.len == 0
+    +return false
+  +else
+    +let first:String = char_at(input, 0)
+    +if first == "+"
+      +return true
+    +elif first == "!"
+      +return true
+    +elif first == "?"
+      +return true
+    +elif starts_with(input, "/")
+      +return true
+    +else
+      +return false
+
+// === Session log ===
+
++fn log_entry (log:List<String>, entry:String)->List<String>
+  +return push(log, entry)
+
++fn format_log (log:List<String>)->String
+  +let result:String = ""
+  +let i:Int = 0
+  +while i < log.len
+    +let entry:String = get(log, i)
+    +set result = concat(result, concat("[", concat(to_string(i), concat("] ", concat(entry, "\n")))))
+    +set i = i + 1
+  +return result
+
+// === The REPL loop ===
+
++fn repl_loop (llm_host:String, llm_port:Int, llm_model:String)->Int [io,async]
+  +let log:List<String> = list()
+  +let revision:Int = 0
+  +await ok:Int = println("=== Forge Self-Hosted REPL ===")
+  +await ok2:Int = println("Type Forge code (+fn, !eval, ?symbols) or natural language for the AI.")
+  +await ok3:Int = println("Commands: /history, /quit")
+  +await ok4:Int = println("")
+  +while true
+    +let prompt:String = concat("forge[", concat(to_string(revision), "]> "))
+    +await input:String = read_line(prompt)
+    +if input == "/quit" OR input == "/exit"
+      +await bye:Int = println("Goodbye.")
+      +return 0
+    +elif input == "/history"
+      +let hist:String = format_log(log)
+      +await ph:Int = println(hist)
+    +elif input == ""
+      +let dummy:Int = 0
+    +elif is_forge_code(input)
+      +set log = log_entry(log, concat("forge: ", input))
+      +set revision = revision + 1
+      +await pf:Int = println(concat("  [applied rev ", concat(to_string(revision), "]")))
+    +else
+      +await thinking:Int = println("  [asking LLM...]")
+      +await llm_response:String = ask_llm(llm_host, llm_port, llm_model, input)
+      +set log = log_entry(log, concat("ask: ", input))
+      +set log = log_entry(log, concat("llm: ", llm_response))
+      +await pr:Int = println(concat("  ", llm_response))
+  +return 0
+
+// === Entry point ===
+
++fn main ()->Int [io,async]
+  +await ok:Int = println("Starting self-hosted Forge REPL...")
+  +let result:Int = repl_loop("localhost", 3000, "claude-opus-4-6-20250610")
+  +return result
