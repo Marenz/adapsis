@@ -160,6 +160,12 @@ pub fn eval_compiled_or_interpreted(
     function_name: &str,
     input: &parser::Expr,
 ) -> Result<(String, bool)> {
+    // If it's a builtin, use eval_call_with_input directly
+    if program.get_function(function_name).is_none() && crate::builtins::is_builtin(function_name) {
+        let result = eval_call_with_input(program, function_name, input)?;
+        return Ok((result, false));
+    }
+
     let func = program
         .get_function(function_name)
         .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
@@ -213,29 +219,54 @@ pub fn eval_call_with_input(
     function_name: &str,
     input: &parser::Expr,
 ) -> Result<String> {
-    let func = program
-        .get_function(function_name)
-        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+    // Try user-defined function first
+    if let Some(func) = program.get_function(function_name) {
+        let input_val = eval_parser_expr_standalone(input)?;
+        let mut env = Env::new();
+        bind_input_to_params(program, func, &input_val, &mut env);
 
-    let input_val = eval_parser_expr_standalone(input)?;
-    let mut env = Env::new();
-    bind_input_to_params(program, func, &input_val, &mut env);
+        let returns_result = matches!(&func.return_type, ast::Type::Result(_));
 
-    let returns_result = matches!(&func.return_type, ast::Type::Result(_));
+        return match eval_function_body(program, &func.body, &mut env) {
+            Ok(val) => {
+                let result = if returns_result {
+                    match &val {
+                        Value::Ok(_) | Value::Err(_) => val,
+                        _ => Value::Ok(Box::new(val)),
+                    }
+                } else {
+                    val
+                };
+                Ok(format!("{result}"))
+            }
+            Err(e) => Ok(format!("Err({e})")),
+        };
+    }
 
-    match eval_function_body(program, &func.body, &mut env) {
-        Ok(val) => {
-            let result = if returns_result {
-                match &val {
-                    Value::Ok(_) | Value::Err(_) => val,
-                    _ => Value::Ok(Box::new(val)),
-                }
-            } else {
-                val
-            };
-            Ok(format!("{result}"))
+    // Try as a builtin function
+    if crate::builtins::is_builtin(function_name) {
+        let input_val = eval_parser_expr_standalone(input)?;
+        // Convert input to args list
+        let args = match &input_val {
+            Value::Struct(_, fields) => {
+                // Struct fields become positional args in order
+                fields.values().cloned().collect::<Vec<_>>()
+            }
+            Value::None => vec![],
+            other => vec![other.clone()],
+        };
+        let mut env = Env::new();
+        let call = ast::CallExpr {
+            callee: function_name.to_string(),
+            args: vec![], // not used — we call eval_call_inner directly
+        };
+        // Build a fake call and evaluate using the builtin path
+        match eval_call_inner_with_args(program, function_name, args, &mut env) {
+            Ok(val) => Ok(format!("{val}")),
+            Err(e) => Ok(format!("Err({e})")),
         }
-        Err(e) => Ok(format!("Err({e})")),
+    } else {
+        bail!("function `{function_name}` not found (not a user function or builtin)")
     }
 }
 
@@ -735,6 +766,16 @@ fn eval_call(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Res
     result
 }
 
+/// Evaluate a builtin call with pre-evaluated args. Public for !eval on builtins.
+pub fn eval_call_inner_with_args(
+    program: &ast::Program,
+    callee: &str,
+    args: Vec<Value>,
+    env: &mut Env,
+) -> Result<Value> {
+    eval_builtin_or_user(program, callee, args, env)
+}
+
 fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Result<Value> {
     let args: Vec<Value> = call
         .args
@@ -742,8 +783,17 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
         .map(|a| eval_ast_expr(program, a, env))
         .collect::<Result<Vec<_>>>()?;
 
+    eval_builtin_or_user(program, &call.callee, args, env)
+}
+
+fn eval_builtin_or_user(
+    program: &ast::Program,
+    callee: &str,
+    args: Vec<Value>,
+    env: &mut Env,
+) -> Result<Value> {
     // Check for built-in functions
-    match call.callee.as_str() {
+    match callee {
         "Ok" => {
             if args.len() == 1 {
                 Ok(Value::Ok(Box::new(args.into_iter().next().unwrap())))
@@ -1244,7 +1294,7 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
         }
         _ => {
             // Try to find the function in the program and call it
-            if let Some(func) = program.get_function(&call.callee) {
+            if let Some(func) = program.get_function(callee) {
                 let mut call_env = Env::new();
                 for (param, arg) in func.params.iter().zip(args) {
                     call_env.set(&param.name, arg);
@@ -1256,16 +1306,15 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 eval_function_body(program, &func.body, &mut call_env)
             } else {
                 // Check if it's a union variant constructor
-                if is_union_variant(program, &call.callee) {
+                if is_union_variant(program, callee) {
                     return Ok(Value::Union {
-                        variant: call.callee.clone(),
+                        variant: callee.to_string(),
                         payload: args,
                     });
                 }
-                // Also handle no-arg variant (called without parens — comes as Ident)
                 bail!(
                     "undefined function `{}` (called with {} args)",
-                    call.callee,
+                    callee,
                     args.len()
                 )
             }

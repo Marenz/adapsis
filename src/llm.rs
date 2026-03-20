@@ -293,7 +293,32 @@ where
             max_tokens: self.max_tokens,
         };
 
-        self.backend.generate(&self.http, &request).await
+        // Retry with exponential backoff on connection errors
+        let mut last_err = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_millis(1000 * (1 << attempt));
+                eprintln!("[llm:retry] attempt {}/3 after {}ms", attempt + 1, delay.as_millis());
+                tokio::time::sleep(delay).await;
+            }
+            match self.backend.generate(&self.http, &request).await {
+                Ok(output) => return Ok(output),
+                Err(e) => {
+                    let err_str = format!("{e}");
+                    if err_str.contains("connection") || err_str.contains("Connection")
+                        || err_str.contains("timeout") || err_str.contains("reset")
+                        || err_str.contains("broken pipe")
+                    {
+                        eprintln!("[llm:error] {err_str} — will retry");
+                        last_err = Some(e);
+                        continue;
+                    }
+                    // Non-retryable error
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("LLM request failed after 3 retries")))
     }
 }
 
