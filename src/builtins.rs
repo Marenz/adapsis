@@ -397,6 +397,18 @@ pub static IO_BUILTINS: &[Builtin] = &[
         description: "sleep for milliseconds",
         category: BuiltinCategory::Io,
     },
+    Builtin {
+        name: "llm_call",
+        aliases: &[],
+        description: "single LLM text generation: llm_call(system, prompt[, model])",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "llm_agent",
+        aliases: &[],
+        description: "full agentic LLM loop until DONE: llm_agent(system, task[, model])",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).

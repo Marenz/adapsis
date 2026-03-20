@@ -40,19 +40,33 @@ pub enum IoRequest {
     StdinReadLine { prompt: String, reply: oneshot::Sender<Result<String>> },
     Print { text: String, newline: bool, reply: oneshot::Sender<Result<()>> },
     Sleep { ms: u64, reply: oneshot::Sender<Result<()>> },
+    /// Single LLM text generation — no agentic loop, just prompt → response
+    LlmCall {
+        model: Option<String>,
+        system: String,
+        prompt: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// Full agentic LLM loop — takes control until DONE
+    LlmAgent {
+        model: Option<String>,
+        system: String,
+        task: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
     Spawn { function_name: String, args: Vec<Value> },
 }
 
 /// The coroutine runtime — manages IO resources and dispatches operations.
 pub struct Runtime {
-    /// Channel for receiving IO requests from coroutines
     io_tx: mpsc::Sender<IoRequest>,
-    /// Handle counter
     next_handle: AtomicI64,
-    /// Active TCP listeners
     listeners: Mutex<HashMap<Handle, Arc<TcpListener>>>,
-    /// Active TCP connections
     connections: Mutex<HashMap<Handle, Arc<Mutex<TcpStream>>>>,
+    /// LLM config for llm_call/llm_agent
+    pub llm_url: String,
+    pub llm_default_model: String,
+    pub llm_api_key: Option<String>,
 }
 
 impl Runtime {
@@ -64,6 +78,9 @@ impl Runtime {
                 next_handle: AtomicI64::new(1),
                 listeners: Mutex::new(HashMap::new()),
                 connections: Mutex::new(HashMap::new()),
+                llm_url: String::new(),
+                llm_default_model: String::new(),
+                llm_api_key: None,
             },
             io_rx,
         )
@@ -245,6 +262,67 @@ impl Runtime {
             }
             IoRequest::Spawn { .. } => {
                 // Spawn is handled at a higher level
+            }
+            IoRequest::LlmCall { model, system, prompt, reply } => {
+                let url = self.llm_url.clone();
+                let default_model = self.llm_default_model.clone();
+                let api_key = self.llm_api_key.clone();
+                let model = model.unwrap_or(default_model);
+
+                tokio::spawn(async move {
+                    let llm = crate::llm::LlmClient::new_with_model_and_key(&url, &model, api_key);
+                    let messages = vec![
+                        crate::llm::ChatMessage::system(system),
+                        crate::llm::ChatMessage::user(prompt),
+                    ];
+                    match llm.generate(messages).await {
+                        Ok(output) => {
+                            let text = if !output.code.is_empty() { output.code } else { output.text };
+                            let _ = reply.send(Ok(text));
+                        }
+                        Err(e) => { let _ = reply.send(Err(e)); }
+                    }
+                });
+            }
+            IoRequest::LlmAgent { model, system, task, reply } => {
+                let url = self.llm_url.clone();
+                let default_model = self.llm_default_model.clone();
+                let api_key = self.llm_api_key.clone();
+                let model = model.unwrap_or(default_model);
+
+                tokio::spawn(async move {
+                    let llm = crate::llm::LlmClient::new_with_model_and_key(&url, &model, api_key);
+                    let builtins = crate::builtins::format_for_prompt();
+                    let full_system = format!("{}\n\n{builtins}\n\nWork step by step. When done, respond with DONE.", system);
+                    let mut messages = vec![
+                        crate::llm::ChatMessage::system(full_system),
+                        crate::llm::ChatMessage::user(task),
+                    ];
+
+                    let mut final_result = String::new();
+                    for _iter in 0..10 {
+                        match llm.generate(messages.clone()).await {
+                            Ok(output) => {
+                                messages.push(crate::llm::ChatMessage::assistant(&output.text));
+                                let code = &output.code;
+                                if code.trim() == "DONE" || code.is_empty() {
+                                    final_result = output.text;
+                                    break;
+                                }
+                                // Feed results back
+                                messages.push(crate::llm::ChatMessage::user(
+                                    "Continue with the next step, or DONE if complete.".to_string()
+                                ));
+                                final_result = output.text;
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                                return;
+                            }
+                        }
+                    }
+                    let _ = reply.send(Ok(final_result));
+                });
             }
         }
     }
@@ -486,6 +564,48 @@ impl CoroutineHandle {
                 rx.blocking_recv()
                     .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
                 return Ok(Value::String("restarting...".to_string()));
+            }
+            "llm_call" => {
+                // llm_call(system_prompt, user_prompt) or llm_call(system, user, model)
+                let system = match args.get(0) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("llm_call expects (system:String, prompt:String[, model:String])"),
+                };
+                let prompt = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("llm_call expects (system:String, prompt:String[, model:String])"),
+                };
+                let model = args.get(2).and_then(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                });
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::LlmCall { model, system, prompt, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let result = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::String(result));
+            }
+            "llm_agent" => {
+                // llm_agent(system_prompt, task) or llm_agent(system, task, model)
+                let system = match args.get(0) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("llm_agent expects (system:String, task:String[, model:String])"),
+                };
+                let task = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("llm_agent expects (system:String, task:String[, model:String])"),
+                };
+                let model = args.get(2).and_then(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                });
+                let (tx, rx) = oneshot::channel();
+                io_tx.blocking_send(IoRequest::LlmAgent { model, system, task, reply: tx })
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+                let result = rx.blocking_recv()
+                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                return Ok(Value::String(result));
             }
             _ => bail!("unknown await operation: {op}"),
         };

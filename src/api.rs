@@ -34,6 +34,8 @@ pub struct AppConfig {
     pub llm_api_key: Option<String>,
     pub project_dir: String,
     pub io_sender: Option<tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
+    /// Channel for self-triggering: system events that should invoke the AI
+    pub self_trigger: tokio::sync::mpsc::Sender<String>,
 }
 
 #[derive(Deserialize)]
@@ -867,6 +869,7 @@ pub async fn ask(
                             let interval = *interval_ms;
                             let session_ref = config.session.clone();
                             let io_sender = config.io_sender.clone();
+                            let trigger = config.self_trigger.clone();
 
                             tokio::spawn(async move {
                                 let mut last_result = String::new();
@@ -898,11 +901,9 @@ pub async fn ask(
 
                                     if result != last_result && !last_result.is_empty() {
                                         eprintln!("[web:watch:trigger] {fn_name} changed: {last_result} → {result}");
-                                        let mut session = session_ref.lock().await;
-                                        session.chat_messages.push(crate::session::ChatMessage {
-                                            role: "system".to_string(),
-                                            content: format!("Watcher '{fn_name}' triggered: result changed from '{last_result}' to '{result}'"),
-                                        });
+                                        let msg = format!("Watcher '{fn_name}' triggered: result changed from '{last_result}' to '{result}'");
+                                        // Trigger the AI to respond
+                                        let _ = trigger.send(msg).await;
                                     }
                                     last_result = result;
                                 }

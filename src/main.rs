@@ -553,7 +553,10 @@ async fn main() -> Result<()> {
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
             // Set up coroutine runtime for async IO
-            let (runtime, mut io_rx) = coroutine::Runtime::new();
+            let (mut runtime, mut io_rx) = coroutine::Runtime::new();
+            runtime.llm_url = url.clone();
+            runtime.llm_default_model = model.clone();
+            runtime.llm_api_key = api_key.clone();
             let runtime = std::sync::Arc::new(runtime);
             let io_sender = runtime.io_sender();
 
@@ -572,13 +575,17 @@ async fn main() -> Result<()> {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".to_string());
 
+            // Self-trigger channel: events feed back into the AI
+            let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<String>(32);
+
             let config = api::AppConfig {
                 session: shared_session.clone(),
                 llm_url: url.clone(),
                 llm_model: model.clone(),
-                llm_api_key: api_key,
-                project_dir,
+                llm_api_key: api_key.clone(),
+                project_dir: project_dir.clone(),
                 io_sender: Some(io_sender),
+                self_trigger: trigger_tx,
             };
 
             let app = axum::Router::new()
@@ -632,6 +639,65 @@ async fn main() -> Result<()> {
                     let session = save_session.lock().await;
                     if let Err(e) = session.save(std::path::Path::new(&save_path)) {
                         eprintln!("auto-save failed: {e}");
+                    }
+                }
+            });
+
+            // Self-trigger loop: process system events through the AI
+            let trigger_session = shared_session.clone();
+            let trigger_url = url.clone();
+            let trigger_model = model.clone();
+            let trigger_key = api_key.clone();
+            tokio::spawn(async move {
+                while let Some(event_message) = trigger_rx.recv().await {
+                    eprintln!("[self-trigger] {}", event_message.chars().take(80).collect::<String>());
+                    let llm = llm::LlmClient::new_with_model_and_key(&trigger_url, &trigger_model, trigger_key.clone());
+
+                    // Add event as tool message — AI decides whether to act
+                    let messages = {
+                        let mut session = trigger_session.lock().await;
+                        session.chat_messages.push(crate::session::ChatMessage {
+                            role: "tool".to_string(),
+                            content: event_message.clone(),
+                        });
+                        session.chat_messages.iter().map(|m| match m.role.as_str() {
+                            "system" => llm::ChatMessage::system(m.content.clone()),
+                            "assistant" => llm::ChatMessage::assistant(&m.content),
+                            _ => llm::ChatMessage::user(m.content.clone()),
+                        }).collect::<Vec<_>>()
+                    };
+
+                    match llm.generate(messages).await {
+                        Ok(output) => {
+                            let code = output.code.clone();
+                            eprintln!("[self-trigger:response] {}...", output.text.chars().take(100).collect::<String>());
+
+                            // Apply code if any
+                            if !code.is_empty() && code.trim() != "DONE" {
+                                let mut session = trigger_session.lock().await;
+                                if let Ok(ops) = crate::parser::parse(&code) {
+                                    for op in &ops {
+                                        match op {
+                                            crate::parser::Operation::Function(f) => { session.program.functions.retain(|e| e.name != f.name); }
+                                            crate::parser::Operation::Type(t) => { let n = t.name.clone(); session.program.types.retain(|e| e.name() != n); }
+                                            _ => {}
+                                        }
+                                    }
+                                    if let Ok(results) = session.apply(&code) {
+                                        for (msg, ok) in &results {
+                                            eprintln!("[self-trigger:{}] {msg}", if *ok { "ok" } else { "err" });
+                                        }
+                                    }
+                                }
+                                session.chat_messages.push(crate::session::ChatMessage {
+                                    role: "assistant".to_string(),
+                                    content: format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[self-trigger:error] {e}");
+                        }
                     }
                 }
             });
