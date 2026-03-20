@@ -252,7 +252,7 @@ async function sendMessage() {
         msg.querySelector('.msg-body').textContent = '(no response)';
       }
 
-      refreshProgram();
+      await refreshProgram();
 
       // If no errors, we're done
       if (!res.has_errors) break;
@@ -271,7 +271,7 @@ async function sendMessage() {
   sending = false;
   sendBtn.disabled = false;
   document.getElementById('oc-btn').disabled = false;
-  refreshProgram();
+  await refreshProgram();
 }
 
 async function sendOpenCode() {

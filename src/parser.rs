@@ -611,7 +611,7 @@ impl<'a> Parser<'a> {
             while let Some(next) = self.current() {
                 let t = next.text.trim();
                 // Stop at Forge operations (lines starting with + ! ? that aren't bullets)
-                if (t.starts_with("+fn ")
+                if t.starts_with("+fn ")
                     || t.starts_with("+type ")
                     || t.starts_with("+module ")
                     || t.starts_with("+let ")
@@ -620,7 +620,7 @@ impl<'a> Parser<'a> {
                     || t.starts_with("!test ")
                     || t.starts_with("!eval ")
                     || t.starts_with("!move ")
-                    || t.starts_with("?"))
+                    || t.starts_with("?") 
                 {
                     break;
                 }

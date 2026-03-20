@@ -430,6 +430,7 @@ pub struct CallGraph {
     /// function_name → list of functions it calls
     pub callees: HashMap<String, Vec<String>>,
     /// function_name → list of functions that call it
+    #[allow(dead_code)]
     pub callers: HashMap<String, Vec<String>>,
 }
 
@@ -561,7 +562,7 @@ fn query_deps_modules(program: &Program, graph: &CallGraph, target: &str) -> Str
 
     let mut out = format!("`{target}` depends on modules:\n");
     let mut modules: Vec<_> = module_deps.iter().collect();
-    modules.sort_by_key(|(k, _)| k.clone());
+    modules.sort_by_key(|(k, _)| (*k).clone());
     for (module, fns) in modules {
         out.push_str(&format!("  {module}: {}\n", fns.join(", ")));
     }

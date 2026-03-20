@@ -565,7 +565,7 @@ pub async fn ask(
 
     let mut results: Vec<MutationResult> = vec![];
     let mut test_results: Vec<TestCaseResult> = vec![];
-    let mut code = String::new();
+    let code;
     let mut reply_text = String::new();
     let mut has_errors = false;
 

@@ -229,6 +229,7 @@ pub struct LlmClient<B = OpenAiBackend> {
     max_tokens: u32,
 }
 
+#[allow(dead_code)]
 impl LlmClient<OpenAiBackend> {
     pub fn new(base_url: &str) -> Self {
         Self {
