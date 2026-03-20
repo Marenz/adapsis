@@ -182,6 +182,53 @@ enum Command {
         #[arg(short, long)]
         daemonize: bool,
     },
+
+    /// Send a message to a running ForgeOS instance
+    Ask {
+        /// The message to send
+        message: Vec<String>,
+
+        /// ForgeOS API URL
+        #[arg(short, long, default_value = "http://127.0.0.1:3001")]
+        api: String,
+    },
+
+    /// Show status of a running ForgeOS instance
+    Status {
+        /// ForgeOS API URL
+        #[arg(short, long, default_value = "http://127.0.0.1:3001")]
+        api: String,
+    },
+
+    /// Apply Forge code to a running ForgeOS instance
+    Mutate {
+        /// Forge source code
+        source: Vec<String>,
+
+        /// ForgeOS API URL
+        #[arg(short, long, default_value = "http://127.0.0.1:3001")]
+        api: String,
+    },
+
+    /// Eval a function on a running ForgeOS instance
+    Eval {
+        /// Function name and arguments
+        expr: Vec<String>,
+
+        /// ForgeOS API URL
+        #[arg(short, long, default_value = "http://127.0.0.1:3001")]
+        api: String,
+    },
+
+    /// Query a running ForgeOS instance
+    Query {
+        /// Query string (?symbols, ?source fn, ?deps fn, etc.)
+        query: Vec<String>,
+
+        /// ForgeOS API URL
+        #[arg(short, long, default_value = "http://127.0.0.1:3001")]
+        api: String,
+    },
 }
 
 #[tokio::main]
@@ -590,6 +637,100 @@ async fn main() -> Result<()> {
             });
 
             axum::serve(listener, app).await?;
+        }
+        Command::Ask { message, api } => {
+            let msg = message.join(" ");
+            let client = reqwest::Client::new();
+            let resp: serde_json::Value = client
+                .post(format!("{api}/api/ask"))
+                .json(&serde_json::json!({ "message": msg }))
+                .send().await?
+                .json().await?;
+            if let Some(reply) = resp.get("reply").and_then(|r| r.as_str()) {
+                if !reply.is_empty() { println!("{reply}"); }
+            }
+            if let Some(code) = resp.get("code").and_then(|c| c.as_str()) {
+                if !code.is_empty() { println!("\x1b[36m{code}\x1b[0m"); }
+            }
+            if let Some(results) = resp.get("results").and_then(|r| r.as_array()) {
+                for r in results {
+                    let ok = r.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                    let msg = r.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    if ok {
+                        println!("\x1b[32m  OK: {msg}\x1b[0m");
+                    } else {
+                        println!("\x1b[31m  ERR: {msg}\x1b[0m");
+                    }
+                }
+            }
+            if let Some(tests) = resp.get("test_results").and_then(|r| r.as_array()) {
+                for r in tests {
+                    let pass = r.get("pass").and_then(|s| s.as_bool()).unwrap_or(false);
+                    let msg = r.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    if pass {
+                        println!("\x1b[32m  PASS: {msg}\x1b[0m");
+                    } else {
+                        println!("\x1b[31m  FAIL: {msg}\x1b[0m");
+                    }
+                }
+            }
+        }
+        Command::Status { api } => {
+            let resp: serde_json::Value = reqwest::get(format!("{api}/api/status"))
+                .await?.json().await?;
+            println!("Revision: {}", resp.get("revision").unwrap_or(&serde_json::json!(0)));
+            if let Some(fns) = resp.get("functions").and_then(|f| f.as_array()) {
+                println!("Functions ({}): {}", fns.len(), fns.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            if let Some(types) = resp.get("types").and_then(|t| t.as_array()) {
+                if !types.is_empty() {
+                    println!("Types ({}): {}", types.len(), types.iter().filter_map(|t| t.as_str()).collect::<Vec<_>>().join(", "));
+                }
+            }
+        }
+        Command::Mutate { source, api } => {
+            let src = source.join(" ");
+            let client = reqwest::Client::new();
+            let resp: serde_json::Value = client
+                .post(format!("{api}/api/mutate"))
+                .json(&serde_json::json!({ "source": src }))
+                .send().await?.json().await?;
+            println!("Revision: {}", resp.get("revision").unwrap_or(&serde_json::json!(0)));
+            if let Some(results) = resp.get("results").and_then(|r| r.as_array()) {
+                for r in results {
+                    let ok = r.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                    let msg = r.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    println!("  {}: {msg}", if ok { "OK" } else { "ERR" });
+                }
+            }
+        }
+        Command::Eval { expr, api } => {
+            let parts = expr.join(" ");
+            let (func, input) = parts.split_once(' ').unwrap_or((&parts, ""));
+            let client = reqwest::Client::new();
+            let resp: serde_json::Value = client
+                .post(format!("{api}/api/eval"))
+                .json(&serde_json::json!({ "function": func, "input": input }))
+                .send().await?.json().await?;
+            let result = resp.get("result").and_then(|r| r.as_str()).unwrap_or("(none)");
+            let success = resp.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+            let compiled = resp.get("compiled").and_then(|c| c.as_bool()).unwrap_or(false);
+            let tag = if compiled { " [compiled]" } else { "" };
+            if success {
+                println!("= {result}{tag}");
+            } else {
+                println!("Error: {result}");
+            }
+        }
+        Command::Query { query, api } => {
+            let q = query.join(" ");
+            let client = reqwest::Client::new();
+            let resp: serde_json::Value = client
+                .post(format!("{api}/api/query"))
+                .json(&serde_json::json!({ "query": q }))
+                .send().await?.json().await?;
+            let response = resp.get("response").and_then(|r| r.as_str()).unwrap_or("(none)");
+            println!("{response}");
         }
     }
 
