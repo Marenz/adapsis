@@ -251,15 +251,22 @@ pub fn eval_call_with_input(
 
     // Try as a builtin function
     if crate::builtins::is_builtin(function_name) {
-        let input_val = eval_parser_expr_standalone(input)?;
-        // Convert input to args list
-        let args = match &input_val {
-            Value::Struct(_, fields) => {
-                // Struct fields become positional args in order
-                fields.values().cloned().collect::<Vec<_>>()
+        // Get args in order from the parser expression (not via HashMap which loses order)
+        let args = match input {
+            parser::Expr::StructLiteral(fields) => {
+                // Preserve field order from the parser
+                fields
+                    .iter()
+                    .map(|f| eval_parser_expr_standalone(&f.value))
+                    .collect::<Result<Vec<_>>>()?
             }
-            Value::None => vec![],
-            other => vec![other.clone()],
+            _ => {
+                let input_val = eval_parser_expr_standalone(input)?;
+                match &input_val {
+                    Value::None => vec![],
+                    other => vec![other.clone()],
+                }
+            }
         };
         let mut env = Env::new();
         let call = ast::CallExpr {

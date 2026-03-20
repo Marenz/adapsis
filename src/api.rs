@@ -1425,11 +1425,39 @@ pub async fn ask_stream(
 
             drop(session);
 
+            // Build detailed feedback with ALL results so the AI can see them
+            let mut feedback_parts: Vec<String> = Vec::new();
+            // Collect all SSE events we sent as text feedback
+            // We need to reconstruct what happened from the operations
+            {
+                let session = config_clone.session.lock().await;
+                // Re-run queries to include their output in feedback
+                if let Ok(ops) = crate::parser::parse(&code) {
+                    for op in &ops {
+                        if let crate::parser::Operation::Query(query) = op {
+                            let table = crate::typeck::build_symbol_table(&session.program);
+                            let response = crate::typeck::handle_query(&session.program, &table, query);
+                            feedback_parts.push(format!("{query}:\n{response}"));
+                        }
+                    }
+                }
+            }
+
             if has_errors {
                 let _ = tx.send(serde_json::json!({"type": "feedback", "message": "Errors found, retrying..."})).await;
-                messages.push(crate::llm::ChatMessage::user("Fix the errors and continue.".to_string()));
+                let feedback = if feedback_parts.is_empty() {
+                    "There were errors. Fix them and continue.".to_string()
+                } else {
+                    format!("Query results:\n{}\n\nThere were errors. Fix them and continue.", feedback_parts.join("\n\n"))
+                };
+                messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
-                messages.push(crate::llm::ChatMessage::user("Results look good. Continue with next step or DONE.".to_string()));
+                let feedback = if feedback_parts.is_empty() {
+                    "All operations succeeded. Continue with next step or respond with DONE.".to_string()
+                } else {
+                    format!("Results:\n{}\n\nAll operations succeeded. Continue or DONE.", feedback_parts.join("\n\n"))
+                };
+                messages.push(crate::llm::ChatMessage::user(feedback));
             }
         }
 
