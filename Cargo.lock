@@ -601,6 +601,7 @@ dependencies = [
  "cranelift-native",
  "exec",
  "futures",
+ "libc",
  "regex",
  "reqwest",
  "serde",

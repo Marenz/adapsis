@@ -172,6 +172,10 @@ enum Command {
         /// API key for the LLM provider (sent as Bearer token)
         #[arg(long, env = "LLM_API_KEY")]
         api_key: Option<String>,
+
+        /// Daemonize: fork to background after server is ready
+        #[arg(short, long)]
+        daemonize: bool,
     },
 }
 
@@ -478,7 +482,7 @@ async fn main() -> Result<()> {
             let session_path = session.map(std::path::PathBuf::from);
             repl::run_repl(llm_client, session_path).await?;
         }
-        Command::Os { port, session, url, api_key } => {
+        Command::Os { port, session, url, api_key, daemonize } => {
             let session_path = std::path::Path::new(&session);
             let sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -542,6 +546,29 @@ async fn main() -> Result<()> {
             println!("  API:     http://127.0.0.1:{port}/api/");
             println!("  Browser: http://127.0.0.1:{port}/");
             println!();
+
+            if daemonize {
+                // Re-launch ourselves in background without -d flag
+                // We know the port is free (we just bound it), so drop the listener
+                // and let the child re-bind
+                drop(listener);
+                let exe = std::env::current_exe()?;
+                let mut args: Vec<String> = std::env::args().collect();
+                // Remove -d / --daemonize from args
+                args.retain(|a| a != "-d" && a != "--daemonize");
+                let child = std::process::Command::new(exe)
+                    .args(&args[1..])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr({
+                        let f = std::fs::File::create("/tmp/forgeos.log")
+                            .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+                        std::process::Stdio::from(f)
+                    })
+                    .spawn()?;
+                println!("Daemonized: PID {}", child.id());
+                return Ok(());
+            }
 
             // Auto-save session periodically
             let save_session = shared_session.clone();
