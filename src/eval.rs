@@ -171,12 +171,18 @@ pub fn eval_compiled_or_interpreted(
         .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
 
     // Try compiled path
+    let returns_string = matches!(&func.return_type, ast::Type::String);
     if crate::compiler::is_compilable_function(func) {
         if let Ok(mut compiled) = crate::compiler::compile(program) {
-            // Convert input to i64 args
             if let Ok(args) = input_to_i64_args(input, func) {
-                if let Ok(result) = compiled.call_i64(function_name, &args) {
-                    return Ok((format!("{result}"), true));
+                if returns_string {
+                    if let Ok(result) = compiled.call_string(function_name, &args) {
+                        return Ok((format!("\"{result}\""), true));
+                    }
+                } else {
+                    if let Ok(result) = compiled.call_i64(function_name, &args) {
+                        return Ok((format!("{result}"), true));
+                    }
                 }
             }
         }

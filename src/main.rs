@@ -39,7 +39,7 @@ enum Command {
         url: String,
 
         /// Model name to use
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "FORGE_MODEL", default_value = "default")]
         model: String,
 
         /// API key for the LLM provider (sent as Bearer token)
@@ -62,7 +62,7 @@ enum Command {
         url: String,
 
         /// Model name to use
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "FORGE_MODEL", default_value = "default")]
         model: String,
 
         /// API key for the LLM provider (sent as Bearer token)
@@ -144,7 +144,7 @@ enum Command {
         url: String,
 
         /// Model name
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "FORGE_MODEL", default_value = "default")]
         model: String,
 
         /// API key for the LLM provider (sent as Bearer token)
@@ -170,8 +170,8 @@ enum Command {
         #[arg(short, long, default_value = "http://127.0.0.1:8081")]
         url: String,
 
-        /// Model name
-        #[arg(long, default_value = "default")]
+        /// Model name (required, e.g. anthropic/claude-haiku-4-5-20251001)
+        #[arg(long, env = "FORGE_MODEL")]
         model: String,
 
         /// API key for the LLM provider (sent as Bearer token)
