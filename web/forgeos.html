@@ -77,6 +77,10 @@ main { flex: 1; display: flex; overflow: hidden; }
 <main>
   <div id="chat-panel">
     <div class="panel-header">Chat</div>
+    <div id="plan-panel" style="display:none;background:var(--surface);border-bottom:1px solid var(--border);padding:8px 12px;flex-shrink:0;">
+      <div style="color:var(--purple);font-size:11px;font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:1px;">Plan</div>
+      <div id="plan-steps"></div>
+    </div>
     <div id="chat-messages">
       <div class="msg msg-system">
         <div class="msg-label">system</div>
@@ -95,10 +99,6 @@ Try: "write a function that doubles a number"</div>
   <div id="program-panel">
     <div class="panel-header">Program State</div>
     <div class="panel-content">
-      <div id="plan-panel" style="display:none;margin-bottom:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;">
-        <div style="color:var(--purple);font-size:12px;font-weight:600;margin-bottom:6px;">📋 Plan</div>
-        <div id="plan-steps"></div>
-      </div>
       <div id="program">
         <div class="empty-state">No program yet</div>
       </div>
@@ -303,7 +303,10 @@ async function sendMessage() {
               if (currentMsg) addResult(currentMsg, (event.pass ? 'PASS: ' : 'FAIL: ') + event.message, event.pass ? 'pass' : 'fail');
               break;
             case 'eval':
-              if (currentMsg) addResult(currentMsg, `= ${event.result}`, 'ok');
+              if (currentMsg) {
+                const evalOk = event.success !== false;
+                addResult(currentMsg, `${evalOk ? '=' : 'ERROR:'} ${event.function ? event.function + '() ' : ''}${event.result}`, evalOk ? 'ok' : 'error');
+              }
               break;
             case 'query':
               if (currentMsg) {
@@ -313,8 +316,12 @@ async function sendMessage() {
                 currentMsg.querySelector('.msg-body').appendChild(qEl);
               }
               break;
+            case 'plan':
+              renderPlan(event.plan);
+              break;
             case 'feedback':
               addMessage('system', event.message);
+              refreshProgram();
               break;
             case 'error':
               addMessage('system', 'Error: ' + event.message);

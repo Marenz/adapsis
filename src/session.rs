@@ -4,6 +4,7 @@
 //! Evals, queries, and test results are recorded in the working history.
 //! The program state can be reconstructed by replaying mutations 0..N.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
@@ -82,6 +83,18 @@ pub struct Session {
     /// Current plan/goal tracking
     #[serde(default)]
     pub plan: Vec<PlanStep>,
+    /// Agent message bus: agent_name → inbox of pending messages
+    #[serde(default)]
+    pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
+}
+
+/// A message sent between agents (or between main session and agents).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub from: String,
+    pub to: String,
+    pub content: String,
+    pub timestamp: String,
 }
 
 /// A step in the AI's plan.
@@ -143,6 +156,7 @@ impl AgentScope {
                         | crate::parser::Operation::Eval(_)
                         | crate::parser::Operation::Trace(_)
                         | crate::parser::Operation::Query(_)
+                        | crate::parser::Operation::Message { .. }
                 )
             }
             AgentScope::NewOnly => {
@@ -151,7 +165,8 @@ impl AgentScope {
                     | crate::parser::Operation::Type(_)
                     | crate::parser::Operation::Test(_)
                     | crate::parser::Operation::Eval(_)
-                    | crate::parser::Operation::Query(_) => true,
+                    | crate::parser::Operation::Query(_)
+                    | crate::parser::Operation::Message { .. } => true,
                     crate::parser::Operation::Replace(_) => false, // can't modify existing
                     _ => false,
                 }
@@ -160,7 +175,8 @@ impl AgentScope {
                 match op {
                     crate::parser::Operation::Test(_)
                     | crate::parser::Operation::Eval(_)
-                    | crate::parser::Operation::Query(_) => true,
+                    | crate::parser::Operation::Query(_)
+                    | crate::parser::Operation::Message { .. } => true,
                     crate::parser::Operation::Move { target_module, .. } => {
                         target_module == module_name
                     }
@@ -221,7 +237,8 @@ impl AgentBranch {
                 crate::parser::Operation::Test(_)
                 | crate::parser::Operation::Trace(_)
                 | crate::parser::Operation::Eval(_)
-                | crate::parser::Operation::Query(_) => {}
+                | crate::parser::Operation::Query(_)
+                | crate::parser::Operation::Message { .. } => {}
                 _ => match crate::validator::apply_and_validate(&mut self.program, op) {
                     Ok(msg) => results.push((msg, true)),
                     Err(e) => results.push((format!("{e}"), false)),
@@ -273,7 +290,35 @@ impl Session {
             history: Vec::new(),
             revision: 0,
             sources: Vec::new(),
+            agent_mailbox: HashMap::new(),
         }
+    }
+
+    /// Send a message to an agent (or "main" for the main session).
+    pub fn send_agent_message(&mut self, from: &str, to: &str, content: &str) {
+        let msg = AgentMessage {
+            from: from.to_string(),
+            to: to.to_string(),
+            content: content.to_string(),
+            timestamp: now(),
+        };
+        self.agent_mailbox
+            .entry(to.to_string())
+            .or_default()
+            .push(msg);
+    }
+
+    /// Drain all pending messages for an agent.
+    pub fn drain_messages(&mut self, agent_name: &str) -> Vec<AgentMessage> {
+        self.agent_mailbox.remove(agent_name).unwrap_or_default()
+    }
+
+    /// Peek at pending messages without removing them.
+    pub fn peek_messages(&self, agent_name: &str) -> &[AgentMessage] {
+        self.agent_mailbox
+            .get(agent_name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Apply a block of Forge source code as a mutation.

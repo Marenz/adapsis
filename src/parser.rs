@@ -46,6 +46,12 @@ pub enum Operation {
         task: String,
     },
     OpenCode(String),
+    /// Send a message to an agent: !msg <agent> <text>
+    Message {
+        to: String,
+        content: String,
+    },
+    /// Check inbox: ?inbox [agent_name]
     Query(String),
 }
 
@@ -760,6 +766,19 @@ impl<'a> Parser<'a> {
                 name: name.to_string(),
                 scope,
                 task: full_task.trim().to_string(),
+            });
+        }
+
+        if let Some(rest) = text.strip_prefix("!msg") {
+            // !msg <agent_name> <message content>
+            let rest = rest.trim();
+            let (to, content) = rest
+                .split_once(' ')
+                .ok_or_else(|| anyhow!("line {}: expected !msg <agent> <message>", line.number))?;
+            self.index += 1;
+            return Ok(Operation::Message {
+                to: to.to_string(),
+                content: content.trim().to_string(),
             });
         }
 

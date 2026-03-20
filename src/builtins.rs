@@ -474,6 +474,11 @@ pub static QUERIES: &[QueryCommand] = &[
         args: "",
         description: "show current plan (same as !plan)",
     },
+    QueryCommand {
+        name: "?inbox",
+        args: "",
+        description: "check messages from other agents or main session",
+    },
 ];
 
 /// Registered mutation/action commands (!-prefixed).
@@ -529,6 +534,11 @@ pub static ACTIONS: &[ActionCommand] = &[
         name: "!agent",
         args: "<name> --scope <scope> <task>",
         description: "spawn background agent (scopes: read-only, new-only, module X, full)",
+    },
+    ActionCommand {
+        name: "!msg",
+        args: "<agent> <message>",
+        description: "send a message to an agent (or 'main' for the main session). Agents see messages in their feedback.",
     },
     ActionCommand {
         name: "!opencode",

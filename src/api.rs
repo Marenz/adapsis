@@ -787,6 +787,7 @@ pub async fn ask(
                     | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
                     | crate::parser::Operation::Watch { .. }
                     | crate::parser::Operation::Agent { .. }
+                    | crate::parser::Operation::Message { .. }
                     | crate::parser::Operation::OpenCode(_)));
 
                 if has_mutations {
@@ -866,8 +867,17 @@ pub async fn ask(
                             }
                         }
                         crate::parser::Operation::Query(query) => {
-                            let table = crate::typeck::build_symbol_table(&session.program);
-                            let response = crate::typeck::handle_query(&session.program, &table, query);
+                            let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
+                                let msgs = session.peek_messages("main");
+                                if msgs.is_empty() {
+                                    "No messages.".to_string()
+                                } else {
+                                    msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n")
+                                }
+                            } else {
+                                let table = crate::typeck::build_symbol_table(&session.program);
+                                crate::typeck::handle_query(&session.program, &table, query)
+                            };
                             iter_results.push(MutationResult { message: response, success: true });
                         }
                         crate::parser::Operation::Watch { function_name, args, interval_ms } => {
@@ -965,6 +975,21 @@ pub async fn ask(
 
                                 let mut branch = branch;
                                 for agent_iter in 0..10 {
+                                    // Check inbox for messages from other agents or main
+                                    {
+                                        let mut session = session_ref.lock().await;
+                                        let inbox = session.drain_messages(&agent_name);
+                                        if !inbox.is_empty() {
+                                            let inbox_text = inbox.iter()
+                                                .map(|m| format!("[from {}] {}", m.from, m.content))
+                                                .collect::<Vec<_>>().join("\n");
+                                            eprintln!("[agent:{agent_name}] received {} messages", inbox.len());
+                                            agent_messages.push(crate::llm::ChatMessage::user(
+                                                format!("Messages received:\n{inbox_text}\n\nIncorporate this information and continue.")
+                                            ));
+                                        }
+                                    }
+
                                     let output = match agent_llm.generate(agent_messages.clone()).await {
                                         Ok(o) => o,
                                         Err(e) => { eprintln!("[agent:{agent_name}] LLM error: {e}"); break; }
@@ -976,6 +1001,17 @@ pub async fn ask(
                                     if code.trim() == "DONE" || code.is_empty() {
                                         eprintln!("[agent:{agent_name}] done at iter {agent_iter}");
                                         break;
+                                    }
+
+                                    // Handle !msg commands from agent code before applying mutations
+                                    if let Ok(ops) = crate::parser::parse(&code) {
+                                        for op in &ops {
+                                            if let crate::parser::Operation::Message { to, content } = op {
+                                                eprintln!("[agent:{agent_name}] !msg → {to}: {content}");
+                                                let mut session = session_ref.lock().await;
+                                                session.send_agent_message(&agent_name, to, content);
+                                            }
+                                        }
                                     }
 
                                     match branch.apply(&code) {
@@ -1039,6 +1075,14 @@ pub async fn ask(
                                 scope: scope.clone(),
                                 status: "running".to_string(),
                                 message: String::new(),
+                            });
+                        }
+                        crate::parser::Operation::Message { to, content } => {
+                            eprintln!("[web:msg] → {to}: {content}");
+                            session.send_agent_message("main", &to, &content);
+                            iter_results.push(MutationResult {
+                                message: format!("Message sent to '{to}'"),
+                                success: true,
                             });
                         }
                         crate::parser::Operation::OpenCode(task) => {
@@ -1392,11 +1436,19 @@ pub async fn ask_stream(
                                     session.plan = steps.iter().map(|s| crate::session::PlanStep {
                                         description: s.clone(), status: crate::session::PlanStatus::Pending,
                                     }).collect();
+                                    let plan_json: Vec<serde_json::Value> = session.plan.iter().map(|s| {
+                                        serde_json::json!({"description": s.description, "status": format!("{:?}", s.status).to_lowercase()})
+                                    }).collect();
+                                    let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
                                     let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Plan: {} steps", steps.len()), "success": true})).await;
                                 }
                                 crate::parser::PlanAction::Progress(n) => {
                                     if let Some(step) = session.plan.get_mut(n.saturating_sub(1)) {
                                         step.status = crate::session::PlanStatus::Done;
+                                        let plan_json: Vec<serde_json::Value> = session.plan.iter().map(|s| {
+                                            serde_json::json!({"description": s.description, "status": format!("{:?}", s.status).to_lowercase()})
+                                        }).collect();
+                                        let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Step {n} done"), "success": true})).await;
                                     }
                                 }
@@ -1410,6 +1462,7 @@ pub async fn ask_stream(
                         | crate::parser::Operation::Query(_) | crate::parser::Operation::Trace(_)
                         | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
                         | crate::parser::Operation::Watch { .. } | crate::parser::Operation::Agent { .. }
+                        | crate::parser::Operation::Message { .. }
                         | crate::parser::Operation::OpenCode(_)));
 
                     if has_mutations {
@@ -1498,8 +1551,17 @@ pub async fn ask_stream(
                                 }
                             }
                             crate::parser::Operation::Query(query) => {
-                                let table = crate::typeck::build_symbol_table(&session.program);
-                                let response = crate::typeck::handle_query(&session.program, &table, query);
+                                let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
+                                    let msgs = session.peek_messages("main");
+                                    if msgs.is_empty() {
+                                        "No messages.".to_string()
+                                    } else {
+                                        msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n")
+                                    }
+                                } else {
+                                    let table = crate::typeck::build_symbol_table(&session.program);
+                                    crate::typeck::handle_query(&session.program, &table, query)
+                                };
                                 let _ = tx.send(serde_json::json!({"type": "query", "query": query, "response": response})).await;
                             }
                             // Top-level statements: execute immediately
@@ -1556,6 +1618,12 @@ pub async fn ask_stream(
                                     }
                                 }
                             }
+                            crate::parser::Operation::Message { to, content } => {
+                                eprintln!("[web:msg] → {to}: {content}");
+                                session.send_agent_message("main", &to, &content);
+                                feedback_details.push(format!("Message sent to '{to}'"));
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Message sent to '{to}'"), "success": true})).await;
+                            }
                             _ => {}
                         }
                     }
@@ -1570,9 +1638,9 @@ pub async fn ask_stream(
             drop(session);
 
             // Build detailed feedback with ALL results so the AI can see them
-            // Also re-run queries to include their output
+            // Also re-run queries and check inbox
             {
-                let session = config_clone.session.lock().await;
+                let mut session = config_clone.session.lock().await;
                 if let Ok(ops) = crate::parser::parse(&code) {
                     for op in &ops {
                         if let crate::parser::Operation::Query(query) = op {
@@ -1581,6 +1649,15 @@ pub async fn ask_stream(
                             feedback_details.push(format!("{query}:\n{response}"));
                         }
                     }
+                }
+                // Check for messages from agents addressed to main
+                let inbox = session.drain_messages("main");
+                if !inbox.is_empty() {
+                    let inbox_text = inbox.iter()
+                        .map(|m| format!("[from {}] {}", m.from, m.content))
+                        .collect::<Vec<_>>().join("\n");
+                    feedback_details.push(format!("Agent messages:\n{inbox_text}"));
+                    let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Messages from agents: {}", inbox.len()), "success": true})).await;
                 }
             }
 
