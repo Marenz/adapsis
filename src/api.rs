@@ -757,16 +757,18 @@ pub async fn ask(
                         eprintln!("[web:opencode] AI requests: {task}");
                         drop(session); // release lock
 
-                        let oc_result = tokio::process::Command::new("opencode")
-                            .arg("run")
-                            .arg("--format").arg("json")
-                            .arg(&task)
-                            .current_dir(&config.project_dir)
-                            .output()
-                            .await;
+                        let oc_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(300),
+                            tokio::process::Command::new("opencode")
+                                .arg("run")
+                                .arg("--format").arg("json")
+                                .arg(&task)
+                                .current_dir(&config.project_dir)
+                                .output()
+                        ).await;
 
                         match oc_result {
-                            Ok(output) => {
+                            Ok(Ok(output)) => {
                                 let raw = String::from_utf8_lossy(&output.stdout);
                                 let mut oc_text = Vec::new();
                                 for line in raw.lines() {
@@ -790,10 +792,38 @@ pub async fn ask(
 
                                     match build {
                                         Ok(b) if b.status.success() => {
+                                            eprintln!("[web:opencode:rebuild] SUCCESS — restarting");
+                                            
+                                            // Save what was added to session so AI knows after restart
+                                            {
+                                                let mut sess = config.session.lock().await;
+                                                sess.chat_messages.push(crate::session::ChatMessage {
+                                                    role: "system".to_string(),
+                                                    content: format!(
+                                                        "OpenCode completed successfully. Changes made:\n{}\n\
+                                                         Build succeeded. The new features are now available. Use them.",
+                                                        summary.chars().take(500).collect::<String>()
+                                                    ),
+                                                });
+                                                // Save session to disk before restart
+                                                let session_path = std::path::Path::new(&config.project_dir).join("forgeos-session.json");
+                                                let _ = sess.save(&session_path);
+                                            }
+                                            
                                             results.push(MutationResult {
-                                                message: format!("OpenCode completed: {}\nRebuild successful. Restart to apply changes.", 
+                                                message: format!("OpenCode completed + rebuild successful. Restarting to apply changes...\n{}", 
                                                     summary.chars().take(300).collect::<String>()),
                                                 success: true,
+                                            });
+                                            
+                                            // Schedule restart after response is sent
+                                            tokio::spawn(async {
+                                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                                eprintln!("[web:restart] exec()ing new binary...");
+                                                let exe = std::env::current_exe().unwrap_or_default();
+                                                let args: Vec<String> = std::env::args().collect();
+                                                let err = exec::execvp(&exe, &args);
+                                                eprintln!("[web:restart] failed: {err}");
                                             });
                                         }
                                         Ok(b) => {
@@ -817,9 +847,13 @@ pub async fn ask(
                                     });
                                 }
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 has_errors = true;
                                 results.push(MutationResult { message: format!("OpenCode error: {e}"), success: false });
+                            }
+                            Err(_) => {
+                                has_errors = true;
+                                results.push(MutationResult { message: "OpenCode timed out (5 min limit)".to_string(), success: false });
                             }
                         }
 

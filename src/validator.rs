@@ -833,6 +833,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "ends_with"
             | "contains"
             | "regex_match"
+            | "regex_replace"
             | "index_of"
             | "split"
             | "trim"

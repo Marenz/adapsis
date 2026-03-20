@@ -92,6 +92,7 @@ Pure functions have no effect annotation.
   char_code(ch)             — character to ASCII code Int
   from_char_code(n)         — ASCII code to single-char String
   u32_wrap(n)               — wrap Int to unsigned 32-bit range
+  regex_match(pattern, text) — test if text matches regex pattern (Bool)
   state(initial)            — create shared state handle
   get_state(handle)         — read shared state
   set_state(handle, value)  — write shared state

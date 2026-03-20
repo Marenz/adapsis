@@ -875,6 +875,22 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 _ => bail!("regex_match expects (String, String)"),
             }
         }
+        "regex_replace" => {
+            if args.len() != 3 {
+                bail!("regex_replace(pattern, replacement, text) expects 3 arguments");
+            }
+            match (&args[0], &args[1], &args[2]) {
+                (Value::String(pattern), Value::String(replacement), Value::String(text)) => {
+                    match regex::Regex::new(pattern) {
+                        Ok(re) => Ok(Value::String(
+                            re.replace_all(text, replacement.as_str()).into_owned(),
+                        )),
+                        Err(e) => bail!("regex_replace: invalid pattern '{}': {}", pattern, e),
+                    }
+                }
+                _ => bail!("regex_replace expects (String, String, String)"),
+            }
+        }
         "index_of" => {
             if args.len() != 2 {
                 bail!("index_of(s, substr) expects 2 arguments");
@@ -909,6 +925,19 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
             match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim().to_string())),
                 _ => bail!("trim expects String"),
+            }
+        }
+        "base64_encode" => {
+            if args.len() != 1 {
+                bail!("base64_encode(s) expects 1 argument");
+            }
+            match &args[0] {
+                Value::String(s) => {
+                    use base64::Engine;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
+                    Ok(Value::String(encoded))
+                }
+                _ => bail!("base64_encode expects String"),
             }
         }
         // List operations
