@@ -287,14 +287,31 @@ pub struct StatusResponse {
     pub functions: Vec<String>,
     pub types: Vec<String>,
     pub program_summary: String,
+    pub plan: Vec<PlanStepResponse>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PlanStepResponse {
+    pub description: String,
+    pub status: String,
 }
 
 pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse> {
     let session = session.lock().await;
+    let plan = session.plan.iter().map(|s| PlanStepResponse {
+        description: s.description.clone(),
+        status: match s.status {
+            crate::session::PlanStatus::Pending => "pending",
+            crate::session::PlanStatus::InProgress => "in_progress",
+            crate::session::PlanStatus::Done => "done",
+            crate::session::PlanStatus::Failed => "failed",
+        }.to_string(),
+    }).collect();
     Json(StatusResponse {
         revision: session.revision,
         mutations: session.mutations.len(),
         history_entries: session.history.len(),
+        plan,
         functions: session
             .program
             .functions
@@ -1389,6 +1406,11 @@ pub async fn ask_stream(
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("error: {e}"), "function": ev.function_name})).await;
                                     }
                                 }
+                            }
+                            crate::parser::Operation::Query(query) => {
+                                let table = crate::typeck::build_symbol_table(&session.program);
+                                let response = crate::typeck::handle_query(&session.program, &table, query);
+                                let _ = tx.send(serde_json::json!({"type": "query", "query": query, "response": response})).await;
                             }
                             _ => {}
                         }

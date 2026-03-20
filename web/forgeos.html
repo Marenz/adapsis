@@ -94,8 +94,14 @@ Try: "write a function that doubles a number"</div>
   </div>
   <div id="program-panel">
     <div class="panel-header">Program State</div>
-    <div class="panel-content" id="program">
-      <div class="empty-state">No program yet</div>
+    <div class="panel-content">
+      <div id="plan-panel" style="display:none;margin-bottom:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;">
+        <div style="color:var(--purple);font-size:12px;font-weight:600;margin-bottom:6px;">📋 Plan</div>
+        <div id="plan-steps"></div>
+      </div>
+      <div id="program">
+        <div class="empty-state">No program yet</div>
+      </div>
     </div>
   </div>
 </main>
@@ -290,6 +296,14 @@ async function sendMessage() {
             case 'eval':
               if (currentMsg) addResult(currentMsg, `= ${event.result}`, 'ok');
               break;
+            case 'query':
+              if (currentMsg) {
+                const qEl = document.createElement('div');
+                qEl.style.cssText = 'background:var(--surface2);border-radius:4px;padding:6px 8px;margin:4px 0;font-size:11px;color:var(--text-dim);white-space:pre-wrap;';
+                qEl.textContent = `${event.query}:\n${event.response}`;
+                currentMsg.querySelector('.msg-body').appendChild(qEl);
+              }
+              break;
             case 'feedback':
               addMessage('system', event.message);
               break;
@@ -370,8 +384,29 @@ async function refreshProgram() {
     ]);
     document.getElementById('rev').textContent = `rev ${status.revision}`;
     document.getElementById('counts').textContent = `${status.functions.length} fn · ${status.types.length} types`;
+    renderPlan(status.plan || []);
     renderProgram(prog);
   } catch (e) {}
+}
+
+function renderPlan(plan) {
+  const panel = document.getElementById('plan-panel');
+  const stepsEl = document.getElementById('plan-steps');
+  if (!plan || plan.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+  stepsEl.innerHTML = '';
+  for (let i = 0; i < plan.length; i++) {
+    const step = plan[i];
+    const icon = step.status === 'done' ? '✅' : step.status === 'failed' ? '❌' : step.status === 'in_progress' ? '🔄' : '⬜';
+    const color = step.status === 'done' ? 'var(--green)' : step.status === 'failed' ? 'var(--red)' : step.status === 'in_progress' ? 'var(--yellow)' : 'var(--text-dim)';
+    const el = document.createElement('div');
+    el.style.cssText = `font-size:12px;padding:2px 0;color:${color}`;
+    el.textContent = `${icon} ${i + 1}. ${step.description}`;
+    stepsEl.appendChild(el);
+  }
 }
 
 function renderFn(f) {
