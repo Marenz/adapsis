@@ -210,24 +210,14 @@ async function sendMessage() {
       addMessage('system', 'Error: ' + e.message);
     }
   } else {
-    // Natural language → ask LLM with visible retry loop
-    const maxRetries = 5;
-    let currentMessage = text;
-
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      addSpinner();
-      let res;
-      try {
-        res = await fetch('/api/ask', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({message: currentMessage}),
-        }).then(r => r.json());
-      } catch (e) {
-        removeSpinner();
-        addMessage('system', 'Error: ' + e.message);
-        break;
-      }
+    // Natural language → send to AI (API loops until DONE internally)
+    addSpinner();
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: text}),
+      }).then(r => r.json());
 
       removeSpinner();
       const msg = addMessage('ai', '');
@@ -253,18 +243,9 @@ async function sendMessage() {
       }
 
       await refreshProgram();
-
-      // If no errors, we're done
-      if (!res.has_errors) break;
-
-      // Show retry message and feed errors back
-      if (attempt < maxRetries - 1) {
-        const errors = (res.results || []).filter(r => !r.success).map(r => r.message)
-          .concat((res.test_results || []).filter(r => !r.pass).map(r => r.message));
-        const retryMsg = 'Fix these errors:\n' + errors.join('\n');
-        addMessage('system', `⟳ Retrying (${attempt + 2}/${maxRetries})...`);
-        currentMessage = retryMsg;
-      }
+    } catch (e) {
+      removeSpinner();
+      addMessage('system', 'Error: ' + e.message);
     }
   }
 

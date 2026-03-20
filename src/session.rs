@@ -76,6 +76,19 @@ pub struct Session {
     /// Conversation history for the LLM (persists across /api/ask calls)
     #[serde(default)]
     pub chat_messages: Vec<ChatMessage>,
+    /// Active/completed agent statuses
+    #[serde(default)]
+    pub agent_log: Vec<AgentStatus>,
+}
+
+/// Status of an agent run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentStatus {
+    pub name: String,
+    pub task: String,
+    pub scope: String,
+    pub status: String, // "running", "completed", "failed", "merged", "conflict"
+    pub message: String,
 }
 
 /// Agent scope — what an agent is allowed to modify.
@@ -237,6 +250,7 @@ impl Session {
             program: ast::Program::default(),
             mutations: Vec::new(),
             chat_messages: Vec::new(),
+            agent_log: Vec::new(),
             history: Vec::new(),
             revision: 0,
             sources: Vec::new(),

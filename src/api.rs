@@ -806,8 +806,18 @@ pub async fn ask(
                                 eprintln!("[agent:{agent_name}] starting");
                                 let agent_llm = crate::llm::LlmClient::new_with_model_and_key(&llm_url, &llm_model, llm_key);
 
+                                let scope_desc = match &branch.scope {
+                                    crate::session::AgentScope::ReadOnly => 
+                                        "SCOPE: read-only. You CAN: write !test blocks, use !eval, use ?queries. You CANNOT: define new functions or types, modify existing code.".to_string(),
+                                    crate::session::AgentScope::NewOnly =>
+                                        "SCOPE: new-only. You CAN: define NEW functions and types, write !test blocks, use !eval. You CANNOT: modify or replace existing functions.".to_string(),
+                                    crate::session::AgentScope::Module(m) =>
+                                        format!("SCOPE: module {m}. You CAN: modify anything in module {m}, add new functions to it. You CANNOT: modify code outside module {m}."),
+                                    crate::session::AgentScope::Full =>
+                                        "SCOPE: full. You can modify anything.".to_string(),
+                                };
                                 let agent_system = format!(
-                                    "{}\n\n{}\n\nYou are agent '{agent_name}'. Your task:\n{agent_task}\n\nWork step by step. When done, respond with DONE.",
+                                    "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Forge code. When done, respond with DONE in a <code> block.",
                                     crate::prompt::system_prompt(),
                                     crate::builtins::format_for_prompt()
                                 );
@@ -864,12 +874,20 @@ pub async fn ask(
                                         role: "system".to_string(),
                                         content: format!("Agent '{agent_name}' completed and merged successfully."),
                                     });
+                                    if let Some(s) = session.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                        s.status = "merged".to_string();
+                                        s.message = "completed and merged".to_string();
+                                    }
                                 } else {
                                     eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
                                     session.chat_messages.push(crate::session::ChatMessage {
                                         role: "system".to_string(),
                                         content: format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
                                     });
+                                    if let Some(s) = session.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                        s.status = "conflict".to_string();
+                                        s.message = conflicts.join("; ");
+                                    }
                                 }
                             });
 
@@ -879,6 +897,13 @@ pub async fn ask(
                             });
 
                             session = config.session.lock().await;
+                            session.agent_log.push(crate::session::AgentStatus {
+                                name: name.clone(),
+                                task: task.chars().take(100).collect(),
+                                scope: scope.clone(),
+                                status: "running".to_string(),
+                                message: String::new(),
+                            });
                         }
                         crate::parser::Operation::OpenCode(task) => {
                             eprintln!("[web:opencode] {task}");
@@ -1070,6 +1095,11 @@ pub struct OpenCodeResponse {
 }
 
 /// Build the full router with LLM support.
+pub async fn agents(State(session): State<SharedSession>) -> Json<Vec<crate::session::AgentStatus>> {
+    let session = session.lock().await;
+    Json(session.agent_log.clone())
+}
+
 pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
@@ -1081,6 +1111,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/program", get(program))
         .route("/api/history", post(history))
         .route("/api/rewind", post(rewind))
+        .route("/api/agents", get(agents))
         .with_state(config.session.clone());
 
     let config_routes = axum::Router::new()
