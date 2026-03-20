@@ -145,23 +145,12 @@ enum Command {
         model: String,
     },
 
-    /// Interactive REPL
+    /// Interactive REPL (connects to a running ForgeOS instance)
     Repl {
-        /// LLM server URL (OpenAI-compatible)
-        #[arg(short, long, default_value = "http://127.0.0.1:8081")]
-        url: String,
+        /// ForgeOS API URL
+        #[arg(short, long, default_value = "http://127.0.0.1:3001")]
+        api: String,
 
-        /// Model name
-        #[arg(long, env = "FORGE_MODEL", default_value = "default")]
-        model: String,
-
-        /// API key for the LLM provider (sent as Bearer token)
-        #[arg(long, env = "LLM_API_KEY")]
-        api_key: Option<String>,
-
-        /// Session file path (auto-saves)
-        #[arg(short, long)]
-        session: Option<String>,
     },
 
     /// Start ForgeOS — HTTP API + browser UI + session persistence
@@ -539,10 +528,8 @@ async fn main() -> Result<()> {
                 _ = io_loop => {}
             }
         }
-        Command::Repl { url, model, api_key, session } => {
-            let llm_client = llm::LlmClient::new_with_model_and_key(&url, &model, api_key);
-            let session_path = session.map(std::path::PathBuf::from);
-            repl::run_repl(llm_client, session_path).await?;
+        Command::Repl { api } => {
+            repl::run_repl(&api).await?;
         }
         Command::Os { port, session, url, model, api_key, daemonize } => {
             let session_path = std::path::Path::new(&session);

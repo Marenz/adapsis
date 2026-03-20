@@ -1073,6 +1073,47 @@ pub async fn ask(
                             }
                             session = config.session.lock().await;
                         }
+                        // Top-level statements: execute immediately
+                        op @ (crate::parser::Operation::Call(_)
+                        | crate::parser::Operation::Let(_)
+                        | crate::parser::Operation::Set(_)
+                        | crate::parser::Operation::Await(_)
+                        | crate::parser::Operation::Spawn(_)
+                        | crate::parser::Operation::If(_)
+                        | crate::parser::Operation::While(_)
+                        | crate::parser::Operation::Each(_)
+                        | crate::parser::Operation::Match(_)
+                        | crate::parser::Operation::Check(_)
+                        | crate::parser::Operation::Branch(_)
+                        | crate::parser::Operation::Return(_)) => {
+                            match crate::validator::convert_statement_op(op) {
+                                Ok(stmt) => {
+                                    let mut env = crate::eval::Env::new();
+                                    if let Some(sender) = &config.io_sender {
+                                        env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
+                                            crate::coroutine::CoroutineHandle::new(sender.clone())
+                                        ));
+                                    }
+                                    match crate::eval::eval_function_body_pub(&session.program, &[stmt], &mut env) {
+                                        Ok(val) => {
+                                            let msg = format!("executed: {val}");
+                                            eprintln!("[web:exec] {msg}");
+                                            iter_results.push(MutationResult { message: msg, success: true });
+                                        }
+                                        Err(e) => {
+                                            iter_has_errors = true;
+                                            let msg = format!("exec error: {e}");
+                                            eprintln!("[web:exec:err] {msg}");
+                                            iter_results.push(MutationResult { message: msg, success: false });
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    iter_has_errors = true;
+                                    iter_results.push(MutationResult { message: format!("statement error: {e}"), success: false });
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1412,6 +1453,56 @@ pub async fn ask_stream(
                                 let table = crate::typeck::build_symbol_table(&session.program);
                                 let response = crate::typeck::handle_query(&session.program, &table, query);
                                 let _ = tx.send(serde_json::json!({"type": "query", "query": query, "response": response})).await;
+                            }
+                            // Top-level statements: execute immediately
+                            crate::parser::Operation::Call(_)
+                            | crate::parser::Operation::Let(_)
+                            | crate::parser::Operation::Set(_)
+                            | crate::parser::Operation::Await(_)
+                            | crate::parser::Operation::Spawn(_)
+                            | crate::parser::Operation::If(_)
+                            | crate::parser::Operation::While(_)
+                            | crate::parser::Operation::Each(_)
+                            | crate::parser::Operation::Match(_)
+                            | crate::parser::Operation::Check(_)
+                            | crate::parser::Operation::Branch(_)
+                            | crate::parser::Operation::Return(_) => {
+                                // Convert to AST statement and execute
+                                match crate::validator::convert_statement_op(op) {
+                                    Ok(stmt) => {
+                                        let mut env = crate::eval::Env::new();
+                                        // Propagate coroutine handle if available
+                                        if let Some(sender) = &config_clone.io_sender {
+                                            env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
+                                                crate::coroutine::CoroutineHandle::new(sender.clone())
+                                            ));
+                                        }
+                                        let program = session.program.clone();
+                                        drop(session);
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
+                                        }).await;
+                                        match result {
+                                            Ok(Ok(val)) => {
+                                                let msg = format!("executed: {val}");
+                                                let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": true})).await;
+                                            }
+                                            Ok(Err(e)) => {
+                                                has_errors = true;
+                                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("{e}"), "success": false})).await;
+                                            }
+                                            Err(e) => {
+                                                has_errors = true;
+                                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("task error: {e}"), "success": false})).await;
+                                            }
+                                        }
+                                        session = config_clone.session.lock().await;
+                                    }
+                                    Err(e) => {
+                                        has_errors = true;
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": format!("statement error: {e}"), "success": false})).await;
+                                    }
+                                }
                             }
                             _ => {}
                         }
