@@ -26,6 +26,11 @@ pub enum Operation {
         target_module: String,
     },
     Undo,
+    Agent {
+        name: String,
+        scope: String,
+        task: String,
+    },
     OpenCode(String),
     Query(String),
 }
@@ -604,6 +609,62 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Undo);
         }
 
+        if let Some(rest) = text.strip_prefix("!agent") {
+            // !agent name --scope "scope" task description
+            // !agent test --scope read-only write tests for all functions
+            // !agent refactor --scope "module Crypto" reorganize the crypto code
+            let rest = rest.trim();
+            let (name, rest) = rest.split_once(' ').ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected !agent <name> [--scope <scope>] <task>",
+                    line.number
+                )
+            })?;
+            let rest = rest.trim();
+            let (scope, task) = if rest.starts_with("--scope") {
+                let after_flag = rest.strip_prefix("--scope").unwrap().trim();
+                // Scope might be quoted: --scope "module Crypto" or bare: --scope read-only
+                if after_flag.starts_with('"') {
+                    let close = after_flag[1..]
+                        .find('"')
+                        .ok_or_else(|| anyhow!("line {}: unterminated scope quote", line.number))?;
+                    let scope = &after_flag[1..close + 1];
+                    let task = after_flag[close + 2..].trim();
+                    (scope.to_string(), task.to_string())
+                } else {
+                    let (scope, task) = after_flag.split_once(' ').unwrap_or((after_flag, ""));
+                    (scope.to_string(), task.trim().to_string())
+                }
+            } else {
+                ("full".to_string(), rest.to_string())
+            };
+
+            // Consume continuation lines (like !opencode)
+            self.index += 1;
+            let mut full_task = task;
+            while let Some(next) = self.current() {
+                let t = next.text.trim();
+                if t.starts_with("+fn ")
+                    || t.starts_with("+type ")
+                    || t.starts_with("!test ")
+                    || t.starts_with("!eval ")
+                    || t.starts_with("?")
+                    || t.starts_with("+module ")
+                {
+                    break;
+                }
+                full_task.push('\n');
+                full_task.push_str(next.text);
+                self.index += 1;
+            }
+
+            return Ok(Operation::Agent {
+                name: name.to_string(),
+                scope,
+                task: full_task.trim().to_string(),
+            });
+        }
+
         if let Some(rest) = text.strip_prefix("!opencode") {
             // Consume ALL following lines until end of input or a Forge operation
             let mut description = rest.trim().to_string();
@@ -620,7 +681,7 @@ impl<'a> Parser<'a> {
                     || t.starts_with("!test ")
                     || t.starts_with("!eval ")
                     || t.starts_with("!move ")
-                    || t.starts_with("?") 
+                    || t.starts_with("?")
                 {
                     break;
                 }

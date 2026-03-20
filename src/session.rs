@@ -78,6 +78,152 @@ pub struct Session {
     pub chat_messages: Vec<ChatMessage>,
 }
 
+/// Agent scope — what an agent is allowed to modify.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentScope {
+    /// Can only add tests and evals, no mutations to program
+    ReadOnly,
+    /// Can only add new functions/types, can't modify existing
+    NewOnly,
+    /// Exclusive write to a specific module, read everywhere
+    Module(String),
+    /// Unrestricted
+    Full,
+}
+
+impl AgentScope {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "read-only" | "readonly" => AgentScope::ReadOnly,
+            "new-only" | "newonly" => AgentScope::NewOnly,
+            "full" => AgentScope::Full,
+            s if s.starts_with("module ") => AgentScope::Module(s[7..].to_string()),
+            s => AgentScope::Module(s.to_string()),
+        }
+    }
+
+    /// Check if a mutation is allowed under this scope.
+    pub fn allows_mutation(&self, op: &crate::parser::Operation) -> bool {
+        match self {
+            AgentScope::ReadOnly => {
+                matches!(
+                    op,
+                    crate::parser::Operation::Test(_)
+                        | crate::parser::Operation::Eval(_)
+                        | crate::parser::Operation::Trace(_)
+                        | crate::parser::Operation::Query(_)
+                )
+            }
+            AgentScope::NewOnly => {
+                match op {
+                    crate::parser::Operation::Function(_)
+                    | crate::parser::Operation::Type(_)
+                    | crate::parser::Operation::Test(_)
+                    | crate::parser::Operation::Eval(_)
+                    | crate::parser::Operation::Query(_) => true,
+                    crate::parser::Operation::Replace(_) => false, // can't modify existing
+                    _ => false,
+                }
+            }
+            AgentScope::Module(module_name) => {
+                match op {
+                    crate::parser::Operation::Test(_)
+                    | crate::parser::Operation::Eval(_)
+                    | crate::parser::Operation::Query(_) => true,
+                    crate::parser::Operation::Move { target_module, .. } => {
+                        target_module == module_name
+                    }
+                    // Allow all other mutations — the validator will check module membership
+                    _ => true,
+                }
+            }
+            AgentScope::Full => true,
+        }
+    }
+}
+
+/// An active agent branch.
+#[derive(Debug)]
+pub struct AgentBranch {
+    pub name: String,
+    pub scope: AgentScope,
+    pub task: String,
+    pub fork_revision: usize,
+    pub program: ast::Program,
+    pub mutations: Vec<String>,
+}
+
+impl AgentBranch {
+    /// Create a new branch forked from the current session state.
+    pub fn fork(name: &str, scope: AgentScope, task: &str, session: &Session) -> Self {
+        Self {
+            name: name.to_string(),
+            scope,
+            task: task.to_string(),
+            fork_revision: session.revision,
+            program: session.program.clone(),
+            mutations: Vec::new(),
+        }
+    }
+
+    /// Apply a mutation to this branch (respecting scope).
+    pub fn apply(&mut self, source: &str) -> Result<Vec<(String, bool)>> {
+        let operations = crate::parser::parse(source)?;
+
+        // Check scope
+        for op in &operations {
+            if !self.scope.allows_mutation(op) {
+                return Ok(vec![(
+                    format!(
+                        "agent scope violation: {:?} not allowed in {:?}",
+                        std::mem::discriminant(op),
+                        self.scope
+                    ),
+                    false,
+                )]);
+            }
+        }
+
+        let mut results = Vec::new();
+        for op in &operations {
+            match op {
+                crate::parser::Operation::Test(_)
+                | crate::parser::Operation::Trace(_)
+                | crate::parser::Operation::Eval(_)
+                | crate::parser::Operation::Query(_) => {}
+                _ => match crate::validator::apply_and_validate(&mut self.program, op) {
+                    Ok(msg) => results.push((msg, true)),
+                    Err(e) => results.push((format!("{e}"), false)),
+                },
+            }
+        }
+
+        self.mutations.push(source.to_string());
+        Ok(results)
+    }
+
+    /// Merge this branch's mutations back into a session.
+    /// Returns list of conflicts (empty if clean merge).
+    pub fn merge_into(self, session: &mut Session) -> Vec<String> {
+        let mut conflicts = Vec::new();
+
+        for source in &self.mutations {
+            match session.apply(source) {
+                Ok(results) => {
+                    for (msg, ok) in &results {
+                        if !ok {
+                            conflicts.push(format!("merge conflict: {msg}"));
+                        }
+                    }
+                }
+                Err(e) => conflicts.push(format!("merge error: {e}")),
+            }
+        }
+
+        conflicts
+    }
+}
+
 /// A chat message for LLM conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {

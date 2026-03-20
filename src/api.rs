@@ -702,7 +702,8 @@ pub async fn ask(
                 let has_mutations = ops.iter().any(|op| !matches!(op,
                     crate::parser::Operation::Test(_) | crate::parser::Operation::Trace(_)
                     | crate::parser::Operation::Eval(_) | crate::parser::Operation::Query(_)
-                    | crate::parser::Operation::Undo | crate::parser::Operation::OpenCode(_)));
+                    | crate::parser::Operation::Undo | crate::parser::Operation::Agent { .. }
+                    | crate::parser::Operation::OpenCode(_)));
 
                 if has_mutations {
                     match session.apply(&code) {
@@ -784,6 +785,100 @@ pub async fn ask(
                             let table = crate::typeck::build_symbol_table(&session.program);
                             let response = crate::typeck::handle_query(&session.program, &table, query);
                             iter_results.push(MutationResult { message: response, success: true });
+                        }
+                        crate::parser::Operation::Agent { name, scope, task } => {
+                            eprintln!("[web:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
+
+                            let agent_scope = crate::session::AgentScope::parse(scope);
+                            let branch = crate::session::AgentBranch::fork(name, agent_scope, task, &session);
+                            let program_summary = crate::validator::program_summary_compact(&session.program);
+                            let agent_task = task.clone();
+                            let agent_name = name.clone();
+                            let llm_url = config.llm_url.clone();
+                            let llm_model = config.llm_model.clone();
+                            let llm_key = config.llm_api_key.clone();
+                            let session_ref = config.session.clone();
+
+                            drop(session);
+
+                            // Run agent in background
+                            tokio::spawn(async move {
+                                eprintln!("[agent:{agent_name}] starting");
+                                let agent_llm = crate::llm::LlmClient::new_with_model_and_key(&llm_url, &llm_model, llm_key);
+
+                                let agent_system = format!(
+                                    "{}\n\n{}\n\nYou are agent '{agent_name}'. Your task:\n{agent_task}\n\nWork step by step. When done, respond with DONE.",
+                                    crate::prompt::system_prompt(),
+                                    crate::builtins::format_for_prompt()
+                                );
+
+                                let mut agent_messages = vec![
+                                    crate::llm::ChatMessage::system(agent_system),
+                                    crate::llm::ChatMessage::user(format!("Program state:\n{program_summary}\n\nTask: {agent_task}")),
+                                ];
+
+                                let mut branch = branch;
+                                for agent_iter in 0..10 {
+                                    let output = match agent_llm.generate(agent_messages.clone()).await {
+                                        Ok(o) => o,
+                                        Err(e) => { eprintln!("[agent:{agent_name}] LLM error: {e}"); break; }
+                                    };
+
+                                    agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));
+
+                                    let code = output.code.clone();
+                                    if code.trim() == "DONE" || code.is_empty() {
+                                        eprintln!("[agent:{agent_name}] done at iter {agent_iter}");
+                                        break;
+                                    }
+
+                                    match branch.apply(&code) {
+                                        Ok(results) => {
+                                            let mut has_err = false;
+                                            for (msg, ok) in &results {
+                                                eprintln!("[agent:{agent_name}] {}: {msg}", if *ok {"ok"} else {"err"});
+                                                if !*ok { has_err = true; }
+                                            }
+                                            let feedback = results.iter()
+                                                .map(|(msg, ok)| format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}))
+                                                .collect::<Vec<_>>().join("\n");
+                                            if has_err {
+                                                agent_messages.push(crate::llm::ChatMessage::user(format!("Errors:\n{feedback}\nFix and continue.")));
+                                            } else {
+                                                agent_messages.push(crate::llm::ChatMessage::user(format!("Results:\n{feedback}\nContinue or DONE.")));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[agent:{agent_name}] apply error: {e}");
+                                            agent_messages.push(crate::llm::ChatMessage::user(format!("Error: {e}\nFix and continue.")));
+                                        }
+                                    }
+                                }
+
+                                // Merge branch back into main session
+                                let mut session = session_ref.lock().await;
+                                let conflicts = branch.merge_into(&mut session);
+                                if conflicts.is_empty() {
+                                    eprintln!("[agent:{agent_name}] merged successfully");
+                                    session.chat_messages.push(crate::session::ChatMessage {
+                                        role: "system".to_string(),
+                                        content: format!("Agent '{agent_name}' completed and merged successfully."),
+                                    });
+                                } else {
+                                    eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
+                                    session.chat_messages.push(crate::session::ChatMessage {
+                                        role: "system".to_string(),
+                                        content: format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
+                                    });
+                                }
+                            });
+
+                            iter_results.push(MutationResult {
+                                message: format!("Agent '{name}' spawned (background)"),
+                                success: true,
+                            });
+
+                            session = config.session.lock().await;
                         }
                         crate::parser::Operation::OpenCode(task) => {
                             eprintln!("[web:opencode] {task}");
