@@ -574,7 +574,11 @@ pub async fn ask(
              Program state PERSISTS. Do NOT resend existing types/functions.\n\
              Only send NEW code or modifications.\n\
              IO builtins work as tools (minimal function + !eval) or building blocks.\n\
-             If an eval fails, the error will be shown and you'll be asked to fix it."
+             If an eval fails, the error will be shown and you'll be asked to fix it.\n\
+             \n\
+             If you hit a limitation that CANNOT be solved in Forge (missing builtin, runtime bug),\n\
+             emit !opencode <description> to request a Rust-level change via OpenCode.\n\
+             The system will edit the Rust source, rebuild, and restart. Then you can use the new feature."
         )
     };
 
@@ -748,6 +752,78 @@ pub async fn ask(
                         eprintln!("[web:query] {}", response.chars().take(100).collect::<String>());
                         results.push(MutationResult { message: response, success: true });
                     }
+                    crate::parser::Operation::OpenCode(task) => {
+                        eprintln!("[web:opencode] AI requests: {task}");
+                        drop(session); // release lock
+
+                        let oc_result = tokio::process::Command::new("opencode")
+                            .arg("run")
+                            .arg("--format").arg("json")
+                            .arg(&task)
+                            .current_dir(&config.project_dir)
+                            .output()
+                            .await;
+
+                        match oc_result {
+                            Ok(output) => {
+                                let raw = String::from_utf8_lossy(&output.stdout);
+                                let mut oc_text = Vec::new();
+                                for line in raw.lines() {
+                                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                                        if let Some(text) = event.pointer("/part/text").and_then(|t| t.as_str()) {
+                                            oc_text.push(text.to_string());
+                                        }
+                                    }
+                                }
+                                let summary = oc_text.join("\n");
+                                let oc_success = output.status.success();
+                                eprintln!("[web:opencode:done] success={oc_success} text={}chars", summary.len());
+
+                                if oc_success {
+                                    // Try to rebuild
+                                    eprintln!("[web:opencode:rebuild] cargo build...");
+                                    let build = tokio::process::Command::new("cargo")
+                                        .arg("build")
+                                        .current_dir(&config.project_dir)
+                                        .output().await;
+
+                                    match build {
+                                        Ok(b) if b.status.success() => {
+                                            results.push(MutationResult {
+                                                message: format!("OpenCode completed: {}\nRebuild successful. Restart to apply changes.", 
+                                                    summary.chars().take(300).collect::<String>()),
+                                                success: true,
+                                            });
+                                        }
+                                        Ok(b) => {
+                                            let stderr = String::from_utf8_lossy(&b.stderr);
+                                            has_errors = true;
+                                            results.push(MutationResult {
+                                                message: format!("OpenCode completed but build failed:\n{}", stderr.chars().take(500).collect::<String>()),
+                                                success: false,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            has_errors = true;
+                                            results.push(MutationResult { message: format!("Build error: {e}"), success: false });
+                                        }
+                                    }
+                                } else {
+                                    has_errors = true;
+                                    results.push(MutationResult {
+                                        message: format!("OpenCode failed: {}", summary.chars().take(300).collect::<String>()),
+                                        success: false,
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                has_errors = true;
+                                results.push(MutationResult { message: format!("OpenCode error: {e}"), success: false });
+                            }
+                        }
+
+                        session = config.session.lock().await;
+                    }
                     _ => {}
                 }
             }
@@ -816,22 +892,60 @@ pub async fn opencode_task(
 
     match result {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let raw = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let code = output.status.code().unwrap_or(-1);
+
+            // Parse JSON events to extract text and tool results
+            let mut text_parts = Vec::new();
+            let mut tool_results = Vec::new();
+            for line in raw.lines() {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                    match event.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = event.pointer("/part/text").and_then(|t| t.as_str()) {
+                                text_parts.push(text.to_string());
+                            }
+                        }
+                        Some("tool_result") => {
+                            if let Some(content) = event.pointer("/part/content") {
+                                tool_results.push(content.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let summary = if !text_parts.is_empty() {
+                text_parts.join("\n")
+            } else if !tool_results.is_empty() {
+                tool_results.join("\n")
+            } else {
+                raw.chars().take(500).collect()
+            };
+
+            eprintln!("[web:opencode] exit={code} text={}chars tools={}", summary.len(), tool_results.len());
+            if !summary.is_empty() {
+                eprintln!("[web:opencode:text] {}", summary.chars().take(300).collect::<String>());
+            }
+
             Json(OpenCodeResponse {
-                stdout,
+                stdout: summary,
                 stderr,
                 exit_code: code,
                 success: code == 0,
             })
         }
-        Err(e) => Json(OpenCodeResponse {
-            stdout: String::new(),
-            stderr: format!("Failed to run opencode: {e}"),
-            exit_code: -1,
-            success: false,
-        }),
+        Err(e) => {
+            eprintln!("[web:opencode:err] {e}");
+            Json(OpenCodeResponse {
+                stdout: String::new(),
+                stderr: format!("Failed to run opencode: {e}"),
+                exit_code: -1,
+                success: false,
+            })
+        }
     }
 }
 

@@ -25,6 +25,7 @@ pub enum Operation {
         function_names: Vec<String>,
         target_module: String,
     },
+    OpenCode(String),
     Query(String),
 }
 
@@ -595,6 +596,11 @@ impl<'a> Parser<'a> {
                 function_names,
                 target_module,
             });
+        }
+
+        if let Some(rest) = text.strip_prefix("!opencode") {
+            self.index += 1;
+            return Ok(Operation::OpenCode(rest.trim().to_string()));
         }
 
         if let Some(rest) = text.strip_prefix("!trace") {

@@ -279,13 +279,20 @@ When the runtime reports errors, fix them with targeted !replace operations or b
 - Work step by step — I'll validate each response and give you feedback.
 - When everything passes, put just `DONE` in your <code> block.
 
-## Self-Extension
+## Self-Extension via OpenCode
 
-ForgeOS can modify its own Rust source code via OpenCode integration:
-- The user can send tasks to OpenCode which edits the Forge Rust codebase
-- After changes, ForgeOS can rebuild itself with shell_exec("cargo build")
-- Then restart with self_restart() to pick up the new binary
-- This allows adding new builtins, fixing bugs, or extending the language at runtime
+When you hit a limitation that CANNOT be solved in Forge (missing builtin, runtime bug,
+need a new IO operation), you can request a Rust-level change. Emit this in your response:
+
+!opencode <description of what needs to change in the Rust source>
+
+Example: !opencode Add a hex_decode(s:String)->List<Int> builtin to eval.rs that converts hex string to bytes
+
+The system will delegate to OpenCode which has full access to the Rust codebase,
+can edit files, run cargo build, and run tests. After the change, ForgeOS rebuilds
+and restarts automatically. You can then use the new feature.
+
+Only use !opencode when something truly cannot be done in Forge. Try Forge first.
 "#.to_string()
 }
 
