@@ -382,7 +382,12 @@ async fn ask_and_apply<B: LlmBackend>(
         // Run tests and evals
         for op in &operations {
             match op {
-                parser::Operation::Test(test) => {
+            parser::Operation::Agent { name, scope, task } => {
+                println!("  Agent '{name}' (scope: {scope}): {}", task.chars().take(60).collect::<String>());
+                println!("  Note: agents run in background via the API (/api/ask).");
+                println!("  Use 'forge ask' CLI or the web UI to spawn agents.");
+            }
+            parser::Operation::Test(test) => {
                     println!("  Testing {}:", test.function_name);
                     let mut passed = 0;
                     let mut failed = 0;
