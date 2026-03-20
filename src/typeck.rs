@@ -425,6 +425,94 @@ fn types_compatible(expected: &Type, actual: &Type, _table: &SymbolTable) -> boo
 }
 
 /// Respond to a semantic query about the program.
+/// Precomputed call graph: function → callees, built once per program change.
+pub struct CallGraph {
+    /// function_name → list of functions it calls
+    pub callees: HashMap<String, Vec<String>>,
+    /// function_name → list of functions that call it
+    pub callers: HashMap<String, Vec<String>>,
+}
+
+pub fn build_call_graph(program: &Program) -> CallGraph {
+    let mut callees_map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut callers_map: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Top-level functions
+    for func in &program.functions {
+        let callees = collect_callees_from_stmts(&func.body);
+        for callee in &callees {
+            callers_map
+                .entry(callee.clone())
+                .or_default()
+                .push(func.name.clone());
+        }
+        callees_map.insert(func.name.clone(), callees);
+    }
+
+    // Module functions
+    for module in &program.modules {
+        for func in &module.functions {
+            let qualified = format!("{}.{}", module.name, func.name);
+            let callees = collect_callees_from_stmts(&func.body);
+            for callee in &callees {
+                callers_map
+                    .entry(callee.clone())
+                    .or_default()
+                    .push(qualified.clone());
+            }
+            callees_map.insert(qualified, callees.clone());
+            // Also store unqualified for lookup
+            callees_map.insert(func.name.clone(), callees);
+        }
+    }
+
+    CallGraph {
+        callees: callees_map,
+        callers: callers_map,
+    }
+}
+
+fn query_callees_from_graph(graph: &CallGraph, target: &str) -> String {
+    match graph.callees.get(target) {
+        Some(callees) if !callees.is_empty() => {
+            format!("`{target}` calls: {}", callees.join(", "))
+        }
+        _ => format!("`{target}` calls no other functions"),
+    }
+}
+
+fn query_deps_from_graph(graph: &CallGraph, target: &str) -> String {
+    // Transitive closure — all functions reachable from target
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![target.to_string()];
+    while let Some(name) = stack.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(callees) = graph.callees.get(&name) {
+            for callee in callees {
+                if !visited.contains(callee) {
+                    stack.push(callee.clone());
+                }
+            }
+        }
+    }
+    visited.remove(target);
+    if visited.is_empty() {
+        format!("`{target}` has no dependencies")
+    } else {
+        let mut deps: Vec<&String> = visited.iter().collect();
+        deps.sort();
+        format!(
+            "`{target}` depends on: {}",
+            deps.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
 pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> String {
     let parts: Vec<&str> = query.trim().split_whitespace().collect();
     if parts.is_empty() {
@@ -439,6 +527,16 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
         "?callers" => {
             let target = parts.get(1).copied().unwrap_or("");
             query_callers(program, target)
+        }
+        "?callees" => {
+            let target = parts.get(1).copied().unwrap_or("");
+            let graph = build_call_graph(program);
+            query_callees_from_graph(&graph, target)
+        }
+        "?deps" => {
+            let target = parts.get(1).copied().unwrap_or("");
+            let graph = build_call_graph(program);
+            query_deps_from_graph(&graph, target)
         }
         "?effects" => {
             let target = parts.get(1).copied().unwrap_or("");
@@ -565,18 +663,88 @@ fn query_callers(program: &Program, target: &str) -> String {
 }
 
 fn calls_function(stmts: &[Statement], target: &str) -> bool {
-    stmts.iter().any(|stmt| match &stmt.kind {
-        StatementKind::Call { call, .. } => {
-            call.callee == target || call.callee.ends_with(&format!(".{target}"))
+    let callees = collect_callees_from_stmts(stmts);
+    callees
+        .iter()
+        .any(|c| c == target || c.ends_with(&format!(".{target}")))
+}
+
+/// Collect all function names called from a list of statements (recursive).
+pub fn collect_callees_from_stmts(stmts: &[Statement]) -> Vec<String> {
+    let mut callees = vec![];
+    for stmt in stmts {
+        match &stmt.kind {
+            StatementKind::Let { value, .. }
+            | StatementKind::Set { value, .. }
+            | StatementKind::Return { value }
+            | StatementKind::Check {
+                condition: value, ..
+            } => {
+                collect_callees_from_expr(value, &mut callees);
+            }
+            StatementKind::Call { call, .. }
+            | StatementKind::Await { call, .. }
+            | StatementKind::Spawn { call } => {
+                callees.push(call.callee.clone());
+                for arg in &call.args {
+                    collect_callees_from_expr(arg, &mut callees);
+                }
+            }
+            StatementKind::Branch {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_callees_from_expr(condition, &mut callees);
+                callees.extend(collect_callees_from_stmts(then_body));
+                callees.extend(collect_callees_from_stmts(else_body));
+            }
+            StatementKind::While { condition, body } => {
+                collect_callees_from_expr(condition, &mut callees);
+                callees.extend(collect_callees_from_stmts(body));
+            }
+            StatementKind::Each { body, .. } => {
+                callees.extend(collect_callees_from_stmts(body));
+            }
+            StatementKind::Match { expr, arms } => {
+                collect_callees_from_expr(expr, &mut callees);
+                for arm in arms {
+                    callees.extend(collect_callees_from_stmts(&arm.body));
+                }
+            }
+            _ => {}
         }
-        StatementKind::Branch {
-            then_body,
-            else_body,
-            ..
-        } => calls_function(then_body, target) || calls_function(else_body, target),
-        StatementKind::Each { body, .. } => calls_function(body, target),
-        _ => false,
-    })
+    }
+    callees.sort();
+    callees.dedup();
+    callees
+}
+
+fn collect_callees_from_expr(expr: &Expr, callees: &mut Vec<String>) {
+    match expr {
+        Expr::Call(call) => {
+            callees.push(call.callee.clone());
+            for arg in &call.args {
+                collect_callees_from_expr(arg, callees);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_callees_from_expr(left, callees);
+            collect_callees_from_expr(right, callees);
+        }
+        Expr::Unary { expr: inner, .. } => {
+            collect_callees_from_expr(inner, callees);
+        }
+        Expr::FieldAccess { base, .. } => {
+            collect_callees_from_expr(base, callees);
+        }
+        Expr::StructInit { fields, .. } => {
+            for f in fields {
+                collect_callees_from_expr(&f.value, callees);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn query_effects(table: &SymbolTable, target: &str) -> String {

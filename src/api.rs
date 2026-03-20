@@ -591,7 +591,7 @@ pub async fn ask(
         format!(
             "Working directory: {}\n\n{}\n\n{}\n\nUser request: {}",
             config.project_dir,
-            crate::validator::program_summary(&session.program),
+            crate::validator::program_summary_compact(&session.program),
             session.format_recent_history(10),
             req.message
         )

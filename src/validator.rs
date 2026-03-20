@@ -1071,6 +1071,73 @@ fn update_expr_calls(
     }
 }
 
+/// Compact summary for LLM context — just names and signatures, grouped by module.
+pub fn program_summary_compact(program: &ast::Program) -> String {
+    let mut out = String::new();
+
+    let type_count =
+        program.types.len() + program.modules.iter().map(|m| m.types.len()).sum::<usize>();
+    let fn_count = program.functions.len()
+        + program
+            .modules
+            .iter()
+            .map(|m| m.functions.len())
+            .sum::<usize>();
+    let mod_count = program.modules.len();
+
+    out.push_str(&format!(
+        "Program: {type_count} types, {fn_count} functions, {mod_count} modules\n"
+    ));
+
+    if !program.types.is_empty() {
+        out.push_str("Types: ");
+        out.push_str(
+            &program
+                .types
+                .iter()
+                .map(|t| t.name().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push('\n');
+    }
+
+    if !program.functions.is_empty() {
+        out.push_str("Functions:\n");
+        for func in &program.functions {
+            let params = func
+                .params
+                .iter()
+                .map(|p| format!("{}:{:?}", p.name, p.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let effects = if func.effects.is_empty() {
+                String::new()
+            } else {
+                format!(" [{:?}]", func.effects)
+            };
+            out.push_str(&format!(
+                "  {} ({})->{:?}{}\n",
+                func.name, params, func.return_type, effects
+            ));
+        }
+    }
+
+    for module in &program.modules {
+        let fns: Vec<&str> = module.functions.iter().map(|f| f.name.as_str()).collect();
+        let types: Vec<String> = module.types.iter().map(|t| t.name().to_string()).collect();
+        out.push_str(&format!("Module {}:", module.name));
+        if !types.is_empty() {
+            out.push_str(&format!(" types=[{}]", types.join(", ")));
+        }
+        out.push_str(&format!(" fns=[{}]\n", fns.join(", ")));
+    }
+
+    out.push_str("\nUse ?symbols, ?callers, ?callees, ?deps for details.\n");
+    out
+}
+
+/// Full program summary with all signatures.
 pub fn program_summary(program: &ast::Program) -> String {
     let mut out = String::new();
     out.push_str("=== Current Program State ===\n");
