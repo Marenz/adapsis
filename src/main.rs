@@ -170,6 +170,10 @@ enum Command {
         #[arg(short, long, default_value = "http://127.0.0.1:8081")]
         url: String,
 
+        /// Model name
+        #[arg(long, default_value = "default")]
+        model: String,
+
         /// API key for the LLM provider (sent as Bearer token)
         #[arg(long, env = "LLM_API_KEY")]
         api_key: Option<String>,
@@ -483,7 +487,7 @@ async fn main() -> Result<()> {
             let session_path = session.map(std::path::PathBuf::from);
             repl::run_repl(llm_client, session_path).await?;
         }
-        Command::Os { port, session, url, api_key, daemonize } => {
+        Command::Os { port, session, url, model, api_key, daemonize } => {
             let session_path = std::path::Path::new(&session);
             let sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -524,7 +528,7 @@ async fn main() -> Result<()> {
             let config = api::AppConfig {
                 session: shared_session.clone(),
                 llm_url: url.clone(),
-                llm_model: "default".to_string(),
+                llm_model: model.clone(),
                 llm_api_key: api_key,
                 project_dir,
                 io_sender: Some(io_sender),
