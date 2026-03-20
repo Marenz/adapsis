@@ -88,6 +88,7 @@ Try: "write a function that doubles a number"</div>
     <div id="chat-input-bar">
       <textarea id="chat-input" placeholder="Talk to the AI, type Forge code, or prefix with /opencode for Rust changes..." rows="1"></textarea>
       <button id="send-btn" onclick="sendMessage()">Send</button>
+      <button id="stop-btn" onclick="stopStream()" style="display:none;background:var(--red);color:var(--bg);border:none;padding:8px 12px;border-radius:6px;font-family:var(--font-mono);font-size:11px;cursor:pointer;align-self:flex-end;">Stop</button>
       <button id="oc-btn" onclick="sendOpenCode()" title="Send to OpenCode (modifies Rust source)" style="background:var(--orange);color:var(--bg);border:none;padding:8px 12px;border-radius:6px;font-family:var(--font-mono);font-size:11px;cursor:pointer;align-self:flex-end;">OC</button>
     </div>
   </div>
@@ -105,6 +106,19 @@ const inputEl = document.getElementById('chat-input');
 const sendBtn = document.getElementById('send-btn');
 let sending = false;
 const collapsedModules = new Set();
+let activeReader = null;
+
+function stopStream() {
+  if (activeReader) {
+    activeReader.cancel();
+    activeReader = null;
+    addMessage('system', '⏹ Interrupted');
+    document.getElementById('stop-btn').style.display = 'none';
+    sending = false;
+    sendBtn.disabled = false;
+    document.getElementById('oc-btn').disabled = false;
+  }
+}
 
 function addMessage(role, content) {
   const msg = document.createElement('div');
@@ -221,6 +235,8 @@ async function sendMessage() {
       });
 
       const reader = response.body.getReader();
+      activeReader = reader;
+      document.getElementById('stop-btn').style.display = 'block';
       const decoder = new TextDecoder();
       let buffer = '';
 
@@ -289,9 +305,13 @@ async function sendMessage() {
         }
       }
     } catch (e) {
-      addMessage('system', 'Connection error: ' + e.message);
+      if (e.name !== 'AbortError') {
+        addMessage('system', 'Connection error: ' + e.message);
+      }
     }
 
+    activeReader = null;
+    document.getElementById('stop-btn').style.display = 'none';
     await refreshProgram();
   }
 
