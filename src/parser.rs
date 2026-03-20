@@ -34,6 +34,11 @@ pub enum Operation {
         target_module: String,
     },
     Plan(PlanAction),
+    Watch {
+        function_name: String,
+        args: String,
+        interval_ms: u64,
+    },
     Undo,
     Agent {
         name: String,
@@ -648,6 +653,27 @@ impl<'a> Parser<'a> {
             } else {
                 // Treat as set with single step
                 return Ok(Operation::Plan(PlanAction::Set(vec![rest.to_string()])));
+            }
+        }
+
+        if let Some(rest) = text.strip_prefix("!watch") {
+            // !watch function_name args interval_ms
+            let parts: Vec<&str> = rest.trim().rsplitn(2, ' ').collect();
+            if parts.len() >= 2 {
+                let interval_ms: u64 = parts[0].trim().parse().unwrap_or(60000);
+                let func_and_args = parts[1].trim();
+                let (func, args) = func_and_args.split_once(' ').unwrap_or((func_and_args, ""));
+                self.index += 1;
+                return Ok(Operation::Watch {
+                    function_name: func.to_string(),
+                    args: args.to_string(),
+                    interval_ms,
+                });
+            } else {
+                bail!(
+                    "line {}: expected !watch <function> [args] <interval_ms>",
+                    line.number
+                );
             }
         }
 

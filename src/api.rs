@@ -758,6 +758,7 @@ pub async fn ask(
                     crate::parser::Operation::Test(_) | crate::parser::Operation::Trace(_)
                     | crate::parser::Operation::Eval(_) | crate::parser::Operation::Query(_)
                     | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
+                    | crate::parser::Operation::Watch { .. }
                     | crate::parser::Operation::Agent { .. }
                     | crate::parser::Operation::OpenCode(_)));
 
@@ -841,6 +842,59 @@ pub async fn ask(
                             let table = crate::typeck::build_symbol_table(&session.program);
                             let response = crate::typeck::handle_query(&session.program, &table, query);
                             iter_results.push(MutationResult { message: response, success: true });
+                        }
+                        crate::parser::Operation::Watch { function_name, args, interval_ms } => {
+                            eprintln!("[web:watch] {function_name}({args}) every {interval_ms}ms");
+                            let fn_name = function_name.clone();
+                            let fn_args = args.clone();
+                            let interval = *interval_ms;
+                            let session_ref = config.session.clone();
+                            let io_sender = config.io_sender.clone();
+
+                            tokio::spawn(async move {
+                                let mut last_result = String::new();
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+
+                                    // Evaluate the function
+                                    let result = {
+                                        let session = session_ref.lock().await;
+                                        let input_source = format!("!eval {fn_name} {fn_args}");
+                                        match crate::parser::parse(&input_source) {
+                                            Ok(ops) => {
+                                                let mut result_str = String::new();
+                                                for op in &ops {
+                                                    if let crate::parser::Operation::Eval(ev) = op {
+                                                        match crate::eval::eval_compiled_or_interpreted(
+                                                            &session.program, &ev.function_name, &ev.input,
+                                                        ) {
+                                                            Ok((r, _)) => result_str = r,
+                                                            Err(e) => result_str = format!("error: {e}"),
+                                                        }
+                                                    }
+                                                }
+                                                result_str
+                                            }
+                                            Err(e) => format!("parse error: {e}"),
+                                        }
+                                    };
+
+                                    if result != last_result && !last_result.is_empty() {
+                                        eprintln!("[web:watch:trigger] {fn_name} changed: {last_result} → {result}");
+                                        let mut session = session_ref.lock().await;
+                                        session.chat_messages.push(crate::session::ChatMessage {
+                                            role: "system".to_string(),
+                                            content: format!("Watcher '{fn_name}' triggered: result changed from '{last_result}' to '{result}'"),
+                                        });
+                                    }
+                                    last_result = result;
+                                }
+                            });
+
+                            iter_results.push(MutationResult {
+                                message: format!("Watching {function_name}({args}) every {interval_ms}ms"),
+                                success: true,
+                            });
                         }
                         crate::parser::Operation::Agent { name, scope, task } => {
                             eprintln!("[web:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
