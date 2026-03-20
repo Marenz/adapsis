@@ -60,6 +60,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         } => apply_move(program, function_names, target_module),
         parser::Operation::Trace(_) => Ok("trace (handled by evaluator)".to_string()),
         parser::Operation::Eval(_) => Ok("eval (handled by evaluator)".to_string()),
+        parser::Operation::Plan(_) => Ok("plan (handled by session)".to_string()),
         parser::Operation::Undo => Ok("undo (handled by session)".to_string()),
         parser::Operation::Agent { .. } => Ok("agent (handled by orchestrator)".to_string()),
         parser::Operation::OpenCode(_) => Ok("opencode (handled by orchestrator)".to_string()),

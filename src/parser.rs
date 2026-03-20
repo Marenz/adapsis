@@ -1,6 +1,14 @@
 use anyhow::{anyhow, bail, Context, Result};
 
 #[derive(Debug, Clone)]
+pub enum PlanAction {
+    Set(Vec<String>),
+    Progress(usize),
+    Fail(usize),
+    Show,
+}
+
+#[derive(Debug, Clone)]
 pub enum Operation {
     Module(ModuleDecl),
     Type(TypeDecl),
@@ -25,6 +33,7 @@ pub enum Operation {
         function_names: Vec<String>,
         target_module: String,
     },
+    Plan(PlanAction),
     Undo,
     Agent {
         name: String,
@@ -602,6 +611,44 @@ impl<'a> Parser<'a> {
                 function_names,
                 target_module,
             });
+        }
+
+        if let Some(rest) = text.strip_prefix("!plan") {
+            let rest = rest.trim();
+            self.index += 1;
+            if rest.is_empty() {
+                return Ok(Operation::Plan(PlanAction::Show));
+            } else if let Some(steps) = rest.strip_prefix("set") {
+                // Consume all following lines as plan steps
+                let mut plan_steps: Vec<String> = steps
+                    .trim()
+                    .split('\n')
+                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                while let Some(next) = self.current() {
+                    let t = next.text.trim();
+                    if t.starts_with('+')
+                        || t.starts_with('!')
+                        || t.starts_with('?')
+                        || t.is_empty()
+                    {
+                        break;
+                    }
+                    plan_steps.push(t.trim_matches('"').trim_start_matches("- ").to_string());
+                    self.index += 1;
+                }
+                return Ok(Operation::Plan(PlanAction::Set(plan_steps)));
+            } else if let Some(n) = rest.strip_prefix("done") {
+                let n: usize = n.trim().parse().unwrap_or(1);
+                return Ok(Operation::Plan(PlanAction::Progress(n)));
+            } else if let Some(n) = rest.strip_prefix("fail") {
+                let n: usize = n.trim().parse().unwrap_or(1);
+                return Ok(Operation::Plan(PlanAction::Fail(n)));
+            } else {
+                // Treat as set with single step
+                return Ok(Operation::Plan(PlanAction::Set(vec![rest.to_string()])));
+            }
         }
 
         if text == "!undo" {

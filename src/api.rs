@@ -580,6 +580,7 @@ pub async fn ask(
              Only send NEW code or modifications.\n\
              You can !eval builtins directly: !eval concat a=\"hello \" b=\"world\"\n\
              For IO builtins, write a minimal [io,async] function and !eval it.\n\
+             Use !plan set to create a multi-step plan, !plan done N to mark steps complete.\n\
              When your task is COMPLETE, respond with just DONE in a <code> block.\n\
              If you need to ask the user a question, just respond with text (no <code> block).\n\
              Keep working step by step until the task is fully done.\n\
@@ -597,10 +598,25 @@ pub async fn ask(
                 content: system_prompt,
             });
         }
+        let plan_ctx = if session.plan.is_empty() {
+            String::new()
+        } else {
+            let steps = session.plan.iter().enumerate().map(|(i, s)| {
+                let icon = match s.status {
+                    crate::session::PlanStatus::Pending => "[ ]",
+                    crate::session::PlanStatus::InProgress => "[~]",
+                    crate::session::PlanStatus::Done => "[x]",
+                    crate::session::PlanStatus::Failed => "[!]",
+                };
+                format!("{} {}: {}", icon, i + 1, s.description)
+            }).collect::<Vec<_>>().join("\n");
+            format!("\nCurrent plan:\n{steps}\n")
+        };
         let context = format!(
-            "Working directory: {}\n{}\nUser: {}",
+            "Working directory: {}\n{}{}\nUser: {}",
             config.project_dir,
             crate::validator::program_summary_compact(&session.program),
+            plan_ctx,
             req.message
         );
         session.chat_messages.push(crate::session::ChatMessage {
@@ -686,7 +702,7 @@ pub async fn ask(
                     }
                 }
 
-                // Handle !undo before apply
+                // Handle !undo and !plan before apply
                 let has_undo = ops.iter().any(|op| matches!(op, crate::parser::Operation::Undo));
                 if has_undo {
                     if session.revision > 0 {
@@ -697,12 +713,52 @@ pub async fn ask(
                         }
                     }
                 }
+                for op in &ops {
+                    if let crate::parser::Operation::Plan(action) = op {
+                        match action {
+                            crate::parser::PlanAction::Set(steps) => {
+                                session.plan = steps.iter().map(|s| crate::session::PlanStep {
+                                    description: s.clone(),
+                                    status: crate::session::PlanStatus::Pending,
+                                }).collect();
+                                iter_results.push(MutationResult { message: format!("Plan set: {} steps", steps.len()), success: true });
+                            }
+                            crate::parser::PlanAction::Progress(n) => {
+                                let idx = n.saturating_sub(1);
+                                if let Some(step) = session.plan.get_mut(idx) {
+                                    step.status = crate::session::PlanStatus::Done;
+                                    iter_results.push(MutationResult { message: format!("Step {n} done: {}", step.description), success: true });
+                                }
+                            }
+                            crate::parser::PlanAction::Fail(n) => {
+                                let idx = n.saturating_sub(1);
+                                if let Some(step) = session.plan.get_mut(idx) {
+                                    step.status = crate::session::PlanStatus::Failed;
+                                    iter_results.push(MutationResult { message: format!("Step {n} failed: {}", step.description), success: true });
+                                }
+                            }
+                            crate::parser::PlanAction::Show => {
+                                let plan_str = session.plan.iter().enumerate().map(|(i, s)| {
+                                    let icon = match s.status {
+                                        crate::session::PlanStatus::Pending => "[ ]",
+                                        crate::session::PlanStatus::InProgress => "[~]",
+                                        crate::session::PlanStatus::Done => "[x]",
+                                        crate::session::PlanStatus::Failed => "[!]",
+                                    };
+                                    format!("  {} {}: {}", icon, i + 1, s.description)
+                                }).collect::<Vec<_>>().join("\n");
+                                iter_results.push(MutationResult { message: if plan_str.is_empty() { "No plan set".to_string() } else { format!("Plan:\n{plan_str}") }, success: true });
+                            }
+                        }
+                    }
+                }
 
                 // Apply mutations
                 let has_mutations = ops.iter().any(|op| !matches!(op,
                     crate::parser::Operation::Test(_) | crate::parser::Operation::Trace(_)
                     | crate::parser::Operation::Eval(_) | crate::parser::Operation::Query(_)
-                    | crate::parser::Operation::Undo | crate::parser::Operation::Agent { .. }
+                    | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
+                    | crate::parser::Operation::Agent { .. }
                     | crate::parser::Operation::OpenCode(_)));
 
                 if has_mutations {

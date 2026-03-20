@@ -79,6 +79,24 @@ pub struct Session {
     /// Active/completed agent statuses
     #[serde(default)]
     pub agent_log: Vec<AgentStatus>,
+    /// Current plan/goal tracking
+    #[serde(default)]
+    pub plan: Vec<PlanStep>,
+}
+
+/// A step in the AI's plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub description: String,
+    pub status: PlanStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PlanStatus {
+    Pending,
+    InProgress,
+    Done,
+    Failed,
 }
 
 /// Status of an agent run.
@@ -251,6 +269,7 @@ impl Session {
             mutations: Vec::new(),
             chat_messages: Vec::new(),
             agent_log: Vec::new(),
+            plan: Vec::new(),
             history: Vec::new(),
             revision: 0,
             sources: Vec::new(),
