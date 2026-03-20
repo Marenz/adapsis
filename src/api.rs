@@ -1544,9 +1544,9 @@ pub async fn ask_stream(
                 messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
                 let feedback = if feedback_parts.is_empty() {
-                    "All operations succeeded. Continue with next step or respond with DONE.".to_string()
+                    "All operations succeeded. If the user's request is FULLY completed, respond with DONE. Otherwise continue.".to_string()
                 } else {
-                    format!("Results:\n{}\n\nAll operations succeeded. Continue or DONE.", feedback_parts.join("\n\n"))
+                    format!("Results:\n{}\n\nAll operations succeeded. If the user's request is FULLY completed, respond with DONE. Otherwise continue.", feedback_parts.join("\n\n"))
                 };
                 messages.push(crate::llm::ChatMessage::user(feedback));
             }

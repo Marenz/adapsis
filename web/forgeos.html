@@ -169,12 +169,21 @@ function escapeHtml(s) {
 
 async function sendMessage() {
   const text = inputEl.value.trim();
-  if (!text || sending) return;
+  if (!text) return;
+
+  // If already streaming, stop current stream first (injection)
+  if (sending && activeReader) {
+    activeReader.cancel();
+    activeReader = null;
+    addMessage('system', '⏹ Interrupted by user input');
+    document.getElementById('stop-btn').style.display = 'none';
+  }
 
   addMessage('user', text);
   inputEl.value = '';
   sending = true;
-  sendBtn.disabled = true;
+  // Don't disable input — allow injection
+  // sendBtn.disabled = true;
 
   const isForge = text.startsWith('+') || text.startsWith('!') || text.startsWith('?');
 

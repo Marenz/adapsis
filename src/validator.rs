@@ -158,17 +158,74 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
     let parts: Vec<&str> = replace.target.split('.').collect();
 
     match parts.len() {
-        2 => {
-            // function_name.sN
+        1 => {
+            // function_name — replace entire body
             let fn_name = parts[0];
-            let stmt_id = parts[1];
             let func = program
                 .functions
                 .iter_mut()
                 .find(|f| f.name == fn_name)
+                .or_else(|| {
+                    program
+                        .modules
+                        .iter_mut()
+                        .flat_map(|m| m.functions.iter_mut())
+                        .find(|f| f.name == fn_name)
+                })
                 .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
-            replace_statement(&mut func.body, stmt_id, &replace.body)?;
-            Ok(format!("replaced `{}`", replace.target))
+            let mut new_body = vec![];
+            for (i, op) in replace.body.iter().enumerate() {
+                let mut stmt = convert_statement_op(op)?;
+                stmt.id = format!("{fn_name}.s{}", i + 1);
+                new_body.push(stmt);
+            }
+            func.body = new_body;
+            Ok(format!(
+                "replaced entire body of `{fn_name}` ({} statements)",
+                func.body.len()
+            ))
+        }
+        2 => {
+            let fn_name = parts[0];
+            let stmt_id = parts[1];
+            // Check if it's fn.sN or Module.fn
+            if stmt_id.starts_with('s') && stmt_id[1..].parse::<usize>().is_ok() {
+                // function_name.sN
+                let func = program
+                    .functions
+                    .iter_mut()
+                    .find(|f| f.name == fn_name)
+                    .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
+                replace_statement(&mut func.body, stmt_id, &replace.body)?;
+                Ok(format!("replaced `{}`", replace.target))
+            } else {
+                // Module.function — replace entire body
+                let mod_name = parts[0];
+                let fn_name = parts[1];
+                let module = program
+                    .modules
+                    .iter_mut()
+                    .find(|m| m.name == mod_name)
+                    .ok_or_else(|| anyhow!("module `{mod_name}` not found for replace"))?;
+                let func = module
+                    .functions
+                    .iter_mut()
+                    .find(|f| f.name == fn_name)
+                    .ok_or_else(|| {
+                        anyhow!("function `{fn_name}` not found in module `{mod_name}`")
+                    })?;
+                let mut new_body = vec![];
+                for (i, op) in replace.body.iter().enumerate() {
+                    let mut stmt = convert_statement_op(op)?;
+                    stmt.id = format!("{mod_name}.{fn_name}.s{}", i + 1);
+                    new_body.push(stmt);
+                }
+                func.body = new_body;
+                Ok(format!(
+                    "replaced entire body of `{mod_name}.{fn_name}` ({} statements)",
+                    func.body.len()
+                ))
+            }
         }
         3 => {
             // Module.function.sN
@@ -184,14 +241,12 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 .functions
                 .iter_mut()
                 .find(|f| f.name == fn_name)
-                .ok_or_else(|| {
-                    anyhow!("function `{fn_name}` not found in module `{mod_name}` for replace")
-                })?;
+                .ok_or_else(|| anyhow!("function `{fn_name}` not found in module `{mod_name}`"))?;
             replace_statement(&mut func.body, stmt_id, &replace.body)?;
             Ok(format!("replaced `{}`", replace.target))
         }
         _ => bail!(
-            "invalid replace target `{}` — expected `fn.sN` or `module.fn.sN`",
+            "invalid replace target `{}` — expected `fn`, `fn.sN`, `Module.fn`, or `Module.fn.sN`",
             replace.target
         ),
     }

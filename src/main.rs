@@ -145,12 +145,23 @@ enum Command {
         model: String,
     },
 
-    /// Interactive REPL (connects to a running ForgeOS instance)
+    /// Interactive REPL (auto-starts ForgeOS if not running)
     Repl {
-        /// ForgeOS API URL
+        /// ForgeOS API URL (auto-detected if not specified)
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
 
+        /// Session file (used when auto-starting ForgeOS)
+        #[arg(short, long, default_value = "forgeos-session.json")]
+        session: String,
+
+        /// LLM server URL (used when auto-starting)
+        #[arg(short, long, env = "FORGE_LLM_URL", default_value = "http://127.0.0.1:8081")]
+        url: String,
+
+        /// Model name (used when auto-starting)
+        #[arg(long, env = "FORGE_MODEL")]
+        model: Option<String>,
     },
 
     /// Start ForgeOS — HTTP API + browser UI + session persistence
@@ -528,8 +539,67 @@ async fn main() -> Result<()> {
                 _ = io_loop => {}
             }
         }
-        Command::Repl { api } => {
-            repl::run_repl(&api).await?;
+        Command::Repl { api, session, url, model } => {
+            // Check if ForgeOS is already running
+            let client = reqwest::Client::new();
+            let running = client.get(format!("{api}/api/status"))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+
+            let api_url = if running {
+                api
+            } else {
+                // Auto-start ForgeOS in the background
+                let model = model.unwrap_or_else(|| {
+                    eprintln!("No model specified. Set FORGE_MODEL env var or use --model.");
+                    eprintln!("Example: FORGE_MODEL=anthropic/claude-haiku-4-5-20251001 forge repl");
+                    std::process::exit(1);
+                });
+
+                // Extract port from api URL
+                let port = api.rsplit(':').next()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(3001);
+
+                eprintln!("No ForgeOS instance detected. Starting one...");
+
+                let exe = std::env::current_exe()?;
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.arg("os")
+                    .arg("--session").arg(&session)
+                    .arg("--port").arg(port.to_string())
+                    .arg("--url").arg(&url)
+                    .arg("--model").arg(&model)
+                    .arg("--daemonize");
+
+                let output = cmd.output()?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("Failed to start ForgeOS: {stderr}");
+                    std::process::exit(1);
+                }
+
+                // Print the startup output (includes "Daemonized: PID ...")
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                eprint!("{stdout}");
+
+                // Wait for it to be ready
+                for _ in 0..20 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if client.get(format!("{api}/api/status"))
+                        .send().await
+                        .map(|r| r.status().is_success())
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                }
+
+                api
+            };
+
+            repl::run_repl(&api_url).await?;
         }
         Command::Os { port, session, url, model, api_key, daemonize } => {
             let session_path = std::path::Path::new(&session);
