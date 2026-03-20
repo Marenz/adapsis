@@ -41,6 +41,10 @@ enum Command {
         #[arg(long, default_value = "default")]
         model: String,
 
+        /// API key for the LLM provider (sent as Bearer token)
+        #[arg(long, env = "LLM_API_KEY")]
+        api_key: Option<String>,
+
         /// Maximum feedback loop iterations
         #[arg(short, long, default_value_t = 20)]
         max_iterations: usize,
@@ -60,6 +64,10 @@ enum Command {
         #[arg(long, default_value = "default")]
         model: String,
 
+        /// API key for the LLM provider (sent as Bearer token)
+        #[arg(long, env = "LLM_API_KEY")]
+        api_key: Option<String>,
+
         /// Maximum feedback loop iterations per function
         #[arg(short, long, default_value_t = 5)]
         max_iterations: usize,
@@ -78,6 +86,10 @@ enum Command {
         /// LLM server URL (OpenAI-compatible)
         #[arg(short, long, default_value = "http://127.0.0.1:8081")]
         url: String,
+
+        /// API key for the LLM provider (sent as Bearer token)
+        #[arg(long, env = "LLM_API_KEY")]
+        api_key: Option<String>,
 
         /// Maximum feedback loop iterations
         #[arg(short, long, default_value_t = 20)]
@@ -134,6 +146,10 @@ enum Command {
         #[arg(long, default_value = "default")]
         model: String,
 
+        /// API key for the LLM provider (sent as Bearer token)
+        #[arg(long, env = "LLM_API_KEY")]
+        api_key: Option<String>,
+
         /// Session file path (auto-saves)
         #[arg(short, long)]
         session: Option<String>,
@@ -152,6 +168,10 @@ enum Command {
         /// LLM server URL (OpenAI-compatible)
         #[arg(short, long, default_value = "http://127.0.0.1:8081")]
         url: String,
+
+        /// API key for the LLM provider (sent as Bearer token)
+        #[arg(long, env = "LLM_API_KEY")]
+        api_key: Option<String>,
     },
 }
 
@@ -168,9 +188,10 @@ async fn main() -> Result<()> {
             task,
             url,
             model,
+            api_key,
             max_iterations,
         } => {
-            let llm_client = llm::LlmClient::new_with_model(&url, &model);
+            let llm_client = llm::LlmClient::new_with_model_and_key(&url, &model, api_key);
             let mut orch = orchestrator::Orchestrator::new(llm_client, max_iterations);
             orch.run(&task).await?;
         }
@@ -178,10 +199,11 @@ async fn main() -> Result<()> {
             task,
             url,
             model,
+            api_key,
             max_iterations,
             port,
         } => {
-            let llm_client = llm::LlmClient::new_with_model(&url, &model);
+            let llm_client = llm::LlmClient::new_with_model_and_key(&url, &model, api_key);
             if port > 0 {
                 // Run with browser UI
                 let event_bus = events::EventBus::new();
@@ -231,10 +253,11 @@ async fn main() -> Result<()> {
         Command::Serve {
             task,
             url,
+            api_key,
             max_iterations,
             port,
         } => {
-            let llm_client = llm::LlmClient::new(&url);
+            let llm_client = llm::LlmClient::new_with_model_and_key(&url, "default", api_key);
             server::serve_and_run(llm_client, max_iterations, port, task).await?;
         }
         Command::Check { path } => {
@@ -450,12 +473,12 @@ async fn main() -> Result<()> {
                 _ = io_loop => {}
             }
         }
-        Command::Repl { url, model, session } => {
-            let llm_client = llm::LlmClient::new_with_model(&url, &model);
+        Command::Repl { url, model, api_key, session } => {
+            let llm_client = llm::LlmClient::new_with_model_and_key(&url, &model, api_key);
             let session_path = session.map(std::path::PathBuf::from);
             repl::run_repl(llm_client, session_path).await?;
         }
-        Command::Os { port, session, url } => {
+        Command::Os { port, session, url, api_key } => {
             let session_path = std::path::Path::new(&session);
             let sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -497,6 +520,7 @@ async fn main() -> Result<()> {
                 session: shared_session.clone(),
                 llm_url: url.clone(),
                 llm_model: "default".to_string(),
+                llm_api_key: api_key,
                 project_dir,
                 io_sender: Some(io_sender),
             };

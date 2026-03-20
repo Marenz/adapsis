@@ -31,6 +31,7 @@ pub struct AppConfig {
     pub session: SharedSession,
     pub llm_url: String,
     pub llm_model: String,
+    pub llm_api_key: Option<String>,
     pub project_dir: String,
     pub io_sender: Option<tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
 }
@@ -559,7 +560,7 @@ pub async fn ask(
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
     eprintln!("\n[web:user] {}", req.message);
-    let llm = crate::llm::LlmClient::new_with_model(&config.llm_url, &config.llm_model);
+    let llm = crate::llm::LlmClient::new_with_model_and_key(&config.llm_url, &config.llm_model, config.llm_api_key.clone());
 
     let mut results: Vec<MutationResult> = vec![];
     let mut test_results: Vec<TestCaseResult> = vec![];

@@ -64,6 +64,7 @@ pub trait LlmBackend {
 pub struct OpenAiBackend {
     base_url: String,
     model: String,
+    api_key: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -72,11 +73,17 @@ impl OpenAiBackend {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: "default".to_string(),
+            api_key: None,
         }
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key;
         self
     }
 
@@ -94,10 +101,18 @@ impl OpenAiBackend {
         })
     }
 
+    fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.api_key {
+            Some(key) => req.bearer_auth(key),
+            None => req,
+        }
+    }
+
     async fn generate_streaming(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput> {
-        let response = http
+        let req = http
             .post(self.endpoint())
-            .json(&self.request_body(request, true))
+            .json(&self.request_body(request, true));
+        let response = self.apply_auth(req)
             .send()
             .await
             .context("failed to send streaming chat completion request")?
@@ -167,9 +182,10 @@ impl OpenAiBackend {
     }
 
     async fn generate_non_streaming(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput> {
-        let response: ChatCompletionResponse = http
+        let req = http
             .post(self.endpoint())
-            .json(&self.request_body(request, false))
+            .json(&self.request_body(request, false));
+        let response: ChatCompletionResponse = self.apply_auth(req)
             .send()
             .await
             .context("failed to send chat completion request")?
@@ -229,6 +245,16 @@ impl LlmClient<OpenAiBackend> {
         Self {
             http: Client::new(),
             backend: OpenAiBackend::new(base_url).with_model(model),
+            temperature: 0.7,
+            max_tokens,
+        }
+    }
+
+    pub fn new_with_model_and_key(base_url: &str, model: &str, api_key: Option<String>) -> Self {
+        let max_tokens = if model.contains("opus") { 64000 } else { 32000 };
+        Self {
+            http: Client::new(),
+            backend: OpenAiBackend::new(base_url).with_model(model).with_api_key(api_key),
             temperature: 0.7,
             max_tokens,
         }
