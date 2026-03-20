@@ -25,6 +25,7 @@ pub enum Operation {
         function_names: Vec<String>,
         target_module: String,
     },
+    Undo,
     OpenCode(String),
     Query(String),
 }
@@ -596,6 +597,11 @@ impl<'a> Parser<'a> {
                 function_names,
                 target_module,
             });
+        }
+
+        if text == "!undo" {
+            self.index += 1;
+            return Ok(Operation::Undo);
         }
 
         if let Some(rest) = text.strip_prefix("!opencode") {

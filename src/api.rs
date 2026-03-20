@@ -755,6 +755,26 @@ pub async fn ask(
                         eprintln!("[web:query] {}", response.chars().take(100).collect::<String>());
                         results.push(MutationResult { message: response, success: true });
                     }
+                    crate::parser::Operation::Undo => {
+                        if session.revision > 0 {
+                            let prev = session.revision - 1;
+                            match session.rewind_to(prev) {
+                                Ok(()) => {
+                                    eprintln!("[web:undo] rewound to rev {prev}");
+                                    results.push(MutationResult {
+                                        message: format!("Undone. Now at revision {prev}"),
+                                        success: true,
+                                    });
+                                }
+                                Err(e) => {
+                                    has_errors = true;
+                                    results.push(MutationResult { message: format!("Undo failed: {e}"), success: false });
+                                }
+                            }
+                        } else {
+                            results.push(MutationResult { message: "Nothing to undo".to_string(), success: true });
+                        }
+                    }
                     crate::parser::Operation::OpenCode(task) => {
                         eprintln!("[web:opencode] AI requests: {task}");
                         drop(session); // release lock

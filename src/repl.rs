@@ -166,6 +166,21 @@ async fn process_input(input: &str, session: &mut Session) {
         )
     });
 
+    // Handle !undo before apply (it modifies program state directly)
+    let has_undo = operations.iter().any(|op| matches!(op, parser::Operation::Undo));
+    if has_undo {
+        if session.revision > 0 {
+            let prev = session.revision - 1;
+            match session.rewind_to(prev) {
+                Ok(()) => println!("  Undone. Now at revision {prev}"),
+                Err(e) => eprintln!("  Undo failed: {e}"),
+            }
+        } else {
+            println!("  Nothing to undo");
+        }
+        return;
+    }
+
     if has_mutations {
         match session.apply(input) {
             Ok(results) => {
@@ -187,6 +202,17 @@ async fn process_input(input: &str, session: &mut Session) {
     // Handle actions
     for op in &operations {
         match op {
+            parser::Operation::Undo => {
+                if session.revision > 0 {
+                    let prev = session.revision - 1;
+                    match session.rewind_to(prev) {
+                        Ok(()) => println!("  Undone. Now at revision {prev}"),
+                        Err(e) => eprintln!("  Undo failed: {e}"),
+                    }
+                } else {
+                    println!("  Nothing to undo");
+                }
+            }
             parser::Operation::Test(test) => {
                 println!("  Testing {}:", test.function_name);
                 let mut passed = 0;
