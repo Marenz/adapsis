@@ -110,20 +110,7 @@ For multi-param functions, use space-separated key=value pairs (named after the 
   +with name="alice" age=25 -> expect Ok
   +with name="" age=25 -> expect Err(err_empty_name)
 
-### Evaluating
-!eval function_name arg1=val1 arg2=val2
-Calls a function and shows the result. For single-param: !eval double 5
-
-### Tracing
-!trace function_name arg1=val1 arg2=val2
-Shows step-by-step execution of a function with the given input.
-
-### Semantic Queries
-?symbols                    — list all defined types and functions
-?symbols function_name      — show details of a specific function
-?callers function_name      — who calls this function?
-?effects function_name      — what effects does this function have?
-?type TypeName              — show type definition
+(Queries and commands are listed separately via the registry.)
 
 ## Important Rules
 

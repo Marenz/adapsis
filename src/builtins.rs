@@ -399,6 +399,131 @@ pub static IO_BUILTINS: &[Builtin] = &[
     },
 ];
 
+/// Registered query commands (?-prefixed).
+pub struct QueryCommand {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub description: &'static str,
+}
+
+pub static QUERIES: &[QueryCommand] = &[
+    QueryCommand {
+        name: "?symbols",
+        args: "[name]",
+        description: "list all types and functions, or details of one",
+    },
+    QueryCommand {
+        name: "?source",
+        args: "<fn>",
+        description: "show reconstructed source code of a function or type",
+    },
+    QueryCommand {
+        name: "?callers",
+        args: "<fn>",
+        description: "who calls this function",
+    },
+    QueryCommand {
+        name: "?callees",
+        args: "<fn>",
+        description: "what does this function call (1 level)",
+    },
+    QueryCommand {
+        name: "?deps",
+        args: "<fn>",
+        description: "direct dependencies (1 level)",
+    },
+    QueryCommand {
+        name: "?deps-all",
+        args: "<fn>",
+        description: "full transitive dependency tree",
+    },
+    QueryCommand {
+        name: "?deps-modules",
+        args: "<fn>",
+        description: "dependencies grouped by module",
+    },
+    QueryCommand {
+        name: "?effects",
+        args: "<fn>",
+        description: "what effects does this function have",
+    },
+    QueryCommand {
+        name: "?type",
+        args: "<type>",
+        description: "show type definition",
+    },
+    QueryCommand {
+        name: "?agents",
+        args: "",
+        description: "show status of all agents",
+    },
+    QueryCommand {
+        name: "?plan",
+        args: "",
+        description: "show current plan (same as !plan)",
+    },
+];
+
+/// Registered mutation/action commands (!-prefixed).
+pub struct ActionCommand {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub description: &'static str,
+}
+
+pub static ACTIONS: &[ActionCommand] = &[
+    ActionCommand {
+        name: "!test",
+        args: "<fn>\\n  +with ...",
+        description: "run test cases for a function",
+    },
+    ActionCommand {
+        name: "!eval",
+        args: "<fn> [args]",
+        description: "evaluate a function or builtin",
+    },
+    ActionCommand {
+        name: "!trace",
+        args: "<fn> [args]",
+        description: "step-by-step execution trace",
+    },
+    ActionCommand {
+        name: "!replace",
+        args: "<fn.sN>\\n  ...",
+        description: "replace a statement in a function",
+    },
+    ActionCommand {
+        name: "!move",
+        args: "<symbols...> <Module>",
+        description: "move functions/types into a module (auto-updates call sites)",
+    },
+    ActionCommand {
+        name: "!undo",
+        args: "",
+        description: "revert last mutation",
+    },
+    ActionCommand {
+        name: "!plan",
+        args: "set/done N/fail N/show",
+        description: "manage task plan",
+    },
+    ActionCommand {
+        name: "!watch",
+        args: "<fn> [args] <ms>",
+        description: "poll a function periodically, alert on change",
+    },
+    ActionCommand {
+        name: "!agent",
+        args: "<name> --scope <scope> <task>",
+        description: "spawn background agent (scopes: read-only, new-only, module X, full)",
+    },
+    ActionCommand {
+        name: "!opencode",
+        args: "<description>",
+        description: "request Rust-level change via OpenCode (rebuild + restart)",
+    },
+];
+
 /// Get all builtin names (for the validator's shadow check).
 pub fn all_builtin_names() -> Vec<&'static str> {
     let mut names = Vec::new();
@@ -432,6 +557,14 @@ pub fn format_for_prompt() -> String {
     out.push_str("\n### IO Functions (require [io,async] effect, use +await)\n");
     for b in IO_BUILTINS {
         out.push_str(&format!("  {} — {}\n", b.name, b.description));
+    }
+    out.push_str("\n### Queries (inspect program state)\n");
+    for q in QUERIES {
+        out.push_str(&format!("  {} {} — {}\n", q.name, q.args, q.description));
+    }
+    out.push_str("\n### Commands\n");
+    for a in ACTIONS {
+        out.push_str(&format!("  {} {} — {}\n", a.name, a.args, a.description));
     }
     out
 }
