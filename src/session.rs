@@ -336,6 +336,55 @@ impl Session {
                 | parser::Operation::Query(_) => {
                     // These don't modify program state — handled separately
                 }
+                parser::Operation::Plan(action) => match action {
+                    parser::PlanAction::Set(steps) => {
+                        self.plan = steps
+                            .iter()
+                            .map(|s| PlanStep {
+                                description: s.clone(),
+                                status: PlanStatus::Pending,
+                            })
+                            .collect();
+                        results.push((format!("Plan: {} steps", steps.len()), true));
+                    }
+                    parser::PlanAction::Progress(n) => {
+                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                            step.status = PlanStatus::Done;
+                            results.push((format!("Step {n} done"), true));
+                        }
+                    }
+                    parser::PlanAction::Fail(n) => {
+                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                            step.status = PlanStatus::Failed;
+                            results.push((format!("Step {n} failed"), true));
+                        }
+                    }
+                    parser::PlanAction::Show => {
+                        let plan_str = self
+                            .plan
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| {
+                                let icon = match s.status {
+                                    PlanStatus::Pending => "[ ]",
+                                    PlanStatus::InProgress => "[~]",
+                                    PlanStatus::Done => "[x]",
+                                    PlanStatus::Failed => "[!]",
+                                };
+                                format!("{} {}: {}", icon, i + 1, s.description)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        results.push((
+                            if plan_str.is_empty() {
+                                "No plan set".to_string()
+                            } else {
+                                format!("Plan:\n{plan_str}")
+                            },
+                            true,
+                        ));
+                    }
+                },
                 _ => {
                     any_definition = true;
                     match validator::apply_and_validate(&mut self.program, op) {

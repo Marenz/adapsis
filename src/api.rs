@@ -273,12 +273,20 @@ pub struct QueryResponse {
 }
 
 pub async fn query(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
-    let mut session = session.lock().await;
-    let table = typeck::build_symbol_table(&session.program);
-    let response = typeck::handle_query(&session.program, &table, &req.query);
+    let mut session = config.session.lock().await;
+    let response = if req.query.trim() == "?inbox" || req.query.trim().starts_with("?inbox") {
+        let msgs = session.peek_messages("main");
+        if msgs.is_empty() { "No messages.".to_string() }
+        else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
+    } else if req.query.trim() == "?tasks" {
+        format_tasks(&config.task_registry)
+    } else {
+        let table = typeck::build_symbol_table(&session.program);
+        typeck::handle_query(&session.program, &table, &req.query)
+    };
     session.record_query(&req.query, &response);
     Json(QueryResponse { response })
 }
@@ -1726,7 +1734,6 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
     let session_routes = axum::Router::new()
         .route("/api/mutate", post(mutate))
         .route("/api/test", post(test_fn))
-        .route("/api/query", post(query))
         .route("/api/status", get(status))
         .route("/api/program", get(program))
         .route("/api/history", post(history))
@@ -1736,6 +1743,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
 
     let config_routes = axum::Router::new()
         .route("/api/eval", post(eval_fn))
+        .route("/api/query", post(query))
         .route("/api/ask", post(ask))
         .route("/api/ask-stream", post(ask_stream))
         .route("/api/opencode", post(opencode_task))
