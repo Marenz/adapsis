@@ -479,6 +479,11 @@ pub static QUERIES: &[QueryCommand] = &[
         args: "",
         description: "check messages from other agents or main session",
     },
+    QueryCommand {
+        name: "?tasks",
+        args: "",
+        description: "list all spawned async tasks and their current wait state",
+    },
 ];
 
 /// Registered mutation/action commands (!-prefixed).

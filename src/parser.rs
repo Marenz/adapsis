@@ -95,6 +95,8 @@ pub struct AwaitDecl {
 #[derive(Debug, Clone)]
 pub struct SpawnDecl {
     pub call: Expr,
+    /// Optional binding for the task handle: +spawn t:Int = func(args)
+    pub binding: Option<(String, TypeExpr)>,
 }
 
 #[derive(Debug, Clone)]
@@ -496,9 +498,22 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(rest) = text.strip_prefix("+spawn") {
-            let expr = parse_expr(line.number, rest.trim())?;
+            let rest = rest.trim();
+            // Check for binding form: +spawn name:Type = func(args)
+            if rest.contains('=') && !rest.starts_with('(') {
+                let decl = parse_binding_decl(line.number, rest, false)?;
+                self.index += 1;
+                return Ok(Operation::Spawn(SpawnDecl {
+                    call: decl.expr,
+                    binding: Some((decl.name, decl.ty)),
+                }));
+            }
+            let expr = parse_expr(line.number, rest)?;
             self.index += 1;
-            return Ok(Operation::Spawn(SpawnDecl { call: expr }));
+            return Ok(Operation::Spawn(SpawnDecl {
+                call: expr,
+                binding: None,
+            }));
         }
 
         if let Some(rest) = text.strip_prefix("+call") {

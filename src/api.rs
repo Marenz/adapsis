@@ -36,6 +36,8 @@ pub struct AppConfig {
     pub io_sender: Option<tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
     /// Channel for self-triggering: system events that should invoke the AI
     pub self_trigger: tokio::sync::mpsc::Sender<String>,
+    /// Task registry for tracking spawned async tasks
+    pub task_registry: Option<crate::coroutine::TaskRegistry>,
 }
 
 #[derive(Deserialize)]
@@ -470,7 +472,7 @@ fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
         crate::ast::StatementKind::Await { name, call, .. } => {
             ("await".into(), format!("await {name} = {}()", call.callee))
         }
-        crate::ast::StatementKind::Spawn { call } => {
+        crate::ast::StatementKind::Spawn { call, .. } => {
             ("spawn".into(), format!("spawn {}()", call.callee))
         }
         crate::ast::StatementKind::Match { .. } => ("match".into(), "match ...".into()),
@@ -572,6 +574,22 @@ pub struct AskResponse {
     pub results: Vec<MutationResult>,
     pub test_results: Vec<TestCaseResult>,
     pub has_errors: bool,
+}
+
+/// Format the task registry for display.
+fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
+    let Some(reg) = registry else { return "No task registry (async not available).".to_string() };
+    let tasks = reg.lock().unwrap();
+    if tasks.is_empty() {
+        return "No tasks.".to_string();
+    }
+    let mut out = String::new();
+    let mut sorted: Vec<_> = tasks.values().collect();
+    sorted.sort_by_key(|t| t.id);
+    for t in sorted {
+        out.push_str(&format!("  task {} [{}] — {}\n", t.id, t.function_name, t.status));
+    }
+    out
 }
 
 /// Build plan context string and whether the AI needs to create a new plan.
@@ -874,6 +892,8 @@ pub async fn ask(
                                 } else {
                                     msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n")
                                 }
+                            } else if query.trim() == "?tasks" {
+                                format_tasks(&config.task_registry)
                             } else {
                                 let table = crate::typeck::build_symbol_table(&session.program);
                                 crate::typeck::handle_query(&session.program, &table, query)
@@ -1558,6 +1578,8 @@ pub async fn ask_stream(
                                     } else {
                                         msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n")
                                     }
+                                } else if query.trim() == "?tasks" {
+                                    format_tasks(&config_clone.task_registry)
                                 } else {
                                     let table = crate::typeck::build_symbol_table(&session.program);
                                     crate::typeck::handle_query(&session.program, &table, query)
@@ -1717,7 +1739,25 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/ask", post(ask))
         .route("/api/ask-stream", post(ask_stream))
         .route("/api/opencode", post(opencode_task))
+        .route("/api/tasks", get(tasks))
         .with_state(config);
 
     session_routes.merge(config_routes)
+}
+
+/// GET /api/tasks — list all spawned async tasks and their status.
+async fn tasks(State(config): State<AppConfig>) -> Json<serde_json::Value> {
+    let Some(reg) = &config.task_registry else {
+        return Json(serde_json::json!({"tasks": [], "message": "no task registry"}));
+    };
+    let tasks = reg.lock().unwrap();
+    let list: Vec<serde_json::Value> = tasks.values().map(|t| {
+        serde_json::json!({
+            "id": t.id,
+            "function": t.function_name,
+            "status": format!("{}", t.status),
+            "started_at": t.started_at,
+        })
+    }).collect();
+    Json(serde_json::json!({"tasks": list}))
 }

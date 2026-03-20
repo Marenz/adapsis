@@ -294,7 +294,7 @@ fn check_statements(
                     check_statements(table, &arm.body, &mut arm_locals, return_type, errors);
                 }
             }
-            StatementKind::Spawn { call } => {
+            StatementKind::Spawn { call, .. } => {
                 if table.resolve_function(&call.callee).is_none() {
                     // Builtin IO functions won't be in the table — that's fine
                 }
@@ -804,7 +804,7 @@ fn reconstruct_stmt(out: &mut String, stmt: &Statement, indent: usize) {
                     .join(", ")
             ));
         }
-        StatementKind::Spawn { call } => {
+        StatementKind::Spawn { call, .. } => {
             out.push_str(&format!(
                 "{pad}+spawn {}({})\n",
                 call.callee,
@@ -929,6 +929,8 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
             let target = parts.get(1).copied().unwrap_or("");
             query_type(table, target)
         }
+        // ?tasks is handled at the API level (needs runtime access, not just program)
+        "?tasks" => "tasks query requires runtime context".to_string(),
         _ => format!("unknown query: {}", parts[0]),
     }
 }
@@ -1067,7 +1069,7 @@ pub fn collect_callees_from_stmts(stmts: &[Statement]) -> Vec<String> {
             }
             StatementKind::Call { call, .. }
             | StatementKind::Await { call, .. }
-            | StatementKind::Spawn { call } => {
+            | StatementKind::Spawn { call, .. } => {
                 callees.push(call.callee.clone());
                 for arg in &call.args {
                     collect_callees_from_expr(arg, &mut callees);

@@ -489,22 +489,42 @@ async fn main() -> Result<()> {
             let rt = runtime.clone();
             let program_for_spawn = program.clone();
             let io_sender_for_spawn = runtime.io_sender();
+            let task_registry_for_spawn = runtime.task_registry.clone();
+            let rt_for_id = runtime.clone();
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
-                        coroutine::IoRequest::Spawn { function_name, args } => {
+                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
+                            // Register the task
+                            let task_id = rt_for_id.next_task_id();
+                            let task_info = coroutine::TaskInfo {
+                                id: task_id,
+                                function_name: function_name.clone(),
+                                status: coroutine::WaitReason::Running,
+                                started_at: format!("{}s", std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                            };
+                            task_registry_for_spawn.lock().unwrap().insert(task_id, task_info);
+                            let _ = reply.send(Ok(task_id));
+
                             // Spawn a new coroutine for this function
                             let prog = program_for_spawn.clone();
                             let sender = io_sender_for_spawn.clone();
+                            let registry = task_registry_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 let func_decl = match prog.get_function(&function_name) {
                                     Some(f) => f,
                                     None => {
                                         eprintln!("spawn: function `{function_name}` not found");
+                                        if let Ok(mut tasks) = registry.lock() {
+                                            if let Some(info) = tasks.get_mut(&task_id) {
+                                                info.status = coroutine::WaitReason::Failed(format!("function `{function_name}` not found"));
+                                            }
+                                        }
                                         return;
                                     }
                                 };
-                                let handle = coroutine::CoroutineHandle::new(sender);
+                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone());
                                 let mut env = eval::Env::new();
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 // Bind args to params
@@ -513,9 +533,22 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                if let Err(e) = eval::eval_function_body_pub(&prog, &func_decl.body, &mut env) {
-                                    // Errors in spawned coroutines are logged, not fatal
-                                    eprintln!("spawn {function_name}: {e}");
+                                match eval::eval_function_body_pub(&prog, &func_decl.body, &mut env) {
+                                    Ok(val) => {
+                                        if let Ok(mut tasks) = registry.lock() {
+                                            if let Some(info) = tasks.get_mut(&task_id) {
+                                                info.status = coroutine::WaitReason::Completed(format!("{val}"));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("spawn {function_name}: {e}");
+                                        if let Ok(mut tasks) = registry.lock() {
+                                            if let Some(info) = tasks.get_mut(&task_id) {
+                                                info.status = coroutine::WaitReason::Failed(format!("{e}"));
+                                            }
+                                        }
+                                    }
                                 }
                             });
                         }
@@ -627,14 +660,81 @@ async fn main() -> Result<()> {
             let runtime = std::sync::Arc::new(runtime);
             let io_sender = runtime.io_sender();
 
-            // Spawn IO event loop
+            // Spawn IO event loop (including +spawn support)
             let rt = runtime.clone();
+            let rt_for_id = runtime.clone();
+            let task_registry_for_spawn = runtime.task_registry.clone();
+            let io_sender_for_spawn = runtime.io_sender();
+            let shared_session_for_spawn = shared_session.clone();
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
-                    let rt = rt.clone();
-                    tokio::spawn(async move {
-                        rt.handle_io(request).await;
-                    });
+                    match request {
+                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
+                            let task_id = rt_for_id.next_task_id();
+                            let task_info = coroutine::TaskInfo {
+                                id: task_id,
+                                function_name: function_name.clone(),
+                                status: coroutine::WaitReason::Running,
+                                started_at: format!("{}s", std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                            };
+                            task_registry_for_spawn.lock().unwrap().insert(task_id, task_info);
+                            let _ = reply.send(Ok(task_id));
+
+                            let sender = io_sender_for_spawn.clone();
+                            let registry = task_registry_for_spawn.clone();
+                            let session_ref = shared_session_for_spawn.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let session = session_ref.blocking_lock();
+                                let func_decl = match session.program.get_function(&function_name) {
+                                    Some(f) => f.clone(),
+                                    None => {
+                                        eprintln!("spawn: function `{function_name}` not found");
+                                        if let Ok(mut tasks) = registry.lock() {
+                                            if let Some(info) = tasks.get_mut(&task_id) {
+                                                info.status = coroutine::WaitReason::Failed(format!("function not found"));
+                                            }
+                                        }
+                                        return;
+                                    }
+                                };
+                                let program = session.program.clone();
+                                drop(session);
+
+                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone());
+                                let mut env = eval::Env::new();
+                                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+                                for (i, param) in func_decl.params.iter().enumerate() {
+                                    if let Some(val) = args.get(i) {
+                                        env.set(&param.name, val.clone());
+                                    }
+                                }
+                                match eval::eval_function_body_pub(&program, &func_decl.body, &mut env) {
+                                    Ok(val) => {
+                                        if let Ok(mut tasks) = registry.lock() {
+                                            if let Some(info) = tasks.get_mut(&task_id) {
+                                                info.status = coroutine::WaitReason::Completed(format!("{val}"));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("spawn {function_name}: {e}");
+                                        if let Ok(mut tasks) = registry.lock() {
+                                            if let Some(info) = tasks.get_mut(&task_id) {
+                                                info.status = coroutine::WaitReason::Failed(format!("{e}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        _ => {
+                            let rt = rt.clone();
+                            tokio::spawn(async move {
+                                rt.handle_io(request).await;
+                            });
+                        }
+                    }
                 }
             });
 
@@ -653,6 +753,7 @@ async fn main() -> Result<()> {
                 project_dir: project_dir.clone(),
                 io_sender: Some(io_sender),
                 self_trigger: trigger_tx,
+                task_registry: Some(runtime.task_registry.clone()),
             };
 
             let app = axum::Router::new()

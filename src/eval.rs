@@ -11,6 +11,7 @@ use crate::parser;
 pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
     StateHandle(std::sync::Arc<std::sync::Mutex<Value>>),
+    TaskHandle(crate::coroutine::TaskId),
     Union {
         variant: String,
         payload: Vec<Value>,
@@ -71,6 +72,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::CoroutineHandle(_) => write!(f, "<coroutine>"),
+            Value::TaskHandle(id) => write!(f, "<task:{id}>"),
             Value::StateHandle(s) => {
                 let val = s.lock().unwrap();
                 write!(f, "<state:{val}>")
@@ -706,7 +708,7 @@ fn eval_function_body(
                     env.set(name, result);
                 }
             }
-            ast::StatementKind::Spawn { call } => {
+            ast::StatementKind::Spawn { call, binding } => {
                 let handle = match env.vars.get("__coroutine_handle") {
                     Some(Value::CoroutineHandle(h)) => h.clone(),
                     _ => bail!("+spawn requires async context"),
@@ -716,11 +718,20 @@ fn eval_function_body(
                     .iter()
                     .map(|a| eval_ast_expr(program, a, env))
                     .collect::<Result<Vec<_>>>()?;
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 let io_tx = handle.io_sender();
                 let _ = io_tx.blocking_send(crate::coroutine::IoRequest::Spawn {
                     function_name: call.callee.clone(),
                     args,
+                    reply: reply_tx,
                 });
+                // If there's a binding, wait for the task ID
+                if let Some(b) = binding {
+                    let task_id = reply_rx
+                        .blocking_recv()
+                        .map_err(|e| anyhow::anyhow!("spawn reply failed: {e}"))??;
+                    env.set(&b.name, Value::TaskHandle(task_id));
+                }
             }
             ast::StatementKind::While { condition, body } => {
                 let mut iterations = 0;

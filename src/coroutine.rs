@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::{Result, bail};
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -21,6 +22,63 @@ use crate::eval::Value;
 
 /// A handle that Forge code uses to represent sockets/connections.
 pub type Handle = i64;
+
+/// Unique ID for a spawned task.
+pub type TaskId = i64;
+
+/// What a task is currently waiting on.
+#[derive(Debug, Clone, Serialize)]
+pub enum WaitReason {
+    Running,
+    TcpListen(u16),
+    TcpAccept(Handle),
+    TcpRead(Handle),
+    TcpWrite(Handle),
+    TcpConnect(String, u16),
+    FileRead(String),
+    FileWrite(String),
+    ShellExec(String),
+    Sleep(u64),
+    LlmCall,
+    LlmAgent,
+    StdinRead,
+    Completed(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for WaitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaitReason::Running => write!(f, "running"),
+            WaitReason::TcpListen(p) => write!(f, "tcp_listen(:{p})"),
+            WaitReason::TcpAccept(h) => write!(f, "tcp_accept(h{h})"),
+            WaitReason::TcpRead(h) => write!(f, "tcp_read(h{h})"),
+            WaitReason::TcpWrite(h) => write!(f, "tcp_write(h{h})"),
+            WaitReason::TcpConnect(host, port) => write!(f, "tcp_connect({host}:{port})"),
+            WaitReason::FileRead(p) => write!(f, "file_read({p})"),
+            WaitReason::FileWrite(p) => write!(f, "file_write({p})"),
+            WaitReason::ShellExec(cmd) => write!(f, "shell({cmd})"),
+            WaitReason::Sleep(ms) => write!(f, "sleep({ms}ms)"),
+            WaitReason::LlmCall => write!(f, "llm_call"),
+            WaitReason::LlmAgent => write!(f, "llm_agent"),
+            WaitReason::StdinRead => write!(f, "stdin_read"),
+            WaitReason::Completed(v) => write!(f, "done: {}", v.chars().take(50).collect::<String>()),
+            WaitReason::Failed(e) => write!(f, "failed: {}", e.chars().take(50).collect::<String>()),
+        }
+    }
+}
+
+/// Info about a running or completed task.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskInfo {
+    pub id: TaskId,
+    pub function_name: String,
+    pub status: WaitReason,
+    pub started_at: String,
+}
+
+/// Shared task registry — tracks all spawned tasks.
+pub type TaskRegistry = Arc<std::sync::Mutex<HashMap<TaskId, TaskInfo>>>;
 
 /// IO operations that Forge code can request via +await.
 #[derive(Debug)]
@@ -54,15 +112,18 @@ pub enum IoRequest {
         task: String,
         reply: oneshot::Sender<Result<String>>,
     },
-    Spawn { function_name: String, args: Vec<Value> },
+    Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
 }
 
 /// The coroutine runtime — manages IO resources and dispatches operations.
 pub struct Runtime {
     io_tx: mpsc::Sender<IoRequest>,
     next_handle: AtomicI64,
+    next_task_id: AtomicI64,
     listeners: Mutex<HashMap<Handle, Arc<TcpListener>>>,
     connections: Mutex<HashMap<Handle, Arc<Mutex<TcpStream>>>>,
+    /// Shared task registry — tracks all spawned async tasks.
+    pub task_registry: TaskRegistry,
     /// LLM config for llm_call/llm_agent
     pub llm_url: String,
     pub llm_default_model: String,
@@ -76,8 +137,10 @@ impl Runtime {
             Self {
                 io_tx,
                 next_handle: AtomicI64::new(1),
+                next_task_id: AtomicI64::new(1),
                 listeners: Mutex::new(HashMap::new()),
                 connections: Mutex::new(HashMap::new()),
+                task_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 llm_url: String::new(),
                 llm_default_model: String::new(),
                 llm_api_key: None,
@@ -88,6 +151,10 @@ impl Runtime {
 
     fn next_handle(&self) -> Handle {
         self.next_handle.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn next_task_id(&self) -> TaskId {
+        self.next_task_id.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
@@ -333,62 +400,105 @@ impl Runtime {
 #[derive(Clone, Debug)]
 pub struct CoroutineHandle {
     io_tx: mpsc::Sender<IoRequest>,
+    /// If this coroutine is a tracked task, its ID in the registry.
+    pub task_id: Option<TaskId>,
+    /// Shared task registry for updating wait reasons.
+    task_registry: Option<TaskRegistry>,
 }
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx }
+        Self { io_tx, task_id: None, task_registry: None }
+    }
+
+    pub fn new_with_task(io_tx: mpsc::Sender<IoRequest>, task_id: TaskId, registry: TaskRegistry) -> Self {
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry) }
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
         self.io_tx.clone()
     }
 
+    pub fn registry(&self) -> Option<&TaskRegistry> {
+        self.task_registry.as_ref()
+    }
+
+    /// Mark this task as waiting on a specific operation.
+    fn set_wait(&self, reason: WaitReason) {
+        if let (Some(id), Some(reg)) = (self.task_id, &self.task_registry) {
+            if let Ok(mut tasks) = reg.lock() {
+                if let Some(info) = tasks.get_mut(&id) {
+                    info.status = reason;
+                }
+            }
+        }
+    }
+
+    /// Mark this task as running (no longer waiting).
+    fn clear_wait(&self) {
+        self.set_wait(WaitReason::Running);
+    }
+
+    /// Helper: send an IO request and wait for the result, tracking wait reason.
+    fn send_and_wait<T>(&self, reason: WaitReason, req: IoRequest, rx: oneshot::Receiver<Result<T>>) -> Result<T> {
+        self.set_wait(reason);
+        self.io_tx.blocking_send(req)
+            .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+        let result = rx.blocking_recv()
+            .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+        self.clear_wait();
+        Ok(result)
+    }
+
     /// Execute an await operation — sends IO request and blocks until result.
     /// This is called from the synchronous evaluator, so we use block_on
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
-        let io_tx = self.io_tx.clone();
         let op = op.to_string();
         let args: Vec<Value> = args.to_vec();
 
-        // We're in a sync context (the evaluator). Use a oneshot channel
-        // and block on it. The evaluator runs inside spawn_blocking, so
-        // blocking is fine.
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let request = match op.as_str() {
+        match op.as_str() {
             "tcp_listen" => {
                 let port = match &args[0] {
                     Value::Int(p) => *p as u16,
                     _ => bail!("tcp_listen expects Int port"),
                 };
-                IoRequest::TcpListen { port, reply: result_tx }
+                let (tx, rx) = oneshot::channel();
+                let handle = self.send_and_wait(
+                    WaitReason::TcpListen(port),
+                    IoRequest::TcpListen { port, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::Int(handle));
             }
             "tcp_accept" => {
-                let handle = match &args[0] {
+                let listener = match &args[0] {
                     Value::Int(h) => *h,
                     _ => bail!("tcp_accept expects handle"),
                 };
-                IoRequest::TcpAccept { listener: handle, reply: result_tx }
+                let (tx, rx) = oneshot::channel();
+                let handle = self.send_and_wait(
+                    WaitReason::TcpAccept(listener),
+                    IoRequest::TcpAccept { listener, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::Int(handle));
             }
             "tcp_read" => {
-                let handle = match &args[0] {
+                let conn = match &args[0] {
                     Value::Int(h) => *h,
                     _ => bail!("tcp_read expects handle"),
                 };
                 let (tx, rx) = oneshot::channel();
-                let req = IoRequest::TcpRead { conn: handle, reply: tx };
-                // Send request
-                io_tx.blocking_send(req)
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                // Wait for result
-                let data = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let data = self.send_and_wait(
+                    WaitReason::TcpRead(conn),
+                    IoRequest::TcpRead { conn, reply: tx },
+                    rx,
+                )?;
                 return Ok(Value::String(data));
             }
             "tcp_write" => {
-                let handle = match &args[0] {
+                let conn = match &args[0] {
                     Value::Int(h) => *h,
                     _ => bail!("tcp_write expects handle"),
                 };
@@ -397,24 +507,24 @@ impl CoroutineHandle {
                     other => format!("{other}"),
                 };
                 let (tx, rx) = oneshot::channel();
-                let req = IoRequest::TcpWrite { conn: handle, data, reply: tx };
-                io_tx.blocking_send(req)
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                self.send_and_wait(
+                    WaitReason::TcpWrite(conn),
+                    IoRequest::TcpWrite { conn, data, reply: tx },
+                    rx,
+                )?;
                 return Ok(Value::Int(0));
             }
             "tcp_close" => {
-                let handle = match &args[0] {
+                let conn = match &args[0] {
                     Value::Int(h) => *h,
                     _ => bail!("tcp_close expects handle"),
                 };
                 let (tx, rx) = oneshot::channel();
-                let req = IoRequest::TcpClose { conn: handle, reply: tx };
-                io_tx.blocking_send(req)
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                self.send_and_wait(
+                    WaitReason::Running, // tcp_close is instantaneous
+                    IoRequest::TcpClose { conn, reply: tx },
+                    rx,
+                )?;
                 return Ok(Value::Int(0));
             }
             "tcp_connect" => {
@@ -427,194 +537,96 @@ impl CoroutineHandle {
                     _ => bail!("tcp_connect expects Int port"),
                 };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::TcpConnect { host, port, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let handle = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let handle = self.send_and_wait(
+                    WaitReason::TcpConnect(host.clone(), port),
+                    IoRequest::TcpConnect { host, port, reply: tx },
+                    rx,
+                )?;
                 return Ok(Value::Int(handle));
             }
             "read_line" | "stdin_read_line" => {
-                let prompt = if args.is_empty() {
-                    String::new()
-                } else {
-                    match &args[0] {
-                        Value::String(s) => s.clone(),
-                        other => format!("{other}"),
-                    }
+                let prompt = if args.is_empty() { String::new() } else {
+                    match &args[0] { Value::String(s) => s.clone(), other => format!("{other}") }
                 };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::StdinReadLine { prompt, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let line = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let line = self.send_and_wait(WaitReason::StdinRead, IoRequest::StdinReadLine { prompt, reply: tx }, rx)?;
                 return Ok(Value::String(line));
             }
             "print" => {
-                let text = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    other => format!("{other}"),
-                };
+                let text = match &args[0] { Value::String(s) => s.clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::Print { text, newline: false, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                self.send_and_wait(WaitReason::Running, IoRequest::Print { text, newline: false, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
             }
             "println" => {
-                let text = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    other => format!("{other}"),
-                };
+                let text = match &args[0] { Value::String(s) => s.clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::Print { text, newline: true, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                self.send_and_wait(WaitReason::Running, IoRequest::Print { text, newline: true, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
             }
             "sleep" => {
-                let ms = match &args[0] {
-                    Value::Int(ms) => *ms as u64,
-                    _ => bail!("sleep expects Int milliseconds"),
-                };
+                let ms = match &args[0] { Value::Int(ms) => *ms as u64, _ => bail!("sleep expects Int milliseconds") };
                 let (tx, rx) = oneshot::channel();
-                let req = IoRequest::Sleep { ms, reply: tx };
-                io_tx.blocking_send(req)
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                self.send_and_wait(WaitReason::Sleep(ms), IoRequest::Sleep { ms, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
             }
             "file_read" | "read_file" => {
-                let path = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => bail!("file_read expects String path"),
-                };
+                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_read expects String path") };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::FileRead { path, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let contents = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let contents = self.send_and_wait(WaitReason::FileRead(path.clone()), IoRequest::FileRead { path, reply: tx }, rx)?;
                 return Ok(Value::String(contents));
             }
             "file_write" | "write_file" => {
-                let path = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => bail!("file_write expects String path"),
-                };
-                let data = match &args[1] {
-                    Value::String(s) => s.clone(),
-                    other => format!("{other}"),
-                };
+                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_write expects String path") };
+                let data = match &args[1] { Value::String(s) => s.clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::FileWrite { path, data, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                self.send_and_wait(WaitReason::FileWrite(path.clone()), IoRequest::FileWrite { path, data, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
             }
             "file_exists" => {
-                let path = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => bail!("file_exists expects String path"),
-                };
+                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_exists expects String path") };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::FileExists { path, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let exists = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let exists = self.send_and_wait(WaitReason::Running, IoRequest::FileExists { path, reply: tx }, rx)?;
                 return Ok(Value::Bool(exists));
             }
             "list_dir" => {
-                let path = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => bail!("list_dir expects String path"),
-                };
+                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("list_dir expects String path") };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::ListDir { path, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let names = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
-                let values = names.into_iter().map(Value::String).collect();
-                return Ok(Value::List(values));
+                let names = self.send_and_wait(WaitReason::Running, IoRequest::ListDir { path, reply: tx }, rx)?;
+                return Ok(Value::List(names.into_iter().map(Value::String).collect()));
             }
             "shell_exec" | "exec" => {
-                let command = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => bail!("shell_exec expects String command"),
-                };
+                let command = match &args[0] { Value::String(s) => s.clone(), _ => bail!("shell_exec expects String command") };
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::ShellExec { command, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let (stdout, stderr, code) = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
-                // Return a struct-like result: {stdout, stderr, code}
-                // For simplicity, return stdout if code==0, otherwise stderr
-                if code == 0 {
-                    return Ok(Value::String(stdout));
-                } else {
-                    return Ok(Value::String(format!("EXIT {code}: {stderr}")));
-                }
+                let (stdout, stderr, code) = self.send_and_wait(
+                    WaitReason::ShellExec(command.chars().take(40).collect()),
+                    IoRequest::ShellExec { command, reply: tx }, rx,
+                )?;
+                if code == 0 { return Ok(Value::String(stdout)); }
+                else { return Ok(Value::String(format!("EXIT {code}: {stderr}"))); }
             }
             "self_restart" | "restart" => {
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::SelfRestart { reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                self.send_and_wait(WaitReason::Running, IoRequest::SelfRestart { reply: tx }, rx)?;
                 return Ok(Value::String("restarting...".to_string()));
             }
             "llm_call" => {
-                // llm_call(system_prompt, user_prompt) or llm_call(system, user, model)
-                let system = match args.get(0) {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => bail!("llm_call expects (system:String, prompt:String[, model:String])"),
-                };
-                let prompt = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => bail!("llm_call expects (system:String, prompt:String[, model:String])"),
-                };
-                let model = args.get(2).and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                });
+                let system = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
+                let prompt = match args.get(1) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
+                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.clone()), _ => None });
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::LlmCall { model, system, prompt, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let result = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let result = self.send_and_wait(WaitReason::LlmCall, IoRequest::LlmCall { model, system, prompt, reply: tx }, rx)?;
                 return Ok(Value::String(result));
             }
             "llm_agent" => {
-                // llm_agent(system_prompt, task) or llm_agent(system, task, model)
-                let system = match args.get(0) {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => bail!("llm_agent expects (system:String, task:String[, model:String])"),
-                };
-                let task = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => bail!("llm_agent expects (system:String, task:String[, model:String])"),
-                };
-                let model = args.get(2).and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                });
+                let system = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
+                let task = match args.get(1) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
+                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.clone()), _ => None });
                 let (tx, rx) = oneshot::channel();
-                io_tx.blocking_send(IoRequest::LlmAgent { model, system, task, reply: tx })
-                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-                let result = rx.blocking_recv()
-                    .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+                let result = self.send_and_wait(WaitReason::LlmAgent, IoRequest::LlmAgent { model, system, task, reply: tx }, rx)?;
                 return Ok(Value::String(result));
             }
             _ => bail!("unknown await operation: {op}"),
-        };
-
-        // Send the request and wait for the result
-        io_tx.blocking_send(request)
-            .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-        let result = result_rx.blocking_recv()
-            .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
-        Ok(Value::Int(result))
+        }
     }
 }

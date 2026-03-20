@@ -219,6 +219,7 @@ pub enum StatementKind {
     },
     Spawn {
         call: CallExpr,
+        binding: Option<Binding>,
     },
     While {
         condition: Expr,

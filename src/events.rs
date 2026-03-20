@@ -171,7 +171,9 @@ fn snapshot_function(func: &crate::ast::FunctionDecl) -> FunctionSnapshot {
                     crate::ast::StatementKind::Set { name, .. } => format!("set {name}"),
                     crate::ast::StatementKind::While { .. } => "while".to_string(),
                     crate::ast::StatementKind::Await { name, .. } => format!("await {name}"),
-                    crate::ast::StatementKind::Spawn { call } => format!("spawn {}", call.callee),
+                    crate::ast::StatementKind::Spawn { call, .. } => {
+                        format!("spawn {}", call.callee)
+                    }
                     crate::ast::StatementKind::Match { .. } => "match".to_string(),
                     crate::ast::StatementKind::Yield { .. } => "yield".to_string(),
                 },

@@ -420,7 +420,14 @@ pub fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
         }
         parser::Operation::Spawn(decl) => {
             let call = extract_call_expr(&decl.call)?;
-            ast::StatementKind::Spawn { call }
+            let binding = match &decl.binding {
+                Some((name, ty)) => Some(ast::Binding {
+                    name: name.clone(),
+                    ty: convert_type(ty)?,
+                }),
+                None => None,
+            };
+            ast::StatementKind::Spawn { call, binding }
         }
         parser::Operation::Call(decl) => ast::StatementKind::Call {
             binding: Some(ast::Binding {
@@ -1010,7 +1017,7 @@ fn update_call_sites(
             }
             ast::StatementKind::Call { call, .. }
             | ast::StatementKind::Await { call, .. }
-            | ast::StatementKind::Spawn { call } => {
+            | ast::StatementKind::Spawn { call, .. } => {
                 if moved.contains(&call.callee) {
                     call.callee = format!("{module}.{}", call.callee);
                 }
