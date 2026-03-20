@@ -555,6 +555,7 @@ pub struct AskResponse {
     pub has_errors: bool,
 }
 
+/// Scan eval.rs for builtin function names not already in the prompt.
 pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
@@ -570,8 +571,9 @@ pub async fn ask(
 
     let system_prompt = {
         let base = crate::prompt::system_prompt();
+        let builtins = crate::builtins::format_for_prompt();
         format!(
-            "{base}\n\n## ForgeOS Interactive Mode\n\
+            "{base}\n\n{builtins}\n\n## ForgeOS Interactive Mode\n\
              Program state PERSISTS. Do NOT resend existing types/functions.\n\
              Only send NEW code or modifications.\n\
              IO builtins work as tools (minimal function + !eval) or building blocks.\n\

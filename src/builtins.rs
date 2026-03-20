@@ -1,0 +1,447 @@
+//! Builtin function registry.
+//! Single source of truth for all builtin names and their descriptions.
+
+/// A builtin function entry.
+pub struct Builtin {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub description: &'static str,
+    pub category: BuiltinCategory,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum BuiltinCategory {
+    String,
+    Math,
+    List,
+    Bitwise,
+    Conversion,
+    State,
+    Result,
+    Regex,
+    Io,
+}
+
+/// All registered builtins.
+pub static BUILTINS: &[Builtin] = &[
+    // String
+    Builtin {
+        name: "concat",
+        aliases: &[],
+        description: "concatenate two strings",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "char_at",
+        aliases: &[],
+        description: "get character at index i as String",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "substring",
+        aliases: &["substr"],
+        description: "get substring from start to end",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "starts_with",
+        aliases: &[],
+        description: "check if string starts with prefix",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "ends_with",
+        aliases: &[],
+        description: "check if string ends with suffix",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "contains",
+        aliases: &[],
+        description: "check if string contains substring",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "index_of",
+        aliases: &[],
+        description: "find index of substring (-1 if not found)",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "split",
+        aliases: &[],
+        description: "split string into List<String>",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "trim",
+        aliases: &[],
+        description: "remove leading/trailing whitespace",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "len",
+        aliases: &["length"],
+        description: "length of string or list",
+        category: BuiltinCategory::String,
+    },
+    // Conversion
+    Builtin {
+        name: "to_string",
+        aliases: &["str"],
+        description: "convert any value to String",
+        category: BuiltinCategory::Conversion,
+    },
+    Builtin {
+        name: "to_int",
+        aliases: &["parse_int", "int"],
+        description: "convert String/Float/Bool to Int",
+        category: BuiltinCategory::Conversion,
+    },
+    Builtin {
+        name: "digit_value",
+        aliases: &[],
+        description: "single char to digit Int ('5'->5, 'a'->-1)",
+        category: BuiltinCategory::Conversion,
+    },
+    Builtin {
+        name: "is_digit_char",
+        aliases: &[],
+        description: "true if single char is 0-9",
+        category: BuiltinCategory::Conversion,
+    },
+    Builtin {
+        name: "char_code",
+        aliases: &["ord"],
+        description: "character to ASCII code Int",
+        category: BuiltinCategory::Conversion,
+    },
+    Builtin {
+        name: "from_char_code",
+        aliases: &["chr"],
+        description: "ASCII code to single-char String",
+        category: BuiltinCategory::Conversion,
+    },
+    Builtin {
+        name: "to_hex",
+        aliases: &[],
+        description: "Int to 8-char hex string (32-bit)",
+        category: BuiltinCategory::Conversion,
+    },
+    Builtin {
+        name: "u32_wrap",
+        aliases: &[],
+        description: "wrap Int to unsigned 32-bit range",
+        category: BuiltinCategory::Conversion,
+    },
+    // Math
+    Builtin {
+        name: "abs",
+        aliases: &[],
+        description: "absolute value",
+        category: BuiltinCategory::Math,
+    },
+    Builtin {
+        name: "sqrt",
+        aliases: &[],
+        description: "square root",
+        category: BuiltinCategory::Math,
+    },
+    Builtin {
+        name: "pow",
+        aliases: &[],
+        description: "power (base, exponent)",
+        category: BuiltinCategory::Math,
+    },
+    Builtin {
+        name: "floor",
+        aliases: &[],
+        description: "floor to integer",
+        category: BuiltinCategory::Math,
+    },
+    Builtin {
+        name: "min",
+        aliases: &[],
+        description: "minimum of two values",
+        category: BuiltinCategory::Math,
+    },
+    Builtin {
+        name: "max",
+        aliases: &[],
+        description: "maximum of two values",
+        category: BuiltinCategory::Math,
+    },
+    // Bitwise
+    Builtin {
+        name: "bit_and",
+        aliases: &[],
+        description: "bitwise AND",
+        category: BuiltinCategory::Bitwise,
+    },
+    Builtin {
+        name: "bit_or",
+        aliases: &[],
+        description: "bitwise OR",
+        category: BuiltinCategory::Bitwise,
+    },
+    Builtin {
+        name: "bit_xor",
+        aliases: &[],
+        description: "bitwise XOR",
+        category: BuiltinCategory::Bitwise,
+    },
+    Builtin {
+        name: "bit_not",
+        aliases: &[],
+        description: "bitwise NOT",
+        category: BuiltinCategory::Bitwise,
+    },
+    Builtin {
+        name: "shl",
+        aliases: &["bit_shl"],
+        description: "shift left",
+        category: BuiltinCategory::Bitwise,
+    },
+    Builtin {
+        name: "shr",
+        aliases: &["bit_shr"],
+        description: "shift right",
+        category: BuiltinCategory::Bitwise,
+    },
+    Builtin {
+        name: "left_rotate",
+        aliases: &["rotl"],
+        description: "32-bit left rotation",
+        category: BuiltinCategory::Bitwise,
+    },
+    // List
+    Builtin {
+        name: "list",
+        aliases: &[],
+        description: "create empty list or list with items",
+        category: BuiltinCategory::List,
+    },
+    Builtin {
+        name: "push",
+        aliases: &[],
+        description: "returns NEW list with item appended",
+        category: BuiltinCategory::List,
+    },
+    Builtin {
+        name: "get",
+        aliases: &[],
+        description: "get item at index",
+        category: BuiltinCategory::List,
+    },
+    Builtin {
+        name: "join",
+        aliases: &[],
+        description: "join list items into string with delimiter",
+        category: BuiltinCategory::List,
+    },
+    // State
+    Builtin {
+        name: "state",
+        aliases: &[],
+        description: "create shared state handle",
+        category: BuiltinCategory::State,
+    },
+    Builtin {
+        name: "get_state",
+        aliases: &[],
+        description: "read shared state",
+        category: BuiltinCategory::State,
+    },
+    Builtin {
+        name: "set_state",
+        aliases: &[],
+        description: "write shared state",
+        category: BuiltinCategory::State,
+    },
+    // Result
+    Builtin {
+        name: "Ok",
+        aliases: &[],
+        description: "Result success constructor",
+        category: BuiltinCategory::Result,
+    },
+    Builtin {
+        name: "Err",
+        aliases: &[],
+        description: "Result error constructor",
+        category: BuiltinCategory::Result,
+    },
+    Builtin {
+        name: "Some",
+        aliases: &[],
+        description: "Option value constructor",
+        category: BuiltinCategory::Result,
+    },
+    // Regex
+    Builtin {
+        name: "regex_match",
+        aliases: &[],
+        description: "test if text matches regex pattern (Bool)",
+        category: BuiltinCategory::Regex,
+    },
+    Builtin {
+        name: "regex_replace",
+        aliases: &[],
+        description: "regex replace all matches (String)",
+        category: BuiltinCategory::Regex,
+    },
+    // Base64
+    Builtin {
+        name: "base64_encode",
+        aliases: &[],
+        description: "encode string to base64",
+        category: BuiltinCategory::Conversion,
+    },
+];
+
+/// IO builtins (used with +await).
+pub static IO_BUILTINS: &[Builtin] = &[
+    Builtin {
+        name: "tcp_listen",
+        aliases: &[],
+        description: "listen on TCP port, returns handle",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "tcp_accept",
+        aliases: &[],
+        description: "accept connection, returns handle",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "tcp_connect",
+        aliases: &[],
+        description: "connect to TCP server, returns handle",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "tcp_read",
+        aliases: &[],
+        description: "read from connection, returns String",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "tcp_write",
+        aliases: &[],
+        description: "write String to connection",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "tcp_close",
+        aliases: &[],
+        description: "close connection",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "file_read",
+        aliases: &["read_file"],
+        description: "read entire file as String",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "file_write",
+        aliases: &["write_file"],
+        description: "write String to file",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "file_exists",
+        aliases: &[],
+        description: "check if file exists (Bool)",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "list_dir",
+        aliases: &[],
+        description: "list directory entries as List<String>",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "read_line",
+        aliases: &["stdin_read_line"],
+        description: "read line from stdin with prompt",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "print",
+        aliases: &[],
+        description: "print text (no newline)",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "println",
+        aliases: &[],
+        description: "print text with newline",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "shell_exec",
+        aliases: &["exec"],
+        description: "run shell command, returns stdout",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "self_restart",
+        aliases: &["restart"],
+        description: "restart ForgeOS process",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "sleep",
+        aliases: &[],
+        description: "sleep for milliseconds",
+        category: BuiltinCategory::Io,
+    },
+];
+
+/// Get all builtin names (for the validator's shadow check).
+pub fn all_builtin_names() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for b in BUILTINS {
+        names.push(b.name);
+        for alias in b.aliases {
+            names.push(alias);
+        }
+    }
+    for b in IO_BUILTINS {
+        names.push(b.name);
+        for alias in b.aliases {
+            names.push(alias);
+        }
+    }
+    names
+}
+
+/// Format builtins for the system prompt.
+pub fn format_for_prompt() -> String {
+    let mut out = String::new();
+    out.push_str("### Built-in Functions\n");
+    for b in BUILTINS {
+        let aliases = if b.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" (aliases: {})", b.aliases.join(", "))
+        };
+        out.push_str(&format!("  {}{} — {}\n", b.name, aliases, b.description));
+    }
+    out.push_str("\n### IO Functions (require [io,async] effect, use +await)\n");
+    for b in IO_BUILTINS {
+        out.push_str(&format!("  {} — {}\n", b.name, b.description));
+    }
+    out
+}
+
+/// Check if a name is a builtin.
+pub fn is_builtin(name: &str) -> bool {
+    BUILTINS
+        .iter()
+        .any(|b| b.name == name || b.aliases.contains(&name))
+        || IO_BUILTINS
+            .iter()
+            .any(|b| b.name == name || b.aliases.contains(&name))
+}

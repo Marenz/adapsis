@@ -1,5 +1,6 @@
 mod api;
 mod ast;
+pub mod builtins;
 mod compiler;
 mod coroutine;
 mod eval;
@@ -548,23 +549,24 @@ async fn main() -> Result<()> {
             println!();
 
             if daemonize {
-                // Re-launch ourselves in background without -d flag
-                // We know the port is free (we just bound it), so drop the listener
-                // and let the child re-bind
+                // We verified the port works. Now respawn without -d.
+                // Use SO_REUSEADDR equivalent by dropping listener first and
+                // giving the OS a moment.
                 drop(listener);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                
                 let exe = std::env::current_exe()?;
                 let mut args: Vec<String> = std::env::args().collect();
-                // Remove -d / --daemonize from args
                 args.retain(|a| a != "-d" && a != "--daemonize");
-                let child = std::process::Command::new(exe)
+                
+                let log_file = std::fs::File::create("/tmp/forgeos.log")
+                    .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+                
+                let child = std::process::Command::new(&exe)
                     .args(&args[1..])
                     .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr({
-                        let f = std::fs::File::create("/tmp/forgeos.log")
-                            .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
-                        std::process::Stdio::from(f)
-                    })
+                    .stdout(std::process::Stdio::from(log_file.try_clone().unwrap()))
+                    .stderr(std::process::Stdio::from(log_file))
                     .spawn()?;
                 println!("Daemonized: PID {}", child.id());
                 return Ok(());

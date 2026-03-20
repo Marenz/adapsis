@@ -65,55 +65,7 @@ Pure functions have no effect annotation.
   +await name:Type = io_op(args)     — async IO (suspends coroutine until complete)
   +spawn function(args)              — spawn a new coroutine
 
-### Built-in Functions
-  concat(a, b)              — concatenate two strings
-  char_at(s, i)             — get character at index i as a String
-  substring(s, start, end)  — get substring from start to end
-  starts_with(s, prefix)    — check if string starts with prefix
-  contains(s, substr)       — check if string contains substring
-  index_of(s, substr)       — find index of substring (-1 if not found)
-  split(s, delim)           — split string into List<String>
-  trim(s)                   — remove leading/trailing whitespace
-  to_string(x)              — convert any value to String
-  len(x)                    — length of string or list (also x.len)
-  list()                    — create empty list
-  push(list, item)          — returns NEW list with item appended (functional, not mutating)
-  get(list, index)          — get item at index
-  join(list, delim)         — join list items into string with delimiter
-  abs(x), sqrt(x), pow(x,y), floor(x), min(x,y), max(x,y)
-  to_int(x)                 — convert String/Float/Bool to Int ("42" -> 42)
-  digit_value(ch)           — single char to digit Int ("5" -> 5, "a" -> -1)
-  is_digit_char(ch)         — true if single char is 0-9
-  Ok(value), Err(label)     — Result constructors
-  bit_and(a, b), bit_or(a, b), bit_xor(a, b), bit_not(a) — bitwise ops
-  shl(a, n), shr(a, n)     — shift left/right
-  left_rotate(val, n)       — 32-bit left rotation
-  to_hex(n)                 — Int to 8-char hex string (32-bit)
-  char_code(ch)             — character to ASCII code Int
-  from_char_code(n)         — ASCII code to single-char String
-  u32_wrap(n)               — wrap Int to unsigned 32-bit range
-  regex_match(pattern, text) — test if text matches regex pattern (Bool)
-  state(initial)            — create shared state handle
-  get_state(handle)         — read shared state
-  set_state(handle, value)  — write shared state
-
-### IO Functions (require [io,async] effect, use +await)
-  tcp_listen(port)          — listen on TCP port, returns handle
-  tcp_accept(server)        — accept connection, returns handle
-  tcp_connect(host, port)   — connect to TCP server, returns handle
-  tcp_read(conn)            — read from connection, returns String
-  tcp_write(conn, data)     — write String to connection
-  tcp_close(conn)           — close connection
-  file_read(path)           — read entire file as String
-  file_write(path, data)    — write String to file
-  file_exists(path)         — check if file exists, returns Bool
-  list_dir(path)            — list directory entries, returns List<String>
-  read_line(prompt)         — read line from stdin with prompt, returns String
-  print(text)               — print text to stdout (no newline)
-  println(text)             — print text with newline
-  shell_exec(command)       — run shell command, returns stdout (or "EXIT N: stderr")
-  self_restart()            — restart the ForgeOS process (picks up recompiled binary)
-  sleep(ms)                 — sleep for milliseconds
+(Builtins are listed separately via the registry.)
 
 ### Modules
 +module Name

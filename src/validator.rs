@@ -813,64 +813,8 @@ fn resolve_union_types_in_stmts(
 /// Generate a summary of the current program state for injection into the LLM context.
 /// Check if a name conflicts with a built-in function.
 fn is_builtin_name(name: &str) -> bool {
-    matches!(
-        name,
-        "concat"
-            | "len"
-            | "length"
-            | "to_string"
-            | "str"
-            | "abs"
-            | "sqrt"
-            | "pow"
-            | "floor"
-            | "min"
-            | "max"
-            | "char_at"
-            | "substring"
-            | "substr"
-            | "starts_with"
-            | "ends_with"
-            | "contains"
-            | "regex_match"
-            | "regex_replace"
-            | "index_of"
-            | "split"
-            | "trim"
-            | "list"
-            | "push"
-            | "get"
-            | "join"
-            | "to_int"
-            | "parse_int"
-            | "int"
-            | "digit_value"
-            | "is_digit_char"
-            | "bit_and"
-            | "bit_or"
-            | "bit_xor"
-            | "bit_not"
-            | "shl"
-            | "shr"
-            | "bit_shl"
-            | "bit_shr"
-            | "left_rotate"
-            | "rotl"
-            | "to_hex"
-            | "char_code"
-            | "ord"
-            | "from_char_code"
-            | "chr"
-            | "u32_wrap"
-            | "Ok"
-            | "Err"
-            | "Some"
-            | "state"
-            | "get_state"
-            | "set_state"
-    )
+    crate::builtins::is_builtin(name)
 }
-
 fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str) -> Result<String> {
     let mut moved = Vec::new();
     let mut not_found = Vec::new();
