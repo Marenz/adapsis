@@ -83,3 +83,28 @@
 
 !test list_length
   +with make_list() -> expect 3
+
+// Bug #3 fix: None and Some as user-defined union variants
++type Option = Some(Int) | None
+
++fn option_unwrap (opt:Option, default:Int)->Int
+  +match opt
+  +case Some(val)
+    +return val
+  +case None
+    +return default
+
++fn option_map_double (opt:Option)->Option
+  +match opt
+  +case Some(val)
+    +return Some(val * 2)
+  +case None
+    +return None
+
+!test option_unwrap
+  +with opt=Some(42) default=0 -> expect 42
+  +with opt=None default=99 -> expect 99
+
+!test option_map_double
+  +with Some(5) -> expect Some(10)
+  +with None -> expect None

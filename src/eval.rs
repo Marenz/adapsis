@@ -1562,9 +1562,31 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
 /// Evaluate a parser expression with access to the program (can call user functions).
 pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program) -> Result<Value> {
     match expr {
+        parser::Expr::Ident(name) => {
+            // Check if this is a user-defined union variant first
+            if is_union_variant(program, name) {
+                return Ok(Value::Union {
+                    variant: name.clone(),
+                    payload: vec![],
+                });
+            }
+            // Fall through to standalone handling
+            eval_parser_expr_standalone(expr)
+        }
         parser::Expr::Call { callee, args } => {
             let name = parser_callee_name(callee);
-            // Try as user function first
+            // Check if it's a user-defined union constructor
+            if is_union_variant(program, &name) {
+                let payload = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_program(a, program))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(Value::Union {
+                    variant: name,
+                    payload,
+                });
+            }
+            // Try as user function
             if let Some(func) = program.get_function(&name) {
                 let eval_args: Vec<Value> = args
                     .iter()
@@ -1592,18 +1614,24 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
         parser::Expr::String(v) => Ok(Value::String(v.clone())),
         parser::Expr::Ident(name) => {
             match name.as_str() {
-                "Ok" => Ok(Value::Ok(Box::new(Value::None))),
-                "None" => Ok(Value::None),
                 "true" => Ok(Value::Bool(true)),
                 "false" => Ok(Value::Bool(false)),
                 _ => {
-                    // Could be an error label (Err) or a no-payload union variant
-                    // If it starts with uppercase, treat as union variant; otherwise as error label
+                    // Uppercase names: union variants (including user-defined None, Some, Ok)
+                    // Lowercase names: error labels for Err matching
                     if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                        Ok(Value::Union {
-                            variant: name.clone(),
-                            payload: vec![],
-                        })
+                        // Special cases for Result/Option builtins (used in test expectations)
+                        match name.as_str() {
+                            "Ok" => Ok(Value::Ok(Box::new(Value::None))),
+                            "None" => Ok(Value::Union {
+                                variant: "None".to_string(),
+                                payload: vec![],
+                            }),
+                            _ => Ok(Value::Union {
+                                variant: name.clone(),
+                                payload: vec![],
+                            }),
+                        }
                     } else {
                         Ok(Value::Err(name.clone()))
                     }
