@@ -135,6 +135,14 @@ enum Command {
         /// Function to call (default: main)
         #[arg(short, long, default_value = "main")]
         func: String,
+
+        /// LLM server URL
+        #[arg(short, long, default_value = "http://127.0.0.1:8081")]
+        url: String,
+
+        /// Model name
+        #[arg(long, env = "FORGE_MODEL", default_value = "default")]
+        model: String,
     },
 
     /// Interactive REPL
@@ -440,7 +448,7 @@ async fn main() -> Result<()> {
                 println!("Result: {result}");
             }
         }
-        Command::RunAsync { path, func } => {
+        Command::RunAsync { path, func, url, model } => {
             let source = std::fs::read_to_string(&path)?;
             let operations = parser::parse(&source)?;
             let mut program = ast::Program::default();
@@ -458,7 +466,9 @@ async fn main() -> Result<()> {
 
             println!("Running {func}() with coroutine runtime...");
 
-            let (runtime, mut io_rx) = coroutine::Runtime::new();
+            let (mut runtime, mut io_rx) = coroutine::Runtime::new();
+            runtime.llm_url = url;
+            runtime.llm_default_model = model;
             let runtime = std::sync::Arc::new(runtime);
             let handle = coroutine::CoroutineHandle::new(runtime.io_sender());
 
