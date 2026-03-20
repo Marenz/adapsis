@@ -551,6 +551,7 @@ pub struct AskResponse {
     pub code: String,
     pub results: Vec<MutationResult>,
     pub test_results: Vec<TestCaseResult>,
+    pub has_errors: bool,
 }
 
 pub async fn ask(
@@ -560,44 +561,32 @@ pub async fn ask(
     eprintln!("\n[web:user] {}", req.message);
     let llm = crate::llm::LlmClient::new_with_model(&config.llm_url, &config.llm_model);
 
-    let max_iterations = 5;
-    let mut all_results: Vec<MutationResult> = vec![];
-    let mut all_test_results: Vec<TestCaseResult> = vec![];
-    let mut all_code = String::new();
+    let mut results: Vec<MutationResult> = vec![];
+    let mut test_results: Vec<TestCaseResult> = vec![];
+    let mut code = String::new();
     let mut reply_text = String::new();
+    let mut has_errors = false;
 
     let system_prompt = {
         let base = crate::prompt::system_prompt();
         format!(
-            "{base}\n\n## IMPORTANT: ForgeOS Interactive Mode\n\
-             \n\
-             The program state PERSISTS between responses. Do NOT resend existing types or functions.\n\
-             Only send NEW code or modifications. Use !replace to modify existing functions.\n\
-             \n\
-             ## IO Builtins as Tools\n\
-             \n\
-             IO builtins serve two purposes:\n\
-             1. As TOOLS: for quick answers, write a minimal function and !eval it immediately.\n\
-             2. As BUILDING BLOCKS: for larger programs, compose them into proper functions.\n\
-             \n\
-             If an eval fails, FIX the issue and try again — don't stop.\n\
-             Always keep going until the user's request is fulfilled."
+            "{base}\n\n## ForgeOS Interactive Mode\n\
+             Program state PERSISTS. Do NOT resend existing types/functions.\n\
+             Only send NEW code or modifications.\n\
+             IO builtins work as tools (minimal function + !eval) or building blocks.\n\
+             If an eval fails, the error will be shown and you'll be asked to fix it."
         )
     };
 
-    // Build messages from conversation history
-    let mut messages = {
+    // Add to conversation history and build messages
+    let messages = {
         let mut session = config.session.lock().await;
-
-        // Initialize conversation with system prompt if empty
         if session.chat_messages.is_empty() {
             session.chat_messages.push(crate::session::ChatMessage {
                 role: "system".to_string(),
-                content: system_prompt.clone(),
+                content: system_prompt,
             });
         }
-
-        // Add program context + user message
         let context = format!(
             "Working directory: {}\n{}\nUser: {}",
             config.project_dir,
@@ -608,76 +597,52 @@ pub async fn ask(
             role: "user".to_string(),
             content: context,
         });
-
-        // Convert session messages to LLM messages
-        session.chat_messages.iter().map(|m| {
-            match m.role.as_str() {
-                "system" => crate::llm::ChatMessage::system(m.content.clone()),
-                "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-                _ => crate::llm::ChatMessage::user(m.content.clone()),
-            }
+        session.chat_messages.iter().map(|m| match m.role.as_str() {
+            "system" => crate::llm::ChatMessage::system(m.content.clone()),
+            "assistant" => crate::llm::ChatMessage::assistant(&m.content),
+            _ => crate::llm::ChatMessage::user(m.content.clone()),
         }).collect::<Vec<_>>()
-    }; // lock released
+    };
 
-    for iteration in 0..max_iterations {
-        if iteration > 0 {
-            eprintln!("[web:retry {iteration}/{max_iterations}]");
+    // Single LLM call
+    let output = match llm.generate(messages).await {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("[web:error] LLM: {e}");
+            return Json(AskResponse {
+                reply: format!("LLM error: {e}"),
+                code: String::new(),
+                results: vec![],
+                test_results: vec![],
+                has_errors: false,
+            });
         }
+    };
 
-        // Call LLM
-        let output = match llm.generate(messages.clone()).await {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("[web:error] LLM: {e}");
-                reply_text = format!("LLM error: {e}");
-                break;
-            }
-        };
+    // Extract code and reply
+    code = output.code.clone();
+    if !output.thinking.is_empty() {
+        reply_text.push_str(&output.thinking);
+        eprintln!("[web:think] {}...", output.thinking.chars().take(150).collect::<String>());
+    }
+    let mut clean = output.text.clone();
+    while let Some(s) = clean.find("<think>") {
+        if let Some(e) = clean.find("</think>") { clean.replace_range(s..e+8, ""); } else { break; }
+    }
+    while let Some(s) = clean.find("<code>") {
+        if let Some(e) = clean.find("</code>") { clean.replace_range(s..e+7, ""); } else { break; }
+    }
+    let clean = clean.trim();
+    if !clean.is_empty() {
+        if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
+        reply_text.push_str(clean);
+    }
 
-        messages.push(crate::llm::ChatMessage::assistant(&output.text));
-
-        // Extract code and reply
-        let code = output.code.clone();
-
-        if !output.thinking.is_empty() {
-            eprintln!("[web:think] {}...", output.thinking.chars().take(150).collect::<String>());
-        }
-
-        // Build reply from thinking + prose
-        let mut iter_reply = String::new();
-        if !output.thinking.is_empty() {
-            iter_reply.push_str(&output.thinking);
-        }
-        let mut clean = output.text.clone();
-        while let Some(s) = clean.find("<think>") {
-            if let Some(e) = clean.find("</think>") { clean.replace_range(s..e+8, ""); } else { break; }
-        }
-        while let Some(s) = clean.find("<code>") {
-            if let Some(e) = clean.find("</code>") { clean.replace_range(s..e+7, ""); } else { break; }
-        }
-        let clean = clean.trim();
-        if !clean.is_empty() {
-            if !iter_reply.is_empty() { iter_reply.push_str("\n\n"); }
-            iter_reply.push_str(clean);
-        }
-        if !iter_reply.is_empty() {
-            if !reply_text.is_empty() { reply_text.push_str("\n\n---\n\n"); }
-            reply_text.push_str(&iter_reply);
-        }
-
-        if code.is_empty() || code.trim() == "DONE" {
-            eprintln!("[web:done] no code / DONE");
-            break;
-        }
-
+    if !code.is_empty() {
         eprintln!("[web:code]\n{code}");
-        if !all_code.is_empty() { all_code.push_str("\n\n// --- iteration ---\n"); }
-        all_code.push_str(&code);
+    }
 
-        // Apply code
-        let mut iter_results: Vec<MutationResult> = vec![];
-        let mut iter_test_results: Vec<TestCaseResult> = vec![];
-
+    if !code.is_empty() && code.trim() != "DONE" {
         let mut session = config.session.lock().await;
 
         if let Ok(ops) = crate::parser::parse(&code) {
@@ -695,42 +660,34 @@ pub async fn ask(
                 }
             }
 
-            // Apply mutations
-            let has_mutations = ops.iter().any(|op| {
-                !matches!(op,
-                    crate::parser::Operation::Test(_) | crate::parser::Operation::Trace(_)
-                    | crate::parser::Operation::Eval(_) | crate::parser::Operation::Query(_))
-            });
+            let has_mutations = ops.iter().any(|op| !matches!(op,
+                crate::parser::Operation::Test(_) | crate::parser::Operation::Trace(_)
+                | crate::parser::Operation::Eval(_) | crate::parser::Operation::Query(_)));
 
             if has_mutations {
                 match session.apply(&code) {
                     Ok(res) => {
                         for (msg, ok) in res {
                             eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
-                            iter_results.push(MutationResult { message: msg, success: ok });
+                            if !ok { has_errors = true; }
+                            results.push(MutationResult { message: msg, success: ok });
                         }
                     }
                     Err(e) => {
                         eprintln!("[web:err] {e}");
-                        iter_results.push(MutationResult { message: format!("{e}"), success: false });
+                        has_errors = true;
+                        results.push(MutationResult { message: format!("{e}"), success: false });
                     }
                 }
             }
 
-            // Run tests, evals, queries
             for op in &ops {
                 match op {
                     crate::parser::Operation::Test(test) => {
                         for case in &test.cases {
                             match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
-                                Ok(msg) => {
-                                    eprintln!("[web:pass] {msg}");
-                                    iter_test_results.push(TestCaseResult { message: msg, pass: true });
-                                }
-                                Err(e) => {
-                                    eprintln!("[web:fail] {e}");
-                                    iter_test_results.push(TestCaseResult { message: format!("{e}"), pass: false });
-                                }
+                                Ok(msg) => { eprintln!("[web:pass] {msg}"); test_results.push(TestCaseResult { message: msg, pass: true }); }
+                                Err(e) => { eprintln!("[web:fail] {e}"); has_errors = true; test_results.push(TestCaseResult { message: format!("{e}"), pass: false }); }
                             }
                         }
                     }
@@ -758,13 +715,13 @@ pub async fn ask(
                                     crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
                                 }).await;
 
-                                let msg = match &eval_result {
-                                    Ok(Ok(val)) => { let m = format!("eval {}() = {val}", ev.function_name); eprintln!("[web:eval] {m}"); m }
-                                    Ok(Err(e)) => { let m = format!("eval error: {e}"); eprintln!("[web:eval:err] {m}"); m }
-                                    Err(e) => { let m = format!("eval task error: {e}"); eprintln!("[web:eval:err] {m}"); m }
+                                let (msg, success) = match &eval_result {
+                                    Ok(Ok(val)) => (format!("eval {}() = {val}", ev.function_name), true),
+                                    Ok(Err(e)) => { has_errors = true; (format!("eval error: {e}"), false) }
+                                    Err(e) => { has_errors = true; (format!("eval task error: {e}"), false) }
                                 };
-                                let success = matches!(eval_result, Ok(Ok(_)));
-                                iter_results.push(MutationResult { message: msg, success });
+                                eprintln!("[web:eval] {msg}");
+                                results.push(MutationResult { message: msg, success });
 
                                 session = config.session.lock().await;
                             }
@@ -774,12 +731,13 @@ pub async fn ask(
                                     let tag = if compiled { " [compiled]" } else { "" };
                                     let msg = format!("eval {}() = {result}{tag}", ev.function_name);
                                     eprintln!("[web:eval] {msg}");
-                                    iter_results.push(MutationResult { message: msg, success: true });
+                                    results.push(MutationResult { message: msg, success: true });
                                 }
                                 Err(e) => {
+                                    has_errors = true;
                                     let msg = format!("eval error: {e}");
                                     eprintln!("[web:eval:err] {msg}");
-                                    iter_results.push(MutationResult { message: msg, success: false });
+                                    results.push(MutationResult { message: msg, success: false });
                                 }
                             }
                         }
@@ -788,64 +746,37 @@ pub async fn ask(
                         let table = crate::typeck::build_symbol_table(&session.program);
                         let response = crate::typeck::handle_query(&session.program, &table, query);
                         eprintln!("[web:query] {}", response.chars().take(100).collect::<String>());
-                        iter_results.push(MutationResult { message: response, success: true });
+                        results.push(MutationResult { message: response, success: true });
                     }
                     _ => {}
                 }
             }
         } else if let Err(e) = crate::parser::parse(&code) {
+            has_errors = true;
             let msg = format!("Parse error: {e}");
             eprintln!("[web:parse:err] {msg}");
-            iter_results.push(MutationResult { message: msg, success: false });
+            results.push(MutationResult { message: msg, success: false });
         }
-
-        // Check for errors
-        let has_errors = iter_results.iter().any(|r| !r.success) || iter_test_results.iter().any(|r| !r.pass);
-
-        all_results.extend(iter_results);
-        all_test_results.extend(iter_test_results);
-
-        if !has_errors {
-            eprintln!("[web:done] all passed, iteration {iteration}");
-            break;
-        }
-
-        // Feed errors back to LLM
-        let error_summary: String = all_results.iter()
-            .filter(|r| !r.success)
-            .map(|r| r.message.clone())
-            .chain(all_test_results.iter().filter(|r| !r.pass).map(|r| r.message.clone()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let program_state = crate::validator::program_summary(&session.program);
-        drop(session);
-
-        let feedback = format!(
-            "There were errors:\n{error_summary}\n\nCurrent program state:\n{program_state}\n\nFix the issues and try again."
-        );
-        eprintln!("[web:feedback] errors → retrying");
-        messages.push(crate::llm::ChatMessage::user(feedback));
     }
-
-    eprintln!("[web:reply] {}...", reply_text.chars().take(200).collect::<String>());
 
     // Save assistant response to conversation history
     {
         let mut session = config.session.lock().await;
-        let summary = if all_code.is_empty() {
+        let summary = if code.is_empty() {
             reply_text.chars().take(500).collect::<String>()
         } else {
-            format!("{}\n<code>\n{}\n</code>", 
+            let result_summary = results.iter()
+                .map(|r| format!("{}: {}", if r.success { "OK" } else { "ERROR" }, r.message))
+                .collect::<Vec<_>>().join("\n");
+            format!("{}\n<code>\n{}\n</code>\nResults:\n{}",
                 reply_text.chars().take(200).collect::<String>(),
-                all_code.chars().take(500).collect::<String>())
+                code.chars().take(500).collect::<String>(),
+                result_summary)
         };
         session.chat_messages.push(crate::session::ChatMessage {
             role: "assistant".to_string(),
             content: summary,
         });
-        
-        // Trim conversation history if too long (keep last 50 messages)
         if session.chat_messages.len() > 50 {
             let system = session.chat_messages[0].clone();
             let start = session.chat_messages.len() - 49;
@@ -855,13 +786,17 @@ pub async fn ask(
         }
     }
 
+    eprintln!("[web:done] errors={has_errors}");
+
     Json(AskResponse {
         reply: reply_text,
-        code: all_code,
-        results: all_results,
-        test_results: all_test_results,
+        code,
+        results,
+        test_results,
+        has_errors,
     })
 }
+
 
 pub async fn opencode_task(
     State(config): State<AppConfig>,
