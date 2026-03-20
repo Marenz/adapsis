@@ -863,6 +863,18 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
                 _ => bail!("contains expects (String, String)"),
             }
         }
+        "regex_match" => {
+            if args.len() != 2 {
+                bail!("regex_match(pattern, text) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(pattern), Value::String(text)) => match regex::Regex::new(pattern) {
+                    Ok(re) => Ok(Value::Bool(re.is_match(text))),
+                    Err(_) => Ok(Value::Bool(false)),
+                },
+                _ => bail!("regex_match expects (String, String)"),
+            }
+        }
         "index_of" => {
             if args.len() != 2 {
                 bail!("index_of(s, substr) expects 2 arguments");

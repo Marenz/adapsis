@@ -832,6 +832,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "starts_with"
             | "ends_with"
             | "contains"
+            | "regex_match"
             | "index_of"
             | "split"
             | "trim"

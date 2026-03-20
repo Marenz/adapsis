@@ -599,8 +599,30 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(rest) = text.strip_prefix("!opencode") {
+            // Consume ALL following lines until end of input or a Forge operation
+            let mut description = rest.trim().to_string();
             self.index += 1;
-            return Ok(Operation::OpenCode(rest.trim().to_string()));
+            while let Some(next) = self.current() {
+                let t = next.text.trim();
+                // Stop at Forge operations (lines starting with + ! ? that aren't bullets)
+                if (t.starts_with("+fn ")
+                    || t.starts_with("+type ")
+                    || t.starts_with("+module ")
+                    || t.starts_with("+let ")
+                    || t.starts_with("+call ")
+                    || t.starts_with("+return")
+                    || t.starts_with("!test ")
+                    || t.starts_with("!eval ")
+                    || t.starts_with("!move ")
+                    || t.starts_with("?"))
+                {
+                    break;
+                }
+                description.push('\n');
+                description.push_str(next.text);
+                self.index += 1;
+            }
+            return Ok(Operation::OpenCode(description.trim().to_string()));
         }
 
         if let Some(rest) = text.strip_prefix("!trace") {
