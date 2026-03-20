@@ -792,6 +792,15 @@ fn eval_builtin_or_user(
     args: Vec<Value>,
     env: &mut Env,
 ) -> Result<Value> {
+    // User-defined union variants take priority over builtins
+    // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
+    if is_union_variant(program, callee) {
+        return Ok(Value::Union {
+            variant: callee.to_string(),
+            payload: args,
+        });
+    }
+
     // Check for built-in functions
     match callee {
         "Ok" => {

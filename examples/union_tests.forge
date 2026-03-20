@@ -1,0 +1,78 @@
+// Test suite for union types, pattern matching, and recursive structures
+// Covers bugs #1-#3 and enhancement #8 from ISSUES.md
+
++type Maybe = Some(Int) | Nope
+
+// Bug #2: +match on union values passed as function parameters
++fn unwrap_or (m:Maybe, default:Int)->Int
+  +match m
+  +case Some(val)
+    +return val
+  +case Nope
+    +return default
+
+// Bug #3: None-like variants recognized as union variants
++fn is_some (m:Maybe)->Bool
+  +match m
+  +case Some(val)
+    +return true
+  +case Nope
+    +return false
+
+// Basic match with single param
+!test is_some
+  +with Some(42) -> expect true
+  +with Nope -> expect false
+
+// Bug #2: match with multi-param key=value input
+!test unwrap_or
+  +with m=Some(42) default=0 -> expect 42
+  +with m=Nope default=99 -> expect 99
+
+// Enhancement #8: wildcard bindings
++fn describe (m:Maybe)->String
+  +match m
+  +case Some(_)
+    +return "has value"
+  +case Nope
+    +return "empty"
+
+!test describe
+  +with Some(1) -> expect "has value"
+  +with Some(999) -> expect "has value"
+  +with Nope -> expect "empty"
+
+// Bug #1: nested union constructors in test input
++type IntList = Cons(Int, IntList) | Nil
+
++fn list_length (xs:IntList)->Int
+  +match xs
+  +case Nil
+    +return 0
+  +case Cons(head, tail)
+    +let rest:Int = list_length(tail)
+    +return 1 + rest
+
+!test list_length
+  +with Nil -> expect 0
+  +with Cons(1, Nil) -> expect 1
+  +with Cons(1, Cons(2, Nil)) -> expect 2
+  +with Cons(1, Cons(2, Cons(3, Nil))) -> expect 3
+
+// Multi-match sequencing (Enhancement #9)
++fn maybe_add (a:Maybe, b:Maybe)->Maybe
+  +match a
+  +case Some(ax)
+    +match b
+    +case Some(bx)
+      +return Some(ax + bx)
+    +case Nope
+      +return Some(ax)
+  +case Nope
+    +return b
+
+!test maybe_add
+  +with a=Some(3) b=Some(4) -> expect Some(7)
+  +with a=Some(3) b=Nope -> expect Some(3)
+  +with a=Nope b=Some(4) -> expect Some(4)
+  +with a=Nope b=Nope -> expect Nope

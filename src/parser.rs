@@ -1807,27 +1807,62 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
         let expr = parse_expr(line, &input[..end])?;
         Ok((expr, &input[end..]))
     } else {
-        // Number, bool, or identifier — read until whitespace
-        let end = input
-            .find(|c: char| c.is_whitespace())
+        // Check for constructor call: Name(args) or Name(args, args)
+        // Find the identifier part first
+        let ident_end = input
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
             .unwrap_or(input.len());
-        let token = &input[..end];
-        let rest = &input[end..];
+        let ident = &input[..ident_end];
+        let after_ident = &input[ident_end..];
 
-        let expr = if token == "true" {
-            Expr::Bool(true)
-        } else if token == "false" {
-            Expr::Bool(false)
-        } else if let Ok(n) = token.parse::<i64>() {
-            Expr::Int(n)
-        } else if let Ok(f) = token.parse::<f64>() {
-            Expr::Float(f)
+        if !ident.is_empty() && after_ident.starts_with('(') {
+            // Constructor call: Name(arg1, arg2, ...)
+            // Find matching closing paren
+            let mut depth = 0;
+            let mut paren_end = 0;
+            for (i, ch) in after_ident.char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            paren_end = i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if depth != 0 {
+                bail!("line {}: unmatched paren in test value", line);
+            }
+            let full = &input[..ident_end + paren_end];
+            let rest = &input[ident_end + paren_end..];
+            // Parse the full expression using the main expression parser
+            let expr = parse_expr(line, full)?;
+            Ok((expr, rest))
         } else {
-            // Treat as identifier
-            Expr::Ident(token.to_string())
-        };
+            // Simple token: number, bool, or identifier
+            let end = input
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(input.len());
+            let token = &input[..end];
+            let rest = &input[end..];
 
-        Ok((expr, rest))
+            let expr = if token == "true" {
+                Expr::Bool(true)
+            } else if token == "false" {
+                Expr::Bool(false)
+            } else if let Ok(n) = token.parse::<i64>() {
+                Expr::Int(n)
+            } else if let Ok(f) = token.parse::<f64>() {
+                Expr::Float(f)
+            } else {
+                Expr::Ident(token.to_string())
+            };
+
+            Ok((expr, rest))
+        }
     }
 }
 
