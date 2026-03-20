@@ -210,43 +210,89 @@ async function sendMessage() {
       addMessage('system', 'Error: ' + e.message);
     }
   } else {
-    // Natural language → send to AI (API loops until DONE internally)
-    addSpinner();
+    // Natural language → stream from AI via SSE
+    let currentMsg = null;
+
     try {
-      const res = await fetch('/api/ask', {
+      const response = await fetch('/api/ask-stream', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({message: text}),
-      }).then(r => r.json());
+      });
 
-      removeSpinner();
-      const msg = addMessage('ai', '');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      if (res.reply) {
-        msg.querySelector('.msg-body').textContent = res.reply;
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, {stream: true});
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.substring(6);
+          if (!data) continue;
+
+          let event;
+          try { event = JSON.parse(data); } catch { continue; }
+
+          switch (event.type) {
+            case 'iteration':
+              if (event.n > 1) {
+                addMessage('system', `⟳ Iteration ${event.n}`);
+              }
+              currentMsg = addMessage('ai', '');
+              break;
+            case 'thinking':
+              if (currentMsg) {
+                const el = document.createElement('div');
+                el.className = 'thinking';
+                el.textContent = event.text.substring(0, 300) + (event.text.length > 300 ? '...' : '');
+                currentMsg.querySelector('.msg-body').appendChild(el);
+              }
+              break;
+            case 'text':
+              if (currentMsg) {
+                const el = document.createElement('div');
+                el.textContent = event.text;
+                currentMsg.querySelector('.msg-body').appendChild(el);
+              }
+              break;
+            case 'code':
+              if (currentMsg) addCodeBlock(currentMsg, event.code);
+              break;
+            case 'result':
+              if (currentMsg) addResult(currentMsg, (event.success ? 'OK: ' : 'ERROR: ') + event.message, event.success ? 'ok' : 'error');
+              break;
+            case 'test':
+              if (currentMsg) addResult(currentMsg, (event.pass ? 'PASS: ' : 'FAIL: ') + event.message, event.pass ? 'pass' : 'fail');
+              break;
+            case 'eval':
+              if (currentMsg) addResult(currentMsg, `= ${event.result}`, 'ok');
+              break;
+            case 'feedback':
+              addMessage('system', event.message);
+              break;
+            case 'error':
+              addMessage('system', 'Error: ' + event.message);
+              break;
+            case 'done':
+              addMessage('system', '✓ Done');
+              break;
+          }
+
+          chatEl.scrollTop = chatEl.scrollHeight;
+        }
       }
-
-      if (res.code) {
-        addCodeBlock(msg, res.code);
-      }
-
-      for (const r of res.results || []) {
-        addResult(msg, (r.success ? 'OK: ' : 'ERROR: ') + r.message, r.success ? 'ok' : 'error');
-      }
-
-      for (const r of res.test_results || []) {
-        addResult(msg, (r.pass ? 'PASS: ' : 'FAIL: ') + r.message, r.pass ? 'pass' : 'fail');
-      }
-
-      if (!res.reply && !res.code && (res.results?.length || 0) === 0) {
-        msg.querySelector('.msg-body').textContent = '(no response)';
-      }
-
-      await refreshProgram();
     } catch (e) {
-      removeSpinner();
-      addMessage('system', 'Error: ' + e.message);
+      addMessage('system', 'Connection error: ' + e.message);
     }
+
+    await refreshProgram();
   }
 
   sending = false;

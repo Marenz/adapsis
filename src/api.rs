@@ -1210,6 +1210,220 @@ pub async fn agents(State(session): State<SharedSession>) -> Json<Vec<crate::ses
     Json(session.agent_log.clone())
 }
 
+/// SSE streaming version of /api/ask — streams events as they happen.
+pub async fn ask_stream(
+    State(config): State<AppConfig>,
+    Json(req): Json<AskRequest>,
+) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::{Event, KeepAlive};
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::channel::<serde_json::Value>(100);
+
+    // Spawn the processing loop
+    let config_clone = config.clone();
+    tokio::spawn(async move {
+        let llm = crate::llm::LlmClient::new_with_model_and_key(
+            &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
+        );
+
+        let _ = tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
+
+        let system_prompt = {
+            let base = crate::prompt::system_prompt();
+            let builtins = crate::builtins::format_for_prompt();
+            format!(
+                "{base}\n\n{builtins}\n\n## ForgeOS Interactive Mode\n\
+                 Program state PERSISTS. Do NOT resend existing types/functions.\n\
+                 You can !eval builtins directly.\n\
+                 Use !plan set to create plans, !plan done N to mark steps.\n\
+                 When COMPLETE, respond with DONE in a <code> block.\n\
+                 Keep working until the task is fully done."
+            )
+        };
+
+        let mut messages = {
+            let mut session = config_clone.session.lock().await;
+            if session.chat_messages.is_empty() {
+                session.chat_messages.push(crate::session::ChatMessage {
+                    role: "system".to_string(), content: system_prompt,
+                });
+            }
+            let plan_ctx = if session.plan.is_empty() { String::new() } else {
+                let steps = session.plan.iter().enumerate().map(|(i, s)| {
+                    let icon = match s.status {
+                        crate::session::PlanStatus::Pending => "[ ]",
+                        crate::session::PlanStatus::InProgress => "[~]",
+                        crate::session::PlanStatus::Done => "[x]",
+                        crate::session::PlanStatus::Failed => "[!]",
+                    };
+                    format!("{} {}: {}", icon, i + 1, s.description)
+                }).collect::<Vec<_>>().join("\n");
+                format!("\nPlan:\n{steps}\n")
+            };
+            let context = format!("Working directory: {}\n{}{}\nUser: {}",
+                config_clone.project_dir,
+                crate::validator::program_summary_compact(&session.program),
+                plan_ctx, req.message);
+            session.chat_messages.push(crate::session::ChatMessage {
+                role: "user".to_string(), content: context,
+            });
+            session.chat_messages.iter().map(|m| match m.role.as_str() {
+                "system" => crate::llm::ChatMessage::system(m.content.clone()),
+                "assistant" => crate::llm::ChatMessage::assistant(&m.content),
+                _ => crate::llm::ChatMessage::user(m.content.clone()),
+            }).collect::<Vec<_>>()
+        };
+
+        for iteration in 0..10 {
+            let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
+
+            let output = match llm.generate(messages.clone()).await {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = tx.send(serde_json::json!({"type": "error", "message": format!("{e}")})).await;
+                    break;
+                }
+            };
+
+            messages.push(crate::llm::ChatMessage::assistant(&output.text));
+
+            if !output.thinking.is_empty() {
+                let _ = tx.send(serde_json::json!({"type": "thinking", "text": output.thinking})).await;
+            }
+
+            // Extract prose
+            let mut clean = output.text.clone();
+            while let Some(s) = clean.find("<think>") { if let Some(e) = clean.find("</think>") { clean.replace_range(s..e+8, ""); } else { break; } }
+            while let Some(s) = clean.find("<code>") { if let Some(e) = clean.find("</code>") { clean.replace_range(s..e+7, ""); } else { break; } }
+            let clean = clean.trim();
+            if !clean.is_empty() {
+                let _ = tx.send(serde_json::json!({"type": "text", "text": clean})).await;
+            }
+
+            let code = output.code.clone();
+            if code.trim() == "DONE" || code.is_empty() {
+                let _ = tx.send(serde_json::json!({"type": "done"})).await;
+                break;
+            }
+
+            let _ = tx.send(serde_json::json!({"type": "code", "code": code})).await;
+
+            // Apply code
+            let mut session = config_clone.session.lock().await;
+            let mut has_errors = false;
+
+            match crate::parser::parse(&code) {
+                Ok(ops) => {
+                    // Remove duplicates
+                    for op in &ops {
+                        match op {
+                            crate::parser::Operation::Function(f) => { session.program.functions.retain(|e| e.name != f.name); }
+                            crate::parser::Operation::Type(t) => { let n = t.name.clone(); session.program.types.retain(|e| e.name() != n); }
+                            _ => {}
+                        }
+                    }
+
+                    // Handle plan, undo
+                    for op in &ops {
+                        if let crate::parser::Operation::Plan(action) = op {
+                            match action {
+                                crate::parser::PlanAction::Set(steps) => {
+                                    session.plan = steps.iter().map(|s| crate::session::PlanStep {
+                                        description: s.clone(), status: crate::session::PlanStatus::Pending,
+                                    }).collect();
+                                    let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Plan: {} steps", steps.len()), "success": true})).await;
+                                }
+                                crate::parser::PlanAction::Progress(n) => {
+                                    if let Some(step) = session.plan.get_mut(n.saturating_sub(1)) {
+                                        step.status = crate::session::PlanStatus::Done;
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Step {n} done"), "success": true})).await;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    let has_mutations = ops.iter().any(|op| !matches!(op,
+                        crate::parser::Operation::Test(_) | crate::parser::Operation::Eval(_)
+                        | crate::parser::Operation::Query(_) | crate::parser::Operation::Trace(_)
+                        | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
+                        | crate::parser::Operation::Watch { .. } | crate::parser::Operation::Agent { .. }
+                        | crate::parser::Operation::OpenCode(_)));
+
+                    if has_mutations {
+                        match session.apply(&code) {
+                            Ok(res) => {
+                                for (msg, ok) in &res {
+                                    if !ok { has_errors = true; }
+                                    let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": ok})).await;
+                                }
+                            }
+                            Err(e) => {
+                                has_errors = true;
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("{e}"), "success": false})).await;
+                            }
+                        }
+                    }
+
+                    // Tests and evals
+                    for op in &ops {
+                        match op {
+                            crate::parser::Operation::Test(test) => {
+                                for case in &test.cases {
+                                    match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
+                                        Ok(msg) => { let _ = tx.send(serde_json::json!({"type": "test", "pass": true, "message": msg})).await; }
+                                        Err(e) => { has_errors = true; let _ = tx.send(serde_json::json!({"type": "test", "pass": false, "message": format!("{e}")})).await; }
+                                    }
+                                }
+                            }
+                            crate::parser::Operation::Eval(ev) => {
+                                match crate::eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
+                                    Ok((result, compiled)) => {
+                                        let tag = if compiled { " [compiled]" } else { "" };
+                                        let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("{result}{tag}"), "function": ev.function_name})).await;
+                                    }
+                                    Err(e) => {
+                                        has_errors = true;
+                                        let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("error: {e}"), "function": ev.function_name})).await;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    has_errors = true;
+                    let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Parse error: {e}"), "success": false})).await;
+                }
+            }
+
+            drop(session);
+
+            if has_errors {
+                let _ = tx.send(serde_json::json!({"type": "feedback", "message": "Errors found, retrying..."})).await;
+                messages.push(crate::llm::ChatMessage::user("Fix the errors and continue.".to_string()));
+            } else {
+                messages.push(crate::llm::ChatMessage::user("Results look good. Continue with next step or DONE.".to_string()));
+            }
+        }
+
+        let _ = tx.send(serde_json::json!({"type": "end"})).await;
+    });
+
+    // Convert channel to SSE stream
+    let stream = async_stream::stream! {
+        while let Some(event) = rx.recv().await {
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            yield Ok(Event::default().data(data));
+        }
+    };
+
+    axum::response::sse::Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
@@ -1227,6 +1441,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
     let config_routes = axum::Router::new()
         .route("/api/eval", post(eval_fn))
         .route("/api/ask", post(ask))
+        .route("/api/ask-stream", post(ask_stream))
         .route("/api/opencode", post(opencode_task))
         .with_state(config);
 
