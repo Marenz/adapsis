@@ -76,3 +76,10 @@
   +with a=Some(3) b=Nope -> expect Some(3)
   +with a=Nope b=Some(4) -> expect Some(4)
   +with a=Nope b=Nope -> expect Nope
+
+// Enhancement #6: function calls as test inputs
++fn make_list ()->IntList
+  +return Cons(1, Cons(2, Cons(3, Nil)))
+
+!test list_length
+  +with make_list() -> expect 3

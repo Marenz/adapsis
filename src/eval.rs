@@ -473,8 +473,8 @@ pub fn eval_test_case(
         .get_function(function_name)
         .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
 
-    let input = eval_parser_expr_standalone(&case.input)?;
-    let expected = eval_parser_expr_standalone(&case.expected)?;
+    let input = eval_parser_expr_with_program(&case.input, program)?;
+    let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
     let mut env = Env::new();
     bind_input_to_params(program, func, &input, &mut env);
@@ -1559,6 +1559,31 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
 }
 
 /// Evaluate a parser::Expr directly (for test case inputs/expected values).
+/// Evaluate a parser expression with access to the program (can call user functions).
+pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program) -> Result<Value> {
+    match expr {
+        parser::Expr::Call { callee, args } => {
+            let name = parser_callee_name(callee);
+            // Try as user function first
+            if let Some(func) = program.get_function(&name) {
+                let eval_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_program(a, program))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut env = Env::new();
+                for (param, arg) in func.params.iter().zip(eval_args) {
+                    env.set(&param.name, arg);
+                }
+                return eval_function_body(program, &func.body, &mut env);
+            }
+            // Fall through to standalone (handles union constructors, Ok, Err)
+            eval_parser_expr_standalone(expr)
+        }
+        // Everything else delegates to standalone
+        _ => eval_parser_expr_standalone(expr),
+    }
+}
+
 pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
     match expr {
         parser::Expr::Int(v) => Ok(Value::Int(*v)),
