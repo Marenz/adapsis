@@ -73,6 +73,16 @@ pub struct Session {
     pub revision: usize,
     /// All raw mutation sources (for replay)
     pub sources: Vec<String>,
+    /// Conversation history for the LLM (persists across /api/ask calls)
+    #[serde(default)]
+    pub chat_messages: Vec<ChatMessage>,
+}
+
+/// A chat message for LLM conversation history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
 }
 
 impl Session {
@@ -80,6 +90,7 @@ impl Session {
         Self {
             program: ast::Program::default(),
             mutations: Vec::new(),
+            chat_messages: Vec::new(),
             history: Vec::new(),
             revision: 0,
             sources: Vec::new(),

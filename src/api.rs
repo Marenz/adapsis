@@ -566,8 +566,7 @@ pub async fn ask(
     let mut all_code = String::new();
     let mut reply_text = String::new();
 
-    // Build initial messages
-    let system = {
+    let system_prompt = {
         let base = crate::prompt::system_prompt();
         format!(
             "{base}\n\n## IMPORTANT: ForgeOS Interactive Mode\n\
@@ -586,21 +585,39 @@ pub async fn ask(
         )
     };
 
-    let initial_context = {
-        let session = config.session.lock().await;
-        format!(
-            "Working directory: {}\n\n{}\n\n{}\n\nUser request: {}",
+    // Build messages from conversation history
+    let mut messages = {
+        let mut session = config.session.lock().await;
+
+        // Initialize conversation with system prompt if empty
+        if session.chat_messages.is_empty() {
+            session.chat_messages.push(crate::session::ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.clone(),
+            });
+        }
+
+        // Add program context + user message
+        let context = format!(
+            "Working directory: {}\n{}\nUser: {}",
             config.project_dir,
             crate::validator::program_summary_compact(&session.program),
-            session.format_recent_history(10),
             req.message
-        )
-    };
+        );
+        session.chat_messages.push(crate::session::ChatMessage {
+            role: "user".to_string(),
+            content: context,
+        });
 
-    let mut messages = vec![
-        crate::llm::ChatMessage::system(system),
-        crate::llm::ChatMessage::user(initial_context),
-    ];
+        // Convert session messages to LLM messages
+        session.chat_messages.iter().map(|m| {
+            match m.role.as_str() {
+                "system" => crate::llm::ChatMessage::system(m.content.clone()),
+                "assistant" => crate::llm::ChatMessage::assistant(&m.content),
+                _ => crate::llm::ChatMessage::user(m.content.clone()),
+            }
+        }).collect::<Vec<_>>()
+    }; // lock released
 
     for iteration in 0..max_iterations {
         if iteration > 0 {
@@ -812,6 +829,31 @@ pub async fn ask(
     }
 
     eprintln!("[web:reply] {}...", reply_text.chars().take(200).collect::<String>());
+
+    // Save assistant response to conversation history
+    {
+        let mut session = config.session.lock().await;
+        let summary = if all_code.is_empty() {
+            reply_text.chars().take(500).collect::<String>()
+        } else {
+            format!("{}\n<code>\n{}\n</code>", 
+                reply_text.chars().take(200).collect::<String>(),
+                all_code.chars().take(500).collect::<String>())
+        };
+        session.chat_messages.push(crate::session::ChatMessage {
+            role: "assistant".to_string(),
+            content: summary,
+        });
+        
+        // Trim conversation history if too long (keep last 50 messages)
+        if session.chat_messages.len() > 50 {
+            let system = session.chat_messages[0].clone();
+            let start = session.chat_messages.len() - 49;
+            let keep: Vec<_> = session.chat_messages[start..].to_vec();
+            session.chat_messages = vec![system];
+            session.chat_messages.extend(keep);
+        }
+    }
 
     Json(AskResponse {
         reply: reply_text,
