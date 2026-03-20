@@ -574,7 +574,24 @@ pub struct AskResponse {
     pub has_errors: bool,
 }
 
-/// Scan eval.rs for builtin function names not already in the prompt.
+/// Build plan context string and whether the AI needs to create a new plan.
+fn build_plan_context(plan: &[crate::session::PlanStep]) -> (String, bool) {
+    if plan.is_empty() {
+        return (String::new(), true);
+    }
+    let all_done = plan.iter().all(|s| matches!(s.status, crate::session::PlanStatus::Done | crate::session::PlanStatus::Failed));
+    let steps = plan.iter().enumerate().map(|(i, s)| {
+        let icon = match s.status {
+            crate::session::PlanStatus::Pending => "[ ]",
+            crate::session::PlanStatus::InProgress => "[~]",
+            crate::session::PlanStatus::Done => "[x]",
+            crate::session::PlanStatus::Failed => "[!]",
+        };
+        format!("{} {}: {}", icon, i + 1, s.description)
+    }).collect::<Vec<_>>().join("\n");
+    (format!("\nCurrent plan:\n{steps}\n"), all_done)
+}
+
 pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
@@ -599,7 +616,7 @@ pub async fn ask(
              Only send NEW code or modifications.\n\
              You can !eval builtins directly: !eval concat a=\"hello \" b=\"world\"\n\
              For IO builtins, write a minimal [io,async] function and !eval it.\n\
-             Use !plan set to create a multi-step plan, !plan done N to mark steps complete.\n\
+             Use !plan set to create a plan, !plan done N to mark steps. Do NOT number the steps — they are auto-numbered.\n\
              When your task is COMPLETE, respond with just DONE in a <code> block.\n\
              If you need to ask the user a question, just respond with text (no <code> block).\n\
              Keep working step by step until the task is fully done.\n\
@@ -617,26 +634,17 @@ pub async fn ask(
                 content: system_prompt,
             });
         }
-        let plan_ctx = if session.plan.is_empty() {
-            String::new()
-        } else {
-            let steps = session.plan.iter().enumerate().map(|(i, s)| {
-                let icon = match s.status {
-                    crate::session::PlanStatus::Pending => "[ ]",
-                    crate::session::PlanStatus::InProgress => "[~]",
-                    crate::session::PlanStatus::Done => "[x]",
-                    crate::session::PlanStatus::Failed => "[!]",
-                };
-                format!("{} {}: {}", icon, i + 1, s.description)
-            }).collect::<Vec<_>>().join("\n");
-            format!("\nCurrent plan:\n{steps}\n")
-        };
+        let (plan_ctx, needs_plan) = build_plan_context(&session.plan);
+        let plan_hint = if needs_plan {
+            "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
+        } else { "" };
         let context = format!(
-            "Working directory: {}\n{}{}\nUser: {}",
+            "Working directory: {}\n{}{}\nUser: {}{}",
             config.project_dir,
             crate::validator::program_summary_compact(&session.program),
             plan_ctx,
-            req.message
+            req.message,
+            plan_hint
         );
         session.chat_messages.push(crate::session::ChatMessage {
             role: "user".to_string(),
@@ -1295,7 +1303,7 @@ pub async fn ask_stream(
                 "{base}\n\n{builtins}\n\n## ForgeOS Interactive Mode\n\
                  Program state PERSISTS. Do NOT resend existing types/functions.\n\
                  You can !eval builtins directly.\n\
-                 Use !plan set to create plans, !plan done N to mark steps.\n\
+                 Use !plan set to create plans, !plan done N to mark steps. Do NOT number steps — they are auto-numbered.\n\
                  When COMPLETE, respond with DONE in a <code> block.\n\
                  Keep working until the task is fully done."
             )
@@ -1308,22 +1316,14 @@ pub async fn ask_stream(
                     role: "system".to_string(), content: system_prompt,
                 });
             }
-            let plan_ctx = if session.plan.is_empty() { String::new() } else {
-                let steps = session.plan.iter().enumerate().map(|(i, s)| {
-                    let icon = match s.status {
-                        crate::session::PlanStatus::Pending => "[ ]",
-                        crate::session::PlanStatus::InProgress => "[~]",
-                        crate::session::PlanStatus::Done => "[x]",
-                        crate::session::PlanStatus::Failed => "[!]",
-                    };
-                    format!("{} {}: {}", icon, i + 1, s.description)
-                }).collect::<Vec<_>>().join("\n");
-                format!("\nPlan:\n{steps}\n")
-            };
-            let context = format!("Working directory: {}\n{}{}\nUser: {}",
+            let (plan_ctx, needs_plan) = build_plan_context(&session.plan);
+            let plan_hint = if needs_plan {
+                "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
+            } else { "" };
+            let context = format!("Working directory: {}\n{}{}\nUser: {}{}",
                 config_clone.project_dir,
                 crate::validator::program_summary_compact(&session.program),
-                plan_ctx, req.message);
+                plan_ctx, req.message, plan_hint);
             session.chat_messages.push(crate::session::ChatMessage {
                 role: "user".to_string(), content: context,
             });
@@ -1371,6 +1371,7 @@ pub async fn ask_stream(
             // Apply code
             let mut session = config_clone.session.lock().await;
             let mut has_errors = false;
+            let mut feedback_details: Vec<String> = Vec::new(); // Collect ALL results for LLM feedback
 
             match crate::parser::parse(&code) {
                 Ok(ops) => {
@@ -1415,12 +1416,14 @@ pub async fn ask_stream(
                         match session.apply(&code) {
                             Ok(res) => {
                                 for (msg, ok) in &res {
-                                    if !ok { has_errors = true; }
+                                    if !*ok { has_errors = true; }
+                                    feedback_details.push(format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}));
                                     let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": ok})).await;
                                 }
                             }
                             Err(e) => {
                                 has_errors = true;
+                                feedback_details.push(format!("ERROR: {e}"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("{e}"), "success": false})).await;
                             }
                         }
@@ -1432,20 +1435,65 @@ pub async fn ask_stream(
                             crate::parser::Operation::Test(test) => {
                                 for case in &test.cases {
                                     match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
-                                        Ok(msg) => { let _ = tx.send(serde_json::json!({"type": "test", "pass": true, "message": msg})).await; }
-                                        Err(e) => { has_errors = true; let _ = tx.send(serde_json::json!({"type": "test", "pass": false, "message": format!("{e}")})).await; }
+                                        Ok(msg) => {
+                                            feedback_details.push(format!("PASS: {msg}"));
+                                            let _ = tx.send(serde_json::json!({"type": "test", "pass": true, "message": msg})).await;
+                                        }
+                                        Err(e) => {
+                                            has_errors = true;
+                                            feedback_details.push(format!("FAIL: {e}"));
+                                            let _ = tx.send(serde_json::json!({"type": "test", "pass": false, "message": format!("{e}")})).await;
+                                        }
                                     }
                                 }
                             }
                             crate::parser::Operation::Eval(ev) => {
-                                match crate::eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
-                                    Ok((result, compiled)) => {
-                                        let tag = if compiled { " [compiled]" } else { "" };
-                                        let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("{result}{tag}"), "function": ev.function_name})).await;
-                                    }
-                                    Err(e) => {
+                                let needs_async = session.program.get_function(&ev.function_name)
+                                    .is_some_and(|f| f.effects.iter().any(|e|
+                                        matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
+                                if needs_async {
+                                    if let Some(sender) = &config_clone.io_sender {
+                                        let program = session.program.clone();
+                                        let fn_name = ev.function_name.clone();
+                                        let input = ev.input.clone();
+                                        let sender = sender.clone();
+                                        drop(session);
+                                        let eval_result = tokio::task::spawn_blocking(move || {
+                                            let func = program.get_function(&fn_name)
+                                                .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                                            let handle = crate::coroutine::CoroutineHandle::new(sender);
+                                            let mut env = crate::eval::Env::new();
+                                            env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
+                                            let input_val = crate::eval::eval_parser_expr_standalone(&input)?;
+                                            crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
+                                            crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
+                                        }).await;
+                                        let (msg, success) = match &eval_result {
+                                            Ok(Ok(val)) => (format!("{val}"), true),
+                                            Ok(Err(e)) => { has_errors = true; (format!("error: {e}"), false) }
+                                            Err(e) => { has_errors = true; (format!("task error: {e}"), false) }
+                                        };
+                                        feedback_details.push(format!("eval {}() = {}{}", ev.function_name, msg, if success {""} else {" [FAILED]"}));
+                                        let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": ev.function_name, "success": success})).await;
+                                        session = config_clone.session.lock().await;
+                                    } else {
                                         has_errors = true;
-                                        let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("error: {e}"), "function": ev.function_name})).await;
+                                        feedback_details.push(format!("eval {}() = async not available [FAILED]", ev.function_name));
+                                        let _ = tx.send(serde_json::json!({"type": "eval", "result": "async not available", "function": ev.function_name, "success": false})).await;
+                                    }
+                                } else {
+                                    match crate::eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
+                                        Ok((result, compiled)) => {
+                                            let tag = if compiled { " [compiled]" } else { "" };
+                                            feedback_details.push(format!("eval {}() = {result}{tag}", ev.function_name));
+                                            let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("{result}{tag}"), "function": ev.function_name})).await;
+                                        }
+                                        Err(e) => {
+                                            has_errors = true;
+                                            feedback_details.push(format!("eval {}() error: {e} [FAILED]", ev.function_name));
+                                            let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("error: {e}"), "function": ev.function_name})).await;
+                                        }
                                     }
                                 }
                             }
@@ -1485,14 +1533,17 @@ pub async fn ask_stream(
                                         match result {
                                             Ok(Ok(val)) => {
                                                 let msg = format!("executed: {val}");
+                                                feedback_details.push(format!("OK: {msg}"));
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": true})).await;
                                             }
                                             Ok(Err(e)) => {
                                                 has_errors = true;
+                                                feedback_details.push(format!("ERROR: {e}"));
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("{e}"), "success": false})).await;
                                             }
                                             Err(e) => {
                                                 has_errors = true;
+                                                feedback_details.push(format!("ERROR: task error: {e}"));
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("task error: {e}"), "success": false})).await;
                                             }
                                         }
@@ -1500,6 +1551,7 @@ pub async fn ask_stream(
                                     }
                                     Err(e) => {
                                         has_errors = true;
+                                        feedback_details.push(format!("ERROR: statement error: {e}"));
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": format!("statement error: {e}"), "success": false})).await;
                                     }
                                 }
@@ -1510,6 +1562,7 @@ pub async fn ask_stream(
                 }
                 Err(e) => {
                     has_errors = true;
+                    feedback_details.push(format!("ERROR: Parse error: {e}"));
                     let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Parse error: {e}"), "success": false})).await;
                 }
             }
@@ -1517,36 +1570,38 @@ pub async fn ask_stream(
             drop(session);
 
             // Build detailed feedback with ALL results so the AI can see them
-            let mut feedback_parts: Vec<String> = Vec::new();
-            // Collect all SSE events we sent as text feedback
-            // We need to reconstruct what happened from the operations
+            // Also re-run queries to include their output
             {
                 let session = config_clone.session.lock().await;
-                // Re-run queries to include their output in feedback
                 if let Ok(ops) = crate::parser::parse(&code) {
                     for op in &ops {
                         if let crate::parser::Operation::Query(query) = op {
                             let table = crate::typeck::build_symbol_table(&session.program);
                             let response = crate::typeck::handle_query(&session.program, &table, query);
-                            feedback_parts.push(format!("{query}:\n{response}"));
+                            feedback_details.push(format!("{query}:\n{response}"));
                         }
                     }
                 }
             }
 
             if has_errors {
-                let _ = tx.send(serde_json::json!({"type": "feedback", "message": "Errors found, retrying..."})).await;
-                let feedback = if feedback_parts.is_empty() {
-                    "There were errors. Fix them and continue.".to_string()
-                } else {
-                    format!("Query results:\n{}\n\nThere were errors. Fix them and continue.", feedback_parts.join("\n\n"))
-                };
+                let errors: Vec<&str> = feedback_details.iter()
+                    .filter(|d| d.starts_with("ERROR:") || d.starts_with("FAIL:") || d.contains("[FAILED]"))
+                    .map(|s| s.as_str()).collect();
+                let _ = tx.send(serde_json::json!({"type": "feedback", "message": format!("Errors found ({} issues), retrying...", errors.len())})).await;
+                let feedback = format!(
+                    "Results:\n{}\n\nThere were errors. Fix them and continue.",
+                    feedback_details.join("\n")
+                );
                 messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
-                let feedback = if feedback_parts.is_empty() {
+                let feedback = if feedback_details.is_empty() {
                     "All operations succeeded. If the user's request is FULLY completed, respond with DONE. Otherwise continue.".to_string()
                 } else {
-                    format!("Results:\n{}\n\nAll operations succeeded. If the user's request is FULLY completed, respond with DONE. Otherwise continue.", feedback_parts.join("\n\n"))
+                    format!(
+                        "Results:\n{}\n\nAll operations succeeded. If the user's request is FULLY completed, respond with DONE. Otherwise continue.",
+                        feedback_details.join("\n")
+                    )
                 };
                 messages.push(crate::llm::ChatMessage::user(feedback));
             }

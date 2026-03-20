@@ -628,7 +628,19 @@ impl<'a> Parser<'a> {
                 let mut plan_steps: Vec<String> = steps
                     .trim()
                     .split('\n')
-                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .map(|s| {
+                        let s = s.trim().trim_matches('"').trim_start_matches("- ");
+                        // Strip leading "N. " or "N) " numbering
+                        if s.len() > 1 && s.as_bytes()[0].is_ascii_digit() {
+                            let rest = s.trim_start_matches(|c: char| c.is_ascii_digit());
+                            if let Some(r) =
+                                rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))
+                            {
+                                return r.to_string();
+                            }
+                        }
+                        s.to_string()
+                    })
                     .filter(|s| !s.is_empty())
                     .collect();
                 while let Some(next) = self.current() {
@@ -640,7 +652,20 @@ impl<'a> Parser<'a> {
                     {
                         break;
                     }
-                    plan_steps.push(t.trim_matches('"').trim_start_matches("- ").to_string());
+                    let step = t.trim_matches('"').trim_start_matches("- ");
+                    // Strip leading "N. " or "N) " numbering — steps are auto-numbered
+                    let step = if step.len() > 1 && step.as_bytes()[0].is_ascii_digit() {
+                        let rest = step.trim_start_matches(|c: char| c.is_ascii_digit());
+                        if let Some(r) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))
+                        {
+                            r
+                        } else {
+                            step
+                        }
+                    } else {
+                        step
+                    };
+                    plan_steps.push(step.to_string());
                     self.index += 1;
                 }
                 return Ok(Operation::Plan(PlanAction::Set(plan_steps)));

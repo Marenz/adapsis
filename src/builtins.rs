@@ -517,7 +517,8 @@ pub static ACTIONS: &[ActionCommand] = &[
     ActionCommand {
         name: "!plan",
         args: "set/done N/fail N/show",
-        description: "manage task plan",
+        description:
+            "manage task plan. Steps are auto-numbered, do NOT include numbers in step text",
     },
     ActionCommand {
         name: "!watch",
