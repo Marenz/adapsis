@@ -513,6 +513,373 @@ fn query_deps_from_graph(graph: &CallGraph, target: &str) -> String {
     }
 }
 
+fn query_deps_modules(program: &Program, graph: &CallGraph, target: &str) -> String {
+    // Find all transitive deps, then group by module
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![target.to_string()];
+    while let Some(name) = stack.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(callees) = graph.callees.get(&name) {
+            for callee in callees {
+                if !visited.contains(callee) {
+                    stack.push(callee.clone());
+                }
+            }
+        }
+    }
+    visited.remove(target);
+
+    // Group by module
+    let mut module_deps: HashMap<String, Vec<String>> = HashMap::new();
+    for dep in &visited {
+        if let Some(dot) = dep.find('.') {
+            let module = &dep[..dot];
+            let func = &dep[dot + 1..];
+            module_deps
+                .entry(module.to_string())
+                .or_default()
+                .push(func.to_string());
+        } else {
+            // Check which module this function belongs to
+            let mut found_module = None;
+            for m in &program.modules {
+                if m.functions.iter().any(|f| f.name == *dep) {
+                    found_module = Some(m.name.clone());
+                    break;
+                }
+            }
+            let key = found_module.unwrap_or_else(|| "(top-level)".to_string());
+            module_deps.entry(key).or_default().push(dep.clone());
+        }
+    }
+
+    if module_deps.is_empty() {
+        return format!("`{target}` has no module dependencies");
+    }
+
+    let mut out = format!("`{target}` depends on modules:\n");
+    let mut modules: Vec<_> = module_deps.iter().collect();
+    modules.sort_by_key(|(k, _)| k.clone());
+    for (module, fns) in modules {
+        out.push_str(&format!("  {module}: {}\n", fns.join(", ")));
+    }
+    out
+}
+
+/// Reconstruct Forge source code from the AST for a function.
+fn reconstruct_source(program: &Program, target: &str) -> String {
+    // Find the function
+    let func = program
+        .functions
+        .iter()
+        .find(|f| f.name == target)
+        .or_else(|| {
+            program
+                .modules
+                .iter()
+                .flat_map(|m| m.functions.iter())
+                .find(|f| f.name == target)
+        });
+
+    let Some(func) = func else {
+        // Try as a type
+        for td in &program.types {
+            if td.name() == target {
+                return reconstruct_type_source(td);
+            }
+        }
+        for m in &program.modules {
+            for td in &m.types {
+                if td.name() == target {
+                    return reconstruct_type_source(td);
+                }
+            }
+        }
+        return format!("`{target}` not found");
+    };
+
+    let mut out = String::new();
+    let params = func
+        .params
+        .iter()
+        .map(|p| format!("{}:{}", p.name, format_type_simple(&p.ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let effects = if func.effects.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " [{}]",
+            func.effects
+                .iter()
+                .map(|e| format!("{e:?}").to_lowercase())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    out.push_str(&format!(
+        "+fn {} ({})->{}{}\n",
+        func.name,
+        params,
+        format_type_simple(&func.return_type),
+        effects
+    ));
+
+    for stmt in &func.body {
+        reconstruct_stmt(&mut out, stmt, 1);
+    }
+    out
+}
+
+fn reconstruct_type_source(td: &TypeDecl) -> String {
+    match td {
+        TypeDecl::Struct(s) => {
+            let fields = s
+                .fields
+                .iter()
+                .map(|f| format!("{}:{}", f.name, format_type_simple(&f.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("+type {} = {{{}}}\n", s.name, fields)
+        }
+        TypeDecl::TaggedUnion(u) => {
+            let variants = u
+                .variants
+                .iter()
+                .map(|v| {
+                    if v.payload.is_empty() {
+                        v.name.clone()
+                    } else {
+                        format!(
+                            "{}({})",
+                            v.name,
+                            v.payload
+                                .iter()
+                                .map(format_type_simple)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("+type {} = {}\n", u.name, variants)
+        }
+    }
+}
+
+fn format_type_simple(ty: &Type) -> String {
+    match ty {
+        Type::Int => "Int".into(),
+        Type::Float => "Float".into(),
+        Type::Bool => "Bool".into(),
+        Type::String => "String".into(),
+        Type::Byte => "Byte".into(),
+        Type::List(t) => format!("List<{}>", format_type_simple(t)),
+        Type::Set(t) => format!("Set<{}>", format_type_simple(t)),
+        Type::Map(k, v) => format!("Map<{},{}>", format_type_simple(k), format_type_simple(v)),
+        Type::Option(t) => format!("Option<{}>", format_type_simple(t)),
+        Type::Result(t) => format!("Result<{}>", format_type_simple(t)),
+        Type::Struct(name) | Type::TaggedUnion(name) => name.clone(),
+    }
+}
+
+fn reconstruct_stmt(out: &mut String, stmt: &Statement, indent: usize) {
+    let pad = "  ".repeat(indent);
+    match &stmt.kind {
+        StatementKind::Let { name, ty, value } => {
+            out.push_str(&format!(
+                "{pad}+let {name}:{} = {}\n",
+                format_type_simple(ty),
+                reconstruct_expr(value)
+            ));
+        }
+        StatementKind::Set { name, value } => {
+            out.push_str(&format!("{pad}+set {name} = {}\n", reconstruct_expr(value)));
+        }
+        StatementKind::Call { binding, call } => {
+            if let Some(b) = binding {
+                out.push_str(&format!(
+                    "{pad}+call {}:{} = {}({})\n",
+                    b.name,
+                    format_type_simple(&b.ty),
+                    call.callee,
+                    call.args
+                        .iter()
+                        .map(reconstruct_expr)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            } else {
+                out.push_str(&format!(
+                    "{pad}+call {}({})\n",
+                    call.callee,
+                    call.args
+                        .iter()
+                        .map(reconstruct_expr)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        StatementKind::Check {
+            label,
+            condition,
+            on_fail,
+        } => {
+            out.push_str(&format!(
+                "{pad}+check {label} {} ~{on_fail}\n",
+                reconstruct_expr(condition)
+            ));
+        }
+        StatementKind::Return { value } => {
+            out.push_str(&format!("{pad}+return {}\n", reconstruct_expr(value)));
+        }
+        StatementKind::Branch {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            out.push_str(&format!("{pad}+if {}\n", reconstruct_expr(condition)));
+            for s in then_body {
+                reconstruct_stmt(out, s, indent + 1);
+            }
+            if !else_body.is_empty() {
+                out.push_str(&format!("{pad}+else\n"));
+                for s in else_body {
+                    reconstruct_stmt(out, s, indent + 1);
+                }
+            }
+        }
+        StatementKind::While { condition, body } => {
+            out.push_str(&format!("{pad}+while {}\n", reconstruct_expr(condition)));
+            for s in body {
+                reconstruct_stmt(out, s, indent + 1);
+            }
+        }
+        StatementKind::Each {
+            iterator,
+            binding,
+            body,
+        } => {
+            out.push_str(&format!(
+                "{pad}+each {} {}:{}\n",
+                reconstruct_expr(iterator),
+                binding.name,
+                format_type_simple(&binding.ty)
+            ));
+            for s in body {
+                reconstruct_stmt(out, s, indent + 1);
+            }
+        }
+        StatementKind::Match { expr, arms } => {
+            out.push_str(&format!("{pad}+match {}\n", reconstruct_expr(expr)));
+            for arm in arms {
+                if arm.bindings.is_empty() {
+                    out.push_str(&format!("{pad}+case {}\n", arm.variant));
+                } else {
+                    out.push_str(&format!(
+                        "{pad}+case {}({})\n",
+                        arm.variant,
+                        arm.bindings.join(", ")
+                    ));
+                }
+                for s in &arm.body {
+                    reconstruct_stmt(out, s, indent + 1);
+                }
+            }
+        }
+        StatementKind::Await { name, ty, call } => {
+            out.push_str(&format!(
+                "{pad}+await {name}:{} = {}({})\n",
+                format_type_simple(ty),
+                call.callee,
+                call.args
+                    .iter()
+                    .map(reconstruct_expr)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        StatementKind::Spawn { call } => {
+            out.push_str(&format!(
+                "{pad}+spawn {}({})\n",
+                call.callee,
+                call.args
+                    .iter()
+                    .map(reconstruct_expr)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        StatementKind::Yield { value } => {
+            out.push_str(&format!("{pad}+yield {}\n", reconstruct_expr(value)));
+        }
+    }
+}
+
+fn reconstruct_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Literal(lit) => match lit {
+            crate::ast::Literal::Int(n) => n.to_string(),
+            crate::ast::Literal::Float(f) => f.to_string(),
+            crate::ast::Literal::Bool(b) => b.to_string(),
+            crate::ast::Literal::String(s) => format!("\"{s}\""),
+        },
+        Expr::Identifier(name) => name.clone(),
+        Expr::FieldAccess { base, field } => format!("{}.{field}", reconstruct_expr(base)),
+        Expr::Call(call) => format!(
+            "{}({})",
+            call.callee,
+            call.args
+                .iter()
+                .map(reconstruct_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Binary { left, op, right } => {
+            let op_str = match op {
+                crate::ast::BinaryOp::Add => "+",
+                crate::ast::BinaryOp::Sub => "-",
+                crate::ast::BinaryOp::Mul => "*",
+                crate::ast::BinaryOp::Div => "/",
+                crate::ast::BinaryOp::Mod => "%",
+                crate::ast::BinaryOp::GreaterThan => ">",
+                crate::ast::BinaryOp::LessThan => "<",
+                crate::ast::BinaryOp::GreaterThanOrEqual => ">=",
+                crate::ast::BinaryOp::LessThanOrEqual => "<=",
+                crate::ast::BinaryOp::Equal => "==",
+                crate::ast::BinaryOp::NotEqual => "!=",
+                crate::ast::BinaryOp::And => " AND ",
+                crate::ast::BinaryOp::Or => " OR ",
+            };
+            format!(
+                "{}{op_str}{}",
+                reconstruct_expr(left),
+                reconstruct_expr(right)
+            )
+        }
+        Expr::Unary { op, expr } => match op {
+            crate::ast::UnaryOp::Not => format!("NOT {}", reconstruct_expr(expr)),
+            crate::ast::UnaryOp::Neg => format!("-{}", reconstruct_expr(expr)),
+        },
+        Expr::StructInit { ty, fields } => {
+            let fs = fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, reconstruct_expr(&f.value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if ty.is_empty() {
+                format!("{{{fs}}}")
+            } else {
+                format!("{ty}{{{fs}}}")
+            }
+        }
+    }
+}
+
 pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> String {
     let parts: Vec<&str> = query.trim().split_whitespace().collect();
     if parts.is_empty() {
@@ -534,9 +901,24 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
             query_callees_from_graph(&graph, target)
         }
         "?deps" => {
+            // Direct dependencies only (1 level)
+            let target = parts.get(1).copied().unwrap_or("");
+            let graph = build_call_graph(program);
+            query_callees_from_graph(&graph, target)
+        }
+        "?deps-all" => {
             let target = parts.get(1).copied().unwrap_or("");
             let graph = build_call_graph(program);
             query_deps_from_graph(&graph, target)
+        }
+        "?deps-modules" => {
+            let target = parts.get(1).copied().unwrap_or("");
+            let graph = build_call_graph(program);
+            query_deps_modules(program, &graph, target)
+        }
+        "?source" => {
+            let target = parts.get(1).copied().unwrap_or("");
+            reconstruct_source(program, target)
         }
         "?effects" => {
             let target = parts.get(1).copied().unwrap_or("");

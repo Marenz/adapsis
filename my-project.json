@@ -316,6 +316,30 @@
       "revision": 25,
       "query": "?callers bitwise_and",
       "response": "callers of `bitwise_and`: Crypto.md5_f, Crypto.md5_g"
+    },
+    {
+      "kind": "Query",
+      "revision": 25,
+      "query": "?source md5",
+      "response": "+fn md5 (input:String)->String\n  +let state:MD5State = {a: 1732584193, b: 4023233417, c: 2562383102, d: 271733878}\n  +let len:Int = input.len\n  +let bit_len:Int = len*8\n  +let padded:String = concat(input, \"x\")\n  +let final_state:MD5State = Crypto.md5_round(state, 0, 0, 7, 3614090360)\n  +let hex:String = concat(to_string(final_state.a), to_string(final_state.b))\n  +return hex\n"
+    },
+    {
+      "kind": "Query",
+      "revision": 25,
+      "query": "?deps md5",
+      "response": "`md5` calls: Crypto.md5_round, concat, to_string"
+    },
+    {
+      "kind": "Query",
+      "revision": 25,
+      "query": "?deps-all md5",
+      "response": "`md5` depends on: Crypto.bitwise_and, Crypto.bitwise_not, Crypto.bitwise_or, Crypto.bitwise_xor, Crypto.md5_f, Crypto.md5_g, Crypto.md5_h, Crypto.md5_i, Crypto.md5_round, concat, floor, left_rotate, pow, to_string"
+    },
+    {
+      "kind": "Query",
+      "revision": 25,
+      "query": "?deps-modules md5",
+      "response": "`md5` depends on modules:\n  (top-level): to_string, concat, left_rotate, floor, pow\n  Crypto: bitwise_and, md5_i, bitwise_xor, bitwise_not, md5_g, bitwise_or, md5_h, md5_f, md5_round\n"
     }
   ],
   "revision": 25,
@@ -345,5 +369,6 @@
     "!replace list_downloads.s1\n  +await home:String = shell_exec(\"echo $HOME\")\n\n!replace list_downloads.s2\n  +let clean_home:String = trim(home)\n  +let downloads_path:String = concat(concat(clean_home, \"/\"), \"Downloads\")\n  +await files:List<String> = list_dir(downloads_path)\n  +return Ok(files)",
     "+fn show_downloads ()->Result<String> [io,async,fail]\n  +await entries:List<String> = list_dir(\"/home/user/Downloads\")\n  +let joined:String = join(entries, \"\\n\")\n  +return Ok(joined)",
     "+fn run_show_projects ()->String [io,async]\n  +await result:String = shell_exec(\"forge run-async show_projects\")\n  +return result\n\n!eval run_show_projects"
-  ]
+  ],
+  "chat_messages": []
 }
