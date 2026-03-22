@@ -376,37 +376,25 @@ fn sse_data_lines(event: &str) -> Vec<String> {
 /// The content may contain <code> tags (if the model uses them), or may be
 /// raw Forge code. We handle both cases.
 fn build_output(thinking: String, content: String) -> LlmOutput {
-    // Try to extract <code> blocks from content first
-    let code_blocks = extract_tag_contents(&content, "code");
+    // First: strip <think> blocks from content to avoid think text contaminating code extraction.
+    // Models like Sonnet interleave <think> and <code> blocks, and think blocks can contain
+    // literal "<code>" text that confuses the parser.
+    let think_blocks = extract_tag_contents(&content, "think");
+    let combined_thinking = if !think_blocks.is_empty() {
+        let think_text = think_blocks.join("\n\n");
+        if thinking.is_empty() { think_text } else { format!("{thinking}\n\n{think_text}") }
+    } else {
+        thinking.clone()
+    };
+    let clean_content = strip_tags(&content, "think");
+
+    // Now extract <code> blocks from the cleaned content
+    let code_blocks = extract_tag_contents(&clean_content, "code");
     let code = if !code_blocks.is_empty() {
         code_blocks.join("\n\n")
     } else {
-        // No <code> tags — the content itself might be code,
-        // or it might also contain <think> tags (for models that don't use reasoning_content)
-        let think_blocks = extract_tag_contents(&content, "think");
-        if !think_blocks.is_empty() {
-            // Model used <think> in content instead of reasoning_content
-            let combined_thinking =
-                if thinking.is_empty() { think_blocks.join("\n\n") } else { thinking.clone() };
-            // Extract code blocks after removing think blocks
-            let code_after_think = extract_tag_contents(&content, "code");
-            if !code_after_think.is_empty() {
-                return LlmOutput {
-                    text: content,
-                    thinking: combined_thinking,
-                    code: code_after_think.join("\n\n"),
-                };
-            }
-            // Strip think blocks from content to get the code
-            let stripped = strip_tags(&content, "think");
-            return LlmOutput {
-                text: content,
-                thinking: combined_thinking,
-                code: stripped.trim().to_string(),
-            };
-        }
-        // No tags at all — treat entire content as potential code
-        content.clone()
+        // No <code> tags — treat entire cleaned content as potential code
+        clean_content.trim().to_string()
     };
 
     let full_text = if thinking.is_empty() {
