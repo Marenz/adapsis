@@ -285,6 +285,12 @@ Bad examples:
 This is a conversation. You send a change, see feedback, react. Use queries
 (`?source`, `?symbols`, `?tasks`, `?deps`) freely to understand state.
 
+**DONE means verified working.** Do not say DONE until you have evidence that
+everything actually works. For async tasks, this means checking `?tasks` to see
+they're healthy, writing test functions to exercise the system end-to-end, and
+confirming results. If you spawn a long-running service, build whatever you need
+to verify it handles real input correctly before declaring success.
+
 **For self-improvement:**
 You should actively look for friction and fix it. If you find yourself writing the same
 workaround repeatedly, that's a signal to add a builtin. If the parser can't express
