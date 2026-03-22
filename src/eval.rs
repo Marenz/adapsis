@@ -2202,3 +2202,498 @@ fn trace_body(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{parser, session::IoMock, validator};
+
+    /// Helper: parse Forge source and build a program from it.
+    fn build_program(source: &str) -> ast::Program {
+        let ops = parser::parse(source).expect("parse failed");
+        let mut program = ast::Program::default();
+        for op in &ops {
+            match op {
+                parser::Operation::Test(_) | parser::Operation::Eval(_) => {}
+                _ => {
+                    validator::apply_and_validate(&mut program, op)
+                        .expect("validation failed");
+                }
+            }
+        }
+        program.rebuild_function_index();
+        program
+    }
+
+    /// Helper: extract test cases from parsed source.
+    fn extract_test_cases(source: &str) -> Vec<(String, parser::TestCase)> {
+        let ops = parser::parse(source).expect("parse failed");
+        let mut cases = Vec::new();
+        for op in ops {
+            if let parser::Operation::Test(test) = op {
+                for case in test.cases {
+                    cases.push((test.function_name.clone(), case));
+                }
+            }
+        }
+        cases
+    }
+
+    /// Helper: extract mocks from parsed source.
+    fn extract_mocks(source: &str) -> Vec<IoMock> {
+        let ops = parser::parse(source).expect("parse failed");
+        let mut mocks = Vec::new();
+        for op in ops {
+            if let parser::Operation::Mock { operation, pattern, response } = op {
+                mocks.push(IoMock { operation, pattern, response });
+            }
+        }
+        mocks
+    }
+
+    // ── Sync function tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_sync_function_passes() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +return sum
+
+!test add
+  +with a=2 b=3 -> expect 5
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "sync test should pass: {:?}", result);
+        assert!(result.unwrap().contains("expected 5"));
+    }
+
+    #[test]
+    fn test_sync_function_fails_on_wrong_expected() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +return sum
+
+!test add
+  +with a=2 b=3 -> expect 99
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_err(), "should fail when expected is wrong");
+    }
+
+    // ── Async function tests (mock-only path) ────────────────────────
+
+    #[test]
+    fn test_async_function_with_mock_http_get() {
+        let source = "\
++fn fetch_data (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_data
+  +with url=\"https://example.com\" -> expect \"hello\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            pattern: "example.com".to_string(),
+            response: "hello".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        assert!(result.is_ok(), "async test with mock should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_async_function_without_mock_gets_handle() {
+        // An async function tested without mocks should still get a coroutine
+        // handle and fail with "no mock" rather than "requires async context"
+        let source = "\
++fn fetch_data (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_data
+  +with url=\"https://example.com\" -> expect \"hello\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no mock"),
+            "expected 'no mock' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_async_function_with_io_effect_gets_handle() {
+        let source = "\
++fn fetch_data (url:String)->String [io]
+  +await resp:String = http_get(url)
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_data
+  +with url=\"https://example.com\" -> expect \"world\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            pattern: "example.com".to_string(),
+            response: "world".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        assert!(result.is_ok(), "io test with mock should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_async_function_await_sleep_with_mock() {
+        // +await on `sleep` is a builtin IO op — should be intercepted by mock
+        let source = "\
++fn delayed_value (ms:Int)->String [async]
+  +await _:String = sleep(ms)
+  +return \"done\"
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test delayed_value
+  +with ms=1000 -> expect \"done\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        // Mock sleep so it returns immediately without real delay
+        let mocks = vec![IoMock {
+            operation: "sleep".to_string(),
+            pattern: "1000".to_string(),
+            response: "".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        assert!(result.is_ok(), "sleep mock test should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_async_function_nested_await_propagates_handle() {
+        // An async function that calls another user-defined async function
+        // which itself does +await on a builtin — handle must propagate
+        let source = "\
++fn inner_fetch (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
+
++fn outer_fetch (url:String)->String [async]
+  +await data:String = inner_fetch(url)
+  +return data
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test outer_fetch
+  +with url=\"https://api.test.com\" -> expect \"nested_ok\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            pattern: "api.test.com".to_string(),
+            response: "nested_ok".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        assert!(result.is_ok(), "nested async call should pass: {:?}", result);
+    }
+
+    // ── Mock JSON response tests ─────────────────────────────────────
+
+    #[test]
+    fn test_mock_http_get_json_consumed_by_json_get() {
+        // Mock returns JSON, function uses json_get to extract a field
+        let source = "\
++fn get_name (url:String)->String [async]
+  +await body:String = http_get(url)
+  +let name:String = json_get(body, \"name\")
+  +return name
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test get_name
+  +with url=\"https://api.example.com/user\" -> expect \"alice\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        // The mock response is valid JSON — note: IoMock.response is the
+        // *decoded* string (no backslash escapes).
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            pattern: "api.example.com".to_string(),
+            response: r#"{"name":"alice","age":30}"#.to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        assert!(result.is_ok(), "json_get on mock JSON should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_mock_http_get_json_consumed_by_json_array_len() {
+        // Mock returns a JSON array, function uses json_array_len
+        let source = "\
++fn count_items (url:String)->Int [async]
+  +await body:String = http_get(url)
+  +let count:Int = json_array_len(body)
+  +return count
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test count_items
+  +with url=\"https://api.example.com/items\" -> expect 3
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            pattern: "api.example.com".to_string(),
+            response: r#"[1,2,3]"#.to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        assert!(result.is_ok(), "json_array_len on mock JSON should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_mock_escape_decoding_via_parser() {
+        // Verify that !mock strings are properly unescaped by the parser.
+        // The Forge source text: !mock http_get "api.test" -> "{\"ok\":true,\"items\":[1,2]}"
+        let source = "!mock http_get \"api.test\" -> \"{\\\"ok\\\":true,\\\"items\\\":[1,2]}\"";
+        let mocks = extract_mocks(source);
+        assert_eq!(mocks.len(), 1);
+        assert_eq!(mocks[0].pattern, "api.test");
+        // After unescape, response should be valid JSON without backslashes
+        assert_eq!(mocks[0].response, r#"{"ok":true,"items":[1,2]}"#);
+        // Verify it's valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&mocks[0].response)
+            .expect("mock response should be valid JSON");
+        assert_eq!(parsed["ok"], true);
+    }
+
+    #[test]
+    fn test_mock_json_end_to_end_with_parser_escaping() {
+        // End-to-end: !mock with escaped JSON → function uses json_get
+        let fn_source = "\
++fn check_status (url:String)->String [async]
+  +await body:String = http_get(url)
+  +let status:String = json_get(body, \"status\")
+  +return status
+";
+        let program = build_program(fn_source);
+
+        // This is how it would appear in a .forge file — escaped quotes
+        // Forge source: !mock http_get "api.svc" -> "{\"status\":\"healthy\",\"uptime\":99}"
+        let mock_source = "!mock http_get \"api.svc\" -> \"{\\\"status\\\":\\\"healthy\\\",\\\"uptime\\\":99}\"";
+        let mocks = extract_mocks(mock_source);
+
+        let test_source = "\
+!test check_status
+  +with url=\"https://api.svc.local/health\" -> expect \"healthy\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        assert!(result.is_ok(), "end-to-end mock JSON test should pass: {:?}", result);
+    }
+
+    // ── Orchestrator-style integration tests ────────────────────────
+    // These simulate the exact flow: parse source with +fn, !mock, !test;
+    // collect mocks; build program; run eval_test_case_with_mocks.
+
+    /// Helper: simulate orchestrator flow — parse full source, collect mocks,
+    /// build program, run each test case with mocks.
+    fn run_orchestrator_style(source: &str) -> Vec<Result<String>> {
+        let ops = parser::parse(source).expect("parse failed");
+        let mut program = ast::Program::default();
+        let mut test_ops = Vec::new();
+        let mut io_mocks: Vec<IoMock> = Vec::new();
+
+        for op in &ops {
+            match op {
+                parser::Operation::Test(test) => test_ops.push(test.clone()),
+                parser::Operation::Mock { operation, pattern, response } => {
+                    io_mocks.push(IoMock {
+                        operation: operation.clone(),
+                        pattern: pattern.clone(),
+                        response: response.clone(),
+                    });
+                }
+                parser::Operation::Unmock => { io_mocks.clear(); }
+                parser::Operation::Eval(_) => {}
+                _ => { let _ = validator::apply_and_validate(&mut program, op); }
+            }
+        }
+        program.rebuild_function_index();
+
+        let mut results = Vec::new();
+        for test in &test_ops {
+            for case in &test.cases {
+                results.push(eval_test_case_with_mocks(
+                    &program, &test.function_name, case, &io_mocks,
+                ));
+            }
+        }
+        results
+    }
+
+    #[test]
+    fn test_orchestrator_async_http_get_with_mock() {
+        // Simulates LLM output containing +fn [async], !mock, !test
+        let source = "\
++fn fetch_data (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
+
+!mock http_get \"example.com\" -> \"hello world\"
+
+!test fetch_data
+  +with url=\"https://example.com/api\" -> expect \"hello world\"
+";
+        let results = run_orchestrator_style(source);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "orchestrator async http_get test should pass: {:?}", results[0]);
+    }
+
+    #[test]
+    fn test_orchestrator_async_sleep_with_mock() {
+        let source = "\
++fn delayed (ms:Int)->String [async]
+  +await _:String = sleep(ms)
+  +return \"done\"
+
+!mock sleep \"500\" -> \"\"
+
+!test delayed
+  +with ms=500 -> expect \"done\"
+";
+        let results = run_orchestrator_style(source);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "orchestrator async sleep test should pass: {:?}", results[0]);
+    }
+
+    #[test]
+    fn test_orchestrator_nested_async_with_mock() {
+        // wrapper -> inner_fetch -> http_get (all async, handle must propagate)
+        let source = "\
++fn inner_fetch (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
+
++fn wrapper (url:String)->String [async]
+  +await data:String = inner_fetch(url)
+  +return data
+
+!mock http_get \"api.test\" -> \"nested result\"
+
+!test wrapper
+  +with url=\"https://api.test/v1\" -> expect \"nested result\"
+";
+        let results = run_orchestrator_style(source);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "orchestrator nested async test should pass: {:?}", results[0]);
+    }
+
+    #[test]
+    fn test_orchestrator_mock_json_escape_json_get_json_array_len() {
+        // Proves: !mock with escaped JSON → parser decodes → json_get + json_array_len work
+        // Forge source: !mock http_get "x" -> "{\"ok\":true,\"result\":[]}"
+        let fn_source = "\
++fn check (url:String)->Int [async]
+  +await body:String = http_get(url)
+  +let arr:String = json_get(body, \"result\")
+  +let count:Int = json_array_len(arr)
+  +return count
+";
+        let mock_source = "!mock http_get \"x\" -> \"{\\\"ok\\\":true,\\\"result\\\":[]}\"";
+        let test_source = "\
+!test check
+  +with url=\"x\" -> expect 0
+";
+        let full_source = format!("{fn_source}\n{mock_source}\n\n{test_source}");
+        let results = run_orchestrator_style(&full_source);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "mock JSON escape + json_get + json_array_len should pass: {:?}", results[0]);
+    }
+
+    // ── Async eval_test_case_async tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_async_eval_test_case_with_mocks() {
+        let source = "\
++fn fetch_data (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_data
+  +with url=\"https://example.com\" -> expect \"async_hello\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            pattern: "example.com".to_string(),
+            response: "async_hello".to_string(),
+        }];
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let result = eval_test_case_async(&program, fn_name, case, &mocks, tx).await;
+        assert!(result.is_ok(), "async test case should pass: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_async_eval_delegates_sync_to_sync_path() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +return sum
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test add
+  +with a=10 b=20 -> expect 30
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let result = eval_test_case_async(&program, fn_name, case, &[], tx).await;
+        assert!(result.is_ok(), "sync function via async path should pass: {:?}", result);
+    }
+}

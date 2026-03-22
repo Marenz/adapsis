@@ -838,20 +838,23 @@ impl<'a> Parser<'a> {
             })?;
             let rest = rest.trim();
             // Parse: "pattern" -> "response"
-            if let Some(arrow_pos) = rest.find("->") {
-                let pattern_part = rest[..arrow_pos].trim().trim_matches('"');
-                let response_part = rest[arrow_pos + 2..].trim().trim_matches('"');
-                self.index += 1;
-                return Ok(Operation::Mock {
-                    operation: operation.to_string(),
-                    pattern: pattern_part.to_string(),
-                    response: response_part.to_string(),
-                });
-            }
-            bail!(
-                "line {}: expected !mock <operation> \"<pattern>\" -> \"<response>\"",
-                line.number
-            );
+            // Use proper quoted-string parsing so escape sequences are decoded
+            let (pattern_part, rest) = parse_mock_string(line.number, rest)?;
+            let rest = rest.trim();
+            let rest = rest.strip_prefix("->").ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected '->' between pattern and response in !mock",
+                    line.number
+                )
+            })?;
+            let rest = rest.trim();
+            let (response_part, _) = parse_mock_string(line.number, rest)?;
+            self.index += 1;
+            return Ok(Operation::Mock {
+                operation: operation.to_string(),
+                pattern: pattern_part,
+                response: response_part,
+            });
         }
 
         if let Some(rest) = text.strip_prefix("!opencode") {
@@ -2286,4 +2289,43 @@ fn parse_match_pattern(line_num: usize, input: &str) -> Result<MatchPatternDecl>
 
     // Simple binding (identifier or _)
     Ok(MatchPatternDecl::Binding(input.to_string()))
+}
+
+/// Parse a quoted string from `!mock`, decoding standard escape sequences
+/// (`\"`, `\\`, `\n`, `\r`, `\t`). Returns the decoded string content and
+/// the remaining unparsed input.  If the input doesn't start with `"`, the
+/// content up to the next whitespace (or end) is returned verbatim.
+fn parse_mock_string(line: usize, input: &str) -> Result<(String, &str)> {
+    let input = input.trim_start();
+    if !input.starts_with('"') {
+        // Unquoted token — take until whitespace or end
+        let end = input.find(char::is_whitespace).unwrap_or(input.len());
+        return Ok((input[..end].to_string(), &input[end..]));
+    }
+    // Quoted string with escape processing
+    let mut chars = input[1..].char_indices();
+    let mut value = String::new();
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '"' => {
+                let consumed = 1 + i + 1; // opening quote + content up to i + closing quote
+                return Ok((value, &input[consumed..]));
+            }
+            '\\' => {
+                let (_, escaped) = chars
+                    .next()
+                    .ok_or_else(|| anyhow!("line {line}: unfinished escape in !mock string"))?;
+                value.push(match escaped {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '\\' => '\\',
+                    '"' => '"',
+                    other => other,
+                });
+            }
+            other => value.push(other),
+        }
+    }
+    bail!("line {line}: unterminated string in !mock")
 }

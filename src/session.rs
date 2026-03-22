@@ -354,8 +354,12 @@ impl Session {
                     // Run tests and track which functions pass
                     let mut all_passed = true;
                     for case in &test.cases {
-                        match crate::eval::eval_test_case(&self.program, &test.function_name, case)
-                        {
+                        match crate::eval::eval_test_case_with_mocks(
+                            &self.program,
+                            &test.function_name,
+                            case,
+                            &self.io_mocks,
+                        ) {
                             Ok(msg) => results.push((format!("PASS: {msg}"), true)),
                             Err(e) => {
                                 all_passed = false;

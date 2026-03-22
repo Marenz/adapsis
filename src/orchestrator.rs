@@ -125,11 +125,25 @@ impl<B: LlmBackend> Orchestrator<B> {
             // Apply and validate each operation
             let mut results: Vec<(String, bool)> = vec![];
             let mut test_ops: Vec<parser::TestMutation> = vec![];
+            let mut io_mocks: Vec<crate::session::IoMock> = vec![];
 
             for op in &operations {
                 match op {
                     parser::Operation::Test(test) => {
                         test_ops.push(test.clone());
+                    }
+                    parser::Operation::Mock { operation, pattern, response } => {
+                        io_mocks.push(crate::session::IoMock {
+                            operation: operation.clone(),
+                            pattern: pattern.clone(),
+                            response: response.clone(),
+                        });
+                        results.push((format!("mock: {operation} \"{pattern}\""), true));
+                    }
+                    parser::Operation::Unmock => {
+                        let count = io_mocks.len();
+                        io_mocks.clear();
+                        results.push((format!("cleared {count} mocks"), true));
                     }
                     parser::Operation::Trace(trace) => {
                         println!("  Tracing {}:", trace.function_name);
@@ -263,7 +277,7 @@ impl<B: LlmBackend> Orchestrator<B> {
             for test in &test_ops {
                 println!("  Testing {}:", test.function_name);
                 for (i, case) in test.cases.iter().enumerate() {
-                    match eval::eval_test_case(&program, &test.function_name, case) {
+                    match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks) {
                         Ok(msg) => {
                             println!("    PASS [{i}]: {msg}");
                             self.emit(ForgeEvent::TestPass {
@@ -529,9 +543,23 @@ impl<B: LlmBackend> Orchestrator<B> {
                 // Remove existing function with same name, then add new one
                 let mut results: Vec<(String, bool)> = vec![];
                 let mut test_ops: Vec<parser::TestMutation> = vec![];
+                let mut io_mocks: Vec<crate::session::IoMock> = vec![];
 
                 for op in &operations {
                     match op {
+                        parser::Operation::Mock { operation, pattern, response } => {
+                            io_mocks.push(crate::session::IoMock {
+                                operation: operation.clone(),
+                                pattern: pattern.clone(),
+                                response: response.clone(),
+                            });
+                            results.push((format!("mock: {operation} \"{pattern}\""), true));
+                        }
+                        parser::Operation::Unmock => {
+                            let count = io_mocks.len();
+                            io_mocks.clear();
+                            results.push((format!("cleared {count} mocks"), true));
+                        }
                         parser::Operation::Function(fd) if fd.name == *fn_name => {
                             // Remove old stub
                             program.functions.retain(|f| f.name != *fn_name);
@@ -598,7 +626,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                 for test in &test_ops {
                     println!("  Testing {}:", test.function_name);
                     for (i, case) in test.cases.iter().enumerate() {
-                        match eval::eval_test_case(&program, &test.function_name, case) {
+                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks) {
                             Ok(msg) => {
                                 println!("    PASS [{i}]: {msg}");
                                 self.emit(ForgeEvent::TestPass {

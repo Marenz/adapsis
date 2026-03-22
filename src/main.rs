@@ -372,9 +372,23 @@ async fn main() -> Result<()> {
             let operations = parser::parse(&source)?;
             let mut program = ast::Program::default();
             let mut test_ops = vec![];
+            let mut io_mocks: Vec<session::IoMock> = vec![];
             for op in &operations {
                 match op {
                     parser::Operation::Test(_) => test_ops.push(op.clone()),
+                    parser::Operation::Mock { operation, pattern, response } => {
+                        io_mocks.push(session::IoMock {
+                            operation: operation.clone(),
+                            pattern: pattern.clone(),
+                            response: response.clone(),
+                        });
+                        println!("OK: mock {operation} \"{pattern}\"");
+                    }
+                    parser::Operation::Unmock => {
+                        let count = io_mocks.len();
+                        io_mocks.clear();
+                        println!("OK: cleared {count} mocks");
+                    }
                     parser::Operation::Trace(trace) => {
                         println!("\n--- Tracing {} ---", trace.function_name);
                         match eval::trace_function(&program, &trace.function_name, &trace.input) {
@@ -414,7 +428,7 @@ async fn main() -> Result<()> {
                 if let parser::Operation::Test(test) = test_op {
                     println!("\n--- Testing {} ---", test.function_name);
                     for (i, case) in test.cases.iter().enumerate() {
-                        match eval::eval_test_case(&program, &test.function_name, case) {
+                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks) {
                             Ok(msg) => println!("  PASS [{i}]: {msg}"),
                             Err(e) => eprintln!("  FAIL [{i}]: {e}"),
                         }
