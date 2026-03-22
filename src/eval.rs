@@ -826,7 +826,7 @@ std::thread_local! {
     static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-const MAX_CALL_DEPTH: usize = 64;
+const MAX_CALL_DEPTH: usize = 256;
 
 fn eval_call(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Result<Value> {
     let depth = CALL_DEPTH.with(|d| {
