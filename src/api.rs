@@ -1720,26 +1720,49 @@ pub async fn ask_stream(
                 }
             }
 
+            // Build plan status summary for feedback
+            let plan_summary = {
+                let session = config_clone.session.lock().await;
+                let pending: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending | crate::session::PlanStatus::InProgress)).collect();
+                let failed: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Failed)).collect();
+                let total = session.plan.len();
+                let done = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Done)).count();
+                if total == 0 {
+                    "No plan set. Create one with !plan set.".to_string()
+                } else if pending.is_empty() && failed.is_empty() {
+                    format!("All {total} plan steps completed. Verify everything works, then DONE.")
+                } else {
+                    let mut parts = vec![format!("Plan: {done}/{total} done.")];
+                    if !failed.is_empty() {
+                        parts.push(format!("{} failed.", failed.len()));
+                    }
+                    for s in &pending {
+                        parts.push(format!("  [ ] {}", s.description));
+                    }
+                    parts.push("Continue working.".to_string());
+                    parts.join("\n")
+                }
+            };
+
             if has_errors {
                 let errors: Vec<&str> = feedback_details.iter()
                     .filter(|d| d.starts_with("ERROR:") || d.starts_with("FAIL:") || d.contains("[FAILED]"))
                     .map(|s| s.as_str()).collect();
                 let _ = tx.send(serde_json::json!({"type": "feedback", "message": format!("Errors found ({} issues), retrying...", errors.len())})).await;
                 let feedback = format!(
-                    "Results:\n{}\n\nThere were errors. Fix them and continue.",
-                    feedback_details.join("\n")
+                    "Results:\n{}\n\n{}\n\nFix the errors and continue.",
+                    feedback_details.join("\n"),
+                    plan_summary
                 );
                 log_activity(&config_clone.log_file, "feedback", &feedback).await;
                 messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
-                let feedback = if feedback_details.is_empty() {
-                    "All operations succeeded. If the user's request is FULLY completed, respond with DONE. Otherwise continue.".to_string()
+                let results_section = if feedback_details.is_empty() {
+                    String::new()
                 } else {
-                    format!(
-                        "Results:\n{}\n\nAll operations succeeded. If the user's request is FULLY completed, respond with DONE. Otherwise continue.",
-                        feedback_details.join("\n")
-                    )
+                    format!("Results:\n{}\n\n", feedback_details.join("\n"))
                 };
+                let feedback = format!("{}{}", results_section, plan_summary);
                 log_activity(&config_clone.log_file, "feedback", &feedback).await;
                 messages.push(crate::llm::ChatMessage::user(feedback));
             }
