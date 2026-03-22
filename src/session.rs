@@ -89,6 +89,9 @@ pub struct Session {
     /// Functions that have been tested (passed at least one test). Eval/spawn blocked until tested.
     #[serde(default)]
     pub tested_functions: std::collections::HashSet<String>,
+    /// OpenCode session ID — reused across !opencode calls to maintain context
+    #[serde(default)]
+    pub opencode_session_id: Option<String>,
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -295,6 +298,7 @@ impl Session {
             sources: Vec::new(),
             agent_mailbox: HashMap::new(),
             tested_functions: std::collections::HashSet::new(),
+            opencode_session_id: None,
         }
     }
 

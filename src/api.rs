@@ -1858,16 +1858,27 @@ pub async fn ask_stream(
                                 let work_dir = if std::path::Path::new(&wt_path).exists() { wt_path.clone() } else { project_dir.clone() };
                                 log_activity(&config_clone.log_file, "opencode-worktree", &work_dir).await;
 
+                                // Get existing OpenCode session ID to continue building on top
+                                let oc_session_id = {
+                                    let s = config_clone.session.lock().await;
+                                    s.opencode_session_id.clone()
+                                };
+
                                 let recent_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
                                 let recent_for_stream = recent_lines.clone();
                                 let oc_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(1800),
                                     async {
-                                        let mut child = tokio::process::Command::new("opencode")
-                                            .arg("run").arg("--format").arg("json")
+                                        let mut cmd = tokio::process::Command::new("opencode");
+                                        cmd.arg("run").arg("--format").arg("json")
                                             .arg("--attach").arg("http://localhost:4096")
-                                            .arg("--dir").arg(&work_dir)
-                                            .arg(&task)
+                                            .arg("--dir").arg(&work_dir);
+                                        // Continue existing session if we have one
+                                        if let Some(sid) = &oc_session_id {
+                                            cmd.arg("--session").arg(sid);
+                                        }
+                                        cmd.arg(&task);
+                                        let mut child = cmd
                                             .current_dir(&work_dir)
                                             .stdout(std::process::Stdio::piped())
                                             .stderr(std::process::Stdio::piped())
@@ -1904,6 +1915,16 @@ pub async fn ask_stream(
                                                         eprintln!("[opencode:{event_type}] {summary}");
                                                         log_activity(&config_clone.log_file, &format!("opencode-{event_type}"), summary).await;
                                                         let _ = tx.send(serde_json::json!({"type": "result", "message": format!("OpenCode {event_type}: {summary}"), "success": true})).await;
+                                                    }
+                                                    "step_start" | "step_finish" => {
+                                                        // Capture session ID for reuse
+                                                        if let Some(sid) = event.get("sessionID").and_then(|s| s.as_str()) {
+                                                            let mut s = config_clone.session.lock().await;
+                                                            if s.opencode_session_id.as_deref() != Some(sid) {
+                                                                s.opencode_session_id = Some(sid.to_string());
+                                                                eprintln!("[opencode] session ID: {sid}");
+                                                            }
+                                                        }
                                                     }
                                                     _ => {
                                                         eprintln!("[opencode:event] {event_type}");
