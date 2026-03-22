@@ -377,7 +377,7 @@ impl<'a> Parser<'a> {
         Ok(ops)
     }
 
-    fn parse_block(&mut self, _indent: usize, mode: BlockMode) -> Result<Vec<Operation>> {
+    fn parse_block(&mut self, indent: usize, mode: BlockMode) -> Result<Vec<Operation>> {
         let mut ops = Vec::new();
 
         while let Some(line) = self.current() {
@@ -386,6 +386,11 @@ impl<'a> Parser<'a> {
                 if mode == BlockMode::TopLevel {
                     // Top-level: just stop, don't consume
                 }
+                break;
+            }
+
+            // In nested blocks, stop when indentation decreases below the block level
+            if mode == BlockMode::Normal && line.indent < indent {
                 break;
             }
 
