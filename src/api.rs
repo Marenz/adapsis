@@ -608,14 +608,47 @@ pub struct AskResponse {
 async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>, event: &str, detail: &str) {
     if let Some(f) = log_file {
         use tokio::io::AsyncWriteExt;
-        let ts = std::time::SystemTime::now()
+        // Human-readable timestamp
+        let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        let line = format!("[{ts}] [{event}] {}\n", detail.replace('\n', "\n  | "));
+        let h = (secs / 3600) % 24;
+        let m = (secs / 60) % 60;
+        let s = secs % 60;
+
+        let line = match event {
+            "iter" => format!("\n============================================================\n[{h:02}:{m:02}:{s:02}] {detail}\n============================================================\n"),
+            "code" => {
+                let truncated: String = detail.chars().take(500).collect();
+                format!("[{h:02}:{m:02}:{s:02}] CODE:\n{truncated}\n{}\n",
+                    if detail.len() > 500 { "  ... (truncated)" } else { "" })
+            }
+            "think" => {
+                let truncated: String = detail.chars().take(300).collect();
+                format!("[{h:02}:{m:02}:{s:02}] THINK: {truncated}{}\n",
+                    if detail.len() > 300 { "..." } else { "" })
+            }
+            "feedback" => {
+                // Highlight errors
+                let has_err = detail.contains("ERROR") || detail.contains("FAIL") || detail.contains("Fix the errors");
+                let prefix = if has_err { "FEEDBACK (ERRORS)" } else { "FEEDBACK (ok)" };
+                let truncated: String = detail.chars().take(400).collect();
+                format!("[{h:02}:{m:02}:{s:02}] {prefix}:\n{truncated}\n{}\n",
+                    if detail.len() > 400 { "  ... (truncated)" } else { "" })
+            }
+            "done" | "done-rejected" => format!("[{h:02}:{m:02}:{s:02}] >>> {event}: {detail}\n"),
+            "llm-error" => format!("[{h:02}:{m:02}:{s:02}] !!! LLM ERROR: {detail}\n"),
+            "user" => {
+                let truncated: String = detail.chars().take(300).collect();
+                format!("[{h:02}:{m:02}:{s:02}] USER: {truncated}{}\n",
+                    if detail.len() > 300 { "..." } else { "" })
+            }
+            _ => format!("[{h:02}:{m:02}:{s:02}] [{event}] {detail}\n"),
+        };
         let mut f = f.lock().await;
         let _ = f.write_all(line.as_bytes()).await;
         let _ = f.flush().await;
     }
-    // Also print to stderr for terminal visibility
+    // Stderr: short preview
     let preview: String = detail.chars().take(200).collect();
     eprintln!("[{event}] {preview}");
 }
