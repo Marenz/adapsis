@@ -42,6 +42,8 @@ pub enum WaitReason {
     LlmCall,
     LlmAgent,
     StdinRead,
+    HttpGet(String),
+    HttpPost(String),
     Completed(String),
     Failed(String),
 }
@@ -62,6 +64,8 @@ impl std::fmt::Display for WaitReason {
             WaitReason::LlmCall => write!(f, "llm_call"),
             WaitReason::LlmAgent => write!(f, "llm_agent"),
             WaitReason::StdinRead => write!(f, "stdin_read"),
+            WaitReason::HttpGet(url) => write!(f, "http_get({})", url.chars().take(50).collect::<String>()),
+            WaitReason::HttpPost(url) => write!(f, "http_post({})", url.chars().take(50).collect::<String>()),
             WaitReason::Completed(v) => write!(f, "done: {}", v.chars().take(50).collect::<String>()),
             WaitReason::Failed(e) => write!(f, "failed: {}", e.chars().take(50).collect::<String>()),
         }
@@ -113,6 +117,8 @@ pub enum IoRequest {
         reply: oneshot::Sender<Result<String>>,
     },
     Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
+    HttpGet { url: String, reply: oneshot::Sender<Result<String>> },
+    HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
 }
 
 /// The coroutine runtime — manages IO resources and dispatches operations.
@@ -326,6 +332,34 @@ impl Runtime {
             IoRequest::Sleep { ms, reply } => {
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 let _ = reply.send(Ok(()));
+            }
+            IoRequest::HttpGet { url, reply } => {
+                tokio::spawn(async move {
+                    let client = reqwest::Client::new();
+                    match client.get(&url).send().await {
+                        Ok(resp) => match resp.text().await {
+                            Ok(body) => { let _ = reply.send(Ok(body)); }
+                            Err(e) => { let _ = reply.send(Err(e.into())); }
+                        },
+                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                    }
+                });
+            }
+            IoRequest::HttpPost { url, body, content_type, reply } => {
+                tokio::spawn(async move {
+                    let client = reqwest::Client::new();
+                    match client.post(&url)
+                        .header("Content-Type", &content_type)
+                        .body(body)
+                        .send().await
+                    {
+                        Ok(resp) => match resp.text().await {
+                            Ok(body) => { let _ = reply.send(Ok(body)); }
+                            Err(e) => { let _ = reply.send(Err(e.into())); }
+                        },
+                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                    }
+                });
             }
             IoRequest::Spawn { .. } => {
                 // Spawn is handled at a higher level
@@ -609,6 +643,20 @@ impl CoroutineHandle {
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::Running, IoRequest::SelfRestart { reply: tx }, rx)?;
                 return Ok(Value::String("restarting...".to_string()));
+            }
+            "http_get" => {
+                let url = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("http_get expects (url:String)") };
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(WaitReason::HttpGet(url.clone()), IoRequest::HttpGet { url, reply: tx }, rx)?;
+                return Ok(Value::String(result));
+            }
+            "http_post" => {
+                let url = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
+                let body = match args.get(1) { Some(Value::String(s)) => s.clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
+                let content_type = match args.get(2) { Some(Value::String(s)) => s.clone(), _ => "application/json".to_string() };
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPost { url, body, content_type, reply: tx }, rx)?;
+                return Ok(Value::String(result));
             }
             "llm_call" => {
                 let system = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };

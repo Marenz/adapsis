@@ -1067,6 +1067,66 @@ fn eval_builtin_or_user(
                 _ => bail!("trim expects String"),
             }
         }
+        "json_get" => {
+            if args.len() != 2 {
+                bail!("json_get(json, key_path) expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::String(json_str), Value::String(path)) => {
+                    let parsed: serde_json::Value = serde_json::from_str(json_str)
+                        .map_err(|e| anyhow!("json_get: invalid JSON: {e}"))?;
+                    let mut current = &parsed;
+                    for key in path.split('.') {
+                        if key.is_empty() {
+                            continue;
+                        }
+                        if let Ok(idx) = key.parse::<usize>() {
+                            current = current
+                                .get(idx)
+                                .ok_or_else(|| anyhow!("json_get: index {idx} not found"))?;
+                        } else {
+                            current = current
+                                .get(key)
+                                .ok_or_else(|| anyhow!("json_get: key '{key}' not found"))?;
+                        }
+                    }
+                    // Return the value as a string, stripping quotes from string values
+                    match current {
+                        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+                        serde_json::Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                Ok(Value::Int(i))
+                            } else if let Some(f) = n.as_f64() {
+                                Ok(Value::Float(f))
+                            } else {
+                                Ok(Value::String(n.to_string()))
+                            }
+                        }
+                        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+                        serde_json::Value::Null => Ok(Value::String("null".to_string())),
+                        // Arrays and objects are returned as JSON strings
+                        other => Ok(Value::String(other.to_string())),
+                    }
+                }
+                _ => bail!("json_get expects (String, String)"),
+            }
+        }
+        "json_array_len" => {
+            if args.len() != 1 {
+                bail!("json_array_len(json) expects 1 argument");
+            }
+            match &args[0] {
+                Value::String(json_str) => {
+                    let parsed: serde_json::Value = serde_json::from_str(json_str)
+                        .map_err(|e| anyhow!("json_array_len: invalid JSON: {e}"))?;
+                    match &parsed {
+                        serde_json::Value::Array(arr) => Ok(Value::Int(arr.len() as i64)),
+                        _ => bail!("json_array_len: expected JSON array, got {}", parsed),
+                    }
+                }
+                _ => bail!("json_array_len expects String"),
+            }
+        }
         "base64_encode" => {
             if args.len() != 1 {
                 bail!("base64_encode(s) expects 1 argument");

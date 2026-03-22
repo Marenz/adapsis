@@ -297,6 +297,19 @@ pub static BUILTINS: &[Builtin] = &[
         description: "encode string to base64",
         category: BuiltinCategory::Conversion,
     },
+    // JSON
+    Builtin {
+        name: "json_get",
+        aliases: &[],
+        description: "extract value from JSON string by key path: json_get(json, \"key.0.nested\")",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
+        name: "json_array_len",
+        aliases: &[],
+        description: "get length of JSON array: json_array_len(json) -> Int",
+        category: BuiltinCategory::String,
+    },
 ];
 
 /// IO builtins (used with +await).
@@ -407,6 +420,18 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "llm_agent",
         aliases: &[],
         description: "full agentic LLM loop until DONE: llm_agent(system, task[, model])",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "http_get",
+        aliases: &[],
+        description: "HTTP GET request, returns response body as String",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "http_post",
+        aliases: &[],
+        description: "HTTP POST request: http_post(url, body, content_type) -> String",
         category: BuiltinCategory::Io,
     },
 ];
