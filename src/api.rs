@@ -1209,7 +1209,10 @@ pub async fn ask(
                             let oc_result = tokio::time::timeout(
                                 std::time::Duration::from_secs(1800),
                                 tokio::process::Command::new("opencode")
-                                    .arg("run").arg("--format").arg("json").arg(task)
+                                    .arg("run").arg("--format").arg("json")
+                                    .arg("--attach").arg("http://localhost:4096")
+                                    .arg("--dir").arg(&config.project_dir)
+                                    .arg(task)
                                     .current_dir(&config.project_dir)
                                     .output()
                             ).await;
@@ -1861,7 +1864,10 @@ pub async fn ask_stream(
                                     std::time::Duration::from_secs(1800),
                                     async {
                                         let mut child = tokio::process::Command::new("opencode")
-                                            .arg("run").arg("--format").arg("json").arg(&task)
+                                            .arg("run").arg("--format").arg("json")
+                                            .arg("--attach").arg("http://localhost:4096")
+                                            .arg("--dir").arg(&work_dir)
+                                            .arg(&task)
                                             .current_dir(&work_dir)
                                             .stdout(std::process::Stdio::piped())
                                             .stderr(std::process::Stdio::piped())
