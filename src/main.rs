@@ -766,6 +766,16 @@ async fn main() -> Result<()> {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".to_string());
 
+            // Validate: binary must be inside the git dir for !opencode restart to work
+            let resolved_git_dir = opencode_git_dir.as_deref().unwrap_or(&project_dir);
+            let exe_path = std::env::current_exe().unwrap_or_default();
+            let exe_str = exe_path.to_string_lossy();
+            if !exe_str.contains(resolved_git_dir) {
+                eprintln!("WARNING: ForgeOS binary ({}) is not inside the opencode git dir ({}).", exe_str, resolved_git_dir);
+                eprintln!("  !opencode self-restart will not pick up rebuilt binaries.");
+                eprintln!("  Run from: {}/target/release/forge", resolved_git_dir);
+            }
+
             // Self-trigger channel: events feed back into the AI
             let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<String>(32);
 
