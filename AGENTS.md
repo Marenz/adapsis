@@ -94,10 +94,52 @@ training/
 
 ## LLM Backend
 
-- llama.cpp server via OpenAI-compatible API at `http://127.0.0.1:8081`
-- Primary model: Qwen3.5-9B (Q4_K_M quant)
+Multiple LLM backends available:
+
+### Cloud (via llm-gateway on port 4000)
+- `anthropic/claude-sonnet-4-6`, `anthropic/claude-opus-4-6`, etc.
+- `chatgpt/gpt-5.4`, `chatgpt/gpt-5.4-mini`
+- URL: `http://127.0.0.1:4000`
+
+### Local (via llama.cpp in podman, GPU-accelerated)
+- **Qwen3.5-9B** (Q4_K_M) — systemd service `llama-server`, port 8081
+  - `systemctl --user start llama-server`
+  - Model: `/home/marenz/models/Qwen3.5-9B-Q4_K_M.gguf`
+- **Qwen3.5-35B-A3B** (Q4_K_XL, MoE active 3B) — systemd service `llama-server-a3`, port 8082
+  - `systemctl --user start llama-server-a3`
+  - Model: `/home/marenz/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`
+  - 20GB model, needs full 3090 (can't run alongside 9B)
+- Both use podman with `llama-server-cuda` image, NVIDIA GPU passthrough
+- Context: 32-64k tokens, flash attention, Q8 KV cache
+
+### Local (via Ollama on port 11434)
+- `glm-4.7-flash`, `gpt-oss:20b`
+- URL: `http://127.0.0.1:11434`
+
+### Available local models
+```
+~/models/Qwen3.5-9B-Q4_K_M.gguf
+~/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+~/models/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled.i1-Q4_K_M.gguf
+~/models/Qwen3.5-4B-Forge-LoRA-BF16.gguf
+~/models/Qwen3.5-9B-Forge-LoRA-v2-Q4_K_M.gguf
+~/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+~/models/Phi-4-mini-instruct-Q4_K_M.gguf
+~/models/gemma-3-4b-it-Q4_K_M.gguf
+```
+
+### Notes
+- Qwen3.5 family learns Forge syntax from system prompt alone
+- Non-Qwen models (Gemma, Phi, Llama) produce zero valid Forge
 - Handles Qwen's thinking mode (`reasoning_content` field)
-- Benchmark results: Qwen3.5 family works from system prompt alone. Non-Qwen models (Gemma, Phi, Llama) produce zero valid Forge.
+
+## ForgeOS !opencode Integration
+
+- `!opencode` uses `opencode run --attach http://localhost:4096` (connects to running server)
+- Sessions visible in `opencode sessions list`
+- Each `!opencode` gets its own git worktree for isolation
+- Sequential lock: only one `!opencode` at a time
+- Config flags: `--opencode-git-dir`, `--opencode-worktree-dir`
 
 ## Test Commands
 
