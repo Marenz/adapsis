@@ -1776,6 +1776,65 @@ pub async fn ask_stream(
                                 feedback_details.push(format!("Message sent to '{to}'"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Message sent to '{to}'"), "success": true})).await;
                             }
+                            crate::parser::Operation::OpenCode(task) => {
+                                eprintln!("[web:opencode:stream] {task}");
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Running !opencode: {}", task.chars().take(80).collect::<String>()), "success": true})).await;
+                                drop(session);
+                                let project_dir = config_clone.project_dir.clone();
+                                let oc_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(300),
+                                    tokio::process::Command::new("opencode")
+                                        .arg("run").arg("--format").arg("json").arg(task)
+                                        .current_dir(&project_dir)
+                                        .output()
+                                ).await;
+                                match oc_result {
+                                    Ok(Ok(output)) if output.status.success() => {
+                                        eprintln!("[web:opencode:stream:done] rebuilding...");
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode done, rebuilding...", "success": true})).await;
+                                        let build = tokio::process::Command::new("cargo")
+                                            .arg("build").current_dir(&project_dir).output().await;
+                                        match build {
+                                            Ok(b) if b.status.success() => {
+                                                feedback_details.push("OK: OpenCode + rebuild successful. Restarting...".to_string());
+                                                let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
+                                                // Restart the process
+                                                tokio::spawn(async {
+                                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                                    let exe = std::env::current_exe().unwrap_or_default();
+                                                    let args: Vec<String> = std::env::args().collect();
+                                                    let _ = exec::execvp(&exe, &args);
+                                                });
+                                            }
+                                            Ok(b) => {
+                                                has_errors = true;
+                                                let stderr = String::from_utf8_lossy(&b.stderr);
+                                                let msg = format!("OpenCode done but cargo build failed:\n{}", stderr.chars().take(500).collect::<String>());
+                                                feedback_details.push(format!("ERROR: {msg}"));
+                                                let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
+                                            }
+                                            Err(e) => {
+                                                has_errors = true;
+                                                feedback_details.push(format!("ERROR: build error: {e}"));
+                                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("build error: {e}"), "success": false})).await;
+                                            }
+                                        }
+                                    }
+                                    Ok(Ok(output)) => {
+                                        has_errors = true;
+                                        let stderr = String::from_utf8_lossy(&output.stderr);
+                                        let msg = format!("OpenCode failed:\n{}", stderr.chars().take(500).collect::<String>());
+                                        feedback_details.push(format!("ERROR: {msg}"));
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
+                                    }
+                                    _ => {
+                                        has_errors = true;
+                                        feedback_details.push("ERROR: OpenCode timed out or failed to start".to_string());
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode timed out", "success": false})).await;
+                                    }
+                                }
+                                session = config_clone.session.lock().await;
+                            }
                             _ => {}
                         }
                     }
