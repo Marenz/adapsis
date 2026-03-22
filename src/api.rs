@@ -42,6 +42,8 @@ pub struct AppConfig {
     pub log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// JIT compilation cache — reuses compiled modules across evals when revision unchanged
     pub jit_cache: crate::eval::JitCache,
+    /// Broadcast channel for SSE events — all activity visible to all subscribers (web UI)
+    pub event_broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -605,6 +607,19 @@ pub struct AskResponse {
 }
 
 /// Write a structured log entry to the AI activity log.
+/// Channel wrapper that sends to both the response mpsc and the broadcast channel.
+struct EventSender {
+    tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+    broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
+}
+
+impl EventSender {
+    async fn send(&self, event: serde_json::Value) {
+        let _ = self.broadcast.send(event.clone());
+        let _ = self.tx.send(event).await;
+    }
+}
+
 async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>, event: &str, detail: &str) {
     if let Some(f) = log_file {
         use tokio::io::AsyncWriteExt;
@@ -617,31 +632,16 @@ async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio:
 
         let line = match event {
             "iter" => format!("\n============================================================\n[{h:02}:{m:02}:{s:02}] {detail}\n============================================================\n"),
-            "code" => {
-                let truncated: String = detail.chars().take(500).collect();
-                format!("[{h:02}:{m:02}:{s:02}] CODE:\n{truncated}\n{}\n",
-                    if detail.len() > 500 { "  ... (truncated)" } else { "" })
-            }
-            "think" => {
-                let truncated: String = detail.chars().take(300).collect();
-                format!("[{h:02}:{m:02}:{s:02}] THINK: {truncated}{}\n",
-                    if detail.len() > 300 { "..." } else { "" })
-            }
+            "code" => format!("[{h:02}:{m:02}:{s:02}] CODE:\n{detail}\n"),
+            "think" => format!("[{h:02}:{m:02}:{s:02}] THINK:\n{detail}\n"),
             "feedback" => {
-                // Highlight errors
                 let has_err = detail.contains("ERROR") || detail.contains("FAIL") || detail.contains("Fix the errors");
                 let prefix = if has_err { "FEEDBACK (ERRORS)" } else { "FEEDBACK (ok)" };
-                let truncated: String = detail.chars().take(400).collect();
-                format!("[{h:02}:{m:02}:{s:02}] {prefix}:\n{truncated}\n{}\n",
-                    if detail.len() > 400 { "  ... (truncated)" } else { "" })
+                format!("[{h:02}:{m:02}:{s:02}] {prefix}:\n{detail}\n")
             }
             "done" | "done-rejected" => format!("[{h:02}:{m:02}:{s:02}] >>> {event}: {detail}\n"),
             "llm-error" => format!("[{h:02}:{m:02}:{s:02}] !!! LLM ERROR: {detail}\n"),
-            "user" => {
-                let truncated: String = detail.chars().take(300).collect();
-                format!("[{h:02}:{m:02}:{s:02}] USER: {truncated}{}\n",
-                    if detail.len() > 300 { "..." } else { "" })
-            }
+            "user" => format!("[{h:02}:{m:02}:{s:02}] USER:\n{detail}\n"),
             _ => format!("[{h:02}:{m:02}:{s:02}] [{event}] {detail}\n"),
         };
         let mut f = f.lock().await;
@@ -1440,11 +1440,12 @@ pub async fn ask_stream(
     use axum::response::sse::{Event, KeepAlive};
     use tokio::sync::mpsc;
 
-    let (tx, mut rx) = mpsc::channel::<serde_json::Value>(100);
+    let (raw_tx, mut rx) = mpsc::channel::<serde_json::Value>(100);
 
     // Spawn the processing loop
     let config_clone = config.clone();
     tokio::spawn(async move {
+        let tx = EventSender { tx: raw_tx, broadcast: config_clone.event_broadcast.clone() };
         let llm = crate::llm::LlmClient::new_with_model_and_key(
             &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
         );
@@ -2024,9 +2025,25 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/opencode", post(opencode_task))
         .route("/api/tasks", get(tasks))
         .route("/api/log", get(get_log))
+        .route("/api/events", get(events_stream))
         .with_state(config);
 
     session_routes.merge(config_routes)
+}
+
+/// GET /api/events — SSE stream of all AI activity (subscribe from web UI).
+async fn events_stream(
+    State(config): State<AppConfig>,
+) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::{Event, KeepAlive};
+    let mut rx = config.event_broadcast.subscribe();
+    let stream = async_stream::stream! {
+        while let Ok(event) = rx.recv().await {
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            yield Ok(Event::default().data(data));
+        }
+    };
+    axum::response::sse::Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// GET /api/log?tail=N — get recent log entries.

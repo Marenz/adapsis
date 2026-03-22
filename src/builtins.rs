@@ -310,6 +310,12 @@ pub static BUILTINS: &[Builtin] = &[
         description: "get length of JSON array: json_array_len(json) -> Int",
         category: BuiltinCategory::String,
     },
+    Builtin {
+        name: "json_escape",
+        aliases: &[],
+        description: "escape string for use in JSON value: json_escape(s) -> String",
+        category: BuiltinCategory::String,
+    },
 ];
 
 /// IO builtins (used with +await).

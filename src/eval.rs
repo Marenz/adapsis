@@ -1190,6 +1190,28 @@ fn eval_builtin_or_user(
                 _ => bail!("json_array_len expects String"),
             }
         }
+        "json_escape" => {
+            if args.len() != 1 {
+                bail!("json_escape(s) expects 1 argument");
+            }
+            match &args[0] {
+                Value::String(s) => {
+                    let mut escaped = String::with_capacity(s.len());
+                    for ch in s.chars() {
+                        match ch {
+                            '\\' => escaped.push_str("\\\\"),
+                            '"' => escaped.push_str("\\\""),
+                            '\n' => escaped.push_str("\\n"),
+                            '\r' => escaped.push_str("\\r"),
+                            '\t' => escaped.push_str("\\t"),
+                            c => escaped.push(c),
+                        }
+                    }
+                    Ok(Value::String(escaped))
+                }
+                _ => bail!("json_escape expects String"),
+            }
+        }
         "base64_encode" => {
             if args.len() != 1 {
                 bail!("base64_encode(s) expects 1 argument");

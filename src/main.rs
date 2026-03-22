@@ -776,6 +776,7 @@ async fn main() -> Result<()> {
                 task_registry: Some(runtime.task_registry.clone()),
                 log_file: ai_log,
                 jit_cache: eval::new_jit_cache(),
+                event_broadcast: tokio::sync::broadcast::channel(256).0,
             };
 
             let app = axum::Router::new()
