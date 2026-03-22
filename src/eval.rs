@@ -143,26 +143,73 @@ impl Value {
     }
 }
 
-/// Evaluation environment (scope).
+/// Evaluation environment with a scope stack.
+/// Each scope is a HashMap of variable bindings. `+let` defines into the
+/// top scope, `+set` mutates the nearest scope that already contains the
+/// variable, and lookups walk the stack from top to bottom.
 pub struct Env {
-    pub vars: HashMap<String, Value>,
+    scopes: Vec<HashMap<String, Value>>,
 }
 
 impl Env {
     pub fn new() -> Self {
         Self {
-            vars: HashMap::new(),
+            scopes: vec![HashMap::new()],
         }
     }
 
-    pub fn set(&mut self, name: &str, value: Value) {
-        self.vars.insert(name.to_string(), value);
+    /// Push a new empty scope onto the stack.
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
     }
 
+    /// Pop the top scope. Panics if only the root scope remains.
+    fn pop_scope(&mut self) {
+        debug_assert!(self.scopes.len() > 1, "cannot pop the root scope");
+        self.scopes.pop();
+    }
+
+    /// Define a new variable in the current (top) scope.
+    /// Used by `+let` and parameter binding.
+    pub fn set(&mut self, name: &str, value: Value) {
+        self.scopes
+            .last_mut()
+            .expect("scope stack empty")
+            .insert(name.to_string(), value);
+    }
+
+    /// Mutate an existing variable: walk scopes top-to-bottom, update the
+    /// first scope that contains `name`. If not found, insert into the top
+    /// scope (same as `set`). Used by `+set`.
+    fn set_existing(&mut self, name: &str, value: Value) {
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.contains_key(name) {
+                scope.insert(name.to_string(), value);
+                return;
+            }
+        }
+        // Not found anywhere — define in current scope
+        self.set(name, value);
+    }
+
+    /// Look up a variable by walking scopes from top to bottom.
     fn get(&self, name: &str) -> Result<&Value> {
-        self.vars
-            .get(name)
-            .ok_or_else(|| anyhow!("undefined variable `{name}`"))
+        for scope in self.scopes.iter().rev() {
+            if let Some(val) = scope.get(name) {
+                return Ok(val);
+            }
+        }
+        Err(anyhow!("undefined variable `{name}`"))
+    }
+
+    /// Raw lookup (returns Option) — used for special variables like __coroutine_handle.
+    fn get_raw(&self, name: &str) -> Option<&Value> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(val) = scope.get(name) {
+                return Some(val);
+            }
+        }
+        None
     }
 }
 
@@ -663,7 +710,10 @@ fn eval_function_body(
                 } else {
                     else_body
                 };
-                let result = eval_function_body(program, branch, env)?;
+                env.push_scope();
+                let result = eval_function_body(program, branch, env);
+                env.pop_scope();
+                let result = result?;
                 // Only propagate if the branch did an explicit return (non-None)
                 if !matches!(result, Value::None) {
                     return Ok(result);
@@ -678,9 +728,12 @@ fn eval_function_body(
                 match iter_val {
                     Value::List(items) => {
                         for item in items {
+                            env.push_scope();
                             env.set(&binding.name, item);
                             // Execute body but don't return from each unless explicitly returned
-                            match eval_function_body(program, each_body, env) {
+                            let result = eval_function_body(program, each_body, env);
+                            env.pop_scope();
+                            match result {
                                 Ok(_) => {}
                                 Err(e) => return Err(e),
                             }
@@ -691,7 +744,7 @@ fn eval_function_body(
             }
             ast::StatementKind::Set { name, value } => {
                 let val = eval_ast_expr(program, value, env)?;
-                env.set(name, val);
+                env.set_existing(name, val);
             }
             ast::StatementKind::Match { expr, arms } => {
                 let val = eval_ast_expr(program, expr, env)?;
@@ -700,6 +753,7 @@ fn eval_function_body(
                         let mut matched = false;
                         for arm in arms {
                             if arm.variant == *variant {
+                                env.push_scope();
                                 // Exact variant match — bind payload values
                                 for (i, binding) in arm.bindings.iter().enumerate() {
                                     if binding != "_" {
@@ -711,21 +765,27 @@ fn eval_function_body(
                                 // Check nested pattern guards
                                 if let Some(ref patterns) = arm.patterns {
                                     if !match_nested_patterns(program, patterns, payload, env)? {
+                                        env.pop_scope();
                                         continue; // nested pattern didn't match, try next arm
                                     }
                                 }
-                                let result = eval_function_body(program, &arm.body, env)?;
+                                let result = eval_function_body(program, &arm.body, env);
+                                env.pop_scope();
+                                let result = result?;
                                 if !matches!(result, Value::None) {
                                     return Ok(result);
                                 }
                                 matched = true;
                                 break;
                             } else if arm.variant == "_" {
+                                env.push_scope();
                                 // Wildcard/default case — bind the whole value if there's a binding
                                 if arm.bindings.len() == 1 && arm.bindings[0] != "_" {
                                     env.set(&arm.bindings[0], val.clone());
                                 }
-                                let result = eval_function_body(program, &arm.body, env)?;
+                                let result = eval_function_body(program, &arm.body, env);
+                                env.pop_scope();
+                                let result = result?;
                                 if !matches!(result, Value::None) {
                                     return Ok(result);
                                 }
@@ -752,7 +812,7 @@ fn eval_function_body(
                     env.set(name, val);
                 } else {
                     // Builtin IO operation
-                    let handle = match env.vars.get("__coroutine_handle") {
+                    let handle = match env.get_raw("__coroutine_handle") {
                         Some(Value::CoroutineHandle(h)) => h.clone(),
                         _ => bail!("+await requires async context — use 'forge run-async'"),
                     };
@@ -766,7 +826,7 @@ fn eval_function_body(
                 }
             }
             ast::StatementKind::Spawn { call, binding } => {
-                let handle = match env.vars.get("__coroutine_handle") {
+                let handle = match env.get_raw("__coroutine_handle") {
                     Some(Value::CoroutineHandle(h)) => h.clone(),
                     _ => bail!("+spawn requires async context"),
                 };
@@ -801,7 +861,10 @@ fn eval_function_body(
                     if iterations > 10000 {
                         bail!("while loop exceeded 10000 iterations — possible infinite loop");
                     }
-                    match eval_function_body(program, body, env) {
+                    env.push_scope();
+                    let result = eval_function_body(program, body, env);
+                    env.pop_scope();
+                    match result {
                         Ok(val) => {
                             // If the body returned a value (via +return), propagate it
                             if !matches!(val, Value::None) {
@@ -1450,7 +1513,7 @@ fn eval_builtin_or_user(
                     call_env.set(&param.name, arg);
                 }
                 // Propagate coroutine handle to called functions
-                if let Some(handle) = env.vars.get("__coroutine_handle") {
+                if let Some(handle) = env.get_raw("__coroutine_handle") {
                     call_env.set("__coroutine_handle", handle.clone());
                 }
                 eval_function_body(program, &func.body, &mut call_env)
