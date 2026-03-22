@@ -751,10 +751,12 @@ pub async fn ask(
         match crate::parser::parse(&code) {
             Ok(ops) => {
                 // Remove duplicates
+                let mut fns_removed = false;
                 for op in &ops {
                     match op {
                         crate::parser::Operation::Function(f) => {
                             session.program.functions.retain(|existing| existing.name != f.name);
+                            fns_removed = true;
                         }
                         crate::parser::Operation::Type(t) => {
                             let name = t.name.clone();
@@ -762,6 +764,9 @@ pub async fn ask(
                         }
                         _ => {}
                     }
+                }
+                if fns_removed {
+                    session.program.rebuild_function_index();
                 }
 
                 // Handle !undo and !plan before apply
@@ -1459,12 +1464,16 @@ pub async fn ask_stream(
             match crate::parser::parse(&code) {
                 Ok(ops) => {
                     // Remove duplicates
+                    let mut fns_removed = false;
                     for op in &ops {
                         match op {
-                            crate::parser::Operation::Function(f) => { session.program.functions.retain(|e| e.name != f.name); }
+                            crate::parser::Operation::Function(f) => { session.program.functions.retain(|e| e.name != f.name); fns_removed = true; }
                             crate::parser::Operation::Type(t) => { let n = t.name.clone(); session.program.types.retain(|e| e.name() != n); }
                             _ => {}
                         }
+                    }
+                    if fns_removed {
+                        session.program.rebuild_function_index();
                     }
 
                     // Handle plan, undo

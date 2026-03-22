@@ -863,12 +863,16 @@ async fn main() -> Result<()> {
                             if !code.is_empty() && code.trim() != "DONE" {
                                 let mut session = trigger_session.lock().await;
                                 if let Ok(ops) = crate::parser::parse(&code) {
+                                    let mut fns_removed = false;
                                     for op in &ops {
                                         match op {
-                                            crate::parser::Operation::Function(f) => { session.program.functions.retain(|e| e.name != f.name); }
+                                            crate::parser::Operation::Function(f) => { session.program.functions.retain(|e| e.name != f.name); fns_removed = true; }
                                             crate::parser::Operation::Type(t) => { let n = t.name.clone(); session.program.types.retain(|e| e.name() != n); }
                                             _ => {}
                                         }
+                                    }
+                                    if fns_removed {
+                                        session.program.rebuild_function_index();
                                     }
                                     if let Ok(results) = session.apply(&code) {
                                         for (msg, ok) in &results {
