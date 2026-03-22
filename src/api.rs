@@ -72,12 +72,12 @@ pub struct MutationResult {
 }
 
 pub async fn mutate(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
-    let mut session = session.lock().await;
-    match session.apply(&req.source) {
+    let mut session = config.session.lock().await;
+    match session.apply_async(&req.source, config.io_sender.as_ref()).await {
         Ok(results) => Json(MutateResponse {
             revision: session.revision,
             results: results
@@ -979,8 +979,35 @@ pub async fn ask(
                     match op {
                         crate::parser::Operation::Test(test) => {
                             let mut all_passed = true;
+                            let needs_async = session.program.get_function(&test.function_name)
+                                .is_some_and(|f| f.effects.iter().any(|e|
+                                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
                             for case in &test.cases {
-                                match crate::eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
+                                let case_result = if needs_async {
+                                    if let Some(sender) = &config.io_sender {
+                                        let program = session.program.clone();
+                                        let fn_name = test.function_name.clone();
+                                        let case = case.clone();
+                                        let mocks = session.io_mocks.clone();
+                                        let sender = sender.clone();
+                                        drop(session);
+                                        let result = crate::eval::eval_test_case_async(
+                                            &program, &fn_name, &case, &mocks, sender,
+                                        ).await;
+                                        session = config.session.lock().await;
+                                        result
+                                    } else {
+                                        crate::eval::eval_test_case_with_mocks(
+                                            &session.program, &test.function_name, case, &session.io_mocks,
+                                        )
+                                    }
+                                } else {
+                                    crate::eval::eval_test_case_with_mocks(
+                                        &session.program, &test.function_name, case, &session.io_mocks,
+                                    )
+                                };
+                                match case_result {
                                     Ok(msg) => { eprintln!("[web:pass] {msg}"); iter_test_results.push(TestCaseResult { message: msg, pass: true }); }
                                     Err(e) => { all_passed = false; eprintln!("[web:fail] {e}"); iter_has_errors = true; iter_test_results.push(TestCaseResult { message: format!("{e}"), pass: false }); }
                                 }
@@ -1738,8 +1765,35 @@ pub async fn ask_stream(
                         match op {
                             crate::parser::Operation::Test(test) => {
                                 let mut all_passed = true;
+                                let needs_async = session.program.get_function(&test.function_name)
+                                    .is_some_and(|f| f.effects.iter().any(|e|
+                                        matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
                                 for case in &test.cases {
-                                    match crate::eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
+                                    let case_result = if needs_async {
+                                        if let Some(sender) = &config_clone.io_sender {
+                                            let program = session.program.clone();
+                                            let fn_name = test.function_name.clone();
+                                            let case = case.clone();
+                                            let mocks = session.io_mocks.clone();
+                                            let sender = sender.clone();
+                                            drop(session);
+                                            let result = crate::eval::eval_test_case_async(
+                                                &program, &fn_name, &case, &mocks, sender,
+                                            ).await;
+                                            session = config_clone.session.lock().await;
+                                            result
+                                        } else {
+                                            crate::eval::eval_test_case_with_mocks(
+                                                &session.program, &test.function_name, case, &session.io_mocks,
+                                            )
+                                        }
+                                    } else {
+                                        crate::eval::eval_test_case_with_mocks(
+                                            &session.program, &test.function_name, case, &session.io_mocks,
+                                        )
+                                    };
+                                    match case_result {
                                         Ok(msg) => {
                                             train_tests_passed += 1;
                                             feedback_details.push(format!("PASS: {msg}"));
@@ -2242,7 +2296,6 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
     let session_routes = axum::Router::new()
-        .route("/api/mutate", post(mutate))
         .route("/api/status", get(status))
         .route("/api/program", get(program))
         .route("/api/history", post(history))
@@ -2251,6 +2304,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .with_state(config.session.clone());
 
     let config_routes = axum::Router::new()
+        .route("/api/mutate", post(mutate))
         .route("/api/eval", post(eval_fn))
         .route("/api/test", post(test_fn))
         .route("/api/query", post(query))

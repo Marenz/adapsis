@@ -886,8 +886,8 @@ impl<'a> Parser<'a> {
                 self.index += 1;
                 return Ok(Operation::Mock {
                     operation: operation.to_string(),
-                    pattern: pattern_part.to_string(),
-                    response: response_part.to_string(),
+                    pattern: unescape_string(pattern_part),
+                    response: unescape_string(response_part),
                 });
             }
             bail!(
@@ -2117,6 +2117,30 @@ fn is_ident_start(ch: char) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+/// Unescape backslash sequences in a string (e.g. `\"` → `"`, `\\` → `\`).
+fn unescape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn count_indent(input: &str) -> usize {
