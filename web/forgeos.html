@@ -540,6 +540,96 @@ inputEl.addEventListener('input', () => {
 refreshProgram();
 setInterval(refreshProgram, 5000);
 inputEl.focus();
+
+// === Event broadcast listener ===
+// Subscribe to /api/events so the browser sees ALL AI activity,
+// including work initiated by --autonomous mode or CLI requests.
+(function setupEventBroadcast() {
+  let broadcastMsg = null;
+  const es = new EventSource('/api/events');
+
+  es.onmessage = function(e) {
+    let event;
+    try { event = JSON.parse(e.data); } catch { return; }
+    if (sending) return; // browser-initiated request already shows events
+
+    switch (event.type) {
+      case 'start':
+        broadcastMsg = null;
+        addMessage('system', 'AI activity: ' + (event.message || '').substring(0, 200));
+        break;
+      case 'iteration':
+        if (event.n > 1) addMessage('system', 'Iteration ' + event.n);
+        broadcastMsg = addMessage('ai', '');
+        break;
+      case 'thinking':
+        if (broadcastMsg) {
+          const wrapper = document.createElement('div');
+          const toggle = document.createElement('span');
+          toggle.className = 'thinking-toggle';
+          toggle.textContent = '> thinking...';
+          const content = document.createElement('div');
+          content.className = 'thinking-content thinking';
+          content.textContent = event.text;
+          toggle.onclick = () => {
+            content.classList.toggle('open');
+            toggle.textContent = content.classList.contains('open') ? 'v thinking' : '> thinking...';
+          };
+          wrapper.appendChild(toggle);
+          wrapper.appendChild(content);
+          broadcastMsg.querySelector('.msg-body').appendChild(wrapper);
+        }
+        break;
+      case 'text':
+        if (broadcastMsg) {
+          const el = document.createElement('div');
+          el.textContent = event.text;
+          broadcastMsg.querySelector('.msg-body').appendChild(el);
+        }
+        break;
+      case 'code':
+        if (broadcastMsg) addCodeBlock(broadcastMsg, event.code);
+        break;
+      case 'result':
+        if (broadcastMsg) addResult(broadcastMsg, (event.success ? 'OK: ' : 'ERROR: ') + event.message, event.success ? 'ok' : 'error');
+        break;
+      case 'test':
+        if (broadcastMsg) addResult(broadcastMsg, (event.pass ? 'PASS: ' : 'FAIL: ') + event.message, event.pass ? 'pass' : 'fail');
+        break;
+      case 'eval':
+        if (broadcastMsg) {
+          const ok = event.success !== false;
+          addResult(broadcastMsg, (ok ? '= ' : 'ERROR: ') + (event.function ? event.function + '() ' : '') + event.result, ok ? 'ok' : 'error');
+        }
+        break;
+      case 'query':
+        if (broadcastMsg) {
+          const el = document.createElement('div');
+          el.style.cssText = 'background:var(--surface2);border-radius:4px;padding:6px 8px;margin:4px 0;font-size:11px;color:var(--text-dim);white-space:pre-wrap;';
+          el.textContent = event.query + ':\n' + event.response;
+          broadcastMsg.querySelector('.msg-body').appendChild(el);
+        }
+        break;
+      case 'plan':
+        renderPlan(event.plan);
+        break;
+      case 'feedback':
+        addMessage('system', event.message);
+        refreshProgram();
+        break;
+      case 'done':
+        addMessage('system', 'Done');
+        refreshProgram();
+        break;
+      case 'end':
+        broadcastMsg = null;
+        refreshProgram();
+        break;
+    }
+    chatEl.scrollTop = chatEl.scrollHeight;
+  };
+  es.onerror = function() {}; // auto-reconnects
+})();
 </script>
 </body>
 </html>

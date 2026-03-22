@@ -785,6 +785,7 @@ async fn main() -> Result<()> {
                 log_file: ai_log,
                 jit_cache: eval::new_jit_cache(),
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
+                opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
                 opencode_worktree_dir: opencode_worktree_dir.unwrap_or_else(|| {
                     let p = std::path::Path::new(&project_dir).parent().unwrap_or(std::path::Path::new("."));

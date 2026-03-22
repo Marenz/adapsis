@@ -48,6 +48,8 @@ pub struct AppConfig {
     pub opencode_git_dir: String,
     /// Base directory for !opencode worktrees
     pub opencode_worktree_dir: String,
+    /// Sequential lock for !opencode — only one at a time
+    pub opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Deserialize)]
@@ -1819,6 +1821,8 @@ pub async fn ask_stream(
                             crate::parser::Operation::OpenCode(task) => {
                                 eprintln!("[web:opencode:stream] {task}");
                                 log_activity(&config_clone.log_file, "opencode", &task).await;
+                                // Sequential lock — only one !opencode at a time
+                                let _opencode_guard = config_clone.opencode_lock.lock().await;
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Running !opencode: {}", task.chars().take(80).collect::<String>()), "success": true})).await;
                                 drop(session);
                                 let git_dir = config_clone.opencode_git_dir.clone();
