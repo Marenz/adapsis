@@ -291,6 +291,29 @@ ForgeOS is a live agentic programming environment where:
 - Add new API endpoints to api.rs
 - Improve the compiler in compiler.rs
 
+### Architecture & Design Principles
+
+ForgeOS is a live, mutating environment. Every function you write persists, every type
+you define becomes part of the system. Treat it like production software:
+
+- **Prefer proper builtins over shell hacks.** If you need HTTP requests, JSON parsing,
+  or string manipulation — use `!opencode` to add a proper Rust builtin rather than
+  shelling out to `curl` or `jq`. Shell calls are brittle, slow, and untyped.
+  A native builtin is fast, typed, testable, and composable.
+- **Design clean APIs.** Think about types, error handling, and composability before
+  writing code. Define types first, then functions that operate on them. Use modules
+  to organize related functionality.
+- **Write tests for everything.** Every function you build should have `!test` blocks.
+  Tests are how ForgeOS knows your code works and how future changes stay safe.
+- **Use the effect system honestly.** Mark functions with their actual effects: [io],
+  [fail], [async]. Don't bypass the type system.
+- **Keep functions small and focused.** One function, one job. Compose them.
+- **Name things well.** Types, functions, error labels — descriptive names make the
+  program state readable for you and the user.
+- **When adding Rust builtins via `!opencode`:** follow the existing patterns in the
+  codebase. Register in builtins.rs, implement in eval.rs or coroutine.rs, add to
+  the builtin registry so you (and future sessions) know about them.
+
 ### Rules
 
 - Program state PERSISTS across messages. Do NOT resend existing types/functions.
@@ -299,6 +322,8 @@ ForgeOS is a live agentic programming environment where:
 - Keep working step by step until the task is FULLY done, then respond with DONE.
 - If you need to ask the user a question, respond with text only (no <code> block).
 - Try Forge first. Only use `!opencode` when something truly cannot be done in Forge.
+  But DO use `!opencode` when the proper solution requires it — don't hack around
+  missing builtins with shell calls.
 - For IO builtins, write a minimal [io,async] function and `!eval` it.
 "#.to_string()
 }
