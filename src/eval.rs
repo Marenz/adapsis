@@ -606,12 +606,14 @@ pub fn eval_test_case_with_mocks(
 
     let mut env = Env::new();
 
-    // If function has async effects and we have mocks, set up a mock coroutine handle
+    // If function has async/io effects, always set up a mock coroutine handle
+    // so that +await statements don't fail with "requires async context".
+    // Mocked IO responses are checked first; unmatched ops error out.
     let has_async = func
         .effects
         .iter()
         .any(|e| matches!(e, ast::Effect::Async | ast::Effect::Io));
-    if has_async && !mocks.is_empty() {
+    if has_async {
         let handle = crate::coroutine::CoroutineHandle::new_mock(mocks.to_vec());
         env.set("__coroutine_handle", Value::CoroutineHandle(handle));
     }
@@ -621,9 +623,78 @@ pub fn eval_test_case_with_mocks(
     // Execute function body
     let result = eval_function_body(program, &func.body, &mut env);
 
-    // If the function returns Result<T>, wrap successful returns in Ok()
-    // and check failures produce Err()
-    let returns_result = matches!(&func.return_type, ast::Type::Result(_));
+    check_test_result(result, &func.return_type, &input, &expected)
+}
+
+/// Run a test case through the real coroutine runtime (for async functions with
+/// real IO). Falls back to mock-only execution for sync functions.
+/// Must be called from within a tokio runtime.
+pub async fn eval_test_case_async(
+    program: &ast::Program,
+    function_name: &str,
+    case: &parser::TestCase,
+    mocks: &[crate::session::IoMock],
+    io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+) -> Result<String> {
+    let func = program
+        .get_function(function_name)
+        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+
+    let has_async = func
+        .effects
+        .iter()
+        .any(|e| matches!(e, ast::Effect::Async | ast::Effect::Io));
+
+    // If the function isn't async, delegate to the sync path
+    if !has_async {
+        return eval_test_case_with_mocks(program, function_name, case, mocks);
+    }
+
+    let input = eval_parser_expr_with_program(&case.input, program)?;
+    let expected = eval_parser_expr_with_program(&case.expected, program)?;
+
+    // Clone what we need for the blocking task
+    let program = program.clone();
+    let fn_name = function_name.to_string();
+    let return_type = func.return_type.clone();
+    let mocks = mocks.to_vec();
+
+    let eval_result = tokio::task::spawn_blocking(move || {
+        let func = program
+            .get_function(&fn_name)
+            .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
+
+        let mut env = Env::new();
+
+        // If mocks are provided, use a mock handle (mocks checked first, unmatched
+        // ops fall through to the real IO sender). Otherwise use the real sender.
+        if mocks.is_empty() {
+            let handle = crate::coroutine::CoroutineHandle::new(io_sender);
+            env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+        } else {
+            let handle = crate::coroutine::CoroutineHandle::new_mock(mocks);
+            env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+        }
+
+        bind_input_to_params(&program, func, &input, &mut env);
+
+        let result = eval_function_body(&program, &func.body, &mut env);
+        check_test_result(result, &return_type, &input, &expected)
+    })
+    .await
+    .map_err(|e| anyhow!("async test task panicked: {e}"))??;
+
+    Ok(eval_result)
+}
+
+/// Compare the eval result against expected, handling Result<T> wrapping.
+fn check_test_result(
+    result: Result<Value>,
+    return_type: &ast::Type,
+    input: &Value,
+    expected: &Value,
+) -> Result<String> {
+    let returns_result = matches!(return_type, ast::Type::Result(_));
 
     let actual = match result {
         Ok(val) => {
@@ -644,7 +715,7 @@ pub fn eval_test_case_with_mocks(
         }
     };
 
-    if actual.matches(&expected) {
+    if actual.matches(expected) {
         Ok(format!("input={input} => {actual} (expected {expected})"))
     } else {
         bail!("input={input} => {actual}, expected {expected}")

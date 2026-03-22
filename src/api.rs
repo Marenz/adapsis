@@ -231,10 +231,10 @@ pub struct TestCaseResult {
 }
 
 pub async fn test_fn(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<TestRequest>,
 ) -> Json<TestResponse> {
-    let mut session = session.lock().await;
+    let mut session = config.session.lock().await;
     let operations = match parser::parse(&req.source) {
         Ok(ops) => ops,
         Err(e) => {
@@ -255,8 +255,43 @@ pub async fn test_fn(
 
     for op in &operations {
         if let parser::Operation::Test(test) = op {
+            // Check if the function under test has async/io effects
+            let needs_async = session.program.get_function(&test.function_name)
+                .is_some_and(|f| f.effects.iter().any(|e|
+                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
             for case in &test.cases {
-                match eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
+                let case_result = if needs_async {
+                    if let Some(sender) = &config.io_sender {
+                        // Run through real coroutine runtime (with mock fallback)
+                        let program = session.program.clone();
+                        let fn_name = test.function_name.clone();
+                        let case = case.clone();
+                        let mocks = session.io_mocks.clone();
+                        let sender = sender.clone();
+
+                        drop(session); // release lock before blocking
+
+                        let result = eval::eval_test_case_async(
+                            &program, &fn_name, &case, &mocks, sender,
+                        ).await;
+
+                        session = config.session.lock().await;
+                        result
+                    } else {
+                        // No IO sender — fall back to mock-only execution
+                        eval::eval_test_case_with_mocks(
+                            &session.program, &test.function_name, case, &session.io_mocks,
+                        )
+                    }
+                } else {
+                    // Sync function — run directly
+                    eval::eval_test_case_with_mocks(
+                        &session.program, &test.function_name, case, &session.io_mocks,
+                    )
+                };
+
+                match case_result {
                     Ok(msg) => {
                         passed += 1;
                         results.push(TestCaseResult {
@@ -2147,7 +2182,6 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
 
     let session_routes = axum::Router::new()
         .route("/api/mutate", post(mutate))
-        .route("/api/test", post(test_fn))
         .route("/api/status", get(status))
         .route("/api/program", get(program))
         .route("/api/history", post(history))
@@ -2157,6 +2191,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
 
     let config_routes = axum::Router::new()
         .route("/api/eval", post(eval_fn))
+        .route("/api/test", post(test_fn))
         .route("/api/query", post(query))
         .route("/api/ask", post(ask))
         .route("/api/ask-stream", post(ask_stream))

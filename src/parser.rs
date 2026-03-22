@@ -389,8 +389,8 @@ impl<'a> Parser<'a> {
                 bail!("line {}: unexpected indentation", line.number);
             }
 
-            // Skip stray `end` tokens (LLMs often add these after test blocks)
-            if line.text == "end" {
+            // Skip stray `end` / `+end` tokens (LLMs often add these to close blocks)
+            if line.text == "end" || line.text == "+end" {
                 self.index += 1;
                 continue;
             }
@@ -962,21 +962,20 @@ impl<'a> Parser<'a> {
         let child_indent = self.child_indent(module_indent);
 
         while let Some(line) = self.current() {
-            if line.indent == module_indent && line.text == "end" {
+            // end / +end closes the module (optional — de-indent also works)
+            if line.indent <= module_indent && (line.text == "end" || line.text == "+end") {
                 self.index += 1;
                 return Ok(ops);
             }
 
-            let Some(indent) = child_indent else {
-                bail!(
-                    "line {}: expected `end` after module declaration",
-                    line.number
-                );
-            };
-
-            if line.indent < indent {
-                bail!("line {}: module block is missing `end`", line.number);
+            // De-indent back to module level or less = module body ended (no end needed)
+            if line.indent <= module_indent {
+                return Ok(ops);
             }
+
+            let Some(indent) = child_indent else {
+                return Ok(ops);
+            };
 
             if line.indent != indent {
                 bail!("line {}: unexpected indentation inside module", line.number);
