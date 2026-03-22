@@ -1456,12 +1456,29 @@ pub async fn ask_stream(
             let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
             log_activity(&config_clone.log_file, "iter", &format!("iteration {}/{}", iteration + 1, max_iterations)).await;
 
-            let output = match llm.generate(messages.clone()).await {
-                Ok(o) => o,
-                Err(e) => {
-                    log_activity(&config_clone.log_file, "llm-error", &format!("{e}")).await;
-                    let _ = tx.send(serde_json::json!({"type": "error", "message": format!("{e}")})).await;
-                    break;
+            // Retry LLM calls on transient errors (network, timeout)
+            let output = {
+                let mut last_err = String::new();
+                let mut result = None;
+                for retry in 0..3 {
+                    match llm.generate(messages.clone()).await {
+                        Ok(o) => { result = Some(o); break; }
+                        Err(e) => {
+                            last_err = format!("{e}");
+                            log_activity(&config_clone.log_file, "llm-error", &format!("attempt {}/{}: {e}", retry + 1, 3)).await;
+                            if retry < 2 {
+                                let _ = tx.send(serde_json::json!({"type": "error", "message": format!("LLM error (retrying): {e}")})).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(5 * (retry as u64 + 1))).await;
+                            }
+                        }
+                    }
+                }
+                match result {
+                    Some(o) => o,
+                    None => {
+                        let _ = tx.send(serde_json::json!({"type": "error", "message": format!("LLM failed after 3 retries: {last_err}")})).await;
+                        break;
+                    }
                 }
             };
 
