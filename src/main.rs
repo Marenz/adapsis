@@ -189,6 +189,15 @@ enum Command {
         /// Daemonize: fork to background after server is ready
         #[arg(short, long)]
         daemonize: bool,
+
+        /// Autonomous mode: inject a goal and let the AI work without user input.
+        /// Pass a goal string, or "roadmap" to use the current priority from ROADMAP.md.
+        #[arg(long)]
+        autonomous: Option<String>,
+
+        /// Log file for structured AI activity logging (what it sees, thinks, does)
+        #[arg(long, default_value = "forgeos.log")]
+        log_file: String,
     },
 
     /// Send a message to a running ForgeOS instance
@@ -634,7 +643,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file } => {
             let session_path = std::path::Path::new(&session);
             let sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -745,6 +754,14 @@ async fn main() -> Result<()> {
             // Self-trigger channel: events feed back into the AI
             let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<String>(32);
 
+            // Set up structured log file
+            let ai_log = {
+                let f = tokio::fs::OpenOptions::new()
+                    .create(true).append(true)
+                    .open(&log_file).await?;
+                Some(std::sync::Arc::new(tokio::sync::Mutex::new(f)))
+            };
+
             let config = api::AppConfig {
                 session: shared_session.clone(),
                 llm_url: url.clone(),
@@ -754,6 +771,7 @@ async fn main() -> Result<()> {
                 io_sender: Some(io_sender),
                 self_trigger: trigger_tx,
                 task_registry: Some(runtime.task_registry.clone()),
+                log_file: ai_log,
             };
 
             let app = axum::Router::new()
@@ -869,6 +887,65 @@ async fn main() -> Result<()> {
                     }
                 }
             });
+
+            // Autonomous mode: inject goal as the first message after startup
+            if let Some(goal) = autonomous {
+                let goal_message = if goal == "roadmap" {
+                    // Read the current priority from ROADMAP.md
+                    let roadmap_path = format!("{}/ROADMAP.md", project_dir);
+                    match std::fs::read_to_string(&roadmap_path) {
+                        Ok(content) => format!(
+                            "You are running in autonomous mode. Here is the project roadmap:\n\n{}\n\n\
+                             Work on the current priority (the first item under 'In Progress' or the top of 'Next Targets'). \
+                             Create a plan, then start building. Use !opencode when you need Rust-level changes. \
+                             Keep going until the goal is complete or you get stuck and need user input.",
+                            content
+                        ),
+                        Err(_) => "You are running in autonomous mode. Identify the most impactful improvement you can make to ForgeOS and start working on it.".to_string(),
+                    }
+                } else {
+                    format!(
+                        "You are running in autonomous mode. Your goal:\n\n{}\n\n\
+                         Create a plan, then start building. Use !opencode when you need Rust-level changes. \
+                         Keep going until the goal is complete or you get stuck and need user input.",
+                        goal
+                    )
+                };
+
+                eprintln!("[autonomous] injecting goal: {}...", goal_message.chars().take(100).collect::<String>());
+                let auto_port = port;
+                tokio::spawn(async move {
+                    // Wait for the server to be ready
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let client = reqwest::Client::new();
+                    match client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
+                        .json(&serde_json::json!({"message": goal_message}))
+                        .send().await
+                    {
+                        Ok(resp) => {
+                            // Stream the response to log it
+                            use futures::StreamExt;
+                            let mut stream = resp.bytes_stream();
+                            while let Some(chunk) = stream.next().await {
+                                if let Ok(bytes) = chunk {
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    // SSE events are logged via the handler, just consume them
+                                    for line in text.lines() {
+                                        if let Some(data) = line.strip_prefix("data: ") {
+                                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                                if event.get("type").and_then(|t| t.as_str()) == Some("end") {
+                                                    eprintln!("[autonomous] first goal iteration complete");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("[autonomous] failed to inject goal: {e}"),
+                    }
+                });
+            }
 
             axum::serve(listener, app).await?;
         }

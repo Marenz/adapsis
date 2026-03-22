@@ -38,6 +38,8 @@ pub struct AppConfig {
     pub self_trigger: tokio::sync::mpsc::Sender<String>,
     /// Task registry for tracking spawned async tasks
     pub task_registry: Option<crate::coroutine::TaskRegistry>,
+    /// Structured log file for AI activity
+    pub log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 }
 
 #[derive(Deserialize)]
@@ -582,6 +584,22 @@ pub struct AskResponse {
     pub results: Vec<MutationResult>,
     pub test_results: Vec<TestCaseResult>,
     pub has_errors: bool,
+}
+
+/// Write a structured log entry to the AI activity log.
+async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>, event: &str, detail: &str) {
+    if let Some(f) = log_file {
+        use tokio::io::AsyncWriteExt;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let line = format!("[{ts}] [{event}] {}\n", detail.replace('\n', "\n  | "));
+        let mut f = f.lock().await;
+        let _ = f.write_all(line.as_bytes()).await;
+        let _ = f.flush().await;
+    }
+    // Also print to stderr for terminal visibility
+    let preview: String = detail.chars().take(200).collect();
+    eprintln!("[{event}] {preview}");
 }
 
 /// Format the task registry for display.
@@ -1379,6 +1397,7 @@ pub async fn ask_stream(
                 config_clone.project_dir,
                 crate::validator::program_summary_compact(&session.program),
                 plan_ctx, req.message, plan_hint);
+            log_activity(&config_clone.log_file, "user", &context).await;
             session.chat_messages.push(crate::session::ChatMessage {
                 role: "user".to_string(), content: context,
             });
@@ -1391,10 +1410,12 @@ pub async fn ask_stream(
 
         for iteration in 0..10 {
             let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
+            log_activity(&config_clone.log_file, "iter", &format!("iteration {}/10", iteration + 1)).await;
 
             let output = match llm.generate(messages.clone()).await {
                 Ok(o) => o,
                 Err(e) => {
+                    log_activity(&config_clone.log_file, "llm-error", &format!("{e}")).await;
                     let _ = tx.send(serde_json::json!({"type": "error", "message": format!("{e}")})).await;
                     break;
                 }
@@ -1403,6 +1424,7 @@ pub async fn ask_stream(
             messages.push(crate::llm::ChatMessage::assistant(&output.text));
 
             if !output.thinking.is_empty() {
+                log_activity(&config_clone.log_file, "think", &output.thinking).await;
                 let _ = tx.send(serde_json::json!({"type": "thinking", "text": output.thinking})).await;
             }
 
@@ -1417,10 +1439,12 @@ pub async fn ask_stream(
 
             let code = output.code.clone();
             if code.trim() == "DONE" || code.is_empty() {
+                log_activity(&config_clone.log_file, "done", &format!("AI said DONE at iteration {}", iteration + 1)).await;
                 let _ = tx.send(serde_json::json!({"type": "done"})).await;
                 break;
             }
 
+            log_activity(&config_clone.log_file, "code", &code).await;
             let _ = tx.send(serde_json::json!({"type": "code", "code": code})).await;
 
             // Apply code
@@ -1683,6 +1707,7 @@ pub async fn ask_stream(
                     "Results:\n{}\n\nThere were errors. Fix them and continue.",
                     feedback_details.join("\n")
                 );
+                log_activity(&config_clone.log_file, "feedback", &feedback).await;
                 messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
                 let feedback = if feedback_details.is_empty() {
@@ -1693,6 +1718,7 @@ pub async fn ask_stream(
                         feedback_details.join("\n")
                     )
                 };
+                log_activity(&config_clone.log_file, "feedback", &feedback).await;
                 messages.push(crate::llm::ChatMessage::user(feedback));
             }
         }
@@ -1731,9 +1757,31 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/ask-stream", post(ask_stream))
         .route("/api/opencode", post(opencode_task))
         .route("/api/tasks", get(tasks))
+        .route("/api/log", get(get_log))
         .with_state(config);
 
     session_routes.merge(config_routes)
+}
+
+/// GET /api/log?tail=N — get recent log entries.
+async fn get_log(
+    State(config): State<AppConfig>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> String {
+    let tail = params.get("tail").and_then(|t| t.parse::<usize>().ok()).unwrap_or(50);
+    if let Some(log) = &config.log_file {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut f = log.lock().await;
+        let _ = f.seek(std::io::SeekFrom::Start(0)).await;
+        let mut content = String::new();
+        let _ = f.read_to_string(&mut content).await;
+        // Return last N lines
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(tail);
+        lines[start..].join("\n")
+    } else {
+        "No log file configured.".to_string()
+    }
 }
 
 /// GET /api/tasks — list all spawned async tasks and their status.

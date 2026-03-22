@@ -17,6 +17,7 @@ program state, a plan, and works toward goals — both user-directed and self-in
 - It maintains a plan and works through it step by step
 - Agents communicate via `!msg` / `?inbox`
 - All mutations are logged, rewindable, inspectable
+- `--autonomous` flag: inject a goal and let the AI work without user input
 
 This is the default `forge os` mode.
 
@@ -46,6 +47,19 @@ No runtime, no mutation protocol, no LLM — just a compiled executable.
 
 The flow: Agentic mode → build and iterate → Compiled mode → deploy.
 
+## Current Priority: Telegram Bot
+
+The first autonomous goal. The AI should build a Telegram bot entirely in Forge:
+
+- Use the async IO system (TCP, HTTP requests via shell/builtins)
+- Connect to the Telegram Bot API (HTTP long polling or webhooks)
+- Handle messages, respond with AI-generated content
+- Persist state across restarts via session
+- If missing builtins are needed (HTTP client, JSON parsing), use `!opencode` to add them
+
+This exercises the full stack: async IO, LLM calls, self-extension, error handling,
+and proves ForgeOS can build real-world applications autonomously.
+
 ## Self-Enhancement Roadmap
 
 The AI inside ForgeOS should be working toward making itself better. The loop:
@@ -56,25 +70,36 @@ The AI inside ForgeOS should be working toward making itself better. The loop:
 4. **After rebuild, verify the new capability works** — write a test, eval it
 5. **Document what changed** — update the prompt, add to the registry
 
-### Current capabilities (what works)
-- Full language: types, functions, pattern matching, effects, modules
-- Async IO: TCP, files, shell, stdin, LLM calls
-- Coroutine runtime with task registry and wait-reason tracking
-- Multi-agent with scoped branches, message bus
-- Self-extension via `!opencode` → OpenCode → cargo build → exec restart
-- Cranelift JIT for Int/Float/Bool/String/Struct
-- 118 test cases, 12 e2e tests
-- HTTP API + SSE streaming + web UI
+### Done
+- [x] Full language: types, functions, pattern matching, effects, modules
+- [x] Async IO: TCP, files, shell, stdin, LLM calls
+- [x] Coroutine runtime with task registry and wait-reason tracking
+- [x] Multi-agent with scoped branches
+- [x] Agent-to-agent messaging (`!msg` / `?inbox`)
+- [x] Self-extension via `!opencode` → OpenCode → cargo build → exec restart
+- [x] Cranelift JIT for Int/Float/Bool/String/Struct
+- [x] HTTP API + SSE streaming + web UI
+- [x] Plan management with auto-numbering, plan pinned to chat
+- [x] AI feedback loop: full eval/test/mutation results fed back to LLM
+- [x] `+spawn` returns task handle, tasks trackable via `?tasks`
+- [x] ForgeOS identity prompt: AI knows it's a self-improving system
+- [x] Three modes documented
+- [x] 118 unit tests, 12 e2e tests
 
-### Missing / next targets
-- **AOT compilation** — freeze program to standalone binary (Compiled mode)
-- **Adaptive mode** — `--load` flag, hot-patching running programs
-- **Provenance tracking** — who wrote what, when, why (design doc Phase 7)
-- **Grammar constraints** — GBNF for guaranteed syntactically valid output
-- **LoRA fine-tuning** — train a model specifically on Forge
-- **Self-hosting** — Forge parser/evaluator written in Forge (design doc Phase 8)
-- **Agent-to-agent direct communication** — beyond message bus, shared state
-- **`!config` command** — per-task model selection, temperature, etc.
+### In Progress
+- [ ] **Autonomous mode** — `--autonomous` flag, goal injection, structured logging
+- [ ] **Telegram bot** — first real-world autonomous build target
+
+### Next Targets (priority order)
+1. **HTTP client builtin** — needed for Telegram API, currently only TCP raw sockets
+2. **JSON parsing builtin** — needed for any API interaction
+3. **`!config` command** — per-task model selection, temperature
+4. **AOT compilation** — freeze program to standalone binary (Compiled mode)
+5. **Adaptive mode** — `--load` flag, hot-patching running programs
+6. **Provenance tracking** — who wrote what, when, why (design doc Phase 7)
+7. **Grammar constraints** — GBNF for guaranteed syntactically valid output
+8. **LoRA fine-tuning** — train a model specifically on Forge
+9. **Self-hosting** — Forge parser/evaluator written in Forge (design doc Phase 8)
 
 ## Post-Self-Hosting Goal: AI-in-the-Loop
 
