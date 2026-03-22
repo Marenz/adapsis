@@ -912,7 +912,20 @@ async fn main() -> Result<()> {
             });
 
             // Autonomous mode: inject goal as the first message after startup
+            // Skip if session already has chat history (e.g. after !opencode restart)
+            let session_has_history = shared_session.lock().await.chat_messages.len() > 1;
             if let Some(goal) = autonomous {
+                if session_has_history {
+                    eprintln!("[autonomous] session has history, injecting continue message instead of full goal");
+                    let auto_port = port;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let client = reqwest::Client::new();
+                        let _ = client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
+                            .json(&serde_json::json!({"message": "ForgeOS was restarted after an !opencode change. The runtime has been updated. Continue where you left off — check ?symbols and ?tasks, then keep working on your plan."}))
+                            .send().await;
+                    });
+                } else {
                 let goal_message = if goal == "roadmap" {
                     // Read the current priority from ROADMAP.md
                     let roadmap_path = format!("{}/ROADMAP.md", project_dir);
@@ -968,6 +981,7 @@ async fn main() -> Result<()> {
                         Err(e) => eprintln!("[autonomous] failed to inject goal: {e}"),
                     }
                 });
+                } // else (fresh session)
             }
 
             match axum::serve(listener, app).await {
