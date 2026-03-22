@@ -11,6 +11,7 @@
   +set result = push(result, val)
   +set result = push(result, pos)
   +return result
++end
 
 +fn skip_spaces (input:String, pos:Int)->Int
   +while pos < input.len
@@ -19,7 +20,10 @@
       +set pos = pos + 1
     +else
       +return pos
+    +end
+  +end
   +return pos
++end
 
 +fn parse_number (input:String, pos:Int)->List<Int>
   +set pos = skip_spaces(input, pos)
@@ -33,7 +37,10 @@
       +set found = true
     +else
       +return make_pair(result, pos)
+    +end
+  +end
   +return make_pair(result, pos)
++end
 
 // For returning (Expr, pos), we abuse a trick:
 // Store the Expr in a global-ish variable and return just the pos.
@@ -47,6 +54,7 @@
   +let num:Int = get(num_result, 0)
   +let new_pos:Int = get(num_result, 1)
   +return {expr: Literal(num), pos: new_pos}
++end
 
 +fn parse_term (input:String, pos:Int)->ParseResult
   +let left_result:ParseResult = parse_atom(input, pos)
@@ -63,7 +71,10 @@
       +set pos = skip_spaces(input, pos)
     +else
       +return {expr: left, pos: pos}
+    +end
+  +end
   +return {expr: left, pos: pos}
++end
 
 +fn parse_expr_at (input:String, pos:Int)->ParseResult
   +let left_result:ParseResult = parse_term(input, pos)
@@ -86,11 +97,15 @@
       +set pos = skip_spaces(input, pos)
     +else
       +return {expr: left, pos: pos}
+    +end
+  +end
   +return {expr: left, pos: pos}
++end
 
 +fn parse (input:String)->Expr
   +let result:ParseResult = parse_expr_at(input, 0)
   +return result.expr
++end
 
 +fn eval_expr (e:Expr)->Int
   +match e
@@ -108,11 +123,14 @@
     +let l:Int = eval_expr(left)
     +let r:Int = eval_expr(right)
     +return l * r
+  +end
++end
 
 // Parse and evaluate in one step
 +fn calc (input:String)->Int
   +let expr:Expr = parse(input)
   +return eval_expr(expr)
++end
 
 !eval parse "42"
 !eval parse "1+2"

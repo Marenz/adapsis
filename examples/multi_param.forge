@@ -3,6 +3,7 @@
 
 +fn create_user (req:CreateRequest, id:Int)->User
   +return {id: id, name: req.name, email: req.email}
++end
 
 !test create_user
   +with name="alice" email="a@b.com" id=1 -> expect {id: 1, name: "alice", email: "a@b.com"}

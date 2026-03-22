@@ -6,33 +6,40 @@
   +check not_empty addr.len>0 ~err_empty_email
   +check min_len addr.len>=3 ~err_email_too_short
   +return {address: addr}
++end
 
 +fn validate_name (name:String)->Result<String> [fail]
   +check not_empty name.len>0 ~err_empty_name
   +check min_len name.len>=2 ~err_name_too_short
   +return name
++end
 
 +fn validate_age (age:Int)->Result<Int> [fail]
   +check min age>=0 ~err_negative_age
   +check max age<=150 ~err_age_too_high
   +check adult age>=18 ~err_too_young
   +return age
++end
 
 +fn create_user (req:CreateRequest)->Result<User> [fail]
   +call valid_name:String = validate_name(req.name)
   +call valid_email:Email = validate_email(req.email_address)
   +call valid_age:Int = validate_age(req.age)
   +return {name: valid_name, email: valid_email, age: valid_age, role: "user"}
++end
 
 +fn is_admin (user:User)->Bool
   +if user.role == "admin"
     +return true
   +else
     +return false
+  +end
++end
 
 +fn format_greeting (user:User)->String
   +let greeting:String = concat("Welcome, ", user.name)
   +return greeting
++end
 
 +fn classify_user (user:User)->String
   +if user.age < 25
@@ -41,12 +48,16 @@
     +return "regular"
   +else
     +return "senior"
+  +end
++end
 
 +fn is_valid_age (age:Int)->Bool
   +if age >= 0 AND age <= 150
     +return true
   +else
     +return false
+  +end
++end
 
 !test validate_email
   +with "alice@example.com" -> expect Ok

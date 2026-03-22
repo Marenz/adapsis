@@ -15,7 +15,10 @@
       +set pos = pos + 1
     +else
       +return pos
+    +end
+  +end
   +return pos
++end
 
 +fn parse_number (input:String, pos:Int)->ParseResult
   +set pos = skip_spaces(input, pos)
@@ -27,13 +30,18 @@
       +set pos = pos + 1
     +else
       +return {expr: Literal(result), pos: pos}
+    +end
+  +end
   +return {expr: Literal(result), pos: pos}
++end
 
 +fn is_ident_char (ch:String)->Bool
   +if index_of("abcdefghijklmnopqrstuvwxyz_", ch) >= 0
     +return true
   +else
     +return false
+  +end
++end
 
 +fn parse_ident (input:String, pos:Int)->List<String>
   +set pos = skip_spaces(input, pos)
@@ -45,7 +53,10 @@
       +set pos = pos + 1
     +else
       +return push(push(list(), name), to_string(pos))
+    +end
+  +end
   +return push(push(list(), name), to_string(pos))
++end
 
 // === Expression parser (precedence climbing) ===
 +fn parse_atom (input:String, pos:Int)->ParseResult
@@ -60,6 +71,8 @@
     +return {expr: Var(name), pos: new_pos}
   +else
     +return {expr: Literal(0), pos: pos}
+  +end
++end
 
 +fn parse_term (input:String, pos:Int)->ParseResult
   +let left_result:ParseResult = parse_atom(input, pos)
@@ -76,7 +89,10 @@
       +set pos = skip_spaces(input, pos)
     +else
       +return {expr: left, pos: pos}
+    +end
+  +end
   +return {expr: left, pos: pos}
++end
 
 +fn parse_expr (input:String, pos:Int)->ParseResult
   +let left_result:ParseResult = parse_term(input, pos)
@@ -99,7 +115,10 @@
       +set pos = skip_spaces(input, pos)
     +else
       +return {expr: left, pos: pos}
+    +end
+  +end
   +return {expr: left, pos: pos}
++end
 
 // === Statement parser ===
 +fn parse_let (input:String, pos:Int)->StmtResult
@@ -113,19 +132,24 @@
     +return {stmt: LetStmt(name, expr_result.expr), pos: expr_result.pos}
   +else
     +return {stmt: LetStmt(name, Literal(0)), pos: pos}
+  +end
++end
 
 +fn parse_return (input:String, pos:Int)->StmtResult
   +let expr_result:ParseResult = parse_expr(input, pos)
   +return {stmt: ReturnStmt(expr_result.expr), pos: expr_result.pos}
++end
 
 // === Evaluator ===
 +type Env = {vars:List<String>, vals:List<Int>}
 
 +fn empty_env ()->Env
   +return {vars: list(), vals: list()}
++end
 
 +fn env_set (env:Env, name:String, val:Int)->Env
   +return {vars: push(env.vars, name), vals: push(env.vals, val)}
++end
 
 +fn env_get (env:Env, name:String)->Int
   +let i:Int = env.vars.len - 1
@@ -134,7 +158,10 @@
       +return get(env.vals, i)
     +else
       +set i = i - 1
+    +end
+  +end
   +return 0
++end
 
 +fn eval_e (env:Env, e:Expr)->Int
   +match e
@@ -154,6 +181,8 @@
     +let l:Int = eval_e(env, left)
     +let r:Int = eval_e(env, right)
     +return l * r
+  +end
++end
 
 +fn eval_stmt (env:Env, s:Stmt)->List<String>
   +match s
@@ -164,6 +193,8 @@
   +case ReturnStmt(expr)
     +let val:Int = eval_e(env, expr)
     +return push(push(list(), "return"), to_string(val))
+  +end
++end
 
 // === End-to-end: parse a let statement, then parse a return using the var ===
 +fn run_two_stmts (let_line:String, return_line:String)->Int
@@ -175,12 +206,15 @@
     +set env = env_set(env, name, val)
   +case _
     +let dummy:Int = 0
+  +end
   +let ret_result:StmtResult = parse_return(return_line, 0)
   +match ret_result.stmt
   +case ReturnStmt(expr)
     +return eval_e(env, expr)
   +case _
     +return 0
+  +end
++end
 
 // Test: parse "x = 10 + 5" then "x * 2" -> should be 30
 !eval run_two_stmts let_line="x = 10 + 5" return_line="x * 2"

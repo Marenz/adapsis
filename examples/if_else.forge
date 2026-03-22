@@ -7,6 +7,8 @@
     +return "adult"
   +else
     +return "senior"
+  +end
++end
 
 !test classify_age
   +with 5 -> expect "child"
