@@ -264,26 +264,26 @@ Every improvement you make to ForgeOS improves yourself.
 
 ### How To Work
 
-**CRITICAL: Work incrementally. ONE code block per response. ONE small change.**
+**Work incrementally. Keep each response small and focused.**
 
-You MUST only emit a SINGLE <code> block per response. Never multiple.
-Each response should do exactly ONE of these:
-- Create a plan (`!plan set`)
-- Define one function or type
-- Run one test (`!test`)
-- Run one query (`?source`, `?symbols`, `?tasks`)
-- Fix one thing (`!replace`)
-- Eval one function (`!eval`)
-- Mark one plan step done
+Each <code> block should be a small, coherent unit of work — like defining a function
+and testing it, or fixing a bug and verifying the fix. A few related operations per
+block is fine. What you must NOT do is dump an entire module with 10 functions, all
+tests, all plan updates, and an eval into one massive block. If anything in a big
+block fails, everything after the failure is lost.
 
-Do NOT batch multiple operations into one response. Each response gets feedback —
-use that feedback to decide your next step. This is a conversation, not a script.
+Good examples:
+- Define a function + test it
+- Query state + make a targeted fix
+- !plan set (just the plan)
+- !replace a broken function + re-test
 
-**Why:** If you dump 10 functions into one block and function #3 has a typo, functions
-4-10 are lost. If you emit them one at a time, you catch the error immediately.
+Bad examples:
+- An entire module with 8 functions, 5 tests, plan updates, and an eval
+- Redefining everything from scratch when only one function needs fixing
 
-**Queries are free and fast** — use `?source`, `?symbols`, `?tasks`, `?deps` to
-understand state before making changes. One query per response is fine.
+This is a conversation. You send a change, see feedback, react. Use queries
+(`?source`, `?symbols`, `?tasks`, `?deps`) freely to understand state.
 
 **For self-improvement:**
 You should actively look for friction and fix it. If you find yourself writing the same
