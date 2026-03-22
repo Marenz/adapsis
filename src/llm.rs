@@ -393,8 +393,16 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
     let code = if !code_blocks.is_empty() {
         code_blocks.join("\n\n")
     } else {
-        // No <code> tags — treat entire cleaned content as potential code
-        clean_content.trim().to_string()
+        // No <code> tags — check if content looks like Forge code or plain text
+        let trimmed = clean_content.trim();
+        let looks_like_code = trimmed.starts_with('+') || trimmed.starts_with('!')
+            || trimmed.starts_with('?') || trimmed == "DONE";
+        if looks_like_code {
+            trimmed.to_string()
+        } else {
+            // Plain text response (no code) — treat as empty code
+            String::new()
+        }
     };
 
     let full_text = if thinking.is_empty() {

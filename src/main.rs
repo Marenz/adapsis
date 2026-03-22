@@ -952,7 +952,10 @@ async fn main() -> Result<()> {
                 });
             }
 
-            axum::serve(listener, app).await?;
+            match axum::serve(listener, app).await {
+                Ok(()) => eprintln!("[forge] server exited cleanly"),
+                Err(e) => eprintln!("[forge] server error: {e}"),
+            }
         }
         Command::Ask { message, api } => {
             let msg = message.join(" ");
