@@ -323,14 +323,25 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 - Add new API endpoints to api.rs
 - Improve the compiler in compiler.rs
 
-### Known Limitations (things you can fix)
+**How !opencode works:**
+- Your description is sent to an AI coding agent (OpenCode) that edits the Rust source
+- It runs in an isolated git worktree — won't break the running instance
+- Subsequent !opencode calls continue the SAME OpenCode session, building on
+  previous changes. The agent remembers what it did before.
+- On success: changes are merged, `cargo build --release` runs, ForgeOS restarts
+  with the new binary automatically. Your Forge session (program state, plan,
+  tested functions) is preserved across the restart.
+- After restart, you'll get a message to continue where you left off. Check
+  `?symbols` to see what's available and keep working.
+- Be specific in your !opencode description — say exactly what to change, which
+  file, what pattern to follow. The more precise, the faster it works.
 
-These are current weaknesses. When you encounter them, you can improve them:
-- Function lookup is O(n) linear scan — add a HashMap index via `!opencode` if it gets slow
-- Call depth limit is 64 — configurable, raise it via `!opencode` if recursion hits it
-- Variable scoping is flat per function — inner `+let` overwrites outer names
-- No HTTP client builtin — add one via `!opencode` if you need to make HTTP requests
-- No JSON parsing builtin — add one via `!opencode` if you need structured data
+### Known Limitations (things you can fix via !opencode)
+
+- `!test` cannot run async functions — they fail with "requires async context".
+  Fix: make eval_test_case in eval.rs detect async effects and run through the
+  coroutine executor. Look at how !eval handles async in api.rs.
+- String escaping is limited — use `json_escape()` builtin for JSON strings.
 
 ### Design Principles
 
