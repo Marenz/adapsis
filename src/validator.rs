@@ -74,6 +74,8 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::Agent { .. } => Ok("agent (handled by orchestrator)".to_string()),
         parser::Operation::OpenCode(_) => Ok("opencode (handled by orchestrator)".to_string()),
         parser::Operation::Message { .. } => Ok("message (handled by orchestrator)".to_string()),
+        parser::Operation::Mock { .. } => Ok("mock (handled by session)".to_string()),
+        parser::Operation::Unmock => Ok("unmock (handled by session)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements at top level — execute immediately (not stored in AST)
         parser::Operation::Let(_)

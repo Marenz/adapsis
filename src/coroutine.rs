@@ -438,15 +438,23 @@ pub struct CoroutineHandle {
     pub task_id: Option<TaskId>,
     /// Shared task registry for updating wait reasons.
     task_registry: Option<TaskRegistry>,
+    /// Mock responses for testing — if set, IO calls check here first.
+    mocks: Option<Vec<crate::session::IoMock>>,
 }
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None }
+        Self { io_tx, task_id: None, task_registry: None, mocks: None }
     }
 
     pub fn new_with_task(io_tx: mpsc::Sender<IoRequest>, task_id: TaskId, registry: TaskRegistry) -> Self {
-        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry) }
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), mocks: None }
+    }
+
+    /// Create a mock handle for testing — no real IO, returns mock responses.
+    pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
+        let (tx, _) = mpsc::channel(1); // dummy channel, never used
+        Self { io_tx: tx, task_id: None, task_registry: None, mocks: Some(mocks) }
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
@@ -488,6 +496,20 @@ impl CoroutineHandle {
     /// This is called from the synchronous evaluator, so we use block_on
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
+        // Check mock table first — if a mock matches, return it without real IO
+        if let Some(mocks) = &self.mocks {
+            let arg_str = args.iter().map(|a| format!("{a}")).collect::<Vec<_>>().join(" ");
+            for mock in mocks {
+                if mock.operation == op && arg_str.contains(&mock.pattern) {
+                    return Ok(Value::String(mock.response.clone()));
+                }
+            }
+            // No mock matched — for mock-only handles, return an error
+            if self.io_tx.is_closed() {
+                bail!("no mock for {op}({arg_str}) — add !mock {op} \"<pattern>\" -> \"<response>\"");
+            }
+        }
+
         let op = op.to_string();
         let args: Vec<Value> = args.to_vec();
 

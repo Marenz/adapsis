@@ -572,6 +572,16 @@ pub static ACTIONS: &[ActionCommand] = &[
         description: "spawn background agent (scopes: read-only, new-only, module X, full)",
     },
     ActionCommand {
+        name: "!mock",
+        args: "<operation> \"<pattern>\" -> \"<response>\"",
+        description: "register mock IO response for testing. During !test, IO calls matching the pattern return the mock instead of real IO.",
+    },
+    ActionCommand {
+        name: "!unmock",
+        args: "",
+        description: "clear all IO mocks",
+    },
+    ActionCommand {
         name: "!msg",
         args: "<agent> <message>",
         description: "send a message to an agent (or 'main' for the main session). Agents see messages in their feedback.",

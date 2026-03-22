@@ -92,6 +92,17 @@ pub struct Session {
     /// OpenCode session ID — reused across !opencode calls to maintain context
     #[serde(default)]
     pub opencode_session_id: Option<String>,
+    /// IO mock table: (operation, url_pattern) -> response. Used during !test.
+    #[serde(default)]
+    pub io_mocks: Vec<IoMock>,
+}
+
+/// A mock IO response — matches operation + URL prefix, returns a fixed value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoMock {
+    pub operation: String, // e.g. "http_get", "http_post", "llm_call"
+    pub pattern: String,   // URL/arg prefix to match
+    pub response: String,  // value to return
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -299,6 +310,7 @@ impl Session {
             agent_mailbox: HashMap::new(),
             tested_functions: std::collections::HashSet::new(),
             opencode_session_id: None,
+            io_mocks: Vec::new(),
         }
     }
 
@@ -409,6 +421,29 @@ impl Session {
                         ));
                     }
                 },
+                parser::Operation::Mock {
+                    operation,
+                    pattern,
+                    response,
+                } => {
+                    self.io_mocks.push(IoMock {
+                        operation: operation.clone(),
+                        pattern: pattern.clone(),
+                        response: response.clone(),
+                    });
+                    results.push((
+                        format!(
+                            "mock: {operation} \"{pattern}\" -> \"{}\"",
+                            response.chars().take(50).collect::<String>()
+                        ),
+                        true,
+                    ));
+                }
+                parser::Operation::Unmock => {
+                    let count = self.io_mocks.len();
+                    self.io_mocks.clear();
+                    results.push((format!("cleared {count} mocks"), true));
+                }
                 _ => {
                     any_definition = true;
                     match validator::apply_and_validate(&mut self.program, op) {

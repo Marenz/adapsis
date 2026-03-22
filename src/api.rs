@@ -258,7 +258,7 @@ pub async fn test_fn(
     for op in &operations {
         if let parser::Operation::Test(test) = op {
             for case in &test.cases {
-                match eval::eval_test_case(&session.program, &test.function_name, case) {
+                match eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
                     Ok(msg) => {
                         passed += 1;
                         results.push(TestCaseResult {
@@ -911,7 +911,7 @@ pub async fn ask(
                         crate::parser::Operation::Test(test) => {
                             let mut all_passed = true;
                             for case in &test.cases {
-                                match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
+                                match crate::eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
                                     Ok(msg) => { eprintln!("[web:pass] {msg}"); iter_test_results.push(TestCaseResult { message: msg, pass: true }); }
                                     Err(e) => { all_passed = false; eprintln!("[web:fail] {e}"); iter_has_errors = true; iter_test_results.push(TestCaseResult { message: format!("{e}"), pass: false }); }
                                 }
@@ -1667,7 +1667,7 @@ pub async fn ask_stream(
                             crate::parser::Operation::Test(test) => {
                                 let mut all_passed = true;
                                 for case in &test.cases {
-                                    match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
+                                    match crate::eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
                                         Ok(msg) => {
                                             feedback_details.push(format!("PASS: {msg}"));
                                             let _ = tx.send(serde_json::json!({"type": "test", "pass": true, "message": msg})).await;
@@ -1816,6 +1816,19 @@ pub async fn ask_stream(
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": format!("statement error: {e}"), "success": false})).await;
                                     }
                                 }
+                            }
+                            crate::parser::Operation::Mock { operation, pattern, response } => {
+                                session.io_mocks.push(crate::session::IoMock {
+                                    operation: operation.clone(), pattern: pattern.clone(), response: response.clone(),
+                                });
+                                feedback_details.push(format!("mock: {operation} \"{pattern}\""));
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} \"{pattern}\""), "success": true})).await;
+                            }
+                            crate::parser::Operation::Unmock => {
+                                let count = session.io_mocks.len();
+                                session.io_mocks.clear();
+                                feedback_details.push(format!("cleared {count} mocks"));
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("cleared {count} mocks"), "success": true})).await;
                             }
                             crate::parser::Operation::Message { to, content } => {
                                 eprintln!("[web:msg] → {to}: {content}");

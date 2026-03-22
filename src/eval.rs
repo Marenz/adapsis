@@ -588,6 +588,15 @@ pub fn eval_test_case(
     function_name: &str,
     case: &parser::TestCase,
 ) -> Result<String> {
+    eval_test_case_with_mocks(program, function_name, case, &[])
+}
+
+pub fn eval_test_case_with_mocks(
+    program: &ast::Program,
+    function_name: &str,
+    case: &parser::TestCase,
+    mocks: &[crate::session::IoMock],
+) -> Result<String> {
     let func = program
         .get_function(function_name)
         .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
@@ -596,6 +605,17 @@ pub fn eval_test_case(
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
     let mut env = Env::new();
+
+    // If function has async effects and we have mocks, set up a mock coroutine handle
+    let has_async = func
+        .effects
+        .iter()
+        .any(|e| matches!(e, ast::Effect::Async | ast::Effect::Io));
+    if has_async && !mocks.is_empty() {
+        let handle = crate::coroutine::CoroutineHandle::new_mock(mocks.to_vec());
+        env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    }
+
     bind_input_to_params(program, func, &input, &mut env);
 
     // Execute function body

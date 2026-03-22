@@ -51,6 +51,14 @@ pub enum Operation {
         to: String,
         content: String,
     },
+    /// Register IO mock: !mock <operation> "<pattern>" -> "<response>"
+    Mock {
+        operation: String,
+        pattern: String,
+        response: String,
+    },
+    /// Clear all mocks: !unmock
+    Unmock,
     /// Check inbox: ?inbox [agent_name]
     Query(String),
 }
@@ -795,6 +803,38 @@ impl<'a> Parser<'a> {
                 to: to.to_string(),
                 content: content.trim().to_string(),
             });
+        }
+
+        if text.trim() == "!unmock" {
+            self.index += 1;
+            return Ok(Operation::Unmock);
+        }
+
+        if let Some(rest) = text.strip_prefix("!mock") {
+            // !mock http_get "https://..." -> "response"
+            let rest = rest.trim();
+            let (operation, rest) = rest.split_once(' ').ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected !mock <operation> \"<pattern>\" -> \"<response>\"",
+                    line.number
+                )
+            })?;
+            let rest = rest.trim();
+            // Parse: "pattern" -> "response"
+            if let Some(arrow_pos) = rest.find("->") {
+                let pattern_part = rest[..arrow_pos].trim().trim_matches('"');
+                let response_part = rest[arrow_pos + 2..].trim().trim_matches('"');
+                self.index += 1;
+                return Ok(Operation::Mock {
+                    operation: operation.to_string(),
+                    pattern: pattern_part.to_string(),
+                    response: response_part.to_string(),
+                });
+            }
+            bail!(
+                "line {}: expected !mock <operation> \"<pattern>\" -> \"<response>\"",
+                line.number
+            );
         }
 
         if let Some(rest) = text.strip_prefix("!opencode") {
