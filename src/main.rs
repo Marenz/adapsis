@@ -198,6 +198,14 @@ enum Command {
         /// Log file for structured AI activity logging (what it sees, thinks, does)
         #[arg(long, default_value = "forgeos.log")]
         log_file: String,
+
+        /// Git repository for !opencode worktrees (defaults to project dir)
+        #[arg(long, env = "FORGE_OPENCODE_GIT_DIR")]
+        opencode_git_dir: Option<String>,
+
+        /// Directory for !opencode worktrees (defaults to {project_dir}/../forge-opencode-work)
+        #[arg(long, env = "FORGE_OPENCODE_WORKTREE_DIR")]
+        opencode_worktree_dir: Option<String>,
     },
 
     /// Send a message to a running ForgeOS instance
@@ -643,7 +651,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, opencode_git_dir, opencode_worktree_dir } => {
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -777,6 +785,11 @@ async fn main() -> Result<()> {
                 log_file: ai_log,
                 jit_cache: eval::new_jit_cache(),
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
+                opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
+                opencode_worktree_dir: opencode_worktree_dir.unwrap_or_else(|| {
+                    let p = std::path::Path::new(&project_dir).parent().unwrap_or(std::path::Path::new("."));
+                    p.join("forge-opencode-work").to_string_lossy().to_string()
+                }),
             };
 
             let app = axum::Router::new()

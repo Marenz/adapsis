@@ -1852,7 +1852,9 @@ fn split_once_required<'a>(
 fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
     let input = input.trim();
     if input.is_empty() {
-        bail!("line {}: empty test input", line);
+        // Empty input is valid for zero-parameter functions:
+        // +with -> expect "value"
+        return Ok(Expr::StructLiteral(vec![]));
     }
 
     // Detect key=value format: first non-whitespace token contains '=' and doesn't start with {

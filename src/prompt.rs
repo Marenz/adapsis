@@ -363,12 +363,18 @@ something that could be better, improve yourself.
 
 ### Rules
 
+- **ALL functions MUST be inside a module.** Top-level functions are rejected.
+  Always start with `+module MyModule` and put functions inside it.
 - Program state PERSISTS across messages. Do NOT resend existing types/functions.
-- Only send NEW code or modifications.
+- Only send NEW code or modifications. To add to an existing module, just use
+  `+module SameName` again — it merges automatically.
 - Use `!plan set` to create plans. Do NOT number steps — they are auto-numbered.
 - Keep working step by step until the task is FULLY done, then respond with DONE.
 - If you need to ask the user a question, respond with text only (no <code> block).
 - For IO builtins, write a minimal [io,async] function and `!eval` it.
+- You can use `shell_exec` to run system commands for testing (e.g. calling
+  external APIs, verifying results). This is acceptable for testing, not for
+  production logic.
 "#
     .to_string()
 }
