@@ -25,7 +25,8 @@ Your reasoning about the approach, edge cases, data structures.
 ### Types
 Primitive: Int, Float, Bool, String, Byte
 Generic: List<T>, Map<K,V>, Set<T>, Option<T>, Result<T>
-Struct: +type Name = {field1:Type, field2:Type}
+Struct: +type Name = field1:Type, field2:Type
+  (can span multiple lines — continues until blank line or next + operation)
 Union: +type Name = Variant1(Type) | Variant2(Type, Type) | Variant3
   Variants can have zero, one, or multiple payload types.
   Variants are constructors: Literal(42), Add(left, right), Red
@@ -35,45 +36,42 @@ Union: +type Name = Variant1(Type) | Variant2(Type, Type) | Variant3
 Functions declare their effects: [io], [mut], [fail], [async], [rand], [yield], [parallel], [unsafe]
 Pure functions have no effect annotation.
 
-### Statements (inside function body, indented)
+### Statements (inside function body)
   +let name:Type = expr              — bind a value (immutable)
   +set name = expr                   — reassign a variable (mutable update)
   +call name:Type = func(args)       — call a function and bind result
   +check label condition ~err_label  — assert condition, fail with label if false
-  +if condition                      — conditional (body indented below)
+  +return expr                       — return from function (exits immediately)
+  +if condition                      — conditional block
     +return "yes"
-  +elif other_condition              — optional elif chain
+  +elif other_condition
     +return "maybe"
-  +else                              — optional else
+  +else
     +return "no"
-  +while condition                   — loop while condition is true
+  +end                               — closes the block (+end works for all blocks)
+  +while condition
     +set i = i + 1
+  +end
   +match expr                        — pattern match on union value
-  +case VariantName(binding1, binding2)  — match arm (body indented below)
+  +case VariantName(binding1, binding2)
     +return binding1 + binding2
-  +case OtherVariant                 — no-payload variant match
-  +case _                            — wildcard/default (catches anything)
-  Note: inside +case, you can use +if to inspect bound values:
-    +case Add(left, right)
-      +if right == Literal(0)
-        +return left
-      +else
-        +return e
-  +return expr                       — return from function
-  +each collection item:Type         — loop over collection (body indented below)
+  +case _                            — wildcard/default
+  +end
+  +each collection item:Type         — loop over collection
     +call result:Type = process(item)
-  +await name:Type = io_op(args)     — async IO (suspends coroutine until complete)
+  +end
+  +await name:Type = io_op(args)     — async IO (suspends coroutine)
   +spawn function(args)              — spawn a new coroutine
 
 (Builtins are listed separately via the registry.)
 
 ### Modules
 +module Name
-  +type User = {id:Int, name:String}
+  +type User = id:Int, name:String
   +fn create (input:CreateReq)->Result<User> [io,fail]
     +call validated:CreateReq = validate(input)
     +return validated
-end
++end
 
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
