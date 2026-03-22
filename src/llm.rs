@@ -407,21 +407,30 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
     };
     let clean_content = strip_tags(&content, "think");
 
-    // Now extract <code> blocks from the cleaned content
+    // Extract code: prefer <code> blocks, but also scan for Forge operations anywhere
     let code_blocks = extract_tag_contents(&clean_content, "code");
     let code = if !code_blocks.is_empty() {
         code_blocks.join("\n\n")
     } else {
-        // No <code> tags — check if content looks like Forge code or plain text
-        let trimmed = clean_content.trim();
-        let looks_like_code = trimmed.starts_with('+') || trimmed.starts_with('!')
-            || trimmed.starts_with('?') || trimmed == "DONE";
-        if looks_like_code {
-            trimmed.to_string()
-        } else {
-            // Plain text response (no code) — treat as empty code
-            String::new()
+        // No <code> tags — scan for Forge operation lines in the full response.
+        // Every Forge command starts with +, !, or ? (and `end` for module closing).
+        // Extract contiguous blocks of such lines.
+        let mut forge_lines: Vec<String> = Vec::new();
+        let mut in_block = false;
+        for line in clean_content.lines() {
+            let trimmed = line.trim();
+            let is_forge = trimmed.starts_with('+') || trimmed.starts_with('!')
+                || trimmed.starts_with('?') || trimmed == "end" || trimmed == "DONE"
+                || (in_block && (trimmed.is_empty() || trimmed.starts_with("//")));
+            if is_forge {
+                forge_lines.push(line.to_string());
+                in_block = true;
+            } else if in_block && !trimmed.is_empty() {
+                // End of a Forge block — prose text after code
+                in_block = false;
+            }
         }
+        forge_lines.join("\n").trim().to_string()
     };
 
     let full_text = if thinking.is_empty() {
