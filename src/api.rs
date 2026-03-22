@@ -1447,12 +1447,22 @@ pub async fn ask_stream(
                 let _ = tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             }
 
-            let code = output.code.clone();
-            if code.trim() == "DONE" || code.is_empty() {
+            // Strip "DONE" from code — the AI sometimes appends it to a code block
+            let raw_code = output.code.trim().to_string();
+            let (code, is_done) = if raw_code.ends_with("\nDONE") || raw_code.ends_with("\n\nDONE") {
+                (raw_code.rsplit_once('\n').map(|(before, _)| before.trim().to_string()).unwrap_or_default(), true)
+            } else if raw_code == "DONE" || raw_code.is_empty() {
+                (String::new(), true)
+            } else {
+                (raw_code, false)
+            };
+
+            if code.is_empty() {
                 log_activity(&config_clone.log_file, "done", &format!("AI said DONE at iteration {}", iteration + 1)).await;
                 let _ = tx.send(serde_json::json!({"type": "done"})).await;
                 break;
             }
+            // Code has content — process it, then check is_done after feedback
 
             log_activity(&config_clone.log_file, "code", &code).await;
             let _ = tx.send(serde_json::json!({"type": "code", "code": code})).await;
@@ -1800,6 +1810,12 @@ pub async fn ask_stream(
                 let feedback = format!("{}{}", results_section, plan_summary);
                 log_activity(&config_clone.log_file, "feedback", &feedback).await;
                 messages.push(crate::llm::ChatMessage::user(feedback));
+                // If the AI said DONE alongside this code and there were no errors, stop
+                if is_done {
+                    log_activity(&config_clone.log_file, "done", &format!("AI said DONE (with code) at iteration {}", iteration + 1)).await;
+                    let _ = tx.send(serde_json::json!({"type": "done"})).await;
+                    break;
+                }
             }
         }
 
