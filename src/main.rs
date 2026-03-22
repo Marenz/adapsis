@@ -772,6 +772,7 @@ async fn main() -> Result<()> {
                 self_trigger: trigger_tx,
                 task_registry: Some(runtime.task_registry.clone()),
                 log_file: ai_log,
+                jit_cache: eval::new_jit_cache(),
             };
 
             let app = axum::Router::new()
