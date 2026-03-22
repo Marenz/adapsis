@@ -1492,6 +1492,28 @@ pub async fn ask_stream(
             };
 
             if code.is_empty() {
+                // Check for untested functions before accepting DONE
+                if config_clone.session.lock().await.program.require_modules {
+                    let session = config_clone.session.lock().await;
+                    let untested: Vec<String> = session.program.modules.iter().flat_map(|m| {
+                        m.functions.iter().filter_map(|f| {
+                            let qname = format!("{}.{}", m.name, f.name);
+                            if f.body.len() > 2 && !session.tested_functions.contains(&qname) {
+                                Some(qname)
+                            } else { None }
+                        })
+                    }).collect();
+                    if !untested.is_empty() {
+                        let challenge = format!(
+                            "Cannot accept DONE: {} untested functions: {}. Write !test blocks for them.",
+                            untested.len(), untested.join(", ")
+                        );
+                        log_activity(&config_clone.log_file, "done-rejected", &challenge).await;
+                        let _ = tx.send(serde_json::json!({"type": "feedback", "message": "DONE rejected: untested functions"})).await;
+                        messages.push(crate::llm::ChatMessage::user(challenge));
+                        continue;
+                    }
+                }
                 log_activity(&config_clone.log_file, "done", &format!("AI said DONE at iteration {}", iteration + 1)).await;
                 let _ = tx.send(serde_json::json!({"type": "done"})).await;
                 break;
