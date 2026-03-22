@@ -1732,15 +1732,15 @@ pub async fn ask_stream(
                 } else if pending.is_empty() && failed.is_empty() {
                     format!("All {total} plan steps completed. Verify everything works, then DONE.")
                 } else {
-                    let mut parts = vec![format!("Plan: {done}/{total} done.")];
+                    let mut msg = format!("Plan: {done}/{total} done.");
                     if !failed.is_empty() {
-                        parts.push(format!("{} failed.", failed.len()));
+                        msg.push_str(&format!(" {} failed.", failed.len()));
                     }
-                    for s in &pending {
-                        parts.push(format!("  [ ] {}", s.description));
+                    // Show next 2 pending steps only
+                    for s in pending.iter().take(2) {
+                        msg.push_str(&format!(" Next: {}", s.description));
                     }
-                    parts.push("Continue working.".to_string());
-                    parts.join("\n")
+                    msg
                 }
             };
 
