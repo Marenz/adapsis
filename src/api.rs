@@ -636,19 +636,8 @@ pub async fn ask(
     let system_prompt = {
         let base = crate::prompt::system_prompt();
         let builtins = crate::builtins::format_for_prompt();
-        format!(
-            "{base}\n\n{builtins}\n\n## ForgeOS Interactive Mode\n\
-             Program state PERSISTS. Do NOT resend existing types/functions.\n\
-             Only send NEW code or modifications.\n\
-             You can !eval builtins directly: !eval concat a=\"hello \" b=\"world\"\n\
-             For IO builtins, write a minimal [io,async] function and !eval it.\n\
-             Use !plan set to create a plan, !plan done N to mark steps. Do NOT number the steps — they are auto-numbered.\n\
-             When your task is COMPLETE, respond with just DONE in a <code> block.\n\
-             If you need to ask the user a question, just respond with text (no <code> block).\n\
-             Keep working step by step until the task is fully done.\n\
-             \n\
-             If you hit a limitation that CANNOT be solved in Forge, emit !opencode <description>."
-        )
+        let identity = crate::prompt::forgeos_identity();
+        format!("{base}\n\n{builtins}\n\n{identity}")
     };
 
     // Build messages from conversation history
@@ -1371,14 +1360,8 @@ pub async fn ask_stream(
         let system_prompt = {
             let base = crate::prompt::system_prompt();
             let builtins = crate::builtins::format_for_prompt();
-            format!(
-                "{base}\n\n{builtins}\n\n## ForgeOS Interactive Mode\n\
-                 Program state PERSISTS. Do NOT resend existing types/functions.\n\
-                 You can !eval builtins directly.\n\
-                 Use !plan set to create plans, !plan done N to mark steps. Do NOT number steps — they are auto-numbered.\n\
-                 When COMPLETE, respond with DONE in a <code> block.\n\
-                 Keep working until the task is fully done."
-            )
+            let identity = crate::prompt::forgeos_identity();
+            format!("{base}\n\n{builtins}\n\n{identity}")
         };
 
         let mut messages = {
