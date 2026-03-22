@@ -1,18 +1,40 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 pub type NodeId = String;
 pub type Identifier = String;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Program {
     pub modules: Vec<Module>,
     pub functions: Vec<FunctionDecl>,
     pub types: Vec<TypeDecl>,
+    /// Maps function name → index in `functions` Vec. Derived index, not serialized.
+    #[serde(skip)]
+    fn_index: HashMap<String, usize>,
+}
+
+impl PartialEq for Program {
+    fn eq(&self, other: &Self) -> bool {
+        self.modules == other.modules
+            && self.functions == other.functions
+            && self.types == other.types
+    }
 }
 
 impl Program {
+    /// Rebuild the function name → index lookup table. Call after any mutation
+    /// to `self.functions`.
+    pub fn rebuild_function_index(&mut self) {
+        self.fn_index.clear();
+        for (i, f) in self.functions.iter().enumerate() {
+            self.fn_index.insert(f.name.clone(), i);
+        }
+    }
+
     pub fn get_function(&self, name: &str) -> Option<&FunctionDecl> {
+        // Module-qualified lookup: "Module.func"
         if let Some((module_name, function_name)) = name.split_once('.') {
             return self
                 .modules
@@ -26,17 +48,24 @@ impl Program {
                 });
         }
 
-        self.functions
-            .iter()
-            .find(|function| function.name == name)
-            .or_else(|| {
-                self.modules.iter().find_map(|module| {
-                    module
-                        .functions
-                        .iter()
-                        .find(|function| function.name == name)
-                })
-            })
+        // Use index for O(1) lookup on top-level functions
+        if !self.fn_index.is_empty() {
+            if let Some(&idx) = self.fn_index.get(name) {
+                return self.functions.get(idx);
+            }
+        } else if let Some(f) = self.functions.iter().find(|function| function.name == name) {
+            // Fallback: linear scan if index not yet built (e.g. after deserialization
+            // before first rebuild)
+            return Some(f);
+        }
+
+        // Search inside modules for unqualified name
+        self.modules.iter().find_map(|module| {
+            module
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+        })
     }
 }
 

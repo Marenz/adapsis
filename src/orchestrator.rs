@@ -535,6 +535,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                         parser::Operation::Function(fd) if fd.name == *fn_name => {
                             // Remove old stub
                             program.functions.retain(|f| f.name != *fn_name);
+                            program.rebuild_function_index();
                             // Also remove from modules
                             for m in &mut program.modules {
                                 m.functions.retain(|f| f.name != *fn_name);

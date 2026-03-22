@@ -47,6 +47,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
                     .join(", ")
             );
             program.functions.push(converted);
+            program.rebuild_function_index();
             Ok(msg)
         }
         parser::Operation::Replace(replace) => apply_replace(program, replace),
@@ -992,6 +993,8 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
             update_call_sites(&mut func.body, &moved_fn_names, target_module);
         }
     }
+
+    program.rebuild_function_index();
 
     let mut msg = format!("moved [{}] into `{target_module}`", moved.join(", "));
     if !not_found.is_empty() {
