@@ -2027,8 +2027,23 @@ pub async fn ask_stream(
                 }
                 Err(e) => {
                     has_errors = true;
-                    feedback_details.push(format!("ERROR: Parse error: {e}"));
-                    let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Parse error: {e}"), "success": false})).await;
+                    // Extract line number from error and show surrounding code context
+                    let err_str = format!("{e}");
+                    let context = if let Some(rest) = err_str.strip_prefix("line ") {
+                        if let Some(n) = rest.split(':').next().and_then(|s| s.trim().parse::<usize>().ok()) {
+                            let lines: Vec<&str> = code.lines().collect();
+                            let start = n.saturating_sub(2);
+                            let end = (n + 1).min(lines.len());
+                            let ctx: Vec<String> = (start..end).map(|i| {
+                                let marker = if i + 1 == n { ">>>" } else { "   " };
+                                format!("{marker} {}: {}", i + 1, lines.get(i).unwrap_or(&""))
+                            }).collect();
+                            format!("\nContext:\n{}", ctx.join("\n"))
+                        } else { String::new() }
+                    } else { String::new() };
+                    let msg = format!("Parse error: {e}{context}");
+                    feedback_details.push(format!("ERROR: {msg}"));
+                    let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                 }
             }
 
