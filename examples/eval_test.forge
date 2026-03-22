@@ -1,5 +1,6 @@
 +fn add (a:Int, b:Int)->Int
   +return a + b
++end
 
 +fn fizz_type (n:Int)->Int
   +let mod3:Int = n % 3
@@ -12,6 +13,8 @@
     +return 2
   +else
     +return 0
+  +end
++end
 
 !eval add a=3 b=4
 !eval add a=100 b=200

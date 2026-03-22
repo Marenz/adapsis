@@ -199,6 +199,10 @@ enum Command {
         #[arg(long, default_value = "forgeos.log")]
         log_file: String,
 
+        /// JSONL training data log (one entry per iteration: input/output/outcome)
+        #[arg(long, default_value = "training.jsonl")]
+        training_log: String,
+
         /// Directory where !opencode runs and builds. ForgeOS should be started from
         /// {dir}/target/release/forge so exec restart picks up rebuilt binaries.
         #[arg(long, env = "FORGE_OPENCODE_GIT_DIR")]
@@ -666,7 +670,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, opencode_git_dir, max_iterations } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations } => {
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -797,6 +801,12 @@ async fn main() -> Result<()> {
                     .open(&log_file).await?;
                 Some(std::sync::Arc::new(tokio::sync::Mutex::new(f)))
             };
+            let train_log = {
+                let f = tokio::fs::OpenOptions::new()
+                    .create(true).append(true)
+                    .open(&training_log).await?;
+                Some(std::sync::Arc::new(tokio::sync::Mutex::new(f)))
+            };
 
             let config = api::AppConfig {
                 session: shared_session.clone(),
@@ -808,6 +818,7 @@ async fn main() -> Result<()> {
                 self_trigger: trigger_tx,
                 task_registry: Some(runtime.task_registry.clone()),
                 log_file: ai_log,
+                training_log: train_log,
                 jit_cache: eval::new_jit_cache(),
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
                 max_iterations,

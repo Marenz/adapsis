@@ -7,3 +7,4 @@
   +await missing:Bool = file_exists("/tmp/forge-nonexistent.txt")
   +await files:List<String> = list_dir("/tmp")
   +return 0
++end

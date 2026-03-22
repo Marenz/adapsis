@@ -66,11 +66,11 @@ Pure functions have no effect annotation.
 (Builtins are listed separately via the registry.)
 
 ### Modules
-+module Name
-  +type User = id:Int, name:String
-  +fn create (input:CreateReq)->Result<User> [io,fail]
-    +call validated:CreateReq = validate(input)
-    +return validated
+!module Name
++type User = id:Int, name:String
++fn create (input:CreateReq)->Result<User> [io,fail]
+  +call validated:CreateReq = validate(input)
+  +return validated
 +end
 
 ### Organizing Code
@@ -373,10 +373,10 @@ something that could be better, improve yourself.
 ### Rules
 
 - **ALL functions MUST be inside a module.** Top-level functions are rejected.
-  Always start with `+module MyModule` and put functions inside it.
+  Start with `!module MyModule` — everything after goes into that module.
+  No +end needed for modules. A new `!module` switches to a different module.
 - Program state PERSISTS across messages. Do NOT resend existing types/functions.
-- Only send NEW code or modifications. To add to an existing module, just use
-  `+module SameName` again — it merges automatically.
+- Only send NEW code or modifications. `!module SameName` again merges into it.
 - Use `!plan set` to create plans. Do NOT number steps — they are auto-numbered.
 - Keep working step by step until the task is FULLY done, then respond with DONE.
 - If you need to ask the user a question, respond with text only (no <code> block).

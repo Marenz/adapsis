@@ -1,19 +1,24 @@
 +fn add (a:Int, b:Int)->Int
   +return a + b
++end
 
 +fn square (x:Int)->Int
   +return x * x
++end
 
 +fn sum_of_squares (a:Int, b:Int)->Int
   +let a_sq:Int = square(a)
   +let b_sq:Int = square(b)
   +return a_sq + b_sq
++end
 
 +fn abs (x:Int)->Int
   +if x >= 0
     +return x
   +else
     +return 0 - x
+  +end
++end
 
 +fn fizz_type (n:Int)->Int
   +let mod3:Int = n % 3
@@ -26,3 +31,5 @@
     +return 2
   +else
     +return 0
+  +end
++end

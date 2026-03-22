@@ -7,8 +7,11 @@
       +set count = count + 1
     +else
       +let dummy:Int = 0
+    +end
     +set i = i + 1
+  +end
   +return count
++end
 
 +fn reverse_string (s:String)->String
   +let result:String = ""
@@ -17,7 +20,9 @@
     +let ch:String = char_at(s, i)
     +set result = concat(result, ch)
     +set i = i - 1
+  +end
   +return result
++end
 
 +fn repeat_string (s:String, n:Int)->String
   +let result:String = ""
@@ -25,11 +30,14 @@
   +while i < n
     +set result = concat(result, s)
     +set i = i + 1
+  +end
   +return result
++end
 
 +fn word_count (s:String)->Int
   +let words:List<String> = split(s, " ")
   +return words.len
++end
 
 +fn to_upper_first (s:String)->String
   +if s.len == 0
@@ -38,6 +46,8 @@
     +let first:String = char_at(s, 0)
     +let rest:String = substring(s, 1, s.len)
     +return concat(first, rest)
+  +end
++end
 
 !test count_chars
   +with s="hello" target="l" -> expect 2

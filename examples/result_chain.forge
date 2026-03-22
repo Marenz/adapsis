@@ -5,12 +5,14 @@
   +check name input.name.len>0 ~err_empty_name
   +check age input.age>=0 ~err_negative_age
   +return input
++end
 
 // Path 1: [fail] effect — errors auto-propagate (like Rust's ?)
 +fn greet_risky (input:Input)->Result<Output> [fail]
   +call validated:Input = validate(input)
   +let greeting:String = concat("Hello, ", validated.name)
   +return {greeting: greeting}
++end
 
 // Path 2: No [fail] — handle Result explicitly
 +fn greet_safe (input:Input)->Output
@@ -20,6 +22,8 @@
     +return {greeting: greeting}
   +else
     +return {greeting: "anonymous"}
+  +end
++end
 
 !test validate
   +with {name: "alice", age: 25} -> expect Ok

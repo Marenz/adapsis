@@ -5,6 +5,7 @@
   +check age_max input.age<=150 ~err_age_too_high
   +check name input.name.len>0 ~err_empty_name
   +return input
++end
 
 !trace validate {age: 25, email: "foo@bar.com", name: "alice"}
 !trace validate {age: -1, email: "foo@bar.com", name: "alice"}
