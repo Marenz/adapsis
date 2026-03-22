@@ -94,40 +94,48 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
 }
 
 fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result<String> {
-    if program.modules.iter().any(|m| m.name == decl.name) {
-        bail!("duplicate module: `{}`", decl.name);
+    // Find existing module to merge into, or create new
+    let existing_idx = program.modules.iter().position(|m| m.name == decl.name);
+    if existing_idx.is_none() {
+        program.modules.push(ast::Module {
+            id: decl.name.clone(),
+            name: decl.name.clone(),
+            types: vec![],
+            functions: vec![],
+            modules: vec![],
+        });
     }
+    let mod_idx = existing_idx.unwrap_or(program.modules.len() - 1);
 
-    let mut module = ast::Module {
-        id: decl.name.clone(),
-        name: decl.name.clone(),
-        types: vec![],
-        functions: vec![],
-        modules: vec![],
-    };
+    let mut added_fns = 0;
+    let mut added_types = 0;
+    let mut replaced_fns = 0;
 
     for op in &decl.body {
         match op {
             parser::Operation::Type(td) => {
                 let converted = convert_type_decl(td)?;
-                if module.types.iter().any(|t| t.name() == converted.name()) {
-                    bail!(
-                        "duplicate type `{}` in module `{}`",
-                        converted.name(),
-                        decl.name
-                    );
+                let name = converted.name();
+                let m = &mut program.modules[mod_idx];
+                if let Some(pos) = m.types.iter().position(|t| t.name() == name) {
+                    m.types[pos] = converted;
+                } else {
+                    m.types.push(converted);
+                    added_types += 1;
                 }
-                module.types.push(converted);
             }
             parser::Operation::Function(fd) => {
                 let mut converted = convert_function(fd)?;
-                // Resolve union types: need both program-level and module-level unions
-                let mut union_names = collect_union_names(program);
-                for td in &module.types {
-                    if let ast::TypeDecl::TaggedUnion(u) = td {
-                        union_names.insert(u.name.clone());
+                // Resolve union types — collect names via immutable borrow first
+                let union_names = {
+                    let mut names = collect_union_names(program);
+                    for td in &program.modules[mod_idx].types {
+                        if let ast::TypeDecl::TaggedUnion(u) = td {
+                            names.insert(u.name.clone());
+                        }
                     }
-                }
+                    names
+                };
                 if !union_names.is_empty() {
                     resolve_type(&mut converted.return_type, &union_names);
                     for param in &mut converted.params {
@@ -135,14 +143,15 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     }
                     resolve_union_types_in_stmts(&mut converted.body, &union_names);
                 }
-                if module.functions.iter().any(|f| f.name == converted.name) {
-                    bail!(
-                        "duplicate function `{}` in module `{}`",
-                        converted.name,
-                        decl.name
-                    );
+                // Now mutably access module to add/replace function
+                let m = &mut program.modules[mod_idx];
+                if let Some(pos) = m.functions.iter().position(|f| f.name == converted.name) {
+                    m.functions[pos] = converted;
+                    replaced_fns += 1;
+                } else {
+                    m.functions.push(converted);
+                    added_fns += 1;
                 }
-                module.functions.push(converted);
             }
             other => bail!(
                 "unexpected operation in module `{}`: {:?}",
@@ -152,13 +161,34 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
         }
     }
 
+    let m = &program.modules[mod_idx];
+    let action = if existing_idx.is_some() {
+        "updated"
+    } else {
+        "added"
+    };
+    let mut details = Vec::new();
+    if added_fns > 0 {
+        details.push(format!("+{added_fns} fn"));
+    }
+    if replaced_fns > 0 {
+        details.push(format!("~{replaced_fns} fn"));
+    }
+    if added_types > 0 {
+        details.push(format!("+{added_types} type"));
+    }
+    let detail_str = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    };
     let msg = format!(
-        "added module `{}` ({} types, {} functions)",
-        module.name,
-        module.types.len(),
-        module.functions.len()
+        "{action} module `{}` ({} types, {} functions){detail_str}",
+        m.name,
+        m.types.len(),
+        m.functions.len()
     );
-    program.modules.push(module);
+    program.rebuild_function_index();
     Ok(msg)
 }
 
