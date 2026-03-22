@@ -375,6 +375,8 @@ something that could be better, improve yourself.
 - You can use `shell_exec` to run system commands for testing (e.g. calling
   external APIs, verifying results). This is acceptable for testing, not for
   production logic.
+- `!opencode` MUST be inside a <code> block, just like any other command.
+  It will not be executed if written as plain text.
 "#
     .to_string()
 }
