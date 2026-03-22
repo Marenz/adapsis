@@ -647,7 +647,7 @@ pub async fn ask(
         &config.llm_url, &config.llm_model, config.llm_api_key.clone(),
     );
 
-    let max_iterations = 10;
+    let max_iterations = 20;
     let mut all_results: Vec<MutationResult> = vec![];
     let mut all_test_results: Vec<TestCaseResult> = vec![];
     let mut all_code = String::new();
@@ -1417,9 +1417,10 @@ pub async fn ask_stream(
             }).collect::<Vec<_>>()
         };
 
-        for iteration in 0..10 {
+        let max_iterations = 20;
+        for iteration in 0..max_iterations {
             let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
-            log_activity(&config_clone.log_file, "iter", &format!("iteration {}/10", iteration + 1)).await;
+            log_activity(&config_clone.log_file, "iter", &format!("iteration {}/{}", iteration + 1, max_iterations)).await;
 
             let output = match llm.generate(messages.clone()).await {
                 Ok(o) => o,
@@ -1694,8 +1695,16 @@ pub async fn ask_stream(
                 if let Ok(ops) = crate::parser::parse(&code) {
                     for op in &ops {
                         if let crate::parser::Operation::Query(query) = op {
-                            let table = crate::typeck::build_symbol_table(&session.program);
-                            let response = crate::typeck::handle_query(&session.program, &table, query);
+                            let response = if query.trim() == "?tasks" {
+                                format_tasks(&config_clone.task_registry)
+                            } else if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
+                                let msgs = session.peek_messages("main");
+                                if msgs.is_empty() { "No messages.".to_string() }
+                                else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
+                            } else {
+                                let table = crate::typeck::build_symbol_table(&session.program);
+                                crate::typeck::handle_query(&session.program, &table, query)
+                            };
                             feedback_details.push(format!("{query}:\n{response}"));
                         }
                     }
