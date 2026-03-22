@@ -40,6 +40,8 @@ pub struct AppConfig {
     pub task_registry: Option<crate::coroutine::TaskRegistry>,
     /// Structured log file for AI activity
     pub log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    /// JIT compilation cache — reuses compiled modules across evals when revision unchanged
+    pub jit_cache: crate::eval::JitCache,
 }
 
 #[derive(Deserialize)]
@@ -162,7 +164,7 @@ pub async fn eval_fn(
                 }
             }
 
-            match eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
+            match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.revision) {
                 Ok((result, compiled)) => {
                     session.record_eval(&ev.function_name, &req.input, &result);
                     return Json(EvalResponse {
@@ -883,7 +885,7 @@ pub async fn ask(
                                     session = config.session.lock().await;
                                 }
                             } else {
-                                match crate::eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
+                                match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.revision) {
                                     Ok((result, compiled)) => {
                                         let tag = if compiled { " [compiled]" } else { "" };
                                         let msg = format!("eval {}() = {result}{tag}", ev.function_name);
@@ -923,6 +925,7 @@ pub async fn ask(
                             let session_ref = config.session.clone();
                             let io_sender = config.io_sender.clone();
                             let trigger = config.self_trigger.clone();
+                            let watch_jit_cache = config.jit_cache.clone();
 
                             tokio::spawn(async move {
                                 let mut last_result = String::new();
@@ -938,8 +941,9 @@ pub async fn ask(
                                                 let mut result_str = String::new();
                                                 for op in &ops {
                                                     if let crate::parser::Operation::Eval(ev) = op {
-                                                        match crate::eval::eval_compiled_or_interpreted(
+                                                        match crate::eval::eval_compiled_or_interpreted_cached(
                                                             &session.program, &ev.function_name, &ev.input,
+                                                            Some(&watch_jit_cache), session.revision,
                                                         ) {
                                                             Ok((r, _)) => result_str = r,
                                                             Err(e) => result_str = format!("error: {e}"),
@@ -1571,7 +1575,7 @@ pub async fn ask_stream(
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": "async not available", "function": ev.function_name, "success": false})).await;
                                     }
                                 } else {
-                                    match crate::eval::eval_compiled_or_interpreted(&session.program, &ev.function_name, &ev.input) {
+                                    match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config_clone.jit_cache), session.revision) {
                                         Ok((result, compiled)) => {
                                             let tag = if compiled { " [compiled]" } else { "" };
                                             feedback_details.push(format!("eval {}() = {result}{tag}", ev.function_name));

@@ -1,9 +1,20 @@
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use crate::ast;
+use crate::compiler::CompiledProgram;
 use crate::parser;
+
+/// Cache for JIT-compiled programs, keyed by session revision.
+/// When the revision matches, the compiled module is reused instead of recompiling.
+pub type JitCache = Arc<Mutex<Option<(usize, CompiledProgram)>>>;
+
+/// Create a new empty JIT cache.
+pub fn new_jit_cache() -> JitCache {
+    Arc::new(Mutex::new(None))
+}
 
 /// A runtime value during evaluation.
 #[derive(Debug, Clone)]
@@ -157,10 +168,24 @@ impl Env {
 
 /// Try to evaluate using the JIT compiler, falling back to the interpreter.
 /// Returns (result_string, was_compiled).
+///
+/// If `cache` is provided along with a `revision`, the compiled module is reused
+/// when the revision hasn't changed, avoiding recompilation on every eval call.
 pub fn eval_compiled_or_interpreted(
     program: &ast::Program,
     function_name: &str,
     input: &parser::Expr,
+) -> Result<(String, bool)> {
+    eval_compiled_or_interpreted_cached(program, function_name, input, None, 0)
+}
+
+/// Like `eval_compiled_or_interpreted`, but with an optional JIT cache.
+pub fn eval_compiled_or_interpreted_cached(
+    program: &ast::Program,
+    function_name: &str,
+    input: &parser::Expr,
+    cache: Option<&JitCache>,
+    revision: usize,
 ) -> Result<(String, bool)> {
     // If it's a builtin, use eval_call_with_input directly
     if program.get_function(function_name).is_none() && crate::builtins::is_builtin(function_name) {
@@ -175,15 +200,47 @@ pub fn eval_compiled_or_interpreted(
     // Try compiled path
     let returns_string = matches!(&func.return_type, ast::Type::String);
     if crate::compiler::is_compilable_function(func) {
-        if let Ok(mut compiled) = crate::compiler::compile(program) {
-            if let Ok(args) = input_to_i64_args(input, func) {
-                if returns_string {
-                    if let Ok(result) = compiled.call_string(function_name, &args) {
-                        return Ok((format!("\"{result}\""), true));
+        if let Ok(args) = input_to_i64_args(input, func) {
+            // Try to use cached compiled module
+            if let Some(jit_cache) = cache {
+                if let Ok(mut guard) = jit_cache.lock() {
+                    // Check if cache is valid for this revision
+                    let needs_compile = match &*guard {
+                        Some((cached_rev, _)) => *cached_rev != revision,
+                        None => true,
+                    };
+
+                    if needs_compile {
+                        // Compile and store in cache
+                        if let Ok(compiled) = crate::compiler::compile(program) {
+                            *guard = Some((revision, compiled));
+                        }
                     }
-                } else {
-                    if let Ok(result) = compiled.call_i64(function_name, &args) {
-                        return Ok((format!("{result}"), true));
+
+                    // Try to use the cached compiled module
+                    if let Some((_, ref mut compiled)) = *guard {
+                        if returns_string {
+                            if let Ok(result) = compiled.call_string(function_name, &args) {
+                                return Ok((format!("\"{result}\""), true));
+                            }
+                        } else {
+                            if let Ok(result) = compiled.call_i64(function_name, &args) {
+                                return Ok((format!("{result}"), true));
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No cache — compile fresh each time (original behavior)
+                if let Ok(mut compiled) = crate::compiler::compile(program) {
+                    if returns_string {
+                        if let Ok(result) = compiled.call_string(function_name, &args) {
+                            return Ok((format!("\"{result}\""), true));
+                        }
+                    } else {
+                        if let Ok(result) = compiled.call_i64(function_name, &args) {
+                            return Ok((format!("{result}"), true));
+                        }
                     }
                 }
             }
