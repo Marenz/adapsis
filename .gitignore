@@ -8,3 +8,8 @@ training/download-*.log
 *.gguf
 training/nvcc-fix/
 .env
+forgeos-telegram.log
+telegram-session.json
+forgeos-stdout.log
+*.log
+*-session.json
