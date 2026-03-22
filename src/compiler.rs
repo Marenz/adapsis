@@ -149,6 +149,7 @@ fn is_compilable_body(stmts: &[ast::Statement]) -> bool {
         ast::StatementKind::Let { ty, value, .. } => {
             is_compilable_type(ty) && is_compilable_expr(value)
         }
+        ast::StatementKind::Set { value, .. } => is_compilable_expr(value),
         ast::StatementKind::Call { call, binding, .. } => {
             call.args.iter().all(is_compilable_expr)
                 && binding.as_ref().is_none_or(|b| is_compilable_type(&b.ty))
@@ -163,6 +164,12 @@ fn is_compilable_body(stmts: &[ast::Statement]) -> bool {
             is_compilable_expr(condition)
                 && is_compilable_body(then_body)
                 && is_compilable_body(else_body)
+        }
+        ast::StatementKind::While { condition, body } => {
+            is_compilable_expr(condition) && is_compilable_body(body)
+        }
+        ast::StatementKind::Match { expr, arms } => {
+            is_compilable_expr(expr) && arms.iter().all(|arm| is_compilable_body(&arm.body))
         }
         _ => false,
     })
@@ -714,8 +721,39 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
             Ok(())
         }
 
-        ast::StatementKind::While { .. } => {
-            bail!("while loops not yet supported in compiler")
+        ast::StatementKind::While { condition, body } => {
+            let header_block = ctx.builder.create_block();
+            let body_block = ctx.builder.create_block();
+            let exit_block = ctx.builder.create_block();
+
+            // Jump from current block into the loop header
+            ctx.builder.ins().jump(header_block, &[]);
+
+            // --- Header: evaluate condition, branch to body or exit ---
+            ctx.builder.switch_to_block(header_block);
+            let cond = compile_expr(ctx, condition, types::I8)?;
+            ctx.builder
+                .ins()
+                .brif(cond, body_block, &[], exit_block, &[]);
+
+            // --- Body: execute statements, then jump back to header ---
+            ctx.builder.switch_to_block(body_block);
+            ctx.builder.seal_block(body_block);
+            let saved_terminated = ctx.terminated;
+            ctx.terminated = false;
+            compile_body(ctx, body)?;
+            if !ctx.terminated {
+                ctx.builder.ins().jump(header_block, &[]);
+            }
+
+            // Now seal the header — it has two predecessors (entry jump + back-edge)
+            ctx.builder.seal_block(header_block);
+
+            // --- Exit block ---
+            ctx.builder.switch_to_block(exit_block);
+            ctx.builder.seal_block(exit_block);
+            ctx.terminated = saved_terminated;
+            Ok(())
         }
 
         ast::StatementKind::Each { .. } => {
@@ -728,8 +766,88 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
         ast::StatementKind::Spawn { .. } => {
             bail!("spawn not yet supported in compiler")
         }
-        ast::StatementKind::Match { .. } => {
-            bail!("match not yet supported in compiler")
+        ast::StatementKind::Match { expr, arms } => {
+            // Compile match as a chain of conditional branches.
+            // The matched expression value is compared against each arm's variant.
+            // For integer matching: variant name is parsed as an i64 literal.
+            // For wildcard "_": always matches (default/else).
+            let matched_val = compile_expr(ctx, expr, types::I64)?;
+            let merge_block = ctx.builder.create_block();
+
+            let mut all_terminated = true;
+
+            for (i, arm) in arms.iter().enumerate() {
+                let is_last = i == arms.len() - 1;
+
+                if arm.variant == "_" {
+                    // Wildcard — unconditional match
+                    // If there are bindings, bind the whole value
+                    if arm.bindings.len() == 1 && arm.bindings[0] != "_" {
+                        let cl_type = types::I64;
+                        let var = alloc_var(ctx, &arm.bindings[0], cl_type);
+                        ctx.builder.def_var(var, matched_val);
+                    }
+                    let saved = ctx.terminated;
+                    ctx.terminated = false;
+                    compile_body(ctx, &arm.body)?;
+                    let arm_terminated = ctx.terminated;
+                    if !arm_terminated {
+                        ctx.builder.ins().jump(merge_block, &[]);
+                    }
+                    all_terminated = all_terminated && arm_terminated;
+                    ctx.terminated = saved;
+                    break; // wildcard is always last effective arm
+                }
+
+                // Try to parse variant as an integer literal for comparison
+                let arm_block = ctx.builder.create_block();
+                let next_block = if is_last {
+                    merge_block
+                } else {
+                    ctx.builder.create_block()
+                };
+
+                // Compare matched value with arm's variant (as integer tag or literal)
+                let arm_val = if let Ok(n) = arm.variant.parse::<i64>() {
+                    ctx.builder.ins().iconst(types::I64, n)
+                } else if arm.variant == "true" {
+                    ctx.builder.ins().iconst(types::I64, 1)
+                } else if arm.variant == "false" {
+                    ctx.builder.ins().iconst(types::I64, 0)
+                } else {
+                    // Named variant — use its index as the tag
+                    ctx.builder.ins().iconst(types::I64, i as i64)
+                };
+
+                let cond = ctx.builder.ins().icmp(IntCC::Equal, matched_val, arm_val);
+                ctx.builder
+                    .ins()
+                    .brif(cond, arm_block, &[], next_block, &[]);
+
+                // Compile arm body
+                ctx.builder.switch_to_block(arm_block);
+                ctx.builder.seal_block(arm_block);
+                let saved = ctx.terminated;
+                ctx.terminated = false;
+                compile_body(ctx, &arm.body)?;
+                let arm_terminated = ctx.terminated;
+                if !arm_terminated {
+                    ctx.builder.ins().jump(merge_block, &[]);
+                }
+                all_terminated = all_terminated && arm_terminated;
+                ctx.terminated = saved;
+
+                // Switch to next arm's test block
+                if !is_last {
+                    ctx.builder.switch_to_block(next_block);
+                    ctx.builder.seal_block(next_block);
+                }
+            }
+
+            ctx.terminated = all_terminated;
+            ctx.builder.switch_to_block(merge_block);
+            ctx.builder.seal_block(merge_block);
+            Ok(())
         }
         ast::StatementKind::Yield { .. } => {
             bail!("yield not yet supported in compiler")
