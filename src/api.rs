@@ -44,10 +44,8 @@ pub struct AppConfig {
     pub jit_cache: crate::eval::JitCache,
     /// Broadcast channel for SSE events — all activity visible to all subscribers (web UI)
     pub event_broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
-    /// Git repo dir for !opencode worktrees (source of .git)
+    /// Directory where !opencode runs and builds (fixed checkout, ForgeOS must run from here)
     pub opencode_git_dir: String,
-    /// Base directory for !opencode worktrees
-    pub opencode_worktree_dir: String,
     /// Sequential lock for !opencode — only one at a time
     pub opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Maximum iterations per AI request
@@ -1843,35 +1841,10 @@ pub async fn ask_stream(
                                 let _opencode_guard = config_clone.opencode_lock.lock().await;
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Running !opencode: {}", task.chars().take(80).collect::<String>()), "success": true})).await;
                                 drop(session);
-                                let git_dir = config_clone.opencode_git_dir.clone();
-                                let worktree_base = config_clone.opencode_worktree_dir.clone();
-                                let project_dir = config_clone.project_dir.clone();
-
-                                // Create isolated worktree for this opencode session
+                                // Use the configured opencode directory (fixed checkout, not dynamic worktrees)
+                                let work_dir = config_clone.opencode_git_dir.clone();
+                                log_activity(&config_clone.log_file, "opencode-dir", &work_dir).await;
                                 use tokio::io::{AsyncBufReadExt, BufReader};
-                                let wt_id = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-                                let branch_name = format!("opencode-{wt_id}");
-                                let wt_path = format!("{worktree_base}/{branch_name}");
-
-                                // Ensure worktree base dir exists
-                                let _ = tokio::fs::create_dir_all(&worktree_base).await;
-
-                                // Create worktree from current HEAD
-                                let wt_create = tokio::process::Command::new("git")
-                                    .args(["worktree", "add", "-b", &branch_name, &wt_path, "HEAD"])
-                                    .current_dir(&git_dir)
-                                    .output().await;
-                                if let Ok(out) = &wt_create {
-                                    if !out.status.success() {
-                                        let stderr = String::from_utf8_lossy(&out.stderr);
-                                        eprintln!("[opencode] worktree create failed: {stderr}");
-                                        log_activity(&config_clone.log_file, "opencode-error", &format!("worktree create failed: {stderr}")).await;
-                                        // Fall back to project dir
-                                    }
-                                }
-                                let work_dir = if std::path::Path::new(&wt_path).exists() { wt_path.clone() } else { project_dir.clone() };
-                                log_activity(&config_clone.log_file, "opencode-worktree", &work_dir).await;
 
                                 // Get existing OpenCode session ID to continue building on top
                                 let oc_session_id = {
@@ -1953,38 +1926,12 @@ pub async fn ask_stream(
 
                                 match oc_result {
                                     Ok(Ok(status)) if status.success() => {
-                                        eprintln!("[web:opencode:stream:done] merging and rebuilding...");
-                                        log_activity(&config_clone.log_file, "opencode-done", "merging worktree and rebuilding...").await;
-                                        let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode done, merging and rebuilding...", "success": true})).await;
-
-                                        // Merge worktree branch back into current branch
-                                        if work_dir != project_dir {
-                                            let merge = tokio::process::Command::new("git")
-                                                .args(["merge", &branch_name, "--no-edit"])
-                                                .current_dir(&git_dir)
-                                                .output().await;
-                                            if let Ok(m) = &merge {
-                                                if !m.status.success() {
-                                                    let stderr = String::from_utf8_lossy(&m.stderr);
-                                                    eprintln!("[opencode] merge failed: {stderr}");
-                                                    log_activity(&config_clone.log_file, "opencode-merge-fail", &format!("{stderr}")).await;
-                                                    // Abort merge on failure
-                                                    let _ = tokio::process::Command::new("git")
-                                                        .args(["merge", "--abort"])
-                                                        .current_dir(&git_dir).output().await;
-                                                }
-                                            }
-                                            // Clean up worktree + branch
-                                            let _ = tokio::process::Command::new("git")
-                                                .args(["worktree", "remove", "--force", &wt_path])
-                                                .current_dir(&git_dir).output().await;
-                                            let _ = tokio::process::Command::new("git")
-                                                .args(["branch", "-D", &branch_name])
-                                                .current_dir(&git_dir).output().await;
-                                        }
+                                        eprintln!("[web:opencode:stream:done] rebuilding...");
+                                        log_activity(&config_clone.log_file, "opencode-done", "rebuilding...").await;
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode done, rebuilding...", "success": true})).await;
 
                                         let build = tokio::process::Command::new("cargo")
-                                            .arg("build").arg("--release").current_dir(&git_dir).output().await;
+                                            .arg("build").arg("--release").current_dir(&work_dir).output().await;
                                         match build {
                                             Ok(b) if b.status.success() => {
                                                 feedback_details.push("OK: OpenCode + rebuild successful. Restarting...".to_string());
@@ -2036,15 +1983,6 @@ pub async fn ask_stream(
                                         log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
-                                }
-                                // Clean up worktree on any failure
-                                if work_dir != project_dir && std::path::Path::new(&wt_path).exists() {
-                                    let _ = tokio::process::Command::new("git")
-                                        .args(["worktree", "remove", "--force", &wt_path])
-                                        .current_dir(&git_dir).output().await;
-                                    let _ = tokio::process::Command::new("git")
-                                        .args(["branch", "-D", &branch_name])
-                                        .current_dir(&git_dir).output().await;
                                 }
                                 session = config_clone.session.lock().await;
                             }

@@ -55,6 +55,9 @@ pub struct LlmOutput {
     pub text: String,
     pub thinking: String,
     pub code: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -368,6 +371,18 @@ struct ChunkDelta {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ResponseChoice>,
+    #[serde(default)]
+    usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,6 +458,9 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
         text: full_text,
         thinking,
         code,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
     }
 }
 

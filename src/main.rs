@@ -199,13 +199,10 @@ enum Command {
         #[arg(long, default_value = "forgeos.log")]
         log_file: String,
 
-        /// Git repository for !opencode worktrees (defaults to project dir)
+        /// Directory where !opencode runs and builds. ForgeOS should be started from
+        /// {dir}/target/release/forge so exec restart picks up rebuilt binaries.
         #[arg(long, env = "FORGE_OPENCODE_GIT_DIR")]
         opencode_git_dir: Option<String>,
-
-        /// Directory for !opencode worktrees (defaults to {project_dir}/../forge-opencode-work)
-        #[arg(long, env = "FORGE_OPENCODE_WORKTREE_DIR")]
-        opencode_worktree_dir: Option<String>,
 
         /// Maximum iterations per AI request (default 20)
         #[arg(long, default_value_t = 20)]
@@ -655,7 +652,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, opencode_git_dir, opencode_worktree_dir, max_iterations } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, opencode_git_dir, max_iterations } => {
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -802,10 +799,6 @@ async fn main() -> Result<()> {
                 max_iterations,
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
-                opencode_worktree_dir: opencode_worktree_dir.unwrap_or_else(|| {
-                    let p = std::path::Path::new(&project_dir).parent().unwrap_or(std::path::Path::new("."));
-                    p.join("forge-opencode-work").to_string_lossy().to_string()
-                }),
             };
 
             let app = axum::Router::new()
