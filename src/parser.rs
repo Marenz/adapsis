@@ -985,13 +985,8 @@ impl<'a> Parser<'a> {
                 return Ok(ops);
             }
 
-            // De-indent back to module level or less = module body ended (no end needed)
-            if line.indent <= module_indent {
-                return Ok(ops);
-            }
-
             let Some(indent) = child_indent else {
-                return Ok(ops);
+                bail!("line {}: module requires +end", line.number);
             };
 
             if line.indent != indent {
