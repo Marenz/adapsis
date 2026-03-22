@@ -1718,6 +1718,41 @@ pub async fn ask_stream(
                     feedback_details.push(format!("Agent messages:\n{inbox_text}"));
                     let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Messages from agents: {}", inbox.len()), "success": true})).await;
                 }
+
+                // Check for untested functions — nag if functions with >2 statements lack tests
+                if let Ok(ops) = crate::parser::parse(&code) {
+                    let tested: std::collections::HashSet<String> = ops.iter().filter_map(|op| {
+                        if let crate::parser::Operation::Test(t) = op { Some(t.function_name.clone()) } else { None }
+                    }).collect();
+                    let mut untested = Vec::new();
+                    for op in &ops {
+                        let (name, stmts) = match op {
+                            crate::parser::Operation::Function(f) => (f.name.clone(), f.body.len()),
+                            crate::parser::Operation::Module(m) => {
+                                // Check functions inside module
+                                for op in &m.body {
+                                    if let crate::parser::Operation::Function(f) = op {
+                                        let qname = format!("{}.{}", m.name, f.name);
+                                        if f.body.len() > 2 && !tested.contains(&qname) && !tested.contains(&f.name) {
+                                            untested.push(qname);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            _ => continue,
+                        };
+                        if stmts > 2 && !tested.contains(&name) {
+                            untested.push(name);
+                        }
+                    }
+                    if !untested.is_empty() {
+                        feedback_details.push(format!(
+                            "WARNING: untested functions (>2 statements): {}. Write !test blocks for them.",
+                            untested.join(", ")
+                        ));
+                    }
+                }
             }
 
             // Build plan status summary for feedback

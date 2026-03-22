@@ -645,7 +645,7 @@ async fn main() -> Result<()> {
         }
         Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file } => {
             let session_path = std::path::Path::new(&session);
-            let sess = if session_path.exists() {
+            let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
                 let s = session::Session::load(session_path)?;
                 println!(
@@ -658,6 +658,9 @@ async fn main() -> Result<()> {
                 println!("New session (saving to {session})");
                 session::Session::new()
             };
+
+            // In ForgeOS mode, enforce modules and tests
+            sess.program.require_modules = true;
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 

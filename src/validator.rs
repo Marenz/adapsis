@@ -30,6 +30,13 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
                     converted.name
                 );
             }
+            // In ForgeOS mode, reject top-level functions — must be inside a module
+            if program.require_modules {
+                bail!(
+                    "function `{}` must be inside a module. Use: +module MyModule\\n  +fn {}(...)\\nend",
+                    converted.name, converted.name
+                );
+            }
             // Check for duplicate function name at top level
             if program.functions.iter().any(|f| f.name == converted.name) {
                 bail!("duplicate function: `{}`", converted.name);
