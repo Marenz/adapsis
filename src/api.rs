@@ -639,6 +639,7 @@ async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio:
                 let prefix = if has_err { "FEEDBACK (ERRORS)" } else { "FEEDBACK (ok)" };
                 format!("[{h:02}:{m:02}:{s:02}] {prefix}:\n{detail}\n")
             }
+            "ai-text" => format!("[{h:02}:{m:02}:{s:02}] AI: {detail}\n"),
             "done" | "done-rejected" => format!("[{h:02}:{m:02}:{s:02}] >>> {event}: {detail}\n"),
             "llm-error" => format!("[{h:02}:{m:02}:{s:02}] !!! LLM ERROR: {detail}\n"),
             "user" => format!("[{h:02}:{m:02}:{s:02}] USER:\n{detail}\n"),
@@ -1200,7 +1201,7 @@ pub async fn ask(
                             eprintln!("[web:opencode] {task}");
                             drop(session);
                             let oc_result = tokio::time::timeout(
-                                std::time::Duration::from_secs(300),
+                                std::time::Duration::from_secs(1800),
                                 tokio::process::Command::new("opencode")
                                     .arg("run").arg("--format").arg("json").arg(task)
                                     .current_dir(&config.project_dir)
@@ -1529,6 +1530,7 @@ pub async fn ask_stream(
             while let Some(s) = clean.find("<code>") { if let Some(e) = clean.find("</code>") { clean.replace_range(s..e+7, ""); } else { break; } }
             let clean = clean.trim();
             if !clean.is_empty() {
+                log_activity(&config_clone.log_file, "ai-text", clean).await;
                 let _ = tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             }
 
@@ -1812,27 +1814,79 @@ pub async fn ask_stream(
                             }
                             crate::parser::Operation::OpenCode(task) => {
                                 eprintln!("[web:opencode:stream] {task}");
+                                log_activity(&config_clone.log_file, "opencode", &task).await;
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Running !opencode: {}", task.chars().take(80).collect::<String>()), "success": true})).await;
                                 drop(session);
                                 let project_dir = config_clone.project_dir.clone();
+
+                                // Stream OpenCode output line by line so we can watch it
+                                use tokio::io::{AsyncBufReadExt, BufReader};
+                                let recent_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                                let recent_for_stream = recent_lines.clone();
                                 let oc_result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(300),
-                                    tokio::process::Command::new("opencode")
-                                        .arg("run").arg("--format").arg("json").arg(task)
-                                        .current_dir(&project_dir)
-                                        .output()
+                                    std::time::Duration::from_secs(1800),
+                                    async {
+                                        let mut child = tokio::process::Command::new("opencode")
+                                            .arg("run").arg("--format").arg("json").arg(&task)
+                                            .current_dir(&project_dir)
+                                            .stdout(std::process::Stdio::piped())
+                                            .stderr(std::process::Stdio::piped())
+                                            .spawn()?;
+
+                                        let stdout = child.stdout.take().unwrap();
+                                        let mut reader = BufReader::new(stdout).lines();
+                                        while let Some(line) = reader.next_line().await? {
+                                            // Keep last 20 lines for error context
+                                            {
+                                                let mut rl = recent_for_stream.lock().unwrap();
+                                                rl.push(line.clone());
+                                                if rl.len() > 20 { rl.remove(0); }
+                                            }
+                                            // Parse JSON events from opencode
+                                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                                                let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                                match event_type {
+                                                    "text" => {
+                                                        if let Some(part) = event.get("part") {
+                                                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                                let preview: String = text.chars().take(200).collect();
+                                                                eprintln!("[opencode:text] {preview}");
+                                                                log_activity(&config_clone.log_file, "opencode-text", text).await;
+                                                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("OpenCode: {preview}"), "success": true})).await;
+                                                            }
+                                                        }
+                                                    }
+                                                    "tool_call" | "tool_result" => {
+                                                        let summary = event.get("part")
+                                                            .and_then(|p| p.get("name").or(p.get("tool")))
+                                                            .and_then(|n| n.as_str())
+                                                            .unwrap_or("tool");
+                                                        eprintln!("[opencode:{event_type}] {summary}");
+                                                        log_activity(&config_clone.log_file, &format!("opencode-{event_type}"), summary).await;
+                                                        let _ = tx.send(serde_json::json!({"type": "result", "message": format!("OpenCode {event_type}: {summary}"), "success": true})).await;
+                                                    }
+                                                    _ => {
+                                                        eprintln!("[opencode:event] {event_type}");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        child.wait().await
+                                    }
                                 ).await;
+
                                 match oc_result {
-                                    Ok(Ok(output)) if output.status.success() => {
+                                    Ok(Ok(status)) if status.success() => {
                                         eprintln!("[web:opencode:stream:done] rebuilding...");
+                                        log_activity(&config_clone.log_file, "opencode-done", "rebuilding...").await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode done, rebuilding...", "success": true})).await;
                                         let build = tokio::process::Command::new("cargo")
-                                            .arg("build").current_dir(&project_dir).output().await;
+                                            .arg("build").arg("--release").current_dir(&project_dir).output().await;
                                         match build {
                                             Ok(b) if b.status.success() => {
                                                 feedback_details.push("OK: OpenCode + rebuild successful. Restarting...".to_string());
+                                                log_activity(&config_clone.log_file, "opencode-restart", "rebuild successful, restarting").await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
-                                                // Restart the process
                                                 tokio::spawn(async {
                                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                                     let exe = std::env::current_exe().unwrap_or_default();
@@ -1843,8 +1897,9 @@ pub async fn ask_stream(
                                             Ok(b) => {
                                                 has_errors = true;
                                                 let stderr = String::from_utf8_lossy(&b.stderr);
-                                                let msg = format!("OpenCode done but cargo build failed:\n{}", stderr.chars().take(500).collect::<String>());
+                                                let msg = format!("OpenCode done but cargo build failed:\n{stderr}");
                                                 feedback_details.push(format!("ERROR: {msg}"));
+                                                log_activity(&config_clone.log_file, "opencode-build-fail", &msg).await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                             }
                                             Err(e) => {
@@ -1854,17 +1909,29 @@ pub async fn ask_stream(
                                             }
                                         }
                                     }
-                                    Ok(Ok(output)) => {
+                                    Ok(Ok(status)) => {
                                         has_errors = true;
-                                        let stderr = String::from_utf8_lossy(&output.stderr);
-                                        let msg = format!("OpenCode failed:\n{}", stderr.chars().take(500).collect::<String>());
+                                        let context = recent_lines.lock().unwrap().join("\n");
+                                        let msg = format!("OpenCode exited with status: {status}\nLast output:\n{context}");
                                         feedback_details.push(format!("ERROR: {msg}"));
+                                        log_activity(&config_clone.log_file, "opencode-fail", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
-                                    _ => {
+                                    Ok(Err(e)) => {
                                         has_errors = true;
-                                        feedback_details.push("ERROR: OpenCode timed out or failed to start".to_string());
-                                        let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode timed out", "success": false})).await;
+                                        let context = recent_lines.lock().unwrap().join("\n");
+                                        let msg = format!("OpenCode error: {e}\nLast output:\n{context}");
+                                        feedback_details.push(format!("ERROR: {msg}"));
+                                        log_activity(&config_clone.log_file, "opencode-error", &msg).await;
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
+                                    }
+                                    Err(_) => {
+                                        has_errors = true;
+                                        let context = recent_lines.lock().unwrap().join("\n");
+                                        let msg = format!("OpenCode timed out (30 min limit)\nLast output:\n{context}");
+                                        feedback_details.push(format!("ERROR: {msg}"));
+                                        log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
                                 }
                                 session = config_clone.session.lock().await;
