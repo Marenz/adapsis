@@ -13,3 +13,4 @@ telegram-session.json
 forgeos-stdout.log
 *.log
 *-session.json
+*-session*.json
