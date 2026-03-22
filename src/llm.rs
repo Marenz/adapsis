@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, Write};
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -295,6 +295,12 @@ where
     }
 
     pub async fn generate(&self, messages: Vec<ChatMessage>) -> Result<LlmOutput> {
+        info!("LLM request: {} messages, temp={}, max_tokens={}", messages.len(), self.temperature, self.max_tokens);
+        for (i, msg) in messages.iter().enumerate() {
+            let role = format!("{:?}", msg.role).to_lowercase();
+            debug!("[msg {i}] {role} ({} chars):\n{}", msg.content.len(), msg.content);
+        }
+
         let request = LlmRequest {
             messages,
             temperature: self.temperature,
@@ -310,7 +316,20 @@ where
                 tokio::time::sleep(delay).await;
             }
             match self.backend.generate(&self.http, &request).await {
-                Ok(output) => return Ok(output),
+                Ok(output) => {
+                    info!("LLM response: thinking={} chars, code={} chars, text={} chars",
+                        output.thinking.len(), output.code.len(), output.text.len());
+                    if !output.thinking.is_empty() {
+                        debug!("[thinking]:\n{}", output.thinking);
+                    }
+                    if !output.code.is_empty() {
+                        debug!("[code]:\n{}", output.code);
+                    }
+                    if !output.text.is_empty() {
+                        debug!("[text]:\n{}", output.text);
+                    }
+                    return Ok(output);
+                }
                 Err(e) => {
                     let err_str = format!("{e}");
                     if err_str.contains("connection") || err_str.contains("Connection")
