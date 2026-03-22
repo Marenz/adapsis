@@ -1900,7 +1900,8 @@ pub async fn ask_stream(
                                         if let Some(sid) = &oc_session_id {
                                             cmd.arg("--session").arg(sid);
                                         }
-                                        cmd.arg(&task);
+                                        let full_task = format!("{task}. When done, create clean atomic git commits with descriptive messages for each logical change.");
+                                        cmd.arg(&full_task);
                                         let mut child = cmd
                                             .current_dir(&work_dir)
                                             .stdout(std::process::Stdio::piped())

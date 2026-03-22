@@ -381,18 +381,19 @@ impl<'a> Parser<'a> {
         let mut ops = Vec::new();
 
         while let Some(line) = self.current() {
+            // +end closes the current block (universal closer)
+            if line.text == "end" || line.text == "+end" {
+                self.index += 1;
+                break;
+            }
+
+            // De-indent also closes the block
             if line.indent < indent {
                 break;
             }
 
             if line.indent > indent {
                 bail!("line {}: unexpected indentation", line.number);
-            }
-
-            // Skip stray `end` / `+end` tokens (LLMs often add these to close blocks)
-            if line.text == "end" || line.text == "+end" {
-                self.index += 1;
-                continue;
             }
 
             ops.push(self.parse_operation(indent)?);
@@ -419,8 +420,24 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(rest) = text.strip_prefix("+type") {
-            let decl = parse_type_decl(line.number, rest.trim())?;
+            let mut type_text = rest.trim().to_string();
             self.index += 1;
+            // Multiline types: join continuation lines until blank line or new +operation
+            while let Some(next) = self.current() {
+                let t = next.text.trim();
+                if t.is_empty()
+                    || t.starts_with('+')
+                    || t.starts_with('!')
+                    || t.starts_with('?')
+                    || t == "end"
+                {
+                    break;
+                }
+                type_text.push_str(", ");
+                type_text.push_str(t.trim_start_matches(',').trim());
+                self.index += 1;
+            }
+            let decl = parse_type_decl(line.number, &type_text)?;
             return Ok(Operation::Type(decl));
         }
 
@@ -1024,16 +1041,12 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
         .ok_or_else(|| anyhow!("line {}: expected `=` in type declaration", line))?
         .trim();
 
-    if value.starts_with('{') {
-        let ty = parse_type(line, value)?;
-        let TypeExpr::Struct(fields) = ty else {
-            bail!("line {}: invalid struct type declaration", line);
-        };
-        return Ok(TypeDecl {
-            name: name.to_string(),
-            body: TypeBody::Struct(fields),
-        });
-    }
+    // Strip optional braces — accept both {a:Int, b:String} and a:Int, b:String
+    let value = if value.starts_with('{') && value.ends_with('}') {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
 
     if value.contains('|') {
         let mut variants = Vec::new();
@@ -1079,6 +1092,27 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
         return Ok(TypeDecl {
             name: name.to_string(),
             body: TypeBody::Union(variants),
+        });
+    }
+
+    // Check if it looks like struct fields: name:Type, name:Type
+    if value.contains(':') {
+        let fields = value
+            .split(',')
+            .map(|f| {
+                let f = f.trim();
+                let (fname, ftype) = f.split_once(':').ok_or_else(|| {
+                    anyhow!("line {}: expected field:Type in struct, got `{f}`", line)
+                })?;
+                Ok(FieldType {
+                    name: fname.trim().to_string(),
+                    ty: parse_type(line, ftype.trim())?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(TypeDecl {
+            name: name.to_string(),
+            body: TypeBody::Struct(fields),
         });
     }
 
