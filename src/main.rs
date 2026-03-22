@@ -206,6 +206,10 @@ enum Command {
         /// Directory for !opencode worktrees (defaults to {project_dir}/../forge-opencode-work)
         #[arg(long, env = "FORGE_OPENCODE_WORKTREE_DIR")]
         opencode_worktree_dir: Option<String>,
+
+        /// Maximum iterations per AI request (default 20)
+        #[arg(long, default_value_t = 20)]
+        max_iterations: usize,
     },
 
     /// Send a message to a running ForgeOS instance
@@ -651,7 +655,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, opencode_git_dir, opencode_worktree_dir } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, opencode_git_dir, opencode_worktree_dir, max_iterations } => {
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -785,6 +789,7 @@ async fn main() -> Result<()> {
                 log_file: ai_log,
                 jit_cache: eval::new_jit_cache(),
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
+                max_iterations,
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
                 opencode_worktree_dir: opencode_worktree_dir.unwrap_or_else(|| {

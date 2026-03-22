@@ -50,6 +50,8 @@ pub struct AppConfig {
     pub opencode_worktree_dir: String,
     /// Sequential lock for !opencode — only one at a time
     pub opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Maximum iterations per AI request
+    pub max_iterations: usize,
 }
 
 #[derive(Deserialize)]
@@ -703,7 +705,7 @@ pub async fn ask(
         &config.llm_url, &config.llm_model, config.llm_api_key.clone(),
     );
 
-    let max_iterations = 20;
+    let max_iterations = config.max_iterations;
     let mut all_results: Vec<MutationResult> = vec![];
     let mut all_test_results: Vec<TestCaseResult> = vec![];
     let mut all_code = String::new();
@@ -1495,7 +1497,7 @@ pub async fn ask_stream(
             }).collect::<Vec<_>>()
         };
 
-        let max_iterations = 20;
+        let max_iterations = config_clone.max_iterations;
         for iteration in 0..max_iterations {
             let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
             log_activity(&config_clone.log_file, "iter", &format!("iteration {}/{}", iteration + 1, max_iterations)).await;
