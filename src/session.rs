@@ -86,6 +86,9 @@ pub struct Session {
     /// Agent message bus: agent_name → inbox of pending messages
     #[serde(default)]
     pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
+    /// Functions that have been tested (passed at least one test). Eval/spawn blocked until tested.
+    #[serde(default)]
+    pub tested_functions: std::collections::HashSet<String>,
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -291,6 +294,7 @@ impl Session {
             revision: 0,
             sources: Vec::new(),
             agent_mailbox: HashMap::new(),
+            tested_functions: std::collections::HashSet::new(),
         }
     }
 
@@ -330,8 +334,24 @@ impl Session {
 
         for op in &operations {
             match op {
-                parser::Operation::Test(_)
-                | parser::Operation::Trace(_)
+                parser::Operation::Test(test) => {
+                    // Run tests and track which functions pass
+                    let mut all_passed = true;
+                    for case in &test.cases {
+                        match crate::eval::eval_test_case(&self.program, &test.function_name, case)
+                        {
+                            Ok(msg) => results.push((format!("PASS: {msg}"), true)),
+                            Err(e) => {
+                                all_passed = false;
+                                results.push((format!("FAIL: {e}"), false));
+                            }
+                        }
+                    }
+                    if all_passed && !test.cases.is_empty() {
+                        self.tested_functions.insert(test.function_name.clone());
+                    }
+                }
+                parser::Operation::Trace(_)
                 | parser::Operation::Eval(_)
                 | parser::Operation::Query(_) => {
                     // These don't modify program state — handled separately

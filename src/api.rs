@@ -120,6 +120,19 @@ pub async fn eval_fn(
 
     for op in &operations {
         if let parser::Operation::Eval(ev) = op {
+            // Block eval of untested functions (>2 statements) in ForgeOS mode
+            if session.program.require_modules {
+                if let Some(func) = session.program.get_function(&ev.function_name) {
+                    if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
+                        return Json(EvalResponse {
+                            result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
+                            success: false,
+                            compiled: None,
+                        });
+                    }
+                }
+            }
+
             let needs_async = session.program.get_function(&ev.function_name)
                 .is_some_and(|f| f.effects.iter().any(|e|
                     matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
@@ -256,6 +269,9 @@ pub async fn test_fn(
                 format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
             }).collect();
             session.record_test(&test.function_name, passed, failed, details);
+            if passed > 0 && failed == 0 {
+                session.tested_functions.insert(test.function_name.clone());
+            }
         }
     }
 
@@ -851,14 +867,32 @@ pub async fn ask(
                 for op in &ops {
                     match op {
                         crate::parser::Operation::Test(test) => {
+                            let mut all_passed = true;
                             for case in &test.cases {
                                 match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
                                     Ok(msg) => { eprintln!("[web:pass] {msg}"); iter_test_results.push(TestCaseResult { message: msg, pass: true }); }
-                                    Err(e) => { eprintln!("[web:fail] {e}"); iter_has_errors = true; iter_test_results.push(TestCaseResult { message: format!("{e}"), pass: false }); }
+                                    Err(e) => { all_passed = false; eprintln!("[web:fail] {e}"); iter_has_errors = true; iter_test_results.push(TestCaseResult { message: format!("{e}"), pass: false }); }
                                 }
+                            }
+                            if all_passed && !test.cases.is_empty() {
+                                session.tested_functions.insert(test.function_name.clone());
                             }
                         }
                         crate::parser::Operation::Eval(ev) => {
+                            // Block eval of untested functions in ForgeOS mode
+                            if session.program.require_modules {
+                                if let Some(func) = session.program.get_function(&ev.function_name) {
+                                    if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
+                                        iter_has_errors = true;
+                                        iter_results.push(MutationResult {
+                                            message: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
+                                            success: false,
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
+
                             let needs_async = session.program.get_function(&ev.function_name)
                                 .is_some_and(|f| f.effects.iter().any(|e|
                                     matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
@@ -1545,6 +1579,7 @@ pub async fn ask_stream(
                     for op in &ops {
                         match op {
                             crate::parser::Operation::Test(test) => {
+                                let mut all_passed = true;
                                 for case in &test.cases {
                                     match crate::eval::eval_test_case(&session.program, &test.function_name, case) {
                                         Ok(msg) => {
@@ -1552,14 +1587,31 @@ pub async fn ask_stream(
                                             let _ = tx.send(serde_json::json!({"type": "test", "pass": true, "message": msg})).await;
                                         }
                                         Err(e) => {
+                                            all_passed = false;
                                             has_errors = true;
                                             feedback_details.push(format!("FAIL: {e}"));
                                             let _ = tx.send(serde_json::json!({"type": "test", "pass": false, "message": format!("{e}")})).await;
                                         }
                                     }
                                 }
+                                if all_passed && !test.cases.is_empty() {
+                                    session.tested_functions.insert(test.function_name.clone());
+                                }
                             }
                             crate::parser::Operation::Eval(ev) => {
+                                // Block eval of untested functions (>2 statements) in ForgeOS mode
+                                if session.program.require_modules {
+                                    if let Some(func) = session.program.get_function(&ev.function_name) {
+                                        if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
+                                            has_errors = true;
+                                            let msg = format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len());
+                                            feedback_details.push(format!("ERROR: {msg}"));
+                                            let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": ev.function_name, "success": false})).await;
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 let needs_async = session.program.get_function(&ev.function_name)
                                     .is_some_and(|f| f.effects.iter().any(|e|
                                         matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
@@ -1729,37 +1781,24 @@ pub async fn ask_stream(
                     let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Messages from agents: {}", inbox.len()), "success": true})).await;
                 }
 
-                // Check for untested functions — nag if functions with >2 statements lack tests
-                if let Ok(ops) = crate::parser::parse(&code) {
-                    let tested: std::collections::HashSet<String> = ops.iter().filter_map(|op| {
-                        if let crate::parser::Operation::Test(t) = op { Some(t.function_name.clone()) } else { None }
-                    }).collect();
-                    let mut untested = Vec::new();
-                    for op in &ops {
-                        let (name, stmts) = match op {
-                            crate::parser::Operation::Function(f) => (f.name.clone(), f.body.len()),
-                            crate::parser::Operation::Module(m) => {
-                                // Check functions inside module
-                                for op in &m.body {
-                                    if let crate::parser::Operation::Function(f) = op {
-                                        let qname = format!("{}.{}", m.name, f.name);
-                                        if f.body.len() > 2 && !tested.contains(&qname) && !tested.contains(&f.name) {
-                                            untested.push(qname);
-                                        }
-                                    }
+                // Note untested functions in feedback so the AI knows what needs tests
+                if session.program.require_modules {
+                    let all_fns: Vec<String> = {
+                        let mut fns = Vec::new();
+                        for m in &session.program.modules {
+                            for f in &m.functions {
+                                let qname = format!("{}.{}", m.name, f.name);
+                                if f.body.len() > 2 && !session.tested_functions.contains(&qname) {
+                                    fns.push(qname);
                                 }
-                                continue;
                             }
-                            _ => continue,
-                        };
-                        if stmts > 2 && !tested.contains(&name) {
-                            untested.push(name);
                         }
-                    }
-                    if !untested.is_empty() {
+                        fns
+                    };
+                    if !all_fns.is_empty() {
                         feedback_details.push(format!(
-                            "WARNING: untested functions (>2 statements): {}. Write !test blocks for them.",
-                            untested.join(", ")
+                            "Untested functions (blocked from !eval): {}",
+                            all_fns.join(", ")
                         ));
                     }
                 }
