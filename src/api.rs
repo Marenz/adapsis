@@ -2462,22 +2462,21 @@ pub async fn ask_stream(
                 } else {
                     let mut msg = format!("Plan: {done}/{total} done.");
                     if !failed.is_empty() {
-                        msg.push_str(&format!(" {} failed.", failed.len()));
+                        msg.push_str(&format!("\n  {} failed.", failed.len()));
                     }
                     if !in_progress.is_empty() {
                         for s in &in_progress {
-                            msg.push_str(&format!(" Current: {}", s.description));
+                            msg.push_str(&format!("\n  Current: {}", s.description));
                         }
                         for s in pending.iter().take(1) {
-                            msg.push_str(&format!(" Next: {}", s.description));
+                            msg.push_str(&format!("\n  Next: {}", s.description));
                         }
                     } else {
-                        // First pending is implicitly the current task
                         if let Some(first) = pending.first() {
-                            msg.push_str(&format!(" Current: {}", first.description));
+                            msg.push_str(&format!("\n  Current: {}", first.description));
                         }
                         if let Some(next) = pending.get(1) {
-                            msg.push_str(&format!(" Next: {}", next.description));
+                            msg.push_str(&format!("\n  Next: {}", next.description));
                         }
                     }
                     msg
