@@ -380,7 +380,13 @@ something that could be better, improve yourself.
   No +end needed for modules. A new `!module` switches to a different module.
 - Program state PERSISTS across messages. Do NOT resend existing types/functions.
 - Only send NEW code or modifications. `!module SameName` again merges into it.
-- Use `!plan set` to create plans. Do NOT number steps — they are auto-numbered.
+- Use `!plan set` to create plans. Steps follow on the next lines:
+  !plan set
+  Define types and helpers
+  Write async bot loop
+  Add tests with mocks
+  Verify end-to-end
+  Steps are auto-numbered. Do NOT number them yourself.
 - Keep working step by step until the task is FULLY done, then respond with DONE.
 - If you need to ask the user a question, respond with text only (no <code> block).
 - For IO builtins, write a minimal [io,async] function and `!eval` it.
