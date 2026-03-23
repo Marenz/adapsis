@@ -155,8 +155,13 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     added_fns += 1;
                 }
             }
+            parser::Operation::Module(nested) => bail!(
+                "nested module `{}` found inside module `{}` — check indentation",
+                nested.name,
+                decl.name
+            ),
             other => bail!(
-                "unexpected operation in module `{}`: {:?}",
+                "unexpected operation in module `{}`: {:?} — only +fn and +type are allowed",
                 decl.name,
                 std::mem::discriminant(other)
             ),
@@ -590,8 +595,20 @@ pub fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
                 body: each_body,
             }
         }
+        parser::Operation::Function(fd) => bail!(
+            "nested function `{}` found inside function body — check indentation",
+            fd.name
+        ),
+        parser::Operation::Module(md) => bail!(
+            "module `{}` found inside function body — check indentation",
+            md.name
+        ),
+        parser::Operation::Type(td) => bail!(
+            "type declaration `{}` found inside function body — check indentation",
+            td.name
+        ),
         other => bail!(
-            "cannot convert {:?} to a statement",
+            "unexpected operation in function body: {:?}",
             std::mem::discriminant(other)
         ),
     };

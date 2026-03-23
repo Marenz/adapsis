@@ -130,7 +130,9 @@ impl OpenAiBackend {
             .error_for_status()
             .context("streaming chat completion request failed")?;
 
-        let mut buffer = String::new();
+        // Buffer raw bytes so multi-byte UTF-8 sequences that are split
+        // across HTTP chunks are not corrupted by from_utf8_lossy.
+        let mut raw_buf: Vec<u8> = Vec::new();
         let mut thinking_text = String::new();
         let mut content_text = String::new();
         let mut in_thinking = false;
@@ -142,14 +144,40 @@ impl OpenAiBackend {
             .await
             .context("failed to read streaming response chunk")?
         {
-            let chunk = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&chunk);
+            raw_buf.extend_from_slice(&chunk);
 
-            while let Some(event_end) = buffer.find("\n\n") {
-                let event = buffer[..event_end].to_string();
-                buffer.drain(..event_end + 2);
+            // Convert as much valid UTF-8 as possible from the front of
+            // the buffer, leaving any trailing incomplete sequence for the
+            // next chunk to complete.
+            let valid_up_to = match std::str::from_utf8(&raw_buf) {
+                Ok(_) => raw_buf.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            if valid_up_to == 0 {
+                continue;
+            }
 
-                for data in sse_data_lines(&event) {
+            let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
+            // We work on complete SSE events delimited by "\n\n".
+            // Only drain up to the last complete event boundary to avoid
+            // splitting an event across iterations.
+            let mut last_event_end = 0;
+            let mut search_from = 0;
+            while let Some(pos) = text[search_from..].find("\n\n") {
+                last_event_end = search_from + pos + 2;
+                search_from = last_event_end;
+            }
+            if last_event_end == 0 {
+                continue; // no complete event yet
+            }
+
+            let events_str = &text[..last_event_end];
+            // Process each complete SSE event
+            for event in events_str.split("\n\n") {
+                if event.is_empty() {
+                    continue;
+                }
+                for data in sse_data_lines(event) {
                     if data == "[DONE]" {
                         stdout.flush().ok();
                         println!();
@@ -185,6 +213,8 @@ impl OpenAiBackend {
                     }
                 }
             }
+
+            raw_buf.drain(..last_event_end);
         }
 
         stdout.flush().ok();

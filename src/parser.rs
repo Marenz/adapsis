@@ -377,42 +377,80 @@ impl<'a> Parser<'a> {
         Ok(ops)
     }
 
-    fn parse_block(&mut self, indent: usize, _mode: BlockMode) -> Result<Vec<Operation>> {
+    fn parse_block(&mut self, indent: usize, mode: BlockMode) -> Result<Vec<Operation>> {
         let mut ops = Vec::new();
 
         while let Some(line) = self.current() {
-            // +end closes the current block (universal closer)
+            // +end closes the current block — don't consume, let caller handle it
             if line.text == "end" || line.text == "+end" {
-                self.index += 1;
+                if mode == BlockMode::TopLevel {
+                    // Top-level: just stop, don't consume
+                }
                 break;
             }
 
-            // De-indent also closes the block
-            if line.indent < indent {
+            // In nested blocks, stop when indentation decreases below the block level
+            if mode == BlockMode::Normal && line.indent < indent {
                 break;
             }
 
-            if line.indent > indent {
-                bail!("line {}: unexpected indentation", line.number);
+            // Sibling keywords close the current sub-block without consuming
+            if mode == BlockMode::Normal {
+                if line.text.starts_with("+elif")
+                    || line.text == "+else"
+                    || line.text.starts_with("+case")
+                {
+                    break; // Don't consume — caller handles these
+                }
             }
 
-            ops.push(self.parse_operation(indent)?);
+            ops.push(self.parse_operation(line.indent)?);
         }
 
         Ok(ops)
+    }
+
+    /// Consume a +end / end token if present. Returns true if consumed.
+    fn consume_end(&mut self) -> bool {
+        if let Some(line) = self.current() {
+            if line.text == "+end" || line.text == "end" {
+                self.index += 1;
+                return true;
+            }
+        }
+        false
     }
 
     fn parse_operation(&mut self, indent: usize) -> Result<Operation> {
         let line = self.current().context("internal parser state error")?;
         let text = line.text;
 
-        if let Some(rest) = text.strip_prefix("+module") {
+        // !module Name — state change, everything after goes into this module
+        if let Some(rest) = text
+            .strip_prefix("!module")
+            .or_else(|| text.strip_prefix("+module"))
+        {
             let name = rest.trim();
             if name.is_empty() {
                 bail!("line {}: expected module name", line.number);
             }
             self.index += 1;
-            let body = self.parse_module_body(indent)?;
+            // Collect +fn and +type operations until next !module, ! command, or EOF
+            let mut body = Vec::new();
+            while let Some(next) = self.current() {
+                if next.text.starts_with("!module") || next.text.starts_with("+module") {
+                    break;
+                }
+                if next.text == "+end" || next.text == "end" {
+                    self.index += 1; // Skip optional +end (backward compat)
+                    break;
+                }
+                // Only +fn, +type belong inside a module — everything else is top-level
+                if !next.text.starts_with("+fn") && !next.text.starts_with("+type") {
+                    break;
+                }
+                body.push(self.parse_operation(next.indent)?);
+            }
             return Ok(Operation::Module(ModuleDecl {
                 name: name.to_string(),
                 body,
@@ -445,6 +483,7 @@ impl<'a> Parser<'a> {
             let header = parse_function_header(line.number, rest.trim())?;
             self.index += 1;
             let body = self.parse_nested_block(indent)?;
+            self.consume_end();
             return Ok(Operation::Function(FunctionDecl {
                 name: header.name,
                 params: header.params,
@@ -478,6 +517,7 @@ impl<'a> Parser<'a> {
             let condition = parse_expr(line.number, rest.trim())?;
             self.index += 1;
             let body = self.parse_nested_block(indent)?;
+            self.consume_end();
             return Ok(Operation::While(WhileDecl { condition, body }));
         }
 
@@ -485,13 +525,17 @@ impl<'a> Parser<'a> {
             let expr = parse_expr(line.number, rest.trim())?;
             self.index += 1;
 
-            // Parse +case arms at the same indent level
+            // Parse +case arms until +end
             let mut arms = Vec::new();
             loop {
                 let next = match self.current() {
-                    Some(l) if l.indent == indent => l,
+                    Some(l) => l,
                     _ => break,
                 };
+                if next.text == "+end" || next.text == "end" {
+                    self.index += 1;
+                    break;
+                }
                 if let Some(case_rest) = next.text.strip_prefix("+case") {
                     let case_rest = case_rest.trim();
                     let arm = parse_case_pattern(next.number, case_rest)?;
@@ -567,10 +611,10 @@ impl<'a> Parser<'a> {
             let mut elif_branches = Vec::new();
             let mut else_body = Vec::new();
 
-            // Parse +elif and +else at the same indentation
+            // Parse +elif and +else — they close the previous branch body
             loop {
                 let next = match self.current() {
-                    Some(l) if l.indent == indent => l,
+                    Some(l) => l,
                     _ => break,
                 };
                 if let Some(rest) = next.text.strip_prefix("+elif") {
@@ -586,6 +630,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+            self.consume_end();
 
             return Ok(Operation::If(IfDecl {
                 condition,
@@ -609,6 +654,7 @@ impl<'a> Parser<'a> {
             let (collection, item, item_type) = parse_each_header(line.number, rest.trim())?;
             self.index += 1;
             let body = self.parse_nested_block(indent)?;
+            self.consume_end();
             return Ok(Operation::Each(EachDecl {
                 collection,
                 item,
@@ -624,6 +670,7 @@ impl<'a> Parser<'a> {
             }
             self.index += 1;
             let body = self.parse_nested_block(indent)?;
+            self.consume_end();
             return Ok(Operation::Replace(ReplaceMutation {
                 target: target.to_string(),
                 body,
@@ -975,37 +1022,6 @@ impl<'a> Parser<'a> {
             return Ok(Vec::new());
         };
         self.parse_block(indent, BlockMode::Normal)
-    }
-
-    fn parse_module_body(&mut self, module_indent: usize) -> Result<Vec<Operation>> {
-        let mut ops = Vec::new();
-        let child_indent = self.child_indent(module_indent);
-
-        while let Some(line) = self.current() {
-            // end / +end closes the module (optional — de-indent also works)
-            if line.indent <= module_indent && (line.text == "end" || line.text == "+end") {
-                self.index += 1;
-                return Ok(ops);
-            }
-
-            // De-indent back to module level or less = module body ended (no end needed)
-            if line.indent <= module_indent {
-                return Ok(ops);
-            }
-
-            let Some(indent) = child_indent else {
-                return Ok(ops);
-            };
-
-            if line.indent != indent {
-                bail!("line {}: unexpected indentation inside module", line.number);
-            }
-
-            ops.push(self.parse_operation(indent)?);
-        }
-
-        let line = self.lines.last().map(|line| line.number).unwrap_or(1);
-        bail!("line {}: module block is missing `end`", line)
     }
 
     fn child_indent(&self, parent_indent: usize) -> Option<usize> {

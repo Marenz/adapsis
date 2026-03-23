@@ -2259,10 +2259,6 @@ mod tests {
 +fn add (a:Int, b:Int)->Int
   +let sum:Int = a + b
   +return sum
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 
 !test add
   +with a=2 b=3 -> expect 5
@@ -2283,10 +2279,6 @@ mod tests {
 +fn add (a:Int, b:Int)->Int
   +let sum:Int = a + b
   +return sum
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 
 !test add
   +with a=2 b=3 -> expect 99
@@ -2306,10 +2298,6 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2337,10 +2325,6 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2366,10 +2350,6 @@ mod tests {
 +fn fetch_data (url:String)->String [io]
   +await resp:String = http_get(url)
   +return resp
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2396,10 +2376,6 @@ mod tests {
 +fn delayed_value (ms:Int)->String [async]
   +await _:String = sleep(ms)
   +return \"done\"
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2428,18 +2404,10 @@ mod tests {
 +fn inner_fetch (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 
 +fn outer_fetch (url:String)->String [async]
   +await data:String = inner_fetch(url)
   +return data
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2469,10 +2437,6 @@ mod tests {
   +await body:String = http_get(url)
   +let name:String = json_get(body, \"name\")
   +return name
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2502,10 +2466,6 @@ mod tests {
   +await body:String = http_get(url)
   +let count:Int = json_array_len(body)
   +return count
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2549,10 +2509,6 @@ mod tests {
   +await body:String = http_get(url)
   +let status:String = json_get(body, \"status\")
   +return status
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(fn_source);
 
@@ -2619,10 +2575,6 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 
 !mock http_get \"example.com\" -> \"hello world\"
 
@@ -2640,10 +2592,6 @@ mod tests {
 +fn delayed (ms:Int)->String [async]
   +await _:String = sleep(ms)
   +return \"done\"
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 
 !mock sleep \"500\" -> \"\"
 
@@ -2662,18 +2610,10 @@ mod tests {
 +fn inner_fetch (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 
 +fn wrapper (url:String)->String [async]
   +await data:String = inner_fetch(url)
   +return data
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 
 !mock http_get \"api.test\" -> \"nested result\"
 
@@ -2695,10 +2635,6 @@ mod tests {
   +let arr:String = json_get(body, \"result\")
   +let count:Int = json_array_len(arr)
   +return count
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let mock_source = "!mock http_get \"x\" -> \"{\\\"ok\\\":true,\\\"result\\\":[]}\"";
         let test_source = "\
@@ -2719,10 +2655,6 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2745,8 +2677,6 @@ mod tests {
     }
 
     #[tokio::test]
-<<<<<<< HEAD
-=======
     async fn test_session_apply_async_runs_async_tests_with_mocks() {
         // Simulate the full session flow: define an async function,
         // register mocks, then run !test — all through apply_async.
@@ -2757,7 +2687,6 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-+end
 ";
         let results = session.apply_async(define_source, None).await;
         assert!(results.is_ok(), "define should succeed: {:?}", results);
@@ -2787,12 +2716,10 @@ mod tests {
 +fn inner_fetch (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
-+end
 
 +fn wrapper (url:String)->String [async]
   +call data:String = inner_fetch(url)
   +return data
-+end
 ";
         let _ = session.apply_async(source, None).await;
 
@@ -2809,16 +2736,11 @@ mod tests {
     }
 
     #[tokio::test]
->>>>>>> syntax-fixes
     async fn test_async_eval_delegates_sync_to_sync_path() {
         let source = "\
 +fn add (a:Int, b:Int)->Int
   +let sum:Int = a + b
   +return sum
-<<<<<<< HEAD
-=======
-+end
->>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2832,5 +2754,170 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let result = eval_test_case_async(&program, fn_name, case, &[], tx).await;
         assert!(result.is_ok(), "sync function via async path should pass: {:?}", result);
+    }
+
+    // ── UTF-8 regression tests ───────────────────────────────────────
+
+    #[test]
+    fn test_json_get_preserves_utf8() {
+        // Verify json_get returns multi-byte UTF-8 characters intact
+        // Use a wrapper that builds the JSON internally to avoid parser quoting issues
+        let source = r#"
++fn get_cafe ()->String
+  +let json:String = "{\"name\":\"café\"}"
+  +return json_get(json, "name")
+"#;
+        let program = build_program(source);
+        let input = parser::parse("!eval get_cafe")
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, r#""café""#, "json_get should preserve UTF-8 chars");
+    }
+
+    #[test]
+    fn test_json_escape_preserves_utf8() {
+        // Verify json_escape passes multi-byte UTF-8 through unchanged
+        let source = r#"
++fn escape_it (s:String)->String
+  +return json_escape(s)
+"#;
+        let program = build_program(source);
+        let input = parser::parse(r#"!eval escape_it s="café élève naïve""#)
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, r#""café élève naïve""#, "json_escape should preserve UTF-8 chars");
+    }
+
+    #[test]
+    fn test_value_display_utf8_string() {
+        // Verify Value::String Display preserves multi-byte UTF-8
+        let val = Value::String("café ☕ 日本語".to_string());
+        let displayed = format!("{val}");
+        assert_eq!(displayed, r#""café ☕ 日本語""#, "Value display should preserve UTF-8");
+    }
+
+    #[test]
+    fn test_concat_preserves_utf8() {
+        let source = r#"
++fn greet (name:String)->String
+  +return concat("Bonjour, ", name)
+"#;
+        let program = build_program(source);
+        let input = parser::parse(r#"!eval greet name="André""#)
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, r#""Bonjour, André""#, "concat should preserve UTF-8");
+    }
+
+    #[test]
+    fn test_unicode_string_literal_roundtrip() {
+        // Full Unicode string literal: parse → eval → display must preserve
+        // all multi-byte characters exactly.
+        let source = "
++fn probe ()->String
+  +return \"hé — 你好 ✓ ★\"
+";
+        let program = build_program(source);
+        let input = parser::parse("!eval probe")
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, "\"hé — 你好 ✓ ★\"",
+            "Unicode string literal must survive parse/eval/display without mojibake");
+        // Verify actual byte representation
+        let inner = &result[1..result.len()-1]; // strip quotes
+        assert_eq!(inner.as_bytes(), "hé — 你好 ✓ ★".as_bytes(),
+            "UTF-8 byte representation must match");
+    }
+
+    #[test]
+    fn test_unicode_json_serialization_roundtrip() {
+        // Build JSON containing Unicode via json_escape, then extract via json_get.
+        // This simulates what send_message_body does with Unicode text.
+        let source = r#"
++fn build_json (text:String)->String
+  +let escaped:String = json_escape(text)
+  +let body:String = concat("{\"text\":\"", concat(escaped, "\"}"))
+  +return body
+
++fn extract_text (json:String)->String
+  +return json_get(json, "text")
+
++fn roundtrip (text:String)->String
+  +let json:String = build_json(text)
+  +return extract_text(json)
+"#;
+        let program = build_program(source);
+        let input = parser::parse("!eval roundtrip text=\"café — 你好 ✓ ★\"")
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, "\"café — 你好 ✓ ★\"",
+            "Unicode text must survive json_escape → JSON embedding → json_get roundtrip");
+    }
+
+    #[tokio::test]
+    async fn test_mocked_http_utf8_roundtrip() {
+        // Simulate an http_get returning UTF-8 text via mock, then extracting it.
+        let mut session = crate::session::Session::new();
+
+        let source = "
++fn fetch_text (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return json_get(resp, \"text\")
+";
+        let _ = session.apply_async(source, None).await;
+
+        // Mock returns JSON with Unicode content
+        let mock_source = "!mock http_get \"unicode-test\" -> \"{\\\"text\\\":\\\"café — 你好 ✓\\\"}\"";
+        let _ = session.apply_async(mock_source, None).await;
+
+        let test_source = "
+!test fetch_text
+  +with url=\"https://unicode-test.example.com\" -> expect \"café — 你好 ✓\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "mocked HTTP UTF-8 test should pass: {:?}", results[0]);
+        assert!(results[0].0.contains("PASS"),
+            "mocked HTTP returning UTF-8 JSON should round-trip: {:?}", results[0]);
+    }
+
+    #[tokio::test]
+    async fn test_mocked_llm_utf8_roundtrip() {
+        // Simulate llm_call returning UTF-8 text via mock.
+        let mut session = crate::session::Session::new();
+
+        let source = "
++fn ask_llm (prompt:String)->String [async]
+  +await reply:String = llm_call(prompt, \"echo\")
+  +return reply
+";
+        let _ = session.apply_async(source, None).await;
+
+        // Mock llm_call to return Unicode text
+        let mock_source = "!mock llm_call \"test\" -> \"café — 你好 ✓ ★\"";
+        let _ = session.apply_async(mock_source, None).await;
+
+        let test_source = "
+!test ask_llm
+  +with prompt=\"test prompt\" -> expect \"café — 你好 ✓ ★\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "mocked LLM UTF-8 test should pass: {:?}", results[0]);
     }
 }

@@ -690,6 +690,7 @@ impl Session {
         Ok(results)
     }
 
+
     /// Get the parsed operations from a source string (for test/eval/query handling).
     pub fn parse_operations(&self, source: &str) -> Result<Vec<parser::Operation>> {
         parser::parse(source)
