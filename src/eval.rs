@@ -2116,6 +2116,13 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         Ok(Value::Err("unknown".to_string()))
                     }
                 }
+                "list" => {
+                    let items = args
+                        .iter()
+                        .map(eval_parser_expr_standalone)
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(Value::List(items))
+                }
                 _ => {
                     // Treat as union variant constructor
                     let payload = args

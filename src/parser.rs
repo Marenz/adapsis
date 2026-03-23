@@ -43,6 +43,8 @@ pub enum Operation {
     },
     Plan(PlanAction),
     Roadmap(RoadmapAction),
+    /// Remove a function, type, or module: !remove Module.function or !remove Module
+    Remove(String),
     Watch {
         function_name: String,
         args: String,
@@ -833,6 +835,18 @@ impl<'a> Parser<'a> {
                 // Treat as set with single step
                 return Ok(Operation::Plan(PlanAction::Set(vec![rest.to_string()])));
             }
+        }
+
+        if let Some(rest) = text.strip_prefix("!remove") {
+            let target = rest.trim().to_string();
+            if target.is_empty() {
+                bail!(
+                    "line {}: !remove requires a target (Module.function, Module, or TypeName)",
+                    line.number
+                );
+            }
+            self.index += 1;
+            return Ok(Operation::Remove(target));
         }
 
         if let Some(rest) = text.strip_prefix("!roadmap") {

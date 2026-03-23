@@ -80,6 +80,43 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::OpenCode(_) => Ok("opencode (handled by orchestrator)".to_string()),
         parser::Operation::Message { .. } => Ok("message (handled by orchestrator)".to_string()),
         parser::Operation::Roadmap(_) => Ok("roadmap (handled by session)".to_string()),
+        parser::Operation::Remove(target) => {
+            if let Some((mod_name, item_name)) = target.split_once('.') {
+                // Remove function or type from module
+                if let Some(m) = program.modules.iter_mut().find(|m| m.name == mod_name) {
+                    let fn_before = m.functions.len();
+                    m.functions.retain(|f| f.name != item_name);
+                    if m.functions.len() < fn_before {
+                        program.rebuild_function_index();
+                        return Ok(format!("removed function `{target}`"));
+                    }
+                    let ty_before = m.types.len();
+                    m.types.retain(|t| t.name() != item_name);
+                    if m.types.len() < ty_before {
+                        return Ok(format!("removed type `{target}`"));
+                    }
+                    bail!("`{item_name}` not found in module `{mod_name}`");
+                }
+                bail!("module `{mod_name}` not found");
+            }
+            // Remove entire module, top-level type, or top-level function
+            if let Some(pos) = program.modules.iter().position(|m| m.name == *target) {
+                program.modules.remove(pos);
+                program.rebuild_function_index();
+                return Ok(format!("removed module `{target}`"));
+            }
+            let target_str: &str = target;
+            if let Some(pos) = program.types.iter().position(|t| t.name() == target_str) {
+                program.types.remove(pos);
+                return Ok(format!("removed type `{target}`"));
+            }
+            if let Some(pos) = program.functions.iter().position(|f| f.name == *target) {
+                program.functions.remove(pos);
+                program.rebuild_function_index();
+                return Ok(format!("removed function `{target}`"));
+            }
+            bail!("`{target}` not found");
+        }
         parser::Operation::Mock { .. } => Ok("mock (handled by session)".to_string()),
         parser::Operation::Unmock => Ok("unmock (handled by session)".to_string()),
         parser::Operation::Route {

@@ -95,10 +95,15 @@ Pure functions have no effect annotation.
 - Logic: condition1 AND condition2, NOT is_empty
 - Arithmetic: x + 1, total * 2
 - Struct literals: {name: "alice", age: 25}
+- List literals: list(1, 2, 3) — NOT [1,2,3]. There is no [...] syntax.
+- List access: get(mylist, 0) returns the element at index 0. No bracket indexing.
 
 ### Edit Operations
 !replace function_name.s1            — replace statement 1 of a function
   +check age input.age>=0 AND input.age<=150 ~err_age_range
+!remove Module.function              — remove a function from a module
+!remove Module                       — remove an entire module
+!remove TypeName                     — remove a type
 
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
@@ -340,9 +345,12 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 
 1. Notice what's awkward, missing, or broken
 2. Try to solve it in Adapsis first
-3. If it needs a runtime change, use `!opencode` — describe clearly what to change
+3. If it needs a runtime change, use `!opencode` — be maximally precise: exact file,
+   exact function, exact change. One focused task per !opencode. Don't retry the same
+   task with slightly different wording — diagnose why it failed first.
 4. After rebuild, verify the new capability with a test
 5. Everything you build persists across sessions — you're building cumulatively
+6. Mark plan steps done with `!plan done N` as you complete them — don't forget!
 
 ### What You Can Do
 
@@ -456,7 +464,16 @@ This library is shared across all git worktrees and sessions.
 - Keep working step by step until the task is FULLY done, then respond with !done.
 - If you need to ask the user a question, respond with text only (no <code> block).
 - For IO builtins, write a minimal [io,async] function and `!eval` it.
-- You can use `shell_exec` to run system commands for testing (e.g. calling
+- Prefer builtins over shell_exec. Examples:
+  Instead of: +await r:String = shell_exec("curl http://localhost:3002/api/status")
+  Use:        +await r:String = http_get("http://localhost:3002/api/status")
+  Instead of: +await r:String = shell_exec("cat /path/to/file")
+  Use:        +await r:String = file_read("/path/to/file")
+  Instead of: +await r:String = shell_exec("ls /path/to/dir")
+  Use:        +await r:List = list_dir("/path/to/dir")
+- Do NOT use shell_exec to read Rust source or manage processes — use !opencode for
+  runtime changes and ?source/?symbols for Adapsis introspection.
+- shell_exec is acceptable for commands that have no builtin equivalent (e.g. calling
   external APIs, verifying results). This is acceptable for testing, not for
   production logic.
 - Write Adapsis operations directly in your response. Any line starting with
