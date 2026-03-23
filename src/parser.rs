@@ -55,6 +55,12 @@ pub enum Operation {
         task: String,
     },
     OpenCode(String),
+    /// Register an HTTP route: +route POST "/path" -> handler_fn
+    Route {
+        method: String,
+        path: String,
+        handler_fn: String,
+    },
     /// Send a message to an agent: !msg <agent> <text>
     Message {
         to: String,
@@ -500,6 +506,52 @@ impl<'a> Parser<'a> {
                 effects: header.effects,
                 body,
             }));
+        }
+
+        if let Some(rest) = text.strip_prefix("+route") {
+            // Format: +route METHOD "path" -> handler_fn
+            // e.g.    +route POST "/webhook/telegram" -> handle_telegram
+            let rest = rest.trim();
+            let (method, rest) = rest.split_once(char::is_whitespace).ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected `+route METHOD \"path\" -> handler_fn`",
+                    line.number
+                )
+            })?;
+            let rest = rest.trim();
+            // Parse quoted path
+            let path = if rest.starts_with('"') {
+                let end = rest[1..].find('"').ok_or_else(|| {
+                    anyhow!("line {}: unterminated string in +route path", line.number)
+                })?;
+                let p = &rest[1..1 + end];
+                (p, &rest[2 + end..])
+            } else {
+                let end = rest.find(char::is_whitespace).ok_or_else(|| {
+                    anyhow!(
+                        "line {}: expected path and -> handler in +route",
+                        line.number
+                    )
+                })?;
+                (&rest[..end], &rest[end..])
+            };
+            let rest = path.1.trim();
+            let handler_fn = rest
+                .strip_prefix("->")
+                .ok_or_else(|| anyhow!("line {}: expected `->` after path in +route", line.number))?
+                .trim();
+            if handler_fn.is_empty() {
+                bail!(
+                    "line {}: expected handler function name after `->` in +route",
+                    line.number
+                );
+            }
+            self.index += 1;
+            return Ok(Operation::Route {
+                method: method.to_uppercase(),
+                path: path.0.to_string(),
+                handler_fn: handler_fn.to_string(),
+            });
         }
 
         if let Some(rest) = text.strip_prefix("+let") {
