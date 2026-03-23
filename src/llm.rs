@@ -462,17 +462,32 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
         // Extract contiguous blocks of such lines.
         let mut forge_lines: Vec<String> = Vec::new();
         let mut in_block = false;
+        let mut block_is_greedy = false; // !plan set, !roadmap add, !opencode, +type eat continuation
         for line in clean_content.lines() {
             let trimmed = line.trim();
+            let is_continuation = in_block && !trimmed.is_empty() && (
+                block_is_greedy
+                || trimmed.starts_with("- ") || trimmed.starts_with("* ")
+                || line.starts_with("  ") || line.starts_with("\t")
+                || trimmed.starts_with("//")
+            );
             let is_forge = trimmed.starts_with('+') || trimmed.starts_with('!')
                 || trimmed.starts_with('?') || trimmed == "end" || trimmed == "DONE"
-                || (in_block && (trimmed.is_empty() || trimmed.starts_with("//")));
+                || is_continuation
+                || (in_block && trimmed.is_empty());
             if is_forge {
+                // Check if this line starts a greedy block
+                if trimmed.starts_with("!plan set") || trimmed.starts_with("!roadmap add")
+                    || trimmed.starts_with("!opencode") || trimmed.starts_with("+type") {
+                    block_is_greedy = true;
+                } else if trimmed.starts_with('+') || trimmed.starts_with('!') || trimmed.starts_with('?') {
+                    block_is_greedy = false; // New forge line resets greedy
+                }
                 forge_lines.push(line.to_string());
                 in_block = true;
             } else if in_block && !trimmed.is_empty() {
-                // End of a Forge block — prose text after code
                 in_block = false;
+                block_is_greedy = false;
             }
         }
         forge_lines.join("\n").trim().to_string()

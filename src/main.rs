@@ -839,7 +839,7 @@ async fn main() -> Result<()> {
                 .route(
                     "/",
                     axum::routing::get(|| async {
-                        axum::response::Html(include_str!("../web/forgeos.html"))
+                        axum::response::Html(include_str!("../web/adapsis.html"))
                     }),
                 )
                 .merge(api::router_with_llm(config))

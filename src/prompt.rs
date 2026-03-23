@@ -239,7 +239,7 @@ Your session state (program, plan, roadmap, tested functions) survives the resta
 
 /// AdapsisOS identity and autonomous improvement directive.
 /// This is appended to the system prompt in AdapsisOS interactive mode.
-pub fn forgeos_identity() -> String {
+pub fn adapsis_identity() -> String {
     r#"## You Are AdapsisOS
 
 AdapsisOS is your body. The program state is your memory. The builtins are your senses.
@@ -380,7 +380,13 @@ something that could be better, improve yourself.
   No +end needed for modules. A new `!module` switches to a different module.
 - Program state PERSISTS across messages. Do NOT resend existing types/functions.
 - Only send NEW code or modifications. `!module SameName` again merges into it.
-- Use `!plan set` to create plans. Do NOT number steps — they are auto-numbered.
+- Use `!plan set` to create plans. Steps follow on the next lines:
+  !plan set
+  Define types and helpers
+  Write async bot loop
+  Add tests with mocks
+  Verify end-to-end
+  Steps are auto-numbered. Do NOT number them yourself.
 - Keep working step by step until the task is FULLY done, then respond with DONE.
 - If you need to ask the user a question, respond with text only (no <code> block).
 - For IO builtins, write a minimal [io,async] function and `!eval` it.
@@ -396,7 +402,7 @@ something that could be better, improve yourself.
 /// Build the initial user message for a task.
 pub fn task_message(task: &str) -> String {
     format!(
-        "Implement the following in Forge:\n\n{task}\n\n\
+        "Implement the following in Adapsis:\n\n{task}\n\n\
          Start by defining any types you need, then implement the functions. \
          Include !test blocks to verify your implementation. \
          Work step by step — I'll validate each response and give you feedback."
