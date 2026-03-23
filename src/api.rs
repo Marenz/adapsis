@@ -363,8 +363,16 @@ pub struct StatusResponse {
     pub history_entries: usize,
     pub functions: Vec<String>,
     pub types: Vec<String>,
+    pub routes: Vec<RouteInfo>,
     pub program_summary: String,
     pub plan: Vec<PlanStepResponse>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RouteInfo {
+    pub method: String,
+    pub path: String,
+    pub handler_fn: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -396,6 +404,11 @@ pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse
             .map(|f| f.name.clone())
             .collect(),
         types: session.program.types.iter().map(|t| t.name().to_string()).collect(),
+        routes: session.program.http_routes.iter().map(|r| RouteInfo {
+            method: r.method.clone(),
+            path: r.path.clone(),
+            handler_fn: r.handler_fn.clone(),
+        }).collect(),
         program_summary: validator::program_summary(&session.program),
     })
 }
@@ -2304,6 +2317,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/history", post(history))
         .route("/api/rewind", post(rewind))
         .route("/api/agents", get(agents))
+        .route("/api/routes", get(list_routes))
         .with_state(config.session.clone());
 
     let config_routes = axum::Router::new()
@@ -2317,9 +2331,120 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/tasks", get(tasks))
         .route("/api/log", get(get_log))
         .route("/api/events", get(events_stream))
+        .with_state(config.clone());
+
+    // Adapsis-registered HTTP route dispatch (e.g. webhook endpoints)
+    let webhook_fallback = axum::Router::new()
+        .fallback(adapsis_route_dispatch)
         .with_state(config);
 
-    session_routes.merge(config_routes)
+    session_routes.merge(config_routes).merge(webhook_fallback)
+}
+
+/// GET /api/routes — list all Adapsis-registered HTTP routes.
+async fn list_routes(State(session): State<SharedSession>) -> Json<serde_json::Value> {
+    let session = session.lock().await;
+    let routes: Vec<serde_json::Value> = session
+        .program
+        .http_routes
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "method": r.method,
+                "path": r.path,
+                "handler_fn": r.handler_fn,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "routes": routes }))
+}
+
+/// Fallback handler: dispatch incoming requests to Adapsis-registered HTTP routes.
+/// Matches method + path against `program.http_routes`, calls the named Adapsis
+/// function with the request body as a String parameter, returns the result as
+/// 200 text/plain.
+async fn adapsis_route_dispatch(
+    State(config): State<AppConfig>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let path = uri.path();
+    let method_str = method.as_str();
+
+    // Skip /api/ paths and the root — those are handled by explicit routes
+    if path.starts_with("/api/") || path == "/" {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+
+    // Look up a matching registered route
+    let session = config.session.lock().await;
+    let route = session
+        .program
+        .http_routes
+        .iter()
+        .find(|r| r.method == method_str && r.path == path);
+
+    let Some(route) = route else {
+        return (StatusCode::NOT_FOUND, format!("no Adapsis route for {method_str} {path}")).into_response();
+    };
+
+    let handler_fn = route.handler_fn.clone();
+
+    // Check the handler function exists
+    let func = session.program.get_function(&handler_fn);
+    if func.is_none() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("route handler function `{handler_fn}` not found in program"),
+        )
+            .into_response();
+    }
+
+    let body_str = String::from_utf8_lossy(&body).to_string();
+
+    // Clone program and drop the session lock before blocking eval
+    let program = session.program.clone();
+    drop(session);
+
+    eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
+
+    // Evaluate the handler function with the body as a String argument
+    let eval_result = tokio::task::spawn_blocking(move || {
+        let func = program
+            .get_function(&handler_fn)
+            .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
+        let mut env = eval::Env::new();
+        let input = eval::Value::String(body_str);
+        eval::bind_input_to_params(&program, func, &input, &mut env);
+        eval::eval_function_body_pub(&program, &func.body, &mut env)
+    })
+    .await;
+
+    match eval_result {
+        Ok(Ok(val)) => {
+            let response_body = format!("{val}");
+            (
+                StatusCode::OK,
+                [("content-type", "text/plain; charset=utf-8")],
+                response_body,
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("handler error: {e}"),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /api/events — SSE stream of all AI activity (subscribe from web UI).

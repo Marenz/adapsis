@@ -929,6 +929,7 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
             let target = parts.get(1).copied().unwrap_or("");
             query_type(table, target)
         }
+        "?routes" => query_routes(program),
         // ?tasks is handled at the API level (needs runtime access, not just program)
         "?tasks" => "tasks query requires runtime context".to_string(),
         _ => format!("unknown query: {}", parts[0]),
@@ -1182,4 +1183,18 @@ fn query_type(table: &SymbolTable, target: &str) -> String {
     } else {
         format!("type `{target}` not found")
     }
+}
+
+fn query_routes(program: &Program) -> String {
+    if program.http_routes.is_empty() {
+        return "No HTTP routes registered.".to_string();
+    }
+    let mut out = String::from("HTTP Routes:\n");
+    for route in &program.http_routes {
+        out.push_str(&format!(
+            "  {} {} -> {}\n",
+            route.method, route.path, route.handler_fn
+        ));
+    }
+    out
 }
