@@ -110,7 +110,6 @@ pub fn build_symbol_table(program: &Program) -> SymbolTable {
             table.register_type(td);
         }
         for func in &module.functions {
-            // Register with module-qualified name
             let sig = FunctionSig {
                 params: func
                     .params
@@ -120,11 +119,13 @@ pub fn build_symbol_table(program: &Program) -> SymbolTable {
                 return_type: func.return_type.clone(),
                 effects: func.effects.clone(),
             };
+            // Register with module-qualified name (canonical for external queries)
             table
                 .functions
                 .insert(format!("{}.{}", module.name, func.name), sig.clone());
-            // Also register with unqualified name for convenience
-            table.functions.insert(func.name.clone(), sig);
+            // Also register bare name for internal type-checking resolution.
+            // query_symbols() filters these out of display output.
+            table.functions.entry(func.name.clone()).or_insert(sig);
         }
     }
 
@@ -570,31 +571,51 @@ fn query_deps_modules(program: &Program, graph: &CallGraph, target: &str) -> Str
 }
 
 /// Reconstruct Forge source code from the AST for a function.
+/// Supports both qualified (`Module.func`) and unqualified (`func`) names.
 fn reconstruct_source(program: &Program, target: &str) -> String {
-    // Find the function
-    let func = program
-        .functions
-        .iter()
-        .find(|f| f.name == target)
-        .or_else(|| {
-            program
-                .modules
-                .iter()
-                .flat_map(|m| m.functions.iter())
-                .find(|f| f.name == target)
-        });
+    // Module-qualified lookup: "Module.func"
+    let func = if let Some((module_name, fn_name)) = target.split_once('.') {
+        program
+            .modules
+            .iter()
+            .find(|m| m.name == module_name)
+            .and_then(|m| m.functions.iter().find(|f| f.name == fn_name))
+    } else {
+        // Unqualified: search top-level first, then modules
+        program
+            .functions
+            .iter()
+            .find(|f| f.name == target)
+            .or_else(|| {
+                program
+                    .modules
+                    .iter()
+                    .flat_map(|m| m.functions.iter())
+                    .find(|f| f.name == target)
+            })
+    };
 
     let Some(func) = func else {
-        // Try as a type
-        for td in &program.types {
-            if td.name() == target {
-                return reconstruct_type_source(td);
+        // Try as a type — qualified or unqualified
+        if let Some((module_name, type_name)) = target.split_once('.') {
+            if let Some(m) = program.modules.iter().find(|m| m.name == module_name) {
+                for td in &m.types {
+                    if td.name() == type_name {
+                        return reconstruct_type_source(td);
+                    }
+                }
             }
-        }
-        for m in &program.modules {
-            for td in &m.types {
+        } else {
+            for td in &program.types {
                 if td.name() == target {
                     return reconstruct_type_source(td);
+                }
+            }
+            for m in &program.modules {
+                for td in &m.types {
+                    if td.name() == target {
+                        return reconstruct_type_source(td);
+                    }
                 }
             }
         }
@@ -821,6 +842,11 @@ fn reconstruct_stmt(out: &mut String, stmt: &Statement, indent: usize) {
     }
 }
 
+/// Public wrapper for `reconstruct_stmt` — used by the module library serializer.
+pub fn reconstruct_stmt_pub(out: &mut String, stmt: &Statement, indent: usize) {
+    reconstruct_stmt(out, stmt, indent);
+}
+
 fn reconstruct_expr(expr: &Expr) -> String {
     match expr {
         Expr::Literal(lit) => match lit {
@@ -929,8 +955,13 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
             let target = parts.get(1).copied().unwrap_or("");
             query_type(table, target)
         }
+        "?routes" => query_routes(program),
         // ?tasks is handled at the API level (needs runtime access, not just program)
         "?tasks" => "tasks query requires runtime context".to_string(),
+        // ?inspect is handled at the API level (needs runtime snapshot registry)
+        "?inspect" => "inspect query requires runtime context".to_string(),
+        // ?library works from any query path — reads disk state directly
+        "?library" => crate::library::query_library(program, None),
         _ => format!("unknown query: {}", parts[0]),
     }
 }
@@ -977,7 +1008,22 @@ fn query_symbols(_program: &Program, table: &SymbolTable, scope: &str) -> String
         }
 
         out.push_str("Functions:\n");
-        for (name, sig) in &table.functions {
+        // Collect and sort for deterministic output; skip unqualified aliases
+        // (if "Module.fn" exists, don't also show "fn")
+        let mut fn_names: Vec<&String> = table.functions.keys().collect();
+        fn_names.sort();
+        for name in fn_names {
+            // Skip unqualified name if a qualified version exists in the table
+            if !name.contains('.') {
+                let has_qualified = table
+                    .functions
+                    .keys()
+                    .any(|k| k.contains('.') && k.ends_with(&format!(".{name}")));
+                if has_qualified {
+                    continue;
+                }
+            }
+            let sig = &table.functions[name];
             out.push_str(&format!(
                 "  {} ({})->{:?} [{:?}]\n",
                 name,
@@ -1182,4 +1228,18 @@ fn query_type(table: &SymbolTable, target: &str) -> String {
     } else {
         format!("type `{target}` not found")
     }
+}
+
+fn query_routes(program: &Program) -> String {
+    if program.http_routes.is_empty() {
+        return "No HTTP routes registered.".to_string();
+    }
+    let mut out = String::from("HTTP Routes:\n");
+    for route in &program.http_routes {
+        out.push_str(&format!(
+            "  {} {} -> {}\n",
+            route.method, route.path, route.handler_fn
+        ));
+    }
+    out
 }

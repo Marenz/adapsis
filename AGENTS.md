@@ -62,6 +62,7 @@ src/
   llm.rs           — LLM client (OpenAI-compatible, streaming SSE, Qwen thinking mode)
   orchestrator.rs  — Feedback loop + architect mode
   session.rs       — Mutation log, working history, save/load, rewind
+  library.rs       — Persistent module library (~/.config/adapsis/modules/), auto-load/persist
   repl.rs          — Interactive REPL with /commands
   events.rs        — Event streaming (WebSocket)
   server.rs        — Browser UI server

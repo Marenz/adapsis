@@ -1,3 +1,4 @@
+// test comment
 //! HTTP API for AdapsisOS — programmatic access to the session.
 //!
 //! Endpoints:
@@ -38,6 +39,8 @@ pub struct AppConfig {
     pub self_trigger: tokio::sync::mpsc::Sender<String>,
     /// Task registry for tracking spawned async tasks
     pub task_registry: Option<crate::coroutine::TaskRegistry>,
+    /// Task snapshot registry for live interpreter state inspection
+    pub snapshot_registry: Option<crate::coroutine::TaskSnapshotRegistry>,
     /// Structured log file for AI activity
     pub log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// JIT compilation cache — reuses compiled modules across evals when revision unchanged
@@ -65,7 +68,7 @@ pub struct MutateResponse {
     pub results: Vec<MutationResult>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MutationResult {
     pub message: String,
     pub success: bool,
@@ -226,7 +229,7 @@ pub struct TestResponse {
     pub results: Vec<TestCaseResult>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TestCaseResult {
     pub message: String,
     pub pass: bool,
@@ -348,12 +351,26 @@ pub async fn query(
         else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
     } else if req.query.trim() == "?tasks" {
         format_tasks(&config.task_registry)
+    } else if let Some(task_id) = parse_inspect_task_query(req.query.trim()) {
+        format_inspect_task(&config.task_registry, &config.snapshot_registry, task_id)
+    } else if req.query.trim() == "?library" {
+        crate::library::query_library(&session.program, session.library_state.as_ref())
     } else {
         let table = typeck::build_symbol_table(&session.program);
         typeck::handle_query(&session.program, &table, &req.query)
     };
     session.record_query(&req.query, &response);
     Json(QueryResponse { response })
+}
+
+/// Parse `?inspect task N` queries, returning the task ID if matched.
+pub fn parse_inspect_task_query(query: &str) -> Option<i64> {
+    let parts: Vec<&str> = query.split_whitespace().collect();
+    if parts.len() == 3 && parts[0] == "?inspect" && parts[1] == "task" {
+        parts[2].parse::<i64>().ok()
+    } else {
+        None
+    }
 }
 
 #[derive(Serialize)]
@@ -363,8 +380,16 @@ pub struct StatusResponse {
     pub history_entries: usize,
     pub functions: Vec<String>,
     pub types: Vec<String>,
+    pub routes: Vec<RouteInfo>,
     pub program_summary: String,
     pub plan: Vec<PlanStepResponse>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RouteInfo {
+    pub method: String,
+    pub path: String,
+    pub handler_fn: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -396,6 +421,11 @@ pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse
             .map(|f| f.name.clone())
             .collect(),
         types: session.program.types.iter().map(|t| t.name().to_string()).collect(),
+        routes: session.program.http_routes.iter().map(|r| RouteInfo {
+            method: r.method.clone(),
+            path: r.path.clone(),
+            handler_fn: r.handler_fn.clone(),
+        }).collect(),
         program_summary: validator::program_summary(&session.program),
     })
 }
@@ -640,7 +670,7 @@ pub struct AskRequest {
     pub message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AskResponse {
     pub reply: String,
     pub code: String,
@@ -649,17 +679,33 @@ pub struct AskResponse {
     pub has_errors: bool,
 }
 
-/// Write a structured log entry to the AI activity log.
-/// Channel wrapper that sends to both the response mpsc and the broadcast channel.
+/// Channel wrapper that sends events to the broadcast channel (and optionally an mpsc
+/// response channel used by the SSE streaming endpoint).  Both `/api/ask` and
+/// `/api/ask-stream` use this so events always appear on `/api/events`.
 struct EventSender {
-    tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+    tx: Option<tokio::sync::mpsc::Sender<serde_json::Value>>,
     broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 impl EventSender {
+    /// Broadcast-only sender (used by plain `/api/ask`).
+    fn broadcast_only(broadcast: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
+        Self { tx: None, broadcast }
+    }
+
+    /// Broadcast + per-request mpsc sender (used by `/api/ask-stream`).
+    fn with_mpsc(tx: tokio::sync::mpsc::Sender<serde_json::Value>, broadcast: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
+        Self { tx: Some(tx), broadcast }
+    }
+
     async fn send(&self, event: serde_json::Value) {
         let _ = self.broadcast.send(event.clone());
-        let _ = self.tx.send(event).await;
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(event).await;
+        } else {
+            // Yield so broadcast receivers get a chance to process the event.
+            tokio::task::yield_now().await;
+        }
     }
 }
 
@@ -732,7 +778,7 @@ async fn log_training_data(
 }
 
 /// Format the task registry for display.
-fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
+pub fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
     let Some(reg) = registry else { return "No task registry (async not available).".to_string() };
     let tasks = reg.lock().unwrap();
     if tasks.is_empty() {
@@ -744,6 +790,52 @@ fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
     for t in sorted {
         out.push_str(&format!("  task {} [{}] — {}\n", t.id, t.function_name, t.status));
     }
+    out
+}
+
+/// Format a detailed inspection of a single task, combining TaskInfo and TaskSnapshot.
+pub fn format_inspect_task(
+    task_registry: &Option<crate::coroutine::TaskRegistry>,
+    snapshot_registry: &Option<crate::coroutine::TaskSnapshotRegistry>,
+    task_id: i64,
+) -> String {
+    let Some(task_reg) = task_registry else {
+        return "No task registry (async not available).".to_string();
+    };
+    let tasks = task_reg.lock().unwrap();
+    let Some(info) = tasks.get(&task_id) else {
+        return format!("No task with id {task_id}.");
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("Task {}\n", info.id));
+    out.push_str(&format!("  function: {}\n", info.function_name));
+    out.push_str(&format!("  started:  {}\n", info.started_at));
+    out.push_str(&format!("  status:   {}\n", info.status));
+
+    if let Some(snap_reg) = snapshot_registry {
+        if let Ok(snaps) = snap_reg.lock() {
+            if let Some(snap) = snaps.get(&task_id) {
+                if let Some(ref stmt_id) = snap.current_stmt_id {
+                    out.push_str(&format!("  stmt:     {}\n", stmt_id));
+                }
+                out.push_str(&format!("  depth:    {}\n", snap.frame_depth));
+                if snap.locals.is_empty() {
+                    out.push_str("  locals:   (none)\n");
+                } else {
+                    out.push_str("  locals:\n");
+                    for (name, val) in &snap.locals {
+                        out.push_str(&format!("    {} = {}\n", name, val));
+                    }
+                }
+            } else {
+                out.push_str("  snapshot: (not yet captured)\n");
+            }
+        }
+    } else {
+        out.push_str("  snapshot: (registry not available)\n");
+    }
+
     out
 }
 
@@ -770,6 +862,8 @@ pub async fn ask(
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
     eprintln!("\n[web:user] {}", req.message);
+    let tx = EventSender::broadcast_only(config.event_broadcast.clone());
+    tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
     let llm = crate::llm::LlmClient::new_with_model_and_key(
         &config.llm_url, &config.llm_model, config.llm_api_key.clone(),
     );
@@ -827,6 +921,7 @@ pub async fn ask(
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[web:error] LLM: {e}");
+                tx.send(serde_json::json!({"type": "error", "message": format!("LLM error: {e}")})).await;
                 reply_text.push_str(&format!("\n\nLLM error: {e}"));
                 break;
             }
@@ -846,25 +941,30 @@ pub async fn ask(
         }
         let clean = clean.trim();
         if !clean.is_empty() {
+            tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
             reply_text.push_str(clean);
         }
         if !output.thinking.is_empty() {
             eprintln!("[web:think] {}...", output.thinking.chars().take(100).collect::<String>());
+            tx.send(serde_json::json!({"type": "thinking", "text": output.thinking})).await;
         }
 
         // Check for !done or no code (AI is asking a question / responding with text)
         if code.trim() == "!done" {
             eprintln!("[web:done] model said !done at iteration {}", iteration + 1);
+            tx.send(serde_json::json!({"type": "done"})).await;
             break;
         }
         if code.is_empty() {
             // No code block = AI is responding with text only (question or explanation)
             eprintln!("[web:text-only] no code block, stopping");
+            tx.send(serde_json::json!({"type": "done"})).await;
             break;
         }
 
         eprintln!("[web:code]\n{}", code.chars().take(200).collect::<String>());
+        tx.send(serde_json::json!({"type": "code", "code": code})).await;
         if !all_code.is_empty() { all_code.push_str("\n\n// --- iteration ---\n"); }
         all_code.push_str(&code);
 
@@ -1088,6 +1188,10 @@ pub async fn ask(
                                 }
                             } else if query.trim() == "?tasks" {
                                 format_tasks(&config.task_registry)
+                            } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+                                format_inspect_task(&config.task_registry, &config.snapshot_registry, tid)
+                            } else if query.trim() == "?library" {
+                                crate::library::query_library(&session.program, session.library_state.as_ref())
                             } else {
                                 let table = crate::typeck::build_symbol_table(&session.program);
                                 crate::typeck::handle_query(&session.program, &table, query)
@@ -1436,6 +1540,10 @@ pub async fn ask(
     }
 
     let has_errors = all_results.iter().any(|r| !r.success) || all_test_results.iter().any(|r| !r.pass);
+    if has_errors {
+        tx.send(serde_json::json!({"type": "error", "message": "request completed with errors"})).await;
+    }
+    tx.send(serde_json::json!({"type": "done"})).await;
     Json(AskResponse {
         reply: reply_text,
         code: all_code,
@@ -1450,75 +1558,108 @@ pub async fn opencode_task(
     State(config): State<AppConfig>,
     Json(req): Json<OpenCodeRequest>,
 ) -> Json<OpenCodeResponse> {
-    let project_dir = &config.project_dir;
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
-    // Run opencode with the task in the project directory
-    let result = tokio::process::Command::new("opencode")
+    let project_dir = &config.project_dir;
+    let tx = EventSender::broadcast_only(config.event_broadcast.clone());
+
+    tx.send(serde_json::json!({"type": "opencode_start", "task": req.task})).await;
+
+    // Spawn with piped stdout so we can stream lines and emit SSE events
+    // as they happen (instead of buffering until exit).
+    let child = tokio::process::Command::new("opencode")
         .arg("run")
         .arg("--format")
         .arg("json")
         .arg(&req.task)
         .current_dir(project_dir)
-        .output()
-        .await;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
 
-    match result {
-        Ok(output) => {
-            let raw = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output.status.code().unwrap_or(-1);
-
-            // Parse JSON events to extract text and tool results
-            let mut text_parts = Vec::new();
-            let mut tool_results = Vec::new();
-            for line in raw.lines() {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
-                    match event.get("type").and_then(|t| t.as_str()) {
-                        Some("text") => {
-                            if let Some(text) = event.pointer("/part/text").and_then(|t| t.as_str()) {
-                                text_parts.push(text.to_string());
-                            }
-                        }
-                        Some("tool_result") => {
-                            if let Some(content) = event.pointer("/part/content") {
-                                tool_results.push(content.to_string());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            let summary = if !text_parts.is_empty() {
-                text_parts.join("\n")
-            } else if !tool_results.is_empty() {
-                tool_results.join("\n")
-            } else {
-                raw.chars().take(500).collect()
-            };
-
-            eprintln!("[web:opencode] exit={code} text={}chars tools={}", summary.len(), tool_results.len());
-            if !summary.is_empty() {
-                eprintln!("[web:opencode:text] {}", summary.chars().take(300).collect::<String>());
-            }
-
-            Json(OpenCodeResponse {
-                stdout: summary,
-                stderr,
-                exit_code: code,
-                success: code == 0,
-            })
-        }
+    let mut child = match child {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("[web:opencode:err] {e}");
-            Json(OpenCodeResponse {
+            tx.send(serde_json::json!({"type": "opencode_error", "exit_code": -1, "message": format!("Failed to run opencode: {e}")})).await;
+            return Json(OpenCodeResponse {
                 stdout: String::new(),
                 stderr: format!("Failed to run opencode: {e}"),
                 exit_code: -1,
                 success: false,
-            })
+            });
+        }
+    };
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr_pipe = child.stderr.take().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+
+    // Drain stderr in background so it doesn't block the process.
+    let stderr_handle = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = String::new();
+        let mut reader = BufReader::new(stderr_pipe);
+        let _ = reader.read_to_string(&mut buf).await;
+        buf
+    });
+
+    // Read stdout line-by-line, emitting SSE events in real time.
+    let mut text_parts = Vec::new();
+    let mut tool_results = Vec::new();
+    let mut raw_lines = Vec::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        raw_lines.push(line.clone());
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+            match event.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(text) = event.pointer("/part/text").and_then(|t| t.as_str()) {
+                        text_parts.push(text.to_string());
+                        tx.send(serde_json::json!({"type": "opencode_progress", "kind": "text", "text": text})).await;
+                    }
+                }
+                Some("tool_result") => {
+                    if let Some(content) = event.pointer("/part/content") {
+                        tool_results.push(content.to_string());
+                        tx.send(serde_json::json!({"type": "opencode_progress", "kind": "tool_result", "content": content})).await;
+                    }
+                }
+                _ => {}
+            }
         }
     }
+
+    // Wait for process exit and stderr collection.
+    let status = child.wait().await;
+    let stderr = stderr_handle.await.unwrap_or_default();
+    let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+
+    let raw = raw_lines.join("\n");
+    let summary = if !text_parts.is_empty() {
+        text_parts.join("\n")
+    } else if !tool_results.is_empty() {
+        tool_results.join("\n")
+    } else {
+        raw.chars().take(500).collect()
+    };
+
+    eprintln!("[web:opencode] exit={code} text={}chars tools={}", summary.len(), tool_results.len());
+    if !summary.is_empty() {
+        eprintln!("[web:opencode:text] {}", summary.chars().take(300).collect::<String>());
+    }
+
+    if code == 0 {
+        tx.send(serde_json::json!({"type": "opencode_done", "exit_code": code})).await;
+    } else {
+        tx.send(serde_json::json!({"type": "opencode_error", "exit_code": code, "message": stderr})).await;
+    }
+
+    Json(OpenCodeResponse {
+        stdout: summary,
+        stderr,
+        exit_code: code,
+        success: code == 0,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1553,7 +1694,7 @@ pub async fn ask_stream(
     // Spawn the processing loop
     let config_clone = config.clone();
     tokio::spawn(async move {
-        let tx = EventSender { tx: raw_tx, broadcast: config_clone.event_broadcast.clone() };
+        let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone());
         let llm = crate::llm::LlmClient::new_with_model_and_key(
             &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
         );
@@ -1885,6 +2026,10 @@ pub async fn ask_stream(
                                     }
                                 } else if query.trim() == "?tasks" {
                                     format_tasks(&config_clone.task_registry)
+                                } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+                                    format_inspect_task(&config_clone.task_registry, &config_clone.snapshot_registry, tid)
+                                } else if query.trim() == "?library" {
+                                    crate::library::query_library(&session.program, session.library_state.as_ref())
                                 } else {
                                     let table = crate::typeck::build_symbol_table(&session.program);
                                     crate::typeck::handle_query(&session.program, &table, query)
@@ -2256,6 +2401,10 @@ pub async fn ask_stream(
                         if let crate::parser::Operation::Query(query) = op {
                             let response = if query.trim() == "?tasks" {
                                 format_tasks(&config_clone.task_registry)
+                            } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+                                format_inspect_task(&config_clone.task_registry, &config_clone.snapshot_registry, tid)
+                            } else if query.trim() == "?library" {
+                                crate::library::query_library(&session.program, session.library_state.as_ref())
                             } else if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
                                 let msgs = session.peek_messages("main");
                                 if msgs.is_empty() { "No messages.".to_string() }
@@ -2416,6 +2565,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/history", post(history))
         .route("/api/rewind", post(rewind))
         .route("/api/agents", get(agents))
+        .route("/api/routes", get(list_routes))
         .with_state(config.session.clone());
 
     let config_routes = axum::Router::new()
@@ -2429,9 +2579,120 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/tasks", get(tasks))
         .route("/api/log", get(get_log))
         .route("/api/events", get(events_stream))
+        .with_state(config.clone());
+
+    // Adapsis-registered HTTP route dispatch (e.g. webhook endpoints)
+    let webhook_fallback = axum::Router::new()
+        .fallback(adapsis_route_dispatch)
         .with_state(config);
 
-    session_routes.merge(config_routes)
+    session_routes.merge(config_routes).merge(webhook_fallback)
+}
+
+/// GET /api/routes — list all Adapsis-registered HTTP routes.
+async fn list_routes(State(session): State<SharedSession>) -> Json<serde_json::Value> {
+    let session = session.lock().await;
+    let routes: Vec<serde_json::Value> = session
+        .program
+        .http_routes
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "method": r.method,
+                "path": r.path,
+                "handler_fn": r.handler_fn,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "routes": routes }))
+}
+
+/// Fallback handler: dispatch incoming requests to Adapsis-registered HTTP routes.
+/// Matches method + path against `program.http_routes`, calls the named Adapsis
+/// function with the request body as a String parameter, returns the result as
+/// 200 text/plain.
+async fn adapsis_route_dispatch(
+    State(config): State<AppConfig>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let path = uri.path();
+    let method_str = method.as_str();
+
+    // Skip /api/ paths and the root — those are handled by explicit routes
+    if path.starts_with("/api/") || path == "/" {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+
+    // Look up a matching registered route
+    let session = config.session.lock().await;
+    let route = session
+        .program
+        .http_routes
+        .iter()
+        .find(|r| r.method == method_str && r.path == path);
+
+    let Some(route) = route else {
+        return (StatusCode::NOT_FOUND, format!("no Adapsis route for {method_str} {path}")).into_response();
+    };
+
+    let handler_fn = route.handler_fn.clone();
+
+    // Check the handler function exists
+    let func = session.program.get_function(&handler_fn);
+    if func.is_none() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("route handler function `{handler_fn}` not found in program"),
+        )
+            .into_response();
+    }
+
+    let body_str = String::from_utf8_lossy(&body).to_string();
+
+    // Clone program and drop the session lock before blocking eval
+    let program = session.program.clone();
+    drop(session);
+
+    eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
+
+    // Evaluate the handler function with the body as a String argument
+    let eval_result = tokio::task::spawn_blocking(move || {
+        let func = program
+            .get_function(&handler_fn)
+            .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
+        let mut env = eval::Env::new();
+        let input = eval::Value::String(body_str);
+        eval::bind_input_to_params(&program, func, &input, &mut env);
+        eval::eval_function_body_pub(&program, &func.body, &mut env)
+    })
+    .await;
+
+    match eval_result {
+        Ok(Ok(val)) => {
+            let response_body = format!("{val}");
+            (
+                StatusCode::OK,
+                [("content-type", "text/plain; charset=utf-8")],
+                response_body,
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("handler error: {e}"),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /api/events — SSE stream of all AI activity (subscribe from web UI).

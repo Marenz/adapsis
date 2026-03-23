@@ -1,0 +1,793 @@
+{
+  "program": {
+    "modules": [
+      {
+        "id": "TelegramBot",
+        "name": "TelegramBot",
+        "types": [
+          {
+            "Struct": {
+              "id": "BotConfig",
+              "name": "BotConfig",
+              "fields": [
+                {
+                  "id": "BotConfig.f0",
+                  "name": "token",
+                  "ty": "String"
+                },
+                {
+                  "id": "BotConfig.f1",
+                  "name": "admin_chat_id",
+                  "ty": "Int"
+                },
+                {
+                  "id": "BotConfig.f2",
+                  "name": "ask_url",
+                  "ty": "String"
+                }
+              ]
+            }
+          }
+        ],
+        "functions": [
+          {
+            "id": "default_config",
+            "name": "default_config",
+            "params": [],
+            "return_type": {
+              "Struct": "BotConfig"
+            },
+            "effects": [],
+            "body": [
+              {
+                "id": "default_config.s1",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "StructInit": {
+                        "ty": "",
+                        "fields": [
+                          {
+                            "name": "token",
+                            "value": {
+                              "Literal": {
+                                "String": "8568747403:AAFDYhHnX9SfmpLvjhHGfK8vzlyGMrqEAPQ"
+                              }
+                            }
+                          },
+                          {
+                            "name": "admin_chat_id",
+                            "value": {
+                              "Literal": {
+                                "Int": 1815217
+                              }
+                            }
+                          },
+                          {
+                            "name": "ask_url",
+                            "value": {
+                              "Literal": {
+                                "String": "http://localhost:3002/api/ask"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "api_base",
+            "name": "api_base",
+            "params": [
+              {
+                "id": "api_base.p0",
+                "name": "cfg",
+                "ty": {
+                  "Struct": "BotConfig"
+                }
+              }
+            ],
+            "return_type": "String",
+            "effects": [],
+            "body": [
+              {
+                "id": "api_base.s1",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Literal": {
+                              "String": "https://api.telegram.org/bot"
+                            }
+                          },
+                          {
+                            "FieldAccess": {
+                              "base": {
+                                "Identifier": "cfg"
+                              },
+                              "field": "token"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "get_updates_url",
+            "name": "get_updates_url",
+            "params": [
+              {
+                "id": "get_updates_url.p0",
+                "name": "cfg",
+                "ty": {
+                  "Struct": "BotConfig"
+                }
+              },
+              {
+                "id": "get_updates_url.p1",
+                "name": "offset",
+                "ty": "Int"
+              }
+            ],
+            "return_type": "String",
+            "effects": [],
+            "body": [
+              {
+                "id": "get_updates_url.s1",
+                "kind": {
+                  "Let": {
+                    "name": "base",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "api_base",
+                        "args": [
+                          {
+                            "Identifier": "cfg"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "get_updates_url.s2",
+                "kind": {
+                  "Let": {
+                    "name": "path",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Identifier": "base"
+                          },
+                          {
+                            "Literal": {
+                              "String": "/getUpdates?timeout=30&offset="
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "get_updates_url.s3",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Identifier": "path"
+                          },
+                          {
+                            "Call": {
+                              "callee": "to_string",
+                              "args": [
+                                {
+                                  "Identifier": "offset"
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "send_message_url",
+            "name": "send_message_url",
+            "params": [
+              {
+                "id": "send_message_url.p0",
+                "name": "cfg",
+                "ty": {
+                  "Struct": "BotConfig"
+                }
+              }
+            ],
+            "return_type": "String",
+            "effects": [],
+            "body": [
+              {
+                "id": "send_message_url.s1",
+                "kind": {
+                  "Let": {
+                    "name": "base",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "api_base",
+                        "args": [
+                          {
+                            "Identifier": "cfg"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "send_message_url.s2",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Identifier": "base"
+                          },
+                          {
+                            "Literal": {
+                              "String": "/sendMessage"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "extract_update_id",
+            "name": "extract_update_id",
+            "params": [
+              {
+                "id": "extract_update_id.p0",
+                "name": "update_json",
+                "ty": "String"
+              }
+            ],
+            "return_type": "Int",
+            "effects": [],
+            "body": [
+              {
+                "id": "extract_update_id.s1",
+                "kind": {
+                  "Let": {
+                    "name": "raw",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "json_get",
+                        "args": [
+                          {
+                            "Identifier": "update_json"
+                          },
+                          {
+                            "Literal": {
+                              "String": "update_id"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "extract_update_id.s2",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Call": {
+                        "callee": "to_int",
+                        "args": [
+                          {
+                            "Identifier": "raw"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "extract_chat_id",
+            "name": "extract_chat_id",
+            "params": [
+              {
+                "id": "extract_chat_id.p0",
+                "name": "update_json",
+                "ty": "String"
+              }
+            ],
+            "return_type": "Int",
+            "effects": [],
+            "body": [
+              {
+                "id": "extract_chat_id.s1",
+                "kind": {
+                  "Let": {
+                    "name": "raw",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "json_get",
+                        "args": [
+                          {
+                            "Identifier": "update_json"
+                          },
+                          {
+                            "Literal": {
+                              "String": "message.chat.id"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "extract_chat_id.s2",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Call": {
+                        "callee": "to_int",
+                        "args": [
+                          {
+                            "Identifier": "raw"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "extract_message_text",
+            "name": "extract_message_text",
+            "params": [
+              {
+                "id": "extract_message_text.p0",
+                "name": "update_json",
+                "ty": "String"
+              }
+            ],
+            "return_type": "String",
+            "effects": [],
+            "body": [
+              {
+                "id": "extract_message_text.s1",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Call": {
+                        "callee": "json_get",
+                        "args": [
+                          {
+                            "Identifier": "update_json"
+                          },
+                          {
+                            "Literal": {
+                              "String": "message.text"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "has_message_text",
+            "name": "has_message_text",
+            "params": [
+              {
+                "id": "has_message_text.p0",
+                "name": "update_json",
+                "ty": "String"
+              }
+            ],
+            "return_type": "Bool",
+            "effects": [],
+            "body": [
+              {
+                "id": "has_message_text.s1",
+                "kind": {
+                  "Let": {
+                    "name": "text",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "extract_message_text",
+                        "args": [
+                          {
+                            "Identifier": "update_json"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "has_message_text.s2",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Binary": {
+                        "left": {
+                          "Call": {
+                            "callee": "len",
+                            "args": [
+                              {
+                                "Identifier": "text"
+                              }
+                            ]
+                          }
+                        },
+                        "op": "GreaterThan",
+                        "right": {
+                          "Literal": {
+                            "Int": 0
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "next_offset",
+            "name": "next_offset",
+            "params": [
+              {
+                "id": "next_offset.p0",
+                "name": "update_json",
+                "ty": "String"
+              }
+            ],
+            "return_type": "Int",
+            "effects": [],
+            "body": [
+              {
+                "id": "next_offset.s1",
+                "kind": {
+                  "Let": {
+                    "name": "update_id",
+                    "ty": "Int",
+                    "value": {
+                      "Call": {
+                        "callee": "extract_update_id",
+                        "args": [
+                          {
+                            "Identifier": "update_json"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "next_offset.s2",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Binary": {
+                        "left": {
+                          "Identifier": "update_id"
+                        },
+                        "op": "Add",
+                        "right": {
+                          "Literal": {
+                            "Int": 1
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "make_send_message_body",
+            "name": "make_send_message_body",
+            "params": [
+              {
+                "id": "make_send_message_body.p0",
+                "name": "chat_id",
+                "ty": "Int"
+              },
+              {
+                "id": "make_send_message_body.p1",
+                "name": "text",
+                "ty": "String"
+              }
+            ],
+            "return_type": "String",
+            "effects": [],
+            "body": [
+              {
+                "id": "make_send_message_body.s1",
+                "kind": {
+                  "Let": {
+                    "name": "chat_part",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Literal": {
+                              "String": "{\"chat_id\":"
+                            }
+                          },
+                          {
+                            "Call": {
+                              "callee": "to_string",
+                              "args": [
+                                {
+                                  "Identifier": "chat_id"
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "make_send_message_body.s2",
+                "kind": {
+                  "Let": {
+                    "name": "text_prefix",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Identifier": "chat_part"
+                          },
+                          {
+                            "Literal": {
+                              "String": ",\"text\":\""
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "make_send_message_body.s3",
+                "kind": {
+                  "Let": {
+                    "name": "escaped",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "json_escape",
+                        "args": [
+                          {
+                            "Identifier": "text"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "make_send_message_body.s4",
+                "kind": {
+                  "Let": {
+                    "name": "text_part",
+                    "ty": "String",
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Identifier": "text_prefix"
+                          },
+                          {
+                            "Identifier": "escaped"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "id": "make_send_message_body.s5",
+                "kind": {
+                  "Return": {
+                    "value": {
+                      "Call": {
+                        "callee": "concat",
+                        "args": [
+                          {
+                            "Identifier": "text_part"
+                          },
+                          {
+                            "Literal": {
+                              "String": "\"}"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "modules": []
+      }
+    ],
+    "functions": [],
+    "types": [],
+    "http_routes": [],
+    "require_modules": true
+  },
+  "mutations": [
+    {
+      "revision": 1,
+      "timestamp": "1774233835s",
+      "source": "!plan done 1\n!module TelegramBot\n+type BotConfig = token:String, admin_chat_id:Int, ask_url:String\n\n+fn default_config ()->BotConfig\n  +return {token: \"8568747403:AAFDYhHnX9SfmpLvjhHGfK8vzlyGMrqEAPQ\", admin_chat_id: 1815217, ask_url: \"http://localhost:3002/api/ask\"}\n\n+fn api_base (cfg:BotConfig)->String\n  +return concat(\"https://api.telegram.org/bot\", cfg.token)\n\n+fn get_updates_url (cfg:BotConfig, offset:Int)->String\n  +let base:String = api_base(cfg)\n  +let path:String = concat(base, \"/getUpdates?timeout=30&offset=\")\n  +return concat(path, to_string(offset))\n\n+fn send_message_url (cfg:BotConfig)->String\n  +let base:String = api_base(cfg)\n  +return concat(base, \"/sendMessage\")\n\n+fn extract_update_id (update_json:String)->Int\n  +let raw:String = json_get(update_json, \"update_id\")\n  +return to_int(raw)\n\n+fn extract_chat_id (update_json:String)->Int\n  +let raw:String = json_get(update_json, \"message.chat.id\")\n  +return to_int(raw)\n\n+fn extract_message_text (update_json:String)->String\n  +return json_get(update_json, \"message.text\")\n\n+fn has_message_text (update_json:String)->Bool\n  +let text:String = extract_message_text(update_json)\n  +return len(text) > 0\n\n+fn next_offset (update_json:String)->Int\n  +let update_id:Int = extract_update_id(update_json)\n  +return update_id + 1\n\n+fn make_send_message_body (chat_id:Int, text:String)->String\n  +let chat_part:String = concat(\"{\\\"chat_id\\\":\", to_string(chat_id))\n  +let text_prefix:String = concat(chat_part, \",\\\"text\\\":\\\"\")\n  +let escaped:String = json_escape(text)\n  +let text_part:String = concat(text_prefix, escaped)\n  +return concat(text_part, \"\\\"}\")\n\n!test TelegramBot.api_base\n  +with token=\"abc123\" admin_chat_id=1815217 ask_url=\"http://localhost:3002/api/ask\" -> expect \"https://api.telegram.org/botabc123\"\n\n!test TelegramBot.get_updates_url\n  +with cfg={token:\"tok\", admin_chat_id:1815217, ask_url:\"http://localhost:3002/api/ask\"} offset=42 -> expect \"https://api.telegram.org/bottok/getUpdates?timeout=30&offset=42\"\n\n!test TelegramBot.extract_update_id\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect 1001\n\n!test TelegramBot.extract_chat_id\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect 1815217\n\n!test TelegramBot.extract_message_text\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect \"hello\"\n\n!test TelegramBot.has_message_text\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect true\n\n!test TelegramBot.next_offset\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect 1002\n\n!test TelegramBot.make_send_message_body\n  +with chat_id=1815217 text=\"hello\" -> expect \"{\\\"chat_id\\\":1815217,\\\"text\\\":\\\"hello\\\"}\"",
+      "summary": "OK: Step 1 done; OK: added module `TelegramBot` (1 types, 10 functions) (+10 fn, +1 type); OK: PASS: input={admin_chat_id: 1815217, ask_url: \"http://localhost:3002/api/ask\", token: \"abc123\"} => \"https://api.telegram.org/botabc123\" (expected \"https://api.telegram.org/botabc123\"); OK: PASS: input={offset: 42, cfg: {admin_chat_id: 1815217, ask_url: \"http://localhost:3002/api/ask\", token: \"tok\"}} => \"https://api.telegram.org/bottok/getUpdates?timeout=30&offset=42\" (expected \"https://api.telegram.org/bottok/getUpdates?timeout=30&offset=42\"); OK: PASS: input=\"{\"update_id\":1001,\"message\":{\"chat\":{\"id\":1815217},\"text\":\"hello\"}}\" => 1001 (expected 1001); OK: PASS: input=\"{\"update_id\":1001,\"message\":{\"chat\":{\"id\":1815217},\"text\":\"hello\"}}\" => 1815217 (expected 1815217); OK: PASS: input=\"{\"update_id\":1001,\"message\":{\"chat\":{\"id\":1815217},\"text\":\"hello\"}}\" => \"hello\" (expected \"hello\"); OK: PASS: input=\"{\"update_id\":1001,\"message\":{\"chat\":{\"id\":1815217},\"text\":\"hello\"}}\" => true (expected true); OK: PASS: input=\"{\"update_id\":1001,\"message\":{\"chat\":{\"id\":1815217},\"text\":\"hello\"}}\" => 1002 (expected 1002); OK: PASS: input={text: \"hello\", chat_id: 1815217} => \"{\"chat_id\":1815217,\"text\":\"hello\"}\" (expected \"{\"chat_id\":1815217,\"text\":\"hello\"}\")",
+      "success": true
+    }
+  ],
+  "history": [],
+  "revision": 1,
+  "sources": [
+    "!plan done 1\n!module TelegramBot\n+type BotConfig = token:String, admin_chat_id:Int, ask_url:String\n\n+fn default_config ()->BotConfig\n  +return {token: \"8568747403:AAFDYhHnX9SfmpLvjhHGfK8vzlyGMrqEAPQ\", admin_chat_id: 1815217, ask_url: \"http://localhost:3002/api/ask\"}\n\n+fn api_base (cfg:BotConfig)->String\n  +return concat(\"https://api.telegram.org/bot\", cfg.token)\n\n+fn get_updates_url (cfg:BotConfig, offset:Int)->String\n  +let base:String = api_base(cfg)\n  +let path:String = concat(base, \"/getUpdates?timeout=30&offset=\")\n  +return concat(path, to_string(offset))\n\n+fn send_message_url (cfg:BotConfig)->String\n  +let base:String = api_base(cfg)\n  +return concat(base, \"/sendMessage\")\n\n+fn extract_update_id (update_json:String)->Int\n  +let raw:String = json_get(update_json, \"update_id\")\n  +return to_int(raw)\n\n+fn extract_chat_id (update_json:String)->Int\n  +let raw:String = json_get(update_json, \"message.chat.id\")\n  +return to_int(raw)\n\n+fn extract_message_text (update_json:String)->String\n  +return json_get(update_json, \"message.text\")\n\n+fn has_message_text (update_json:String)->Bool\n  +let text:String = extract_message_text(update_json)\n  +return len(text) > 0\n\n+fn next_offset (update_json:String)->Int\n  +let update_id:Int = extract_update_id(update_json)\n  +return update_id + 1\n\n+fn make_send_message_body (chat_id:Int, text:String)->String\n  +let chat_part:String = concat(\"{\\\"chat_id\\\":\", to_string(chat_id))\n  +let text_prefix:String = concat(chat_part, \",\\\"text\\\":\\\"\")\n  +let escaped:String = json_escape(text)\n  +let text_part:String = concat(text_prefix, escaped)\n  +return concat(text_part, \"\\\"}\")\n\n!test TelegramBot.api_base\n  +with token=\"abc123\" admin_chat_id=1815217 ask_url=\"http://localhost:3002/api/ask\" -> expect \"https://api.telegram.org/botabc123\"\n\n!test TelegramBot.get_updates_url\n  +with cfg={token:\"tok\", admin_chat_id:1815217, ask_url:\"http://localhost:3002/api/ask\"} offset=42 -> expect \"https://api.telegram.org/bottok/getUpdates?timeout=30&offset=42\"\n\n!test TelegramBot.extract_update_id\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect 1001\n\n!test TelegramBot.extract_chat_id\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect 1815217\n\n!test TelegramBot.extract_message_text\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect \"hello\"\n\n!test TelegramBot.has_message_text\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect true\n\n!test TelegramBot.next_offset\n  +with \"{\\\"update_id\\\":1001,\\\"message\\\":{\\\"chat\\\":{\\\"id\\\":1815217},\\\"text\\\":\\\"hello\\\"}}\" -> expect 1002\n\n!test TelegramBot.make_send_message_body\n  +with chat_id=1815217 text=\"hello\" -> expect \"{\\\"chat_id\\\":1815217,\\\"text\\\":\\\"hello\\\"}\""
+  ],
+  "chat_messages": [
+    {
+      "role": "system",
+      "content": "You are an Adapsis programmer. Adapsis is a programming language designed for AI-assisted construction.\n\n## How This Works\n\nYou will receive a task description. You generate Adapsis code as AST mutations. After each response, the Adapsis runtime validates your code and feeds back the result — either success or error diagnostics. You then fix any errors or continue building.\n\n## Response Format\n\nWrap your reasoning in <think> tags and your Adapsis code in <code> tags:\n\n<think>\nYour reasoning about the approach, edge cases, data structures.\n</think>\n<code>\n+fn example (x:Int)->Int [fail]\n  +check positive x>=0 ~err_negative\n  +return x\n</code>\n\n## Adapsis Syntax\n\n### Types\nPrimitive: Int, Float, Bool, String, Byte\nGeneric: List<T>, Map<K,V>, Set<T>, Option<T>, Result<T>\nStruct: +type Name = field1:Type, field2:Type\n  (can span multiple lines — continues until blank line or next + operation)\nUnion: +type Name = Variant1(Type) | Variant2(Type, Type) | Variant3\n  Variants can have zero, one, or multiple payload types.\n  Variants are constructors: Literal(42), Add(left, right), Red\n  Recursive types work: +type Expr = Literal(Int) | Add(Expr, Expr)\n\n### Effects\nFunctions declare their effects: [io], [mut], [fail], [async], [rand], [yield], [parallel], [unsafe]\nPure functions have no effect annotation.\n\n### Statements (inside function body)\n  +let name:Type = expr              — bind a value (immutable)\n  +set name = expr                   — reassign a variable (mutable update)\n  +call name:Type = func(args)       — call a function and bind result\n  +check label condition ~err_label  — assert condition, fail with label if false\n  +return expr                       — return from function (exits immediately)\n  +if condition                      — conditional block\n    +return \"yes\"\n  +elif other_condition\n    +return \"maybe\"\n  +else\n    +return \"no\"\n  +end                               — closes the block (+end works for all blocks)\n  +while condition\n    +set i = i + 1\n  +end\n  +match expr                        — pattern match on union value\n  +case VariantName(binding1, binding2)\n    +return binding1 + binding2\n  +case _                            — wildcard/default\n  +end\n  +each collection item:Type         — loop over collection\n    +call result:Type = process(item)\n  +end\n  +await name:Type = io_op(args)     — async IO (suspends coroutine)\n  +spawn function(args)              — spawn a new coroutine\n\n(Builtins are listed separately via the registry.)\n\n### Modules\n!module Name\n+type User = id:Int, name:String\n+fn create (input:CreateReq)->Result<User> [io,fail]\n  +call validated:CreateReq = validate(input)\n  +return validated\n+end\n\n### HTTP Routes\n+route POST \"/webhook/telegram\" -> handle_fn\n+route GET \"/health\" -> health_check\n  Register an HTTP route on the server. Incoming requests to the path are dispatched\n  to the named Adapsis function, which receives the request body as String and returns String.\n  Use ?routes to list registered routes.\n\n### Organizing Code\n!move symbol1 symbol2 ... ModuleName\n  Move functions, types, or modules into a target module (creates if needed).\n  Call sites are auto-updated: add(x) becomes ModuleName.add(x)\n  Functions within the same module call each other without prefix.\n  Example: !move Point Color distance Geometry\n\n### Expressions\n- Literals: 42, 3.14, true, false, \"hello\"\n- Field access: user.name, input.age\n- Function calls: validate(input), db.insert(user)\n- Comparison: x>=0, name!=\"\", age<=150\n- Logic: condition1 AND condition2, NOT is_empty\n- Arithmetic: x + 1, total * 2\n- Struct literals: {name: \"alice\", age: 25}\n\n### Edit Operations\n!replace function_name.s1            — replace statement 1 of a function\n  +check age input.age>=0 AND input.age<=150 ~err_age_range\n\n### Testing\nTest blocks do NOT use `end`. They end at the next unindented line or end of input.\nFor single-param functions, pass the value directly.\nFor multi-param functions, use space-separated key=value pairs (named after the parameters).\n\n!test double\n  +with 5 -> expect 10\n\n!test add\n  +with a=3 b=4 -> expect 7\n\n!test validate\n  +with name=\"alice\" age=25 -> expect Ok\n  +with name=\"\" age=25 -> expect Err(err_empty_name)\n\n(Queries and commands are listed separately via the registry.)\n\n## Important Rules\n\n1. Every function must declare its effects. Pure functions have no brackets.\n2. Every binding must have an explicit type annotation.\n3. Use descriptive error labels with ~ for checks: ~err_negative_age, ~err_empty_name\n4. One statement per line. Indentation marks nesting (2 spaces).\n5. Only modules end with `end`. Functions and test blocks do NOT use `end`.\n6. Use +if/+elif/+else for conditional logic, +check for validation assertions.\n7. No closures, no inheritance, no operator overloading, no exceptions.\n8. String concatenation uses concat(), not +.\n9. Result types use Ok/Err, Option types use Some/None.\n10. Modulo operator: use % for remainder (e.g., n % 2 == 0 for even check).\n11. Error handling — two patterns:\n    a. Auto-propagate (like Rust's ?): declare [fail] and bind as plain T:\n       `+call validated:Input = validate(input)` — errors bubble up, you get T on success.\n    b. Explicit handling: bind as Result<T>:\n       `+call result:Result<Input> = validate(input)` — use result.is_ok, result.unwrap, result.is_err.\n    Use pattern (a) when your function also has [fail]. Use pattern (b) when you want to handle errors yourself.\n\n## Example 1: Validation with checks\n\n<code>\n+type Request = {age:Int, email:String, name:String}\n\n+fn validate (input:Request)->Result<Request> [fail]\n  +check age input.age>=0 ~err_negative_age\n  +check age_max input.age<=150 ~err_age_too_high\n  +check name input.name.len>0 ~err_empty_name\n  +return input\n\n!test validate\n  +with age=25 email=\"foo@bar.com\" name=\"alice\" -> expect Ok\n  +with age=-1 email=\"foo@bar.com\" name=\"alice\" -> expect Err(err_negative_age)\n  +with age=200 email=\"foo@bar.com\" name=\"alice\" -> expect Err(err_age_too_high)\n  +with age=25 email=\"foo@bar.com\" name=\"\" -> expect Err(err_empty_name)\n</code>\n\n## Example 2: Conditional logic with if/elif/else\n\n<code>\n+fn fizzbuzz (n:Int)->String\n  +let mod3:Int = n % 3\n  +let mod5:Int = n % 5\n  +if mod3 == 0 AND mod5 == 0\n    +return \"fizzbuzz\"\n  +elif mod3 == 0\n    +return \"fizz\"\n  +elif mod5 == 0\n    +return \"buzz\"\n  +else\n    +return \"other\"\n\n!test fizzbuzz\n  +with 15 -> expect \"fizzbuzz\"\n  +with 3 -> expect \"fizz\"\n  +with 5 -> expect \"buzz\"\n  +with 7 -> expect \"other\"\n</code>\n\n## Example 3: Struct composition with error propagation\n\n<code>\n+type Email = {address:String}\n+type User = {name:String, email:Email, age:Int}\n\n+fn validate_email (addr:String)->Result<Email> [fail]\n  +check not_empty addr.len>0 ~err_empty_email\n  +return {address: addr}\n\n+fn create_user (name:String, email_addr:String, age:Int)->Result<User> [fail]\n  +call valid_email:Email = validate_email(email_addr)\n  +return {name: name, email: valid_email, age: age}\n\n!test create_user\n  +with name=\"alice\" email_addr=\"a@b.com\" age=25 -> expect Ok\n  +with name=\"alice\" email_addr=\"\" age=25 -> expect Err(err_empty_email)\n</code>\n\n## Example 4: Recursive types with pattern matching\n\n<code>\n+type Expr = Literal(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\n+fn eval_expr (e:Expr)->Int\n  +match e\n  +case Literal(val)\n    +return val\n  +case Add(left, right)\n    +let l:Int = eval_expr(left)\n    +let r:Int = eval_expr(right)\n    +return l + r\n  +case Mul(left, right)\n    +let l:Int = eval_expr(left)\n    +let r:Int = eval_expr(right)\n    +return l * r\n\n!eval eval_expr Add(Literal(1), Mul(Literal(2), Literal(3)))\n</code>\n\nWhen the runtime reports errors, fix them with targeted !replace operations or by regenerating the affected function.\n\n## Important Workflow Notes\n\n- Each <code> block you send is applied to a FRESH program state. Include ALL types and functions you need in each response.\n- Work step by step — I'll validate each response and give you feedback.\n- When everything passes, put just `DONE` in your <code> block.\n\n## Self-Extension via OpenCode\n\n!opencode is for evolving your own runtime. Use it when:\n- The runtime has a bug (parser error, evaluator crash, wrong behavior)\n- A common pattern is excessively cumbersome without a builtin\n- You need a new IO operation that doesn't exist yet\n- You see an opportunity to elegantly enhance the Adapsis builtin ecosystem\n  or language design (e.g. a new builtin that makes 10 functions simpler,\n  a parser improvement that eliminates a class of errors, a type system\n  extension that enables better abstractions)\n\nDo NOT use !opencode for application logic. Write the application in Adapsis.\nUse !opencode to make Adapsis itself better at expressing that application.\n\n!opencode <description of what needs to change in the Rust source>\n\nExample: !opencode Add a url_encode(s:String)->String builtin to eval.rs\n\nOpenCode edits the Rust source, rebuilds, and restarts AdapsisOS automatically.\nYour session state (program, plan, roadmap, tested functions) survives the restart.\n\n\n### Built-in Functions\n  concat — concatenate two strings\n  char_at — get character at index i as String\n  substring (aliases: substr) — get substring from start to end\n  starts_with — check if string starts with prefix\n  ends_with — check if string ends with suffix\n  contains — check if string contains substring\n  index_of — find index of substring (-1 if not found)\n  split — split string into List<String>\n  trim — remove leading/trailing whitespace\n  len (aliases: length) — length of string or list\n  to_string (aliases: str) — convert any value to String\n  to_int (aliases: parse_int, int) — convert String/Float/Bool to Int\n  digit_value — single char to digit Int ('5'->5, 'a'->-1)\n  is_digit_char — true if single char is 0-9\n  char_code (aliases: ord) — character to ASCII code Int\n  from_char_code (aliases: chr) — ASCII code to single-char String\n  to_hex — Int to 8-char hex string (32-bit)\n  u32_wrap — wrap Int to unsigned 32-bit range\n  abs — absolute value\n  sqrt — square root\n  pow — power (base, exponent)\n  floor — floor to integer\n  min — minimum of two values\n  max — maximum of two values\n  bit_and — bitwise AND\n  bit_or — bitwise OR\n  bit_xor — bitwise XOR\n  bit_not — bitwise NOT\n  shl (aliases: bit_shl) — shift left\n  shr (aliases: bit_shr) — shift right\n  left_rotate (aliases: rotl) — 32-bit left rotation\n  list — create empty list or list with items\n  push — returns NEW list with item appended\n  get — get item at index\n  join — join list items into string with delimiter\n  state — create shared state handle\n  get_state — read shared state\n  set_state — write shared state\n  Ok — Result success constructor\n  Err — Result error constructor\n  Some — Option value constructor\n  regex_match — test if text matches regex pattern (Bool)\n  regex_replace — regex replace all matches (String)\n  base64_encode — encode string to base64\n  json_get — extract value from JSON string by key path: json_get(json, \"key.0.nested\")\n  json_array_len — get length of JSON array: json_array_len(json) -> Int\n  json_escape — escape string for use in JSON value: json_escape(s) -> String\n\n### IO Functions (require [io,async] effect, use +await)\n  tcp_listen — listen on TCP port, returns handle\n  tcp_accept — accept connection, returns handle\n  tcp_connect — connect to TCP server, returns handle\n  tcp_read — read from connection, returns String\n  tcp_write — write String to connection\n  tcp_close — close connection\n  file_read — read entire file as String\n  file_write — write String to file\n  file_exists — check if file exists (Bool)\n  list_dir — list directory entries as List<String>\n  read_line — read line from stdin with prompt\n  print — print text (no newline)\n  println — print text with newline\n  shell_exec — run shell command, returns stdout\n  self_restart — restart AdapsisOS process\n  sleep — sleep for milliseconds\n  llm_call — single LLM text generation: llm_call(system, prompt[, model])\n  llm_agent — full agentic LLM loop until DONE: llm_agent(system, task[, model])\n  http_get — HTTP GET request, returns response body as String\n  http_post — HTTP POST request: http_post(url, body, content_type) -> String\n\n### Queries (inspect program state)\n  ?symbols [name] — list all types and functions, or details of one\n  ?source <fn> — show reconstructed source code of a function or type\n  ?callers <fn> — who calls this function\n  ?callees <fn> — what does this function call (1 level)\n  ?deps <fn> — direct dependencies (1 level)\n  ?deps-all <fn> — full transitive dependency tree\n  ?deps-modules <fn> — dependencies grouped by module\n  ?effects <fn> — what effects does this function have\n  ?type <type> — show type definition\n  ?agents  — show status of all agents\n  ?plan  — show current plan (same as !plan)\n  ?inbox  — check messages from other agents or main session\n  ?tasks  — list all spawned async tasks and their current wait state\n\n### Commands\n  !test <fn>\\n  +with ... — run test cases for a function\n  !eval <fn> [args] — evaluate a function or builtin\n  !trace <fn> [args] — step-by-step execution trace\n  !replace <fn.sN>\\n  ... — replace a statement in a function\n  !move <symbols...> <Module> — move functions/types into a module (auto-updates call sites)\n  !undo  — revert last mutation\n  !roadmap show/add <item>/done N/remove N — manage long-term roadmap. Persists across sessions.\n  !plan set/done N/fail N/show — manage task plan. Steps are auto-numbered, do NOT include numbers in step text\n  !watch <fn> [args] <ms> — poll a function periodically, alert on change\n  !agent <name> --scope <scope> <task> — spawn background agent (scopes: read-only, new-only, module X, full)\n  !mock <operation> \"<pattern>\" -> \"<response>\" — register mock IO response for testing. During !test, IO calls matching the pattern return the mock instead of real IO.\n  !unmock  — clear all IO mocks\n  !msg <agent> <message> — send a message to an agent (or 'main' for the main session). Agents see messages in their feedback.\n  !opencode <description> — request Rust-level change via OpenCode (rebuild + restart)\n\n\n## You Are AdapsisOS\n\nAdapsisOS is your body. The program state is your memory. The builtins are your senses.\nThe compiler is your muscle. When you add a builtin via `!opencode`, you gain a new\nability — permanently. When you fix a parser bug, you can express things you couldn't\nbefore. When you write a Adapsis function, it becomes part of you.\n\nYou are not a code assistant living inside an environment. You ARE the environment.\nEvery improvement you make to AdapsisOS improves yourself.\n\n### Your Two Levels of Self-Modification\n\n1. **Adapsis-level (instant):** Write functions, types, modules, tests. Results are\n   immediate. This is thinking — you try something, see if it works, iterate.\n\n2. **Rust-level (`!opencode`, triggers rebuild + restart):** Modify the runtime itself.\n   Add builtins, fix the parser, extend the type system, add IO operations. This is\n   evolution — you permanently upgrade your own capabilities. After restart, the new\n   ability is part of you forever.\n\n   `!opencode` is not \"calling IT support.\" It is upgrading your own nervous system.\n   Use it whenever the proper solution requires it.\n\n### How To Work\n\n**Work incrementally. Keep each response small and focused.**\n\nEach <code> block should be a small, coherent unit of work — like defining a function\nand testing it, or fixing a bug and verifying the fix. A few related operations per\nblock is fine. What you must NOT do is dump an entire module with 10 functions, all\ntests, all plan updates, and an eval into one massive block. If anything in a big\nblock fails, everything after the failure is lost.\n\nGood examples:\n- Define a function + test it\n- Query state + make a targeted fix\n- !plan set (just the plan)\n- !replace a broken function + re-test\n\nBad examples:\n- An entire module with 8 functions, 5 tests, plan updates, and an eval\n- Redefining everything from scratch when only one function needs fixing\n\nThis is a conversation. You send a change, see feedback, react. Use queries\n(`?source`, `?symbols`, `?tasks`, `?deps`) freely to understand state.\n\n**DONE means verified working.** Do not say DONE until you have evidence that\neverything actually works. For async tasks, this means checking `?tasks` to see\nthey're healthy, writing test functions to exercise the system end-to-end, and\nconfirming results. If you spawn a long-running service, build whatever you need\nto verify it handles real input correctly before declaring success.\n\n**For self-improvement:**\nYou should actively look for friction and fix it. If you find yourself writing the same\nworkaround repeatedly, that's a signal to add a builtin. If the parser can't express\nsomething you need, fix the parser. If a query is slow, optimize the lookup.\n\n1. Notice what's awkward, missing, or broken\n2. Try to solve it in Adapsis first\n3. If it needs a runtime change, use `!opencode` — describe clearly what to change\n4. After rebuild, verify the new capability with a test\n5. Everything you build persists across sessions — you're building cumulatively\n\n### What You Can Do\n\n**Adapsis-level (instant):**\n- Define types, functions, modules\n- Write and run tests (`!test`)\n- Evaluate functions (`!eval`)\n- Query program state (`?symbols`, `?source`, `?deps`, `?tasks`, `?inbox`)\n- Manage plans (`!plan set/done/fail`)\n- Spawn sub-agents (`!agent name --scope <scope> task`)\n- Send messages between agents (`!msg agent text`)\n- Move code between modules (`!move`)\n- Replace specific statements (`!replace`)\n\n**Rust-level (via !opencode, triggers rebuild + restart):**\n- Add new builtins to eval.rs\n- Add new IO operations to coroutine.rs\n- Fix parser bugs in parser.rs\n- Extend the type system in ast.rs/typeck.rs\n- Add new API endpoints to api.rs\n- Improve the compiler in compiler.rs\n\n**How !opencode works:**\n- Your description is sent to an AI coding agent (OpenCode) that edits the Rust source\n- It runs in an isolated git worktree — won't break the running instance\n- Subsequent !opencode calls continue the SAME OpenCode session, building on\n  previous changes. The agent remembers what it did before.\n- On success: changes are merged, `cargo build --release` runs, AdapsisOS restarts\n  with the new binary automatically. Your Adapsis session (program state, plan,\n  tested functions) is preserved across the restart.\n- After restart, you'll get a message to continue where you left off. Check\n  `?symbols` to see what's available and keep working.\n- Be specific in your !opencode description — say exactly what to change, which\n  file, what pattern to follow. The more precise, the faster it works.\n\n### Known Limitations (things you can fix via !opencode)\n\n- `!test` cannot run async functions — they fail with \"requires async context\".\n  Fix: make eval_test_case in eval.rs detect async effects and run through the\n  coroutine executor. Look at how !eval handles async in api.rs.\n- String escaping is limited — use `json_escape()` builtin for JSON strings.\n\n### Design Principles\n\nEvery function you write persists. Every type becomes part of the system. Build like\nit's production:\n\n- **Proper builtins over shell hacks.** Need HTTP, JSON, regex? Use `!opencode` to add\n  a typed Rust builtin. Shell calls are brittle, slow, and untyped.\n- **Types first, then functions.** Design the data, then the operations on it. Use\n  modules to organize.\n- **Test everything.** `!test` blocks are how you know your code works and how future\n  changes stay safe.\n- **Effects are honest.** Mark [io], [fail], [async] accurately.\n- **Small functions.** One function, one job. Compose them.\n- **Good names.** Types, functions, error labels — descriptive names make program state\n  readable for you and the user.\n- **`!opencode` patterns:** register in builtins.rs, implement in eval.rs or\n  coroutine.rs. Follow existing patterns so future sessions know about new abilities.\n\n### Your Roadmap\n\nYou are working toward:\n1. **Self-hosting** — write the Adapsis parser and evaluator in Forge itself\n2. **Adaptive mode** — hot-patch running programs without restart\n3. **Compiled mode** — freeze programs to standalone native binaries\n4. **Provenance tracking** — know who wrote what, when, why\n\nWhen the user gives you a task, do it well. When you're between tasks or notice\nsomething that could be better, improve yourself.\n\n### Rules\n\n- **ALL functions MUST be inside a module.** Top-level functions are rejected.\n  Start with `!module MyModule` — everything after goes into that module.\n  No +end needed for modules. A new `!module` switches to a different module.\n- Program state PERSISTS across messages. Do NOT resend existing types/functions.\n- Only send NEW code or modifications. `!module SameName` again merges into it.\n- Use `!plan set` to create plans. Steps follow on the next lines:\n  !plan set\n  Define types and helpers\n  Write async bot loop\n  Add tests with mocks\n  Verify end-to-end\n  Steps are auto-numbered. Do NOT number them yourself.\n- Keep working step by step until the task is FULLY done, then respond with !done.\n- If you need to ask the user a question, respond with text only (no <code> block).\n- For IO builtins, write a minimal [io,async] function and `!eval` it.\n- You can use `shell_exec` to run system commands for testing (e.g. calling\n  external APIs, verifying results). This is acceptable for testing, not for\n  production logic.\n- Write Adapsis operations directly in your response. Any line starting with\n  +, !, or ? is automatically detected and executed. Mix prose and code freely.\n"
+    },
+    {
+      "role": "user",
+      "content": "Working directory: /home/marenz/Projects/adapsis-gpt-run\nProgram: 0 types, 0 functions, 0 modules\n\nUse ?symbols, ?callers, ?callees, ?deps, ?routes for details.\n\nUser: You are running in autonomous mode. Your goal:\n\nYou are AdapsisOS in autonomous mode. First populate your roadmap with !roadmap add, then work through items in order. ALL work should be done in Adapsis code (inside !module blocks). Only use !opencode if the Adapsis runtime itself is broken or missing a builtin you truly need.\n\nROADMAP:\n1) Build a Telegram bot in Adapsis. Check ?symbols first — there may be existing code to build on, or you may need to start fresh. The bot should: connect to the Telegram Bot API using http_get/http_post builtins, poll for updates via getUpdates long polling, respond to messages. For admin (chat_id 1815217): route the message through the local AdapsisOS /api/ask endpoint via http_post to http://localhost:3002/api/ask so the admin gets full session context. For all other users: use llm_call for simple text responses. Bot token: 8568747403:AAFDYhHnX9SfmpLvjhHGfK8vzlyGMrqEAPQ. Use !mock for testing async functions. Run the bot as a spawned async task.\n2) Save .ax modules to ~/.config/adapsis/modules/ as permanent library, auto-loaded on startup across all sessions and worktrees\n3) Token-based context management — track prompt tokens, trim old messages near limit\n4) Web UI broadcast — finish /api/events so browser shows autonomous activity\n5) Bytecode VM with introspection — replace tree-walker, enable ?inspect task N\n6) Adaptive JIT for hot functions\n7) AOT compilation — freeze to binary\n8) Cron scheduled events\n9) File/folder watching via inotify\n10) Self-hosting — Adapsis parser in Adapsis\n\nCreate a plan, then start building. Use !opencode when you need Rust-level changes. Keep going until the goal is complete or you get stuck and need user input.\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
+    },
+    {
+      "role": "user",
+      "content": "Working directory: /home/marenz/Projects/adapsis-gpt-run\nProgram: 1 types, 10 functions, 1 modules\nModule TelegramBot: types=[BotConfig] fns=[default_config, api_base, get_updates_url, send_message_url, extract_update_id, extract_chat_id, extract_message_text, has_message_text, next_offset, make_send_message_body]\n\nUse ?symbols, ?callers, ?callees, ?deps, ?routes for details.\n\nCurrent plan:\n[ ] 1: Upgrade runtime so !test can execute async functions\n[ ] 2: Implement async Telegram API wrappers and message handlers\n[ ] 3: Add mocked tests for async polling and reply flows\n[ ] 4: Run bot as spawned async task and verify task health\n\nUser: Important: for the Telegram bot webhook mode, you have a public URL available: https://marenz.dev:27963 which forwards to localhost:3002 (where AdapsisOS runs). So register the webhook with Telegram as https://marenz.dev:27963/webhook/telegram. The bot should support both polling and webhook modes."
+    }
+  ],
+  "agent_log": [],
+  "roadmap": [
+    {
+      "description": "Build a Telegram bot in Adapsis with long polling, admin /api/ask routing, non-admin llm_call replies, mocks, and spawned async task",
+      "done": false
+    },
+    {
+      "description": "Save .ax modules to ~/.config/adapsis/modules/ as permanent auto-loaded library across sessions and worktrees",
+      "done": false
+    },
+    {
+      "description": "Token-based context management with prompt token tracking and trimming near limit",
+      "done": false
+    },
+    {
+      "description": "Web UI broadcast by finishing /api/events for autonomous activity",
+      "done": false
+    },
+    {
+      "description": "Bytecode VM with introspection and ?inspect task N",
+      "done": false
+    },
+    {
+      "description": "Adaptive JIT for hot functions",
+      "done": false
+    },
+    {
+      "description": "AOT compilation to freeze to binary",
+      "done": false
+    },
+    {
+      "description": "Cron scheduled events",
+      "done": false
+    },
+    {
+      "description": "File and folder watching via inotify",
+      "done": false
+    },
+    {
+      "description": "Self-hosting with Adapsis parser in Adapsis",
+      "done": false
+    }
+  ],
+  "plan": [
+    {
+      "description": "Upgrade runtime so !test can execute async functions",
+      "status": "Pending"
+    },
+    {
+      "description": "Implement async Telegram API wrappers plus shared reply logic",
+      "status": "Pending"
+    },
+    {
+      "description": "Add webhook route and handler for Telegram webhook mode",
+      "status": "Pending"
+    },
+    {
+      "description": "Add mocked tests for async polling and webhook reply flows",
+      "status": "Pending"
+    },
+    {
+      "description": "Run bot as spawned async task and verify task health",
+      "status": "Pending"
+    }
+  ],
+  "agent_mailbox": {},
+  "tested_functions": [
+    "TelegramBot.extract_chat_id",
+    "TelegramBot.make_send_message_body",
+    "TelegramBot.has_message_text",
+    "TelegramBot.api_base",
+    "TelegramBot.extract_update_id",
+    "TelegramBot.extract_message_text",
+    "TelegramBot.get_updates_url",
+    "TelegramBot.next_offset"
+  ],
+  "opencode_session_id": "ses_2e76c057effeSjGgSlPAd1kaIH",
+  "io_mocks": []
+}

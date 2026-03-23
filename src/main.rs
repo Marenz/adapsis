@@ -5,6 +5,7 @@ mod compiler;
 mod coroutine;
 mod eval;
 mod events;
+pub mod library;
 mod llm;
 mod orchestrator;
 mod parser;
@@ -12,6 +13,7 @@ mod prompt;
 mod repl;
 mod server;
 mod session;
+mod telegram;
 mod typeck;
 mod validator;
 
@@ -211,6 +213,14 @@ enum Command {
         /// Maximum iterations per AI request (default 20)
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
+
+        /// Telegram bot token (enables Telegram bot when set)
+        #[arg(long, env = "TELEGRAM_BOT_TOKEN")]
+        telegram_token: Option<String>,
+
+        /// Telegram admin chat ID (messages from this chat route through /api/ask)
+        #[arg(long, env = "TELEGRAM_ADMIN_CHAT_ID", default_value_t = 1815217)]
+        telegram_admin_chat_id: i64,
     },
 
     /// Send a message to a running AdapsisOS instance
@@ -377,6 +387,9 @@ async fn main() -> Result<()> {
             let mut program = ast::Program::default();
             let mut test_ops = vec![];
             let mut io_mocks: Vec<session::IoMock> = vec![];
+            // Standalone registries for ?tasks / ?inspect queries (empty but real).
+            let task_registry: coroutine::TaskRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let snapshot_registry: coroutine::TaskSnapshotRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             for op in &operations {
                 match op {
                     parser::Operation::Test(_) => test_ops.push(op.clone()),
@@ -418,8 +431,14 @@ async fn main() -> Result<()> {
                         }
                     }
                     parser::Operation::Query(query) => {
-                        let table = typeck::build_symbol_table(&program);
-                        let response = typeck::handle_query(&program, &table, query);
+                        let response = if query.trim() == "?tasks" {
+                            api::format_tasks(&Some(task_registry.clone()))
+                        } else if let Some(tid) = api::parse_inspect_task_query(query.trim()) {
+                            api::format_inspect_task(&Some(task_registry.clone()), &Some(snapshot_registry.clone()), tid)
+                        } else {
+                            let table = typeck::build_symbol_table(&program);
+                            typeck::handle_query(&program, &table, query)
+                        };
                         println!("\n--- Query: {query} ---\n{response}");
                     }
                     _ => match validator::apply_and_validate(&mut program, op) {
@@ -526,6 +545,7 @@ async fn main() -> Result<()> {
             let program_for_spawn = program.clone();
             let io_sender_for_spawn = runtime.io_sender();
             let task_registry_for_spawn = runtime.task_registry.clone();
+            let snap_registry_for_spawn = runtime.snapshot_registry.clone();
             let rt_for_id = runtime.clone();
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
@@ -547,6 +567,7 @@ async fn main() -> Result<()> {
                             let prog = program_for_spawn.clone();
                             let sender = io_sender_for_spawn.clone();
                             let registry = task_registry_for_spawn.clone();
+                            let snap_reg = snap_registry_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 let func_decl = match prog.get_function(&function_name) {
                                     Some(f) => f,
@@ -560,7 +581,7 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone());
+                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new();
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 // Bind args to params
@@ -569,7 +590,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_pub(&prog, &func_decl.body, &mut env) {
+                                match eval::eval_function_body_named(&prog, &function_name, &func_decl.body, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -670,7 +691,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations, telegram_token, telegram_admin_chat_id } => {
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -689,6 +710,13 @@ async fn main() -> Result<()> {
             // In AdapsisOS mode, enforce modules and tests
             sess.program.require_modules = true;
 
+            // Auto-load persistent module library (~/.config/adapsis/modules/)
+            let lib_state = library::load_module_library(&mut sess.program);
+            if !lib_state.loaded_modules.is_empty() {
+                sess.program.rebuild_function_index();
+            }
+            sess.library_state = Some(lib_state);
+
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
             // Set up coroutine runtime for async IO
@@ -703,6 +731,7 @@ async fn main() -> Result<()> {
             let rt = runtime.clone();
             let rt_for_id = runtime.clone();
             let task_registry_for_spawn = runtime.task_registry.clone();
+            let snap_registry_for_spawn2 = runtime.snapshot_registry.clone();
             let io_sender_for_spawn = runtime.io_sender();
             let shared_session_for_spawn = shared_session.clone();
             tokio::spawn(async move {
@@ -722,6 +751,7 @@ async fn main() -> Result<()> {
 
                             let sender = io_sender_for_spawn.clone();
                             let registry = task_registry_for_spawn.clone();
+                            let snap_reg = snap_registry_for_spawn2.clone();
                             let session_ref = shared_session_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 let session = session_ref.blocking_lock();
@@ -740,7 +770,7 @@ async fn main() -> Result<()> {
                                 let program = session.program.clone();
                                 drop(session);
 
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone());
+                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new();
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 for (i, param) in func_decl.params.iter().enumerate() {
@@ -748,7 +778,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_pub(&program, &func_decl.body, &mut env) {
+                                match eval::eval_function_body_named(&program, &function_name, &func_decl.body, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -817,6 +847,7 @@ async fn main() -> Result<()> {
                 io_sender: Some(io_sender),
                 self_trigger: trigger_tx,
                 task_registry: Some(runtime.task_registry.clone()),
+                snapshot_registry: Some(runtime.snapshot_registry.clone()),
                 log_file: ai_log,
                 training_log: train_log,
                 jit_cache: eval::new_jit_cache(),
@@ -1071,6 +1102,24 @@ async fn main() -> Result<()> {
                     }
                 });
                 } // else (fresh session)
+            }
+
+            // Telegram bot (long-polling, runs alongside the HTTP server)
+            if let Some(token) = telegram_token {
+                let bot = telegram::TelegramBot::new(
+                    token,
+                    telegram_admin_chat_id,
+                    port,
+                    url.clone(),
+                    model.clone(),
+                    api_key.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = bot.run().await {
+                        eprintln!("[telegram] bot exited with error: {e}");
+                    }
+                });
+                eprintln!("[telegram] bot polling started (admin_chat_id={telegram_admin_chat_id})");
             }
 
             match axum::serve(listener, app).await {

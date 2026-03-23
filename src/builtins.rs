@@ -515,6 +515,11 @@ pub static QUERIES: &[QueryCommand] = &[
         args: "",
         description: "list all spawned async tasks and their current wait state",
     },
+    QueryCommand {
+        name: "?library",
+        args: "",
+        description: "show persistent module library: dir path, loaded modules, files on disk, load/save errors",
+    },
 ];
 
 /// Registered mutation/action commands (!-prefixed).

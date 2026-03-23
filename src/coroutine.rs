@@ -84,6 +84,21 @@ pub struct TaskInfo {
 /// Shared task registry — tracks all spawned tasks.
 pub type TaskRegistry = Arc<std::sync::Mutex<HashMap<TaskId, TaskInfo>>>;
 
+/// Inspectable snapshot of a running task's interpreter state.
+/// Values are rendered as display strings — no recursive Value serialization.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskSnapshot {
+    pub task_id: TaskId,
+    pub function_name: String,
+    pub current_stmt_id: Option<String>,
+    pub frame_depth: usize,
+    pub locals: Vec<(String, String)>,
+    pub wait_reason: String,
+}
+
+/// Shared snapshot registry — updated by the evaluator as tasks execute.
+pub type TaskSnapshotRegistry = Arc<std::sync::Mutex<HashMap<TaskId, TaskSnapshot>>>;
+
 /// IO operations that Adapsis code can request via +await.
 #[derive(Debug)]
 pub enum IoRequest {
@@ -130,6 +145,8 @@ pub struct Runtime {
     connections: Mutex<HashMap<Handle, Arc<Mutex<TcpStream>>>>,
     /// Shared task registry — tracks all spawned async tasks.
     pub task_registry: TaskRegistry,
+    /// Shared snapshot registry — live interpreter state for each task.
+    pub snapshot_registry: TaskSnapshotRegistry,
     /// LLM config for llm_call/llm_agent
     pub llm_url: String,
     pub llm_default_model: String,
@@ -147,6 +164,7 @@ impl Runtime {
                 listeners: Mutex::new(HashMap::new()),
                 connections: Mutex::new(HashMap::new()),
                 task_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                snapshot_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 llm_url: String::new(),
                 llm_default_model: String::new(),
                 llm_api_key: None,
@@ -455,23 +473,39 @@ pub struct CoroutineHandle {
     pub task_id: Option<TaskId>,
     /// Shared task registry for updating wait reasons.
     task_registry: Option<TaskRegistry>,
+    /// Shared snapshot registry for live interpreter state inspection.
+    snapshot_registry: Option<TaskSnapshotRegistry>,
     /// Mock responses for testing — if set, IO calls check here first.
     mocks: Option<Vec<crate::session::IoMock>>,
 }
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, mocks: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None }
     }
 
-    pub fn new_with_task(io_tx: mpsc::Sender<IoRequest>, task_id: TaskId, registry: TaskRegistry) -> Self {
-        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), mocks: None }
+    pub fn new_with_task(
+        io_tx: mpsc::Sender<IoRequest>,
+        task_id: TaskId,
+        registry: TaskRegistry,
+        snapshot_registry: TaskSnapshotRegistry,
+    ) -> Self {
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None }
     }
 
     /// Create a mock handle for testing — no real IO, returns mock responses.
+    /// Unmatched operations error with "no mock for..." since there's no real
+    /// IO sender to fall through to.
+    #[allow(dead_code)]
     pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
         let (tx, _) = mpsc::channel(1); // dummy channel, never used
-        Self { io_tx: tx, task_id: None, task_registry: None, mocks: Some(mocks) }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks) }
+    }
+
+    /// Create a handle with mocks AND a real IO sender — mocks are checked first,
+    /// unmatched operations fall through to real IO via the sender.
+    pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks) }
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
@@ -496,6 +530,50 @@ impl CoroutineHandle {
     /// Mark this task as running (no longer waiting).
     fn clear_wait(&self) {
         self.set_wait(WaitReason::Running);
+    }
+
+    /// Update the live interpreter snapshot for this task.
+    /// Called by the evaluator before each statement.
+    pub fn update_snapshot(
+        &self,
+        function_name: &str,
+        current_stmt_id: Option<String>,
+        frame_depth: usize,
+        env: &crate::eval::Env,
+    ) {
+        if let (Some(id), Some(snap_reg)) = (self.task_id, &self.snapshot_registry) {
+            let wait_str = if let Some(task_reg) = &self.task_registry {
+                task_reg.lock().ok()
+                    .and_then(|tasks| tasks.get(&id).map(|t| format!("{}", t.status)))
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                "unknown".to_string()
+            };
+            let snap = TaskSnapshot {
+                task_id: id,
+                function_name: function_name.to_string(),
+                current_stmt_id,
+                frame_depth,
+                locals: env.snapshot_bindings(),
+                wait_reason: wait_str,
+            };
+            if let Ok(mut snaps) = snap_reg.lock() {
+                snaps.insert(id, snap);
+            }
+        }
+    }
+
+    /// Mark the snapshot as completed (keep last known state queryable).
+    pub fn complete_snapshot(&self, function_name: &str) {
+        if let (Some(id), Some(snap_reg)) = (self.task_id, &self.snapshot_registry) {
+            if let Ok(mut snaps) = snap_reg.lock() {
+                if let Some(snap) = snaps.get_mut(&id) {
+                    snap.function_name = function_name.to_string();
+                    snap.current_stmt_id = None;
+                    // wait_reason will be updated from TaskInfo on query
+                }
+            }
+        }
     }
 
     /// Helper: send an IO request and wait for the result, tracking wait reason.
