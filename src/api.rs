@@ -1769,6 +1769,23 @@ pub async fn ask_stream(
             let output = {
                 let mut last_err = String::new();
                 let mut result = None;
+                let waiting_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let wf = waiting_flag.clone();
+                let log_ref = config_clone.log_file.clone();
+                let broadcast_ref = config_clone.event_broadcast.clone();
+                let iter_num = iteration + 1;
+                tokio::spawn(async move {
+                    let mut secs = 0u64;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        if !wf.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                        secs += 30;
+                        let msg = format!("Waiting for LLM response... ({secs}s, iteration {iter_num})");
+                        eprintln!("[waiting] {msg}");
+                        log_activity(&log_ref, "waiting", &msg).await;
+                        let _ = broadcast_ref.send(serde_json::json!({"type": "result", "message": msg, "success": true}));
+                    }
+                });
                 for retry in 0..3 {
                     match llm.generate(messages.clone()).await {
                         Ok(o) => { result = Some(o); break; }
@@ -1782,6 +1799,7 @@ pub async fn ask_stream(
                         }
                     }
                 }
+                waiting_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                 match result {
                     Some(o) => o,
                     None => {
