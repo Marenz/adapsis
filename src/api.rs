@@ -385,6 +385,13 @@ pub struct StatusResponse {
     pub routes: Vec<RouteInfo>,
     pub program_summary: String,
     pub plan: Vec<PlanStepResponse>,
+    pub roadmap: Vec<RoadmapItemResponse>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RoadmapItemResponse {
+    pub description: String,
+    pub done: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -411,11 +418,16 @@ pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse
             crate::session::PlanStatus::Failed => "failed",
         }.to_string(),
     }).collect();
+    let roadmap = session.roadmap.iter().map(|r| RoadmapItemResponse {
+        description: r.description.clone(),
+        done: r.done,
+    }).collect();
     Json(StatusResponse {
         revision: session.revision,
         mutations: session.mutations.len(),
         history_entries: session.history.len(),
         plan,
+        roadmap,
         functions: session
             .program
             .functions
