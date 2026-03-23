@@ -1783,44 +1783,12 @@ pub async fn ask_stream(
                 let _ = tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             }
 
-            // Strip "!done" from code — the AI sometimes appends it to a code block
-            let raw_code = output.code.trim().to_string();
-            let (code, is_done) = if raw_code.ends_with("\n!done") || raw_code.ends_with("\n\n!done") {
-                (raw_code.rsplit_once('\n').map(|(before, _)| before.trim().to_string()).unwrap_or_default(), true)
-            } else if raw_code == "!done" || raw_code.is_empty() {
-                (String::new(), true)
-            } else {
-                (raw_code, false)
-            };
+            let code = output.code.trim().to_string();
 
+            // Empty code = AI responded with prose only, no operations
             if code.is_empty() {
-                // Check for untested functions before accepting !done
-                if config_clone.session.lock().await.program.require_modules {
-                    let session = config_clone.session.lock().await;
-                    let untested: Vec<String> = session.program.modules.iter().flat_map(|m| {
-                        m.functions.iter().filter_map(|f| {
-                            let qname = format!("{}.{}", m.name, f.name);
-                            if f.body.len() > 2 && !session.tested_functions.contains(&qname) {
-                                Some(qname)
-                            } else { None }
-                        })
-                    }).collect();
-                    if !untested.is_empty() {
-                        let challenge = format!(
-                            "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
-                            untested.len(), untested.join(", ")
-                        );
-                        log_activity(&config_clone.log_file, "done-rejected", &challenge).await;
-                        let _ = tx.send(serde_json::json!({"type": "feedback", "message": "!done rejected: untested functions"})).await;
-                        messages.push(crate::llm::ChatMessage::user(challenge));
-                        continue;
-                    }
-                }
-                log_activity(&config_clone.log_file, "done", &format!("AI said !done at iteration {}", iteration + 1)).await;
-                let _ = tx.send(serde_json::json!({"type": "done"})).await;
-                break;
+                continue;
             }
-            // Code has content — process it, then check is_done after feedback
 
             log_activity(&config_clone.log_file, "code", &code).await;
             let _ = tx.send(serde_json::json!({"type": "code", "code": code})).await;
@@ -1831,6 +1799,7 @@ pub async fn ask_stream(
             let mut feedback_details: Vec<String> = Vec::new();
             let mut train_tests_passed: usize = 0;
             let mut train_tests_failed: usize = 0;
+            let mut accepted_done = false;
 
             match crate::parser::parse(&code) {
                 Ok(ops) => {
@@ -1882,6 +1851,7 @@ pub async fn ask_stream(
                         | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
                         | crate::parser::Operation::Watch { .. } | crate::parser::Operation::Agent { .. }
                         | crate::parser::Operation::Message { .. }
+                        | crate::parser::Operation::Done
                         | crate::parser::Operation::OpenCode(_)));
 
                     if has_mutations {
@@ -2089,6 +2059,33 @@ pub async fn ask_stream(
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": format!("statement error: {e}"), "success": false})).await;
                                     }
                                 }
+                            }
+                            crate::parser::Operation::Done => {
+                                // Check for untested functions before accepting
+                                if session.program.require_modules {
+                                    let untested: Vec<String> = session.program.modules.iter().flat_map(|m| {
+                                        m.functions.iter().filter_map(|f| {
+                                            let qname = format!("{}.{}", m.name, f.name);
+                                            if f.body.len() > 2 && !session.tested_functions.contains(&qname) {
+                                                Some(qname)
+                                            } else { None }
+                                        })
+                                    }).collect();
+                                    if !untested.is_empty() {
+                                        let challenge = format!(
+                                            "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
+                                            untested.len(), untested.join(", ")
+                                        );
+                                        log_activity(&config_clone.log_file, "done-rejected", &challenge).await;
+                                        feedback_details.push(format!("ERROR: {challenge}"));
+                                        has_errors = true;
+                                        continue;
+                                    }
+                                }
+                                log_activity(&config_clone.log_file, "done", &format!("AI said !done at iteration {}", iteration + 1)).await;
+                                let _ = tx.send(serde_json::json!({"type": "done"})).await;
+                                accepted_done = true;
+                                break;
                             }
                             crate::parser::Operation::Mock { operation, pattern, response } => {
                                 session.io_mocks.push(crate::session::IoMock {
@@ -2512,33 +2509,7 @@ pub async fn ask_stream(
                 log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, false, train_tests_passed, train_tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
-                // If the AI said !done alongside this code and there were no errors, check untested
-                if is_done {
-                    if config_clone.session.lock().await.program.require_modules {
-                        let session = config_clone.session.lock().await;
-                        let untested: Vec<String> = session.program.modules.iter().flat_map(|m| {
-                            m.functions.iter().filter_map(|f| {
-                                let qname = format!("{}.{}", m.name, f.name);
-                                if f.body.len() > 2 && !session.tested_functions.contains(&qname) {
-                                    Some(qname)
-                                } else { None }
-                            })
-                        }).collect();
-                        if !untested.is_empty() {
-                            let challenge = format!(
-                                "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
-                                untested.len(), untested.join(", ")
-                            );
-                            log_activity(&config_clone.log_file, "done-rejected", &challenge).await;
-                            let _ = tx.send(serde_json::json!({"type": "feedback", "message": "!done rejected: untested functions"})).await;
-                            messages.push(crate::llm::ChatMessage::user(challenge));
-                            continue;
-                        }
-                    }
-                    log_activity(&config_clone.log_file, "done", &format!("AI said !done (with code) at iteration {}", iteration + 1)).await;
-                    let _ = tx.send(serde_json::json!({"type": "done"})).await;
-                    break;
-                }
+                if accepted_done { break; }
             }
         }
 

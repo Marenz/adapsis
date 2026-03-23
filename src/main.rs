@@ -1080,8 +1080,9 @@ async fn main() -> Result<()> {
                                         for line in text.lines() {
                                             if let Some(data) = line.strip_prefix("data: ") {
                                                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                                    if event.get("type").and_then(|t| t.as_str()) == Some("end") {
-                                                        eprintln!("[autonomous] iteration complete, continuing...");
+                                                    let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                                    if etype == "end" || etype == "done" {
+                                                        eprintln!("[autonomous] SSE {etype} received, ending request...");
                                                         got_end = true;
                                                     }
                                                 }
