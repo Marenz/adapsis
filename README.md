@@ -1,16 +1,16 @@
-# Forge
+# Adapsis
 
 An AI-native programming language and live programming environment.
 
-Forge is a system for AI-assisted software construction where programs are built incrementally through validated mutations, not generated in one shot. The LLM emits small changes, the runtime validates each one immediately, and errors feed back into the next generation step.
+Adapsis is a system for AI-assisted software construction where programs are built incrementally through validated mutations, not generated in one shot. The LLM emits small changes, the runtime validates each one immediately, and errors feed back into the next generation step.
 
 ## What works today
 
-- **Feedback loop** — LLM generates Forge code, runtime validates and runs tests, errors feed back, model self-corrects
+- **Feedback loop** — LLM generates Adapsis code, runtime validates and runs tests, errors feed back, model self-corrects
 - **Architect mode** — model designs types + function signatures first, then implements one function at a time
 - **REPL** — interactive session with mutation log, working history, save/load, rewind to any revision
 - **Browser UI** — WebSocket-based live view of mutations, program state, and test results
-- **Cranelift JIT compiler** — Forge programs compile to native x86-64 machine code
+- **Cranelift JIT compiler** — Adapsis programs compile to native x86-64 machine code
 - **Type checker** — symbol table, type inference, semantic queries (`?symbols`, `?callers`, `?effects`)
 - **Statement tracing** — step-by-step execution with `!trace`
 - **Result chaining** — auto-propagation (like Rust's `?`) and explicit handling
@@ -43,7 +43,7 @@ cargo run -- test examples/fizzbuzz.forge
 cargo run -- compile examples/compile_test.forge -f add -a "3,4"
 ```
 
-## Forge syntax
+## Adapsis syntax
 
 ```
 // Types
@@ -115,7 +115,7 @@ src/
 
 ## LLM compatibility
 
-Tested with Qwen3.5 family (9B, 35B-A3B MoE). The model learns Forge syntax from the system prompt alone — no fine-tuning required for basic tasks. Other model families (Gemma, Phi, Llama) failed to produce valid Forge from prompt alone.
+Tested with Qwen3.5 family (9B, 35B-A3B MoE). The model learns Adapsis syntax from the system prompt alone — no fine-tuning required for basic tasks. Other model families (Gemma, Phi, Llama) failed to produce valid Adapsis from prompt alone.
 
 ## Design document
 
@@ -123,7 +123,7 @@ See [forge-design-doc.md](forge-design-doc.md) for the full language design, inc
 
 ## Status
 
-This is an active research project. The core loop works — LLMs can write, test, and iterate on Forge programs. Compilation to native code works for numeric types. Strings and structs in the compiler are next.
+This is an active research project. The core loop works — LLMs can write, test, and iterate on Adapsis programs. Compilation to native code works for numeric types. Strings and structs in the compiler are next.
 
 ## License
 
@@ -131,7 +131,7 @@ TBD
 
 ## Self-Hosting
 
-Forge can host itself — the REPL is written in Forge:
+Adapsis can host itself — the REPL is written in Adapsis:
 
 ```bash
 # Start the self-hosted REPL (with AI-in-the-loop)

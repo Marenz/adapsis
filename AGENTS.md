@@ -1,7 +1,7 @@
-# Forge — AI-First Programming Language (ForgeOS)
+# Adapsis — AI-First Programming Language (AdapsisOS)
 
 ## Overview
-Forge is an AI-native program representation and mutation protocol with a constrained surface language. Programs are built incrementally through validated mutations. The AST is the source of truth, changes happen through small mutations with immediate feedback, and every modification is logged in an append-only revision history.
+Adapsis is an AI-native program representation and mutation protocol with a constrained surface language. Programs are built incrementally through validated mutations. The AST is the source of truth, changes happen through small mutations with immediate feedback, and every modification is logged in an append-only revision history.
 
 See `forge-design-doc.md` for the full design document.
 
@@ -10,7 +10,7 @@ See `forge-design-doc.md` for the full design document.
 ```bash
 cargo build
 
-# ForgeOS — the full environment (HTTP API + browser UI + persistent session)
+# AdapsisOS — the full environment (HTTP API + browser UI + persistent session)
 cargo run -- os --port 3000 --session project.json
 
 # Interactive REPL
@@ -35,7 +35,7 @@ cargo run -- test examples/fizzbuzz.forge
 cargo run -- compile examples/compile_test.forge -f add -a "3,4"
 ```
 
-## HTTP API (ForgeOS mode)
+## HTTP API (AdapsisOS mode)
 
 ```
 POST /api/mutate   — {"source": "+fn add..."} → revision + results
@@ -52,7 +52,7 @@ POST /api/rewind   — {"revision": 5} → rewinds program state
 ```
 src/
   main.rs          — CLI entry point (clap)
-  api.rs           — HTTP REST API for ForgeOS
+  api.rs           — HTTP REST API for AdapsisOS
   ast.rs           — Core AST types (Program, Module, Function, Statement, Expr, Type, Effect)
   parser.rs        — Line-oriented parser for mutation syntax
   validator.rs     — Parser → AST conversion, validation, mutation application
@@ -129,11 +129,11 @@ Multiple LLM backends available:
 ```
 
 ### Notes
-- Qwen3.5 family learns Forge syntax from system prompt alone
-- Non-Qwen models (Gemma, Phi, Llama) produce zero valid Forge
+- Qwen3.5 family learns Adapsis syntax from system prompt alone
+- Non-Qwen models (Gemma, Phi, Llama) produce zero valid Adapsis
 - Handles Qwen's thinking mode (`reasoning_content` field)
 
-## ForgeOS !opencode Integration
+## AdapsisOS !opencode Integration
 
 - `!opencode` uses `opencode run --attach http://localhost:4096` (connects to running server)
 - Sessions visible in `opencode sessions list`

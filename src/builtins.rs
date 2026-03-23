@@ -407,7 +407,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "self_restart",
         aliases: &["restart"],
-        description: "restart ForgeOS process",
+        description: "restart AdapsisOS process",
         category: BuiltinCategory::Io,
     },
     Builtin {

@@ -30,7 +30,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
                     converted.name
                 );
             }
-            // In ForgeOS mode, reject top-level functions — must be inside a module
+            // In AdapsisOS mode, reject top-level functions — must be inside a module
             if program.require_modules {
                 bail!(
                     "function `{}` must be inside a module. Use: !module MyModule\\n+fn {}(...)\\n+end",

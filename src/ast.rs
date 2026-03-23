@@ -13,7 +13,7 @@ pub struct Program {
     /// Maps function name → index in `functions` Vec. Derived index, not serialized.
     #[serde(skip)]
     fn_index: HashMap<String, usize>,
-    /// When true, reject top-level functions — must be inside a module. Set in ForgeOS mode.
+    /// When true, reject top-level functions — must be inside a module. Set in AdapsisOS mode.
     #[serde(default)]
     pub require_modules: bool,
 }

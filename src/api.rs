@@ -1,4 +1,4 @@
-//! HTTP API for ForgeOS — programmatic access to the session.
+//! HTTP API for AdapsisOS — programmatic access to the session.
 //!
 //! Endpoints:
 //!   POST /api/mutate     — apply Forge source code
@@ -44,7 +44,7 @@ pub struct AppConfig {
     pub jit_cache: crate::eval::JitCache,
     /// Broadcast channel for SSE events — all activity visible to all subscribers (web UI)
     pub event_broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
-    /// Directory where !opencode runs and builds (fixed checkout, ForgeOS must run from here)
+    /// Directory where !opencode runs and builds (fixed checkout, AdapsisOS must run from here)
     pub opencode_git_dir: String,
     /// Sequential lock for !opencode — only one at a time
     pub opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -130,7 +130,7 @@ pub async fn eval_fn(
 
     for op in &operations {
         if let parser::Operation::Eval(ev) = op {
-            // Block eval of untested functions (>2 statements) in ForgeOS mode
+            // Block eval of untested functions (>2 statements) in AdapsisOS mode
             if session.program.require_modules {
                 if let Some(func) = session.program.get_function(&ev.function_name) {
                     if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
@@ -1017,7 +1017,7 @@ pub async fn ask(
                             }
                         }
                         crate::parser::Operation::Eval(ev) => {
-                            // Block eval of untested functions in ForgeOS mode
+                            // Block eval of untested functions in AdapsisOS mode
                             if session.program.require_modules {
                                 if let Some(func) = session.program.get_function(&ev.function_name) {
                                     if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
@@ -1179,7 +1179,7 @@ pub async fn ask(
                                         "SCOPE: full. You can modify anything.".to_string(),
                                 };
                                 let agent_system = format!(
-                                    "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Forge code. When done, respond with DONE in a <code> block.",
+                                    "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Adapsis code. When done, respond with DONE in a <code> block.",
                                     crate::prompt::system_prompt(),
                                     crate::builtins::format_for_prompt()
                                 );
@@ -1813,7 +1813,7 @@ pub async fn ask_stream(
                                 }
                             }
                             crate::parser::Operation::Eval(ev) => {
-                                // Block eval of untested functions (>2 statements) in ForgeOS mode
+                                // Block eval of untested functions (>2 statements) in AdapsisOS mode
                                 if session.program.require_modules {
                                     if let Some(func) = session.program.get_function(&ev.function_name) {
                                         if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {

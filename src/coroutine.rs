@@ -1,6 +1,6 @@
-//! Coroutine runtime for Forge async IO.
+//! Coroutine runtime for Adapsis async IO.
 //!
-//! Each Forge coroutine runs on its own tokio task with a dedicated evaluator.
+//! Each Adapsis coroutine runs on its own tokio task with a dedicated evaluator.
 //! `+await` operations send IO requests to the runtime and block (async) until
 //! the result comes back. `+spawn` creates a new coroutine.
 //!
@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::eval::Value;
 
-/// A handle that Forge code uses to represent sockets/connections.
+/// A handle that Adapsis code uses to represent sockets/connections.
 pub type Handle = i64;
 
 /// Unique ID for a spawned task.
@@ -84,7 +84,7 @@ pub struct TaskInfo {
 /// Shared task registry — tracks all spawned tasks.
 pub type TaskRegistry = Arc<std::sync::Mutex<HashMap<TaskId, TaskInfo>>>;
 
-/// IO operations that Forge code can request via +await.
+/// IO operations that Adapsis code can request via +await.
 #[derive(Debug)]
 pub enum IoRequest {
     TcpListen { port: u16, reply: oneshot::Sender<Result<Handle>> },
@@ -303,7 +303,7 @@ impl Runtime {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let exe = std::env::current_exe().unwrap_or_default();
                 let args: Vec<String> = std::env::args().collect();
-                eprintln!("ForgeOS restarting: {} {}", exe.display(), args[1..].join(" "));
+                eprintln!("AdapsisOS restarting: {} {}", exe.display(), args[1..].join(" "));
                 let err = exec::execvp(&exe, &args);
                 eprintln!("restart failed: {err}");
             }
@@ -446,7 +446,7 @@ impl Runtime {
     }
 }
 
-/// A coroutine handle — gives Forge code access to the IO runtime.
+/// A coroutine handle — gives Adapsis code access to the IO runtime.
 /// This is passed into the evaluator as a context.
 #[derive(Clone, Debug)]
 pub struct CoroutineHandle {

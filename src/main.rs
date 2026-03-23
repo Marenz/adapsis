@@ -20,7 +20,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "forge", about = "Forge — AI-first programming language")]
+#[command(name = "forge", about = "Adapsis — the adaptive, self-modifying AI programming environment")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -127,7 +127,7 @@ enum Command {
         args: String,
     },
 
-    /// Run a Forge program with async IO (coroutine runtime)
+    /// Run an Adapsis program with async IO (coroutine runtime)
     RunAsync {
         /// Path to .forge file
         path: String,
@@ -145,13 +145,13 @@ enum Command {
         model: String,
     },
 
-    /// Interactive REPL (auto-starts ForgeOS if not running)
+    /// Interactive REPL (auto-starts AdapsisOS if not running)
     Repl {
-        /// ForgeOS API URL (auto-detected if not specified)
+        /// AdapsisOS API URL (auto-detected if not specified)
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
 
-        /// Session file (used when auto-starting ForgeOS)
+        /// Session file (used when auto-starting AdapsisOS)
         #[arg(short, long, default_value = "forgeos-session.json")]
         session: String,
 
@@ -164,7 +164,7 @@ enum Command {
         model: Option<String>,
     },
 
-    /// Start ForgeOS — HTTP API + browser UI + session persistence
+    /// Start AdapsisOS — HTTP API + browser UI + session persistence
     Os {
         /// HTTP port
         #[arg(short, long, default_value_t = 3001)]
@@ -203,7 +203,7 @@ enum Command {
         #[arg(long, default_value = "training.jsonl")]
         training_log: String,
 
-        /// Directory where !opencode runs and builds. ForgeOS should be started from
+        /// Directory where !opencode runs and builds. AdapsisOS should be started from
         /// {dir}/target/release/forge so exec restart picks up rebuilt binaries.
         #[arg(long, env = "FORGE_OPENCODE_GIT_DIR")]
         opencode_git_dir: Option<String>,
@@ -213,49 +213,49 @@ enum Command {
         max_iterations: usize,
     },
 
-    /// Send a message to a running ForgeOS instance
+    /// Send a message to a running AdapsisOS instance
     Ask {
         /// The message to send
         message: Vec<String>,
 
-        /// ForgeOS API URL
+        /// AdapsisOS API URL
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
     },
 
-    /// Show status of a running ForgeOS instance
+    /// Show status of a running AdapsisOS instance
     Status {
-        /// ForgeOS API URL
+        /// AdapsisOS API URL
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
     },
 
-    /// Apply Forge code to a running ForgeOS instance
+    /// Apply Adapsis code to a running AdapsisOS instance
     Mutate {
-        /// Forge source code
+        /// Adapsis source code
         source: Vec<String>,
 
-        /// ForgeOS API URL
+        /// AdapsisOS API URL
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
     },
 
-    /// Eval a function on a running ForgeOS instance
+    /// Eval a function on a running AdapsisOS instance
     Eval {
         /// Function name and arguments
         expr: Vec<String>,
 
-        /// ForgeOS API URL
+        /// AdapsisOS API URL
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
     },
 
-    /// Query a running ForgeOS instance
+    /// Query a running AdapsisOS instance
     Query {
         /// Query string (?symbols, ?source fn, ?deps fn, etc.)
         query: Vec<String>,
 
-        /// ForgeOS API URL
+        /// AdapsisOS API URL
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
     },
@@ -310,7 +310,7 @@ async fn main() -> Result<()> {
 
                 let listener =
                     tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-                println!("Forge architect UI at http://127.0.0.1:{port}");
+                println!("Adapsis architect UI at http://127.0.0.1:{port}");
 
                 let server_task = axum::serve(listener, app);
                 let orch_task = async {
@@ -609,7 +609,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Repl { api, session, url, model } => {
-            // Check if ForgeOS is already running
+            // Check if AdapsisOS is already running
             let client = reqwest::Client::new();
             let running = client.get(format!("{api}/api/status"))
                 .send().await
@@ -619,7 +619,7 @@ async fn main() -> Result<()> {
             let api_url = if running {
                 api
             } else {
-                // Auto-start ForgeOS in the background
+                // Auto-start AdapsisOS in the background
                 let model = model.unwrap_or_else(|| {
                     eprintln!("No model specified. Set FORGE_MODEL env var or use --model.");
                     eprintln!("Example: FORGE_MODEL=anthropic/claude-haiku-4-5-20251001 forge repl");
@@ -631,7 +631,7 @@ async fn main() -> Result<()> {
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(3001);
 
-                eprintln!("No ForgeOS instance detected. Starting one...");
+                eprintln!("No AdapsisOS instance detected. Starting one...");
 
                 let exe = std::env::current_exe()?;
                 let mut cmd = std::process::Command::new(&exe);
@@ -645,7 +645,7 @@ async fn main() -> Result<()> {
                 let output = cmd.output()?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Failed to start ForgeOS: {stderr}");
+                    eprintln!("Failed to start AdapsisOS: {stderr}");
                     std::process::exit(1);
                 }
 
@@ -686,7 +686,7 @@ async fn main() -> Result<()> {
                 session::Session::new()
             };
 
-            // In ForgeOS mode, enforce modules and tests
+            // In AdapsisOS mode, enforce modules and tests
             sess.program.require_modules = true;
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
@@ -786,7 +786,7 @@ async fn main() -> Result<()> {
             let exe_path = std::env::current_exe().unwrap_or_default();
             let exe_str = exe_path.to_string_lossy();
             if !exe_str.contains(resolved_git_dir) {
-                eprintln!("WARNING: ForgeOS binary ({}) is not inside the opencode git dir ({}).", exe_str, resolved_git_dir);
+                eprintln!("WARNING: AdapsisOS binary ({}) is not inside the opencode git dir ({}).", exe_str, resolved_git_dir);
                 eprintln!("  !opencode self-restart will not pick up rebuilt binaries.");
                 eprintln!("  Run from: {}/target/release/forge", resolved_git_dir);
             }
@@ -839,7 +839,7 @@ async fn main() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
                 .await
                 .map_err(|e| anyhow::anyhow!("Cannot bind port {port}: {e}. Try -p {}", port + 1))?;
-            println!("ForgeOS running at http://127.0.0.1:{port}");
+            println!("AdapsisOS running at http://127.0.0.1:{port}");
             println!("  API:     http://127.0.0.1:{port}/api/");
             println!("  Browser: http://127.0.0.1:{port}/");
             println!();
@@ -955,7 +955,7 @@ async fn main() -> Result<()> {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         let client = reqwest::Client::new();
                         let _ = client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
-                            .json(&serde_json::json!({"message": "ForgeOS was restarted after an !opencode change. The runtime has been updated. Continue where you left off — check ?symbols and ?tasks, then keep working on your plan."}))
+                            .json(&serde_json::json!({"message": "AdapsisOS was restarted after an !opencode change. The runtime has been updated. Continue where you left off — check ?symbols and ?tasks, then keep working on your plan."}))
                             .send().await;
                     });
                 } else {
@@ -970,7 +970,7 @@ async fn main() -> Result<()> {
                              Keep going until the goal is complete or you get stuck and need user input.",
                             content
                         ),
-                        Err(_) => "You are running in autonomous mode. Identify the most impactful improvement you can make to ForgeOS and start working on it.".to_string(),
+                        Err(_) => "You are running in autonomous mode. Identify the most impactful improvement you can make to AdapsisOS and start working on it.".to_string(),
                     }
                 } else {
                     format!(

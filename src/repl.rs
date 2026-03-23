@@ -1,4 +1,4 @@
-//! Interactive REPL — thin CLI client to ForgeOS API.
+//! Interactive REPL — thin CLI client to AdapsisOS API.
 //!
 //! All logic runs server-side via /api/ask-stream.
 //! The REPL just reads input, sends it, and displays streamed results.
@@ -7,7 +7,7 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
 
-/// Run the REPL as a client to a running ForgeOS instance.
+/// Run the REPL as a client to a running AdapsisOS instance.
 pub async fn run_repl(api_url: &str) -> Result<()> {
     let client = reqwest::Client::new();
 
@@ -17,11 +17,11 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
             let status: serde_json::Value = resp.json().await?;
             let rev = status.get("revision").and_then(|r| r.as_u64()).unwrap_or(0);
             let fns = status.get("functions").and_then(|f| f.as_array()).map(|a| a.len()).unwrap_or(0);
-            println!("Connected to ForgeOS at {api_url}");
+            println!("Connected to AdapsisOS at {api_url}");
             println!("  revision: {rev}, functions: {fns}");
         }
         _ => {
-            println!("Cannot connect to ForgeOS at {api_url}");
+            println!("Cannot connect to AdapsisOS at {api_url}");
             println!("Start it with: forge os --session project.json -p PORT");
             return Ok(());
         }

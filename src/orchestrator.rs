@@ -46,7 +46,7 @@ impl<B: LlmBackend> Orchestrator<B> {
             ChatMessage::user(prompt::task_message(task)),
         ];
 
-        println!("=== Forge Feedback Loop ===");
+        println!("=== Adapsis Feedback Loop ===");
         println!("Task: {task}");
         println!("Max iterations: {}", self.max_iterations);
         println!();
@@ -330,7 +330,7 @@ impl<B: LlmBackend> Orchestrator<B> {
     pub async fn run_architect(&mut self, task: &str) -> Result<()> {
         let mut program = ast::Program::default();
 
-        println!("=== Forge Architect Mode ===");
+        println!("=== Adapsis Architect Mode ===");
         println!("Task: {task}");
         println!();
 
