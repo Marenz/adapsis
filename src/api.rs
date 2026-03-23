@@ -1751,6 +1751,17 @@ pub async fn ask_stream(
         let max_iterations = config_clone.max_iterations;
         let mut last_context = req.message.clone();
         for iteration in 0..max_iterations {
+            // Check for injected messages and append to conversation
+            {
+                let mut queue = config_clone.message_queue.lock().await;
+                for injected in queue.drain(..) {
+                    eprintln!("[inject] processing: {}...", injected.chars().take(80).collect::<String>());
+                    log_activity(&config_clone.log_file, "inject", &injected).await;
+                    messages.push(crate::llm::ChatMessage::user(injected));
+                    let _ = tx.send(serde_json::json!({"type": "result", "message": "Injected message received", "success": true})).await;
+                }
+            }
+
             let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
             log_activity(&config_clone.log_file, "iter", &format!("iteration {}/{}", iteration + 1, max_iterations)).await;
 
