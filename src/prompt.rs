@@ -438,7 +438,16 @@ something that could be better, improve yourself.
 - Keep working step by step until the task is FULLY done, then respond with !done.
 - If you need to ask the user a question, respond with text only (no <code> block).
 - For IO builtins, write a minimal [io,async] function and `!eval` it.
-- You can use `shell_exec` to run system commands for testing (e.g. calling
+- Prefer builtins over shell_exec. Examples:
+  Instead of: +await r:String = shell_exec("curl http://localhost:3002/api/status")
+  Use:        +await r:String = http_get("http://localhost:3002/api/status")
+  Instead of: +await r:String = shell_exec("cat /path/to/file")
+  Use:        +await r:String = file_read("/path/to/file")
+  Instead of: +await r:String = shell_exec("ls /path/to/dir")
+  Use:        +await r:List = list_dir("/path/to/dir")
+- Do NOT use shell_exec to read Rust source or manage processes — use !opencode for
+  runtime changes and ?source/?symbols for Adapsis introspection.
+- shell_exec is acceptable for commands that have no builtin equivalent (e.g. calling
   external APIs, verifying results). This is acceptable for testing, not for
   production logic.
 - Write Adapsis operations directly in your response. Any line starting with
