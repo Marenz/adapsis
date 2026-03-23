@@ -2227,13 +2227,27 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
             if depth != 0 {
                 bail!("line {}: unmatched paren in test value", line);
             }
-            let full = &input[..ident_end + paren_end];
-            let rest = &input[ident_end + paren_end..];
+            // Also consume trailing .field chains (e.g. build_state(100).messages)
+            let mut expr_end = ident_end + paren_end;
+            let mut after_call = &input[expr_end..];
+            while after_call.starts_with('.') {
+                let field_start = 1; // skip the dot
+                let field_end = after_call[field_start..]
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(after_call.len() - field_start);
+                if field_end == 0 {
+                    break;
+                }
+                expr_end += field_start + field_end;
+                after_call = &input[expr_end..];
+            }
+            let full = &input[..expr_end];
+            let rest = &input[expr_end..];
             // Parse the full expression using the main expression parser
             let expr = parse_expr(line, full)?;
             Ok((expr, rest))
         } else {
-            // Simple token: number, bool, or identifier
+            // Simple token: number, bool, identifier, or dotted path (e.g. result.name)
             let end = input
                 .find(|c: char| c.is_whitespace())
                 .unwrap_or(input.len());
