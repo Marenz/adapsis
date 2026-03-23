@@ -108,13 +108,14 @@ Pure functions have no effect annotation.
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
 For single-param functions, pass the value directly.
-For multi-param functions, use space-separated key=value pairs (named after the parameters).
+For multi-param functions, use key=value pairs OR positional values (matched by order).
 
 !test double
   +with 5 -> expect 10
 
 !test add
   +with a=3 b=4 -> expect 7
+  +with 3 4 -> expect 7
 
 !test validate
   +with name="alice" age=25 -> expect Ok
@@ -145,7 +146,7 @@ Commands:
   !roadmap add <item> / !roadmap done N / !roadmap show — long-term roadmap
   !mock op "pattern" -> "response" — register mock IO for testing
   !unmock — clear all mocks
-  !eval fn_name arg1=val — evaluate a function
+  !eval fn_name arg1=val — evaluate a function (also: !eval fn "val1" "val2" 42)
   !test Module.fn — run tests (see Testing section above)
   !opencode <description> — request Rust-level runtime change
   !done — signal task completion
@@ -553,7 +554,7 @@ pub fn architect_system_prompt() -> String {
          Write ONLY the function being requested with `+fn` and `!test` blocks.\n\
          The runtime keeps previous functions — you don't need to repeat them.\n\n\
          **Key patterns to remember:**\n\
-         - Multi-param tests use key=value: `+with a=3 b=4 -> expect 7`\n\
+          - Multi-param tests use key=value: `+with a=3 b=4 -> expect 7` (or positional: `+with 3 4 -> expect 7`)\n\
          - Error auto-propagation: `+call val:T = func(x)` with [fail] — errors bubble up, you get T\n\
          - If a function calls another [fail] function, declare [fail] on the caller too and bind as plain T\n\
          - Do NOT create wrapper types just for tests — use key=value syntax\n\n\
@@ -588,8 +589,8 @@ pub fn architect_implement_message(function_name: &str, program_state: &str) -> 
          Write the implementation for `{function_name}` and its tests.\n\n\
          Rules:\n\
          - Write ONLY `+fn {function_name} ...` and `!test {function_name}`\n\
-         - For multi-param tests use key=value: `+with a=3 b=4 -> expect 7`\n\
-         - For struct-param tests: `+with name=\"alice\" age=25 -> expect Ok`\n\
+          - For multi-param tests use key=value: `+with a=3 b=4 -> expect 7` (or positional: `+with 3 4 -> expect 7`)\n\
+          - For struct-param tests: `+with name=\"alice\" age=25 -> expect Ok`\n\
          - If calling a [fail] function, bind as plain T (errors auto-propagate):\n\
            `+call validated:Input = validate(input)` — NOT `+call result:Result<Input> = ...`\n\
          - The runtime will merge this into the existing program"

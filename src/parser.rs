@@ -2101,8 +2101,41 @@ fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
 
         Ok(Expr::StructLiteral(fields))
     } else {
-        // Regular expression format
-        parse_expr(line, input)
+        // Regular expression format — try as single expression first
+        match parse_expr(line, input) {
+            Ok(expr) => Ok(expr),
+            Err(_) => {
+                // Single expression failed — try parsing as multiple space-separated
+                // values (e.g. "hello" "world" 42). This handles positional args for
+                // !eval and +with when there's no key=value syntax.
+                let mut values = Vec::new();
+                let mut rest = input;
+                while !rest.is_empty() {
+                    rest = rest.trim_start();
+                    if rest.is_empty() {
+                        break;
+                    }
+                    let (val, remaining) = parse_test_value(line, rest)?;
+                    values.push(val);
+                    rest = remaining;
+                }
+                if values.len() <= 1 {
+                    // Re-run parse_expr for its original error message
+                    parse_expr(line, input)
+                } else {
+                    // Multiple positional values: wrap as StructLiteral with _0, _1, ...
+                    let fields = values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| FieldValue {
+                            name: format!("_{i}"),
+                            value: v,
+                        })
+                        .collect();
+                    Ok(Expr::StructLiteral(fields))
+                }
+            }
+        }
     }
 }
 
