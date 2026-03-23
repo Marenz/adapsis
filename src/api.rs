@@ -364,7 +364,7 @@ pub async fn query(
 }
 
 /// Parse `?inspect task N` queries, returning the task ID if matched.
-fn parse_inspect_task_query(query: &str) -> Option<i64> {
+pub fn parse_inspect_task_query(query: &str) -> Option<i64> {
     let parts: Vec<&str> = query.split_whitespace().collect();
     if parts.len() == 3 && parts[0] == "?inspect" && parts[1] == "task" {
         parts[2].parse::<i64>().ok()
@@ -778,7 +778,7 @@ async fn log_training_data(
 }
 
 /// Format the task registry for display.
-fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
+pub fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
     let Some(reg) = registry else { return "No task registry (async not available).".to_string() };
     let tasks = reg.lock().unwrap();
     if tasks.is_empty() {
@@ -794,7 +794,7 @@ fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
 }
 
 /// Format a detailed inspection of a single task, combining TaskInfo and TaskSnapshot.
-fn format_inspect_task(
+pub fn format_inspect_task(
     task_registry: &Option<crate::coroutine::TaskRegistry>,
     snapshot_registry: &Option<crate::coroutine::TaskSnapshotRegistry>,
     task_id: i64,
