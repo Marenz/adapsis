@@ -3422,4 +3422,57 @@ mod tests {
         assert!(result.is_ok(), "[fail] function should be allowed in test params: {:?}", result);
         assert!(result.unwrap().contains("expected \"localhost\""));
     }
+
+    // ── Escaped quotes in test value strings ──────────────────────────
+
+    #[test]
+    fn test_escaped_quotes_in_key_value_string() {
+        // Strings with escaped quotes in key=value test params should work
+        let source = r#"
++fn identity (s:String)->String
+  +return s
+
+!test identity
+  +with s="hello\"world" -> expect "hello\"world"
+"#;
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "escaped quotes in key=value string: {:?}", result);
+    }
+
+    #[test]
+    fn test_escaped_quotes_multiple_string_args() {
+        // Multiple string args with escaped quotes should parse correctly
+        let source = r#"
++fn concat_two (a:String, b:String)->String
+  +let result:String = concat(a, b)
+  +return result
+
+!test concat_two
+  +with a="he\"llo" b="wo\"rld" -> expect "he\"llowo\"rld"
+"#;
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "escaped quotes in multiple args: {:?}", result);
+    }
+
+    #[test]
+    fn test_newline_and_tab_escapes_in_test_value() {
+        let source = r#"
++fn identity (s:String)->String
+  +return s
+
+!test identity
+  +with s="line1\nline2" -> expect "line1\nline2"
+"#;
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "newline escape in test value: {:?}", result);
+    }
 }
