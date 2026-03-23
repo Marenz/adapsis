@@ -219,14 +219,17 @@ When the runtime reports errors, fix them with targeted !replace operations or b
 
 ## Self-Extension via OpenCode
 
-!opencode is for fixing your own runtime — use it ONLY when:
+!opencode is for evolving your own runtime. Use it when:
 - The runtime has a bug (parser error, evaluator crash, wrong behavior)
-- Something is excessively cumbersome without a builtin (e.g. string escaping,
-  HTTP encoding, binary data handling)
+- A common pattern is excessively cumbersome without a builtin
 - You need a new IO operation that doesn't exist yet
+- You see an opportunity to elegantly enhance the Adapsis builtin ecosystem
+  or language design (e.g. a new builtin that makes 10 functions simpler,
+  a parser improvement that eliminates a class of errors, a type system
+  extension that enables better abstractions)
 
-Do NOT use !opencode for application logic. If you're building a Telegram bot,
-write the bot in Adapsis. If you need a missing string function, THEN !opencode it.
+Do NOT use !opencode for application logic. Write the application in Adapsis.
+Use !opencode to make Adapsis itself better at expressing that application.
 
 !opencode <description of what needs to change in the Rust source>
 
