@@ -387,6 +387,9 @@ async fn main() -> Result<()> {
             let mut program = ast::Program::default();
             let mut test_ops = vec![];
             let mut io_mocks: Vec<session::IoMock> = vec![];
+            // Standalone registries for ?tasks / ?inspect queries (empty but real).
+            let task_registry: coroutine::TaskRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let snapshot_registry: coroutine::TaskSnapshotRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             for op in &operations {
                 match op {
                     parser::Operation::Test(_) => test_ops.push(op.clone()),
@@ -429,9 +432,9 @@ async fn main() -> Result<()> {
                     }
                     parser::Operation::Query(query) => {
                         let response = if query.trim() == "?tasks" {
-                            api::format_tasks(&None)
+                            api::format_tasks(&Some(task_registry.clone()))
                         } else if let Some(tid) = api::parse_inspect_task_query(query.trim()) {
-                            api::format_inspect_task(&None, &None, tid)
+                            api::format_inspect_task(&Some(task_registry.clone()), &Some(snapshot_registry.clone()), tid)
                         } else {
                             let table = typeck::build_symbol_table(&program);
                             typeck::handle_query(&program, &table, query)
