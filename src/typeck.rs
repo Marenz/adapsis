@@ -958,6 +958,8 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
         "?routes" => query_routes(program),
         // ?tasks is handled at the API level (needs runtime access, not just program)
         "?tasks" => "tasks query requires runtime context".to_string(),
+        // ?inspect is handled at the API level (needs runtime snapshot registry)
+        "?inspect" => "inspect query requires runtime context".to_string(),
         // ?library works from any query path — reads disk state directly
         "?library" => crate::library::query_library(program, None),
         _ => format!("unknown query: {}", parts[0]),

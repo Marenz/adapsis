@@ -536,6 +536,7 @@ async fn main() -> Result<()> {
             let program_for_spawn = program.clone();
             let io_sender_for_spawn = runtime.io_sender();
             let task_registry_for_spawn = runtime.task_registry.clone();
+            let snap_registry_for_spawn = runtime.snapshot_registry.clone();
             let rt_for_id = runtime.clone();
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
@@ -557,6 +558,7 @@ async fn main() -> Result<()> {
                             let prog = program_for_spawn.clone();
                             let sender = io_sender_for_spawn.clone();
                             let registry = task_registry_for_spawn.clone();
+                            let snap_reg = snap_registry_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 let func_decl = match prog.get_function(&function_name) {
                                     Some(f) => f,
@@ -570,7 +572,7 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone());
+                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new();
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 // Bind args to params
@@ -579,7 +581,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_pub(&prog, &func_decl.body, &mut env) {
+                                match eval::eval_function_body_named(&prog, &function_name, &func_decl.body, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -720,6 +722,7 @@ async fn main() -> Result<()> {
             let rt = runtime.clone();
             let rt_for_id = runtime.clone();
             let task_registry_for_spawn = runtime.task_registry.clone();
+            let snap_registry_for_spawn2 = runtime.snapshot_registry.clone();
             let io_sender_for_spawn = runtime.io_sender();
             let shared_session_for_spawn = shared_session.clone();
             tokio::spawn(async move {
@@ -739,6 +742,7 @@ async fn main() -> Result<()> {
 
                             let sender = io_sender_for_spawn.clone();
                             let registry = task_registry_for_spawn.clone();
+                            let snap_reg = snap_registry_for_spawn2.clone();
                             let session_ref = shared_session_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 let session = session_ref.blocking_lock();
@@ -757,7 +761,7 @@ async fn main() -> Result<()> {
                                 let program = session.program.clone();
                                 drop(session);
 
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone());
+                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new();
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 for (i, param) in func_decl.params.iter().enumerate() {
@@ -765,7 +769,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_pub(&program, &func_decl.body, &mut env) {
+                                match eval::eval_function_body_named(&program, &function_name, &func_decl.body, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -834,6 +838,7 @@ async fn main() -> Result<()> {
                 io_sender: Some(io_sender),
                 self_trigger: trigger_tx,
                 task_registry: Some(runtime.task_registry.clone()),
+                snapshot_registry: Some(runtime.snapshot_registry.clone()),
                 log_file: ai_log,
                 training_log: train_log,
                 jit_cache: eval::new_jit_cache(),

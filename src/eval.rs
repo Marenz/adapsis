@@ -211,6 +211,27 @@ impl Env {
         }
         None
     }
+
+    /// Flatten all visible bindings into display-string pairs for task inspection.
+    /// Skips internal names (prefixed with `__`) and deduplicates across scopes
+    /// (inner scopes shadow outer ones).
+    pub fn snapshot_bindings(&self) -> Vec<(String, String)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        // Walk from top (innermost) to bottom (outermost) so shadowed names are skipped.
+        for scope in self.scopes.iter().rev() {
+            for (name, val) in scope {
+                if name.starts_with("__") {
+                    continue;
+                }
+                if seen.insert(name.clone()) {
+                    result.push((name.clone(), format!("{val}")));
+                }
+            }
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
 }
 
 /// Try to evaluate using the JIT compiler, falling back to the interpreter.
@@ -808,12 +829,36 @@ pub fn eval_function_body_pub(
     eval_function_body(program, body, env)
 }
 
+/// Public entry point that also sets the top-level function name for snapshot tracking.
+/// Use this for spawned tasks so `?inspect task N` shows the correct function name.
+pub fn eval_function_body_named(
+    program: &ast::Program,
+    function_name: &str,
+    body: &[ast::Statement],
+    env: &mut Env,
+) -> Result<Value> {
+    FN_NAME_STACK.with(|s| s.borrow_mut().push(function_name.to_string()));
+    let result = eval_function_body(program, body, env);
+    FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+    result
+}
+
 fn eval_function_body(
     program: &ast::Program,
     body: &[ast::Statement],
     env: &mut Env,
 ) -> Result<Value> {
     for stmt in body {
+        // Update task snapshot if this is a tracked coroutine task.
+        if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+            if handle.task_id.is_some() {
+                let fn_name = FN_NAME_STACK.with(|s| {
+                    s.borrow().last().cloned().unwrap_or_else(|| "<top>".to_string())
+                });
+                let depth = FN_NAME_STACK.with(|s| s.borrow().len());
+                handle.update_snapshot(&fn_name, Some(stmt.id.clone()), depth, env);
+            }
+        }
         match &stmt.kind {
             ast::StatementKind::Let { name, value, .. } => {
                 let val = eval_ast_expr(program, value, env)?;
@@ -1055,6 +1100,8 @@ fn eval_function_body(
 
 std::thread_local! {
     static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Stack of function names for the current call chain (used by task snapshots).
+    static FN_NAME_STACK: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 const MAX_CALL_DEPTH: usize = 256;
@@ -1706,7 +1753,11 @@ fn eval_builtin_or_user(
                 if let Some(handle) = env.get_raw("__coroutine_handle") {
                     call_env.set("__coroutine_handle", handle.clone());
                 }
-                eval_function_body(program, &func.body, &mut call_env)
+                // Track function name for task snapshot frames
+                FN_NAME_STACK.with(|s| s.borrow_mut().push(callee.to_string()));
+                let result = eval_function_body(program, &func.body, &mut call_env);
+                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+                result
             } else {
                 // Check if it's a union variant constructor
                 if is_union_variant(program, callee) {
