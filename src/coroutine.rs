@@ -209,8 +209,7 @@ impl Runtime {
                     let mut s = stream.lock().await;
                     match s.read(&mut buf).await {
                         Ok(n) => {
-                            let data = String::from_utf8(buf[..n].to_vec())
-                                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                            let data = String::from_utf8_lossy(&buf[..n]).into_owned();
                             let _ = reply.send(Ok(data));
                         }
                         Err(e) => { let _ = reply.send(Err(e.into())); }
@@ -338,17 +337,15 @@ impl Runtime {
                 tokio::spawn(async move {
                     let client = reqwest::Client::new();
                     match client.get(&url).send().await {
-                        Ok(resp) => match resp.bytes().await {
-                            Ok(bytes) => {
-                                // Always decode as UTF-8 (resp.text() may use
-                                // the charset from Content-Type which can be
-                                // latin-1, causing mojibake for UTF-8 content).
-                                let body = String::from_utf8(bytes.to_vec())
-                                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-                                let _ = reply.send(Ok(body));
+                        Ok(resp) => {
+                            // text() decodes using the charset from Content-Type,
+                            // defaulting to UTF-8 when none is specified (correct
+                            // for application/json per RFC 8259).
+                            match resp.text().await {
+                                Ok(body) => { let _ = reply.send(Ok(body)); }
+                                Err(e) => { let _ = reply.send(Err(e.into())); }
                             }
-                            Err(e) => { let _ = reply.send(Err(e.into())); }
-                        },
+                        }
                         Err(e) => { let _ = reply.send(Err(e.into())); }
                     }
                 });
@@ -371,14 +368,12 @@ impl Runtime {
                         .body(body)
                         .send().await
                     {
-                        Ok(resp) => match resp.bytes().await {
-                            Ok(bytes) => {
-                                let body = String::from_utf8(bytes.to_vec())
-                                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-                                let _ = reply.send(Ok(body));
+                        Ok(resp) => {
+                            match resp.text().await {
+                                Ok(body) => { let _ = reply.send(Ok(body)); }
+                                Err(e) => { let _ = reply.send(Err(e.into())); }
                             }
-                            Err(e) => { let _ = reply.send(Err(e.into())); }
-                        },
+                        }
                         Err(e) => { let _ = reply.send(Err(e.into())); }
                     }
                 });
