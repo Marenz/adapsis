@@ -89,6 +89,8 @@ Pure functions have no effect annotation.
 
 ### Expressions
 - Literals: 42, 3.14, true, false, "hello"
+- String escapes: \\\" (double quote), \\\\ (backslash), \\n, \\r, \\t
+  JSON example: +let body:String = "{\\\"key\\\":\\\"value\\\"}"
 - Field access: user.name, input.age
 - Function calls: validate(input), db.insert(user)
 - Comparison: x>=0, name!="", age<=150
@@ -119,6 +121,10 @@ For multi-param functions, use space-separated key=value pairs (named after the 
 !test validate
   +with name="alice" age=25 -> expect Ok
   +with name="" age=25 -> expect Err(err_empty_name)
+
+String test values support escape sequences (same as string literals):
+!test echo
+  +with s="{\\\"key\\\":\\\"value\\\"}" -> expect "{\\\"key\\\":\\\"value\\\"}"
 
 ### Key Builtins
 
