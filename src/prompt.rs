@@ -94,6 +94,9 @@ Pure functions have no effect annotation.
 ### Edit Operations
 !replace function_name.s1            — replace statement 1 of a function
   +check age input.age>=0 AND input.age<=150 ~err_age_range
+!remove Module.function              — remove a function from a module
+!remove Module                       — remove an entire module
+!remove TypeName                     — remove a type
 
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.

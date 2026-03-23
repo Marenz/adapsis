@@ -546,6 +546,11 @@ pub static ACTIONS: &[ActionCommand] = &[
         description: "replace a statement in a function",
     },
     ActionCommand {
+        name: "!remove",
+        args: "<Module.function | Module | TypeName>",
+        description: "remove a function, type, or entire module",
+    },
+    ActionCommand {
         name: "!move",
         args: "<symbols...> <Module>",
         description: "move functions/types into a module (auto-updates call sites)",
