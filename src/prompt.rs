@@ -73,6 +73,13 @@ Pure functions have no effect annotation.
   +return validated
 +end
 
+### HTTP Routes
++route POST "/webhook/telegram" -> handle_fn
++route GET "/health" -> health_check
+  Register an HTTP route on the server. Incoming requests to the path are dispatched
+  to the named Adapsis function, which receives the request body as String and returns String.
+  Use ?routes to list registered routes.
+
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
   Move functions, types, or modules into a target module (creates if needed).
