@@ -10,6 +10,8 @@
     +return val
   +case Nope
     +return default
+  +end
++end
 
 // Bug #3: None-like variants recognized as union variants
 +fn is_some (m:Maybe)->Bool
@@ -18,6 +20,8 @@
     +return true
   +case Nope
     +return false
+  +end
++end
 
 // Basic match with single param
 !test is_some
@@ -36,6 +40,8 @@
     +return "has value"
   +case Nope
     +return "empty"
+  +end
++end
 
 !test describe
   +with Some(1) -> expect "has value"
@@ -52,6 +58,8 @@
   +case Cons(head, tail)
     +let rest:Int = list_length(tail)
     +return 1 + rest
+  +end
++end
 
 !test list_length
   +with Nil -> expect 0
@@ -68,8 +76,11 @@
       +return Some(ax + bx)
     +case Nope
       +return Some(ax)
+    +end
   +case Nope
     +return b
+  +end
++end
 
 !test maybe_add
   +with a=Some(3) b=Some(4) -> expect Some(7)
@@ -80,6 +91,7 @@
 // Enhancement #6: function calls as test inputs
 +fn make_list ()->IntList
   +return Cons(1, Cons(2, Cons(3, Nil)))
++end
 
 !test list_length
   +with make_list() -> expect 3
@@ -93,6 +105,8 @@
     +return val
   +case None
     +return default
+  +end
++end
 
 +fn option_map_double (opt:Option)->Option
   +match opt
@@ -100,6 +114,8 @@
     +return Some(val * 2)
   +case None
     +return None
+  +end
++end
 
 !test option_unwrap
   +with opt=Some(42) default=0 -> expect 42

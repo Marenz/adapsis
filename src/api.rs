@@ -50,6 +50,8 @@ pub struct AppConfig {
     pub opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Maximum iterations per AI request
     pub max_iterations: usize,
+    /// JSONL training data log — one entry per iteration with input/output/outcome
+    pub training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 }
 
 #[derive(Deserialize)]
@@ -70,12 +72,12 @@ pub struct MutationResult {
 }
 
 pub async fn mutate(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
-    let mut session = session.lock().await;
-    match session.apply(&req.source) {
+    let mut session = config.session.lock().await;
+    match session.apply_async(&req.source, config.io_sender.as_ref()).await {
         Ok(results) => Json(MutateResponse {
             revision: session.revision,
             results: results
@@ -695,6 +697,40 @@ async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio:
     eprintln!("[{event}] {preview}");
 }
 
+/// Write a training data entry (JSONL) for one iteration.
+async fn log_training_data(
+    training_log: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    model: &str,
+    context: &str,
+    thinking: &str,
+    code: &str,
+    feedback: &[String],
+    has_errors: bool,
+    tests_passed: usize,
+    tests_failed: usize,
+) {
+    let Some(f) = training_log else { return };
+    use tokio::io::AsyncWriteExt;
+    let entry = serde_json::json!({
+        "model": model,
+        "context": context,
+        "thinking": thinking,
+        "code": code,
+        "outcome": if has_errors { "error" } else { "success" },
+        "tests_passed": tests_passed,
+        "tests_failed": tests_failed,
+        "feedback": feedback,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_secs(),
+    });
+    let mut line = serde_json::to_string(&entry).unwrap_or_default();
+    line.push('\n');
+    let mut f = f.lock().await;
+    let _ = f.write_all(line.as_bytes()).await;
+    let _ = f.flush().await;
+}
+
 /// Format the task registry for display.
 fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
     let Some(reg) = registry else { return "No task registry (async not available).".to_string() };
@@ -943,8 +979,35 @@ pub async fn ask(
                     match op {
                         crate::parser::Operation::Test(test) => {
                             let mut all_passed = true;
+                            let needs_async = session.program.get_function(&test.function_name)
+                                .is_some_and(|f| f.effects.iter().any(|e|
+                                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
                             for case in &test.cases {
-                                match crate::eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
+                                let case_result = if needs_async {
+                                    if let Some(sender) = &config.io_sender {
+                                        let program = session.program.clone();
+                                        let fn_name = test.function_name.clone();
+                                        let case = case.clone();
+                                        let mocks = session.io_mocks.clone();
+                                        let sender = sender.clone();
+                                        drop(session);
+                                        let result = crate::eval::eval_test_case_async(
+                                            &program, &fn_name, &case, &mocks, sender,
+                                        ).await;
+                                        session = config.session.lock().await;
+                                        result
+                                    } else {
+                                        crate::eval::eval_test_case_with_mocks(
+                                            &session.program, &test.function_name, case, &session.io_mocks,
+                                        )
+                                    }
+                                } else {
+                                    crate::eval::eval_test_case_with_mocks(
+                                        &session.program, &test.function_name, case, &session.io_mocks,
+                                    )
+                                };
+                                match case_result {
                                     Ok(msg) => { eprintln!("[web:pass] {msg}"); iter_test_results.push(TestCaseResult { message: msg, pass: true }); }
                                     Err(e) => { all_passed = false; eprintln!("[web:fail] {e}"); iter_has_errors = true; iter_test_results.push(TestCaseResult { message: format!("{e}"), pass: false }); }
                                 }
@@ -1531,6 +1594,7 @@ pub async fn ask_stream(
         };
 
         let max_iterations = config_clone.max_iterations;
+        let mut last_context = req.message.clone();
         for iteration in 0..max_iterations {
             let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
             log_activity(&config_clone.log_file, "iter", &format!("iteration {}/{}", iteration + 1, max_iterations)).await;
@@ -1623,7 +1687,9 @@ pub async fn ask_stream(
             // Apply code
             let mut session = config_clone.session.lock().await;
             let mut has_errors = false;
-            let mut feedback_details: Vec<String> = Vec::new(); // Collect ALL results for LLM feedback
+            let mut feedback_details: Vec<String> = Vec::new();
+            let mut train_tests_passed: usize = 0;
+            let mut train_tests_failed: usize = 0;
 
             match crate::parser::parse(&code) {
                 Ok(ops) => {
@@ -1699,15 +1765,44 @@ pub async fn ask_stream(
                         match op {
                             crate::parser::Operation::Test(test) => {
                                 let mut all_passed = true;
+                                let needs_async = session.program.get_function(&test.function_name)
+                                    .is_some_and(|f| f.effects.iter().any(|e|
+                                        matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
                                 for case in &test.cases {
-                                    match crate::eval::eval_test_case_with_mocks(&session.program, &test.function_name, case, &session.io_mocks) {
+                                    let case_result = if needs_async {
+                                        if let Some(sender) = &config_clone.io_sender {
+                                            let program = session.program.clone();
+                                            let fn_name = test.function_name.clone();
+                                            let case = case.clone();
+                                            let mocks = session.io_mocks.clone();
+                                            let sender = sender.clone();
+                                            drop(session);
+                                            let result = crate::eval::eval_test_case_async(
+                                                &program, &fn_name, &case, &mocks, sender,
+                                            ).await;
+                                            session = config_clone.session.lock().await;
+                                            result
+                                        } else {
+                                            crate::eval::eval_test_case_with_mocks(
+                                                &session.program, &test.function_name, case, &session.io_mocks,
+                                            )
+                                        }
+                                    } else {
+                                        crate::eval::eval_test_case_with_mocks(
+                                            &session.program, &test.function_name, case, &session.io_mocks,
+                                        )
+                                    };
+                                    match case_result {
                                         Ok(msg) => {
+                                            train_tests_passed += 1;
                                             feedback_details.push(format!("PASS: {msg}"));
                                             let _ = tx.send(serde_json::json!({"type": "test", "pass": true, "message": msg})).await;
                                         }
                                         Err(e) => {
                                             all_passed = false;
                                             has_errors = true;
+                                            train_tests_failed += 1;
                                             feedback_details.push(format!("FAIL: {e}"));
                                             let _ = tx.send(serde_json::json!({"type": "test", "pass": false, "message": format!("{e}")})).await;
                                         }
@@ -2107,20 +2202,23 @@ pub async fn ask_stream(
             // Build plan status summary for feedback
             let plan_summary = {
                 let session = config_clone.session.lock().await;
-                let pending: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending | crate::session::PlanStatus::InProgress)).collect();
+                let in_progress: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::InProgress)).collect();
+                let pending: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending)).collect();
                 let failed: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Failed)).collect();
                 let total = session.plan.len();
                 let done = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Done)).count();
                 if total == 0 {
                     "No plan set. Create one with !plan set.".to_string()
-                } else if pending.is_empty() && failed.is_empty() {
+                } else if pending.is_empty() && in_progress.is_empty() && failed.is_empty() {
                     format!("All {total} plan steps completed. Verify everything works, then DONE.")
                 } else {
                     let mut msg = format!("Plan: {done}/{total} done.");
                     if !failed.is_empty() {
                         msg.push_str(&format!(" {} failed.", failed.len()));
                     }
-                    // Show next 2 pending steps only
+                    for s in &in_progress {
+                        msg.push_str(&format!(" Current: {}", s.description));
+                    }
                     for s in pending.iter().take(2) {
                         msg.push_str(&format!(" Next: {}", s.description));
                     }
@@ -2139,6 +2237,8 @@ pub async fn ask_stream(
                     plan_summary
                 );
                 log_activity(&config_clone.log_file, "feedback", &feedback).await;
+                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, true, train_tests_passed, train_tests_failed).await;
+                last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
                 let results_section = if feedback_details.is_empty() {
@@ -2148,6 +2248,8 @@ pub async fn ask_stream(
                 };
                 let feedback = format!("{}{}", results_section, plan_summary);
                 log_activity(&config_clone.log_file, "feedback", &feedback).await;
+                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, false, train_tests_passed, train_tests_failed).await;
+                last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
                 // If the AI said DONE alongside this code and there were no errors, check untested
                 if is_done {
@@ -2197,7 +2299,6 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
     let session_routes = axum::Router::new()
-        .route("/api/mutate", post(mutate))
         .route("/api/status", get(status))
         .route("/api/program", get(program))
         .route("/api/history", post(history))
@@ -2206,6 +2307,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .with_state(config.session.clone());
 
     let config_routes = axum::Router::new()
+        .route("/api/mutate", post(mutate))
         .route("/api/eval", post(eval_fn))
         .route("/api/test", post(test_fn))
         .route("/api/query", post(query))

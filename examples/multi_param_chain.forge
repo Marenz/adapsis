@@ -5,10 +5,12 @@
   +check name req.name.len>0 ~err_empty_name
   +check email req.email.len>0 ~err_empty_email
   +return req
++end
 
 +fn create_user (req:CreateRequest, id:Int)->Result<User> [fail]
   +call validated:CreateRequest = validate_request(req)
   +return {id: id, name: validated.name, email: validated.email}
++end
 
 !test validate_request
   +with name="alice" email="a@b.com" -> expect Ok

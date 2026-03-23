@@ -2259,6 +2259,10 @@ mod tests {
 +fn add (a:Int, b:Int)->Int
   +let sum:Int = a + b
   +return sum
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 
 !test add
   +with a=2 b=3 -> expect 5
@@ -2279,6 +2283,10 @@ mod tests {
 +fn add (a:Int, b:Int)->Int
   +let sum:Int = a + b
   +return sum
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 
 !test add
   +with a=2 b=3 -> expect 99
@@ -2298,6 +2306,10 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2325,6 +2337,10 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2350,6 +2366,10 @@ mod tests {
 +fn fetch_data (url:String)->String [io]
   +await resp:String = http_get(url)
   +return resp
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2376,6 +2396,10 @@ mod tests {
 +fn delayed_value (ms:Int)->String [async]
   +await _:String = sleep(ms)
   +return \"done\"
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2404,10 +2428,18 @@ mod tests {
 +fn inner_fetch (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 
 +fn outer_fetch (url:String)->String [async]
   +await data:String = inner_fetch(url)
   +return data
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2437,6 +2469,10 @@ mod tests {
   +await body:String = http_get(url)
   +let name:String = json_get(body, \"name\")
   +return name
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2466,6 +2502,10 @@ mod tests {
   +await body:String = http_get(url)
   +let count:Int = json_array_len(body)
   +return count
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2509,6 +2549,10 @@ mod tests {
   +await body:String = http_get(url)
   +let status:String = json_get(body, \"status\")
   +return status
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(fn_source);
 
@@ -2575,6 +2619,10 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 
 !mock http_get \"example.com\" -> \"hello world\"
 
@@ -2592,6 +2640,10 @@ mod tests {
 +fn delayed (ms:Int)->String [async]
   +await _:String = sleep(ms)
   +return \"done\"
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 
 !mock sleep \"500\" -> \"\"
 
@@ -2610,10 +2662,18 @@ mod tests {
 +fn inner_fetch (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 
 +fn wrapper (url:String)->String [async]
   +await data:String = inner_fetch(url)
   +return data
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 
 !mock http_get \"api.test\" -> \"nested result\"
 
@@ -2635,6 +2695,10 @@ mod tests {
   +let arr:String = json_get(body, \"result\")
   +let count:Int = json_array_len(arr)
   +return count
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let mock_source = "!mock http_get \"x\" -> \"{\\\"ok\\\":true,\\\"result\\\":[]}\"";
         let test_source = "\
@@ -2655,6 +2719,10 @@ mod tests {
 +fn fetch_data (url:String)->String [async]
   +await resp:String = http_get(url)
   +return resp
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 
@@ -2677,11 +2745,80 @@ mod tests {
     }
 
     #[tokio::test]
+<<<<<<< HEAD
+=======
+    async fn test_session_apply_async_runs_async_tests_with_mocks() {
+        // Simulate the full session flow: define an async function,
+        // register mocks, then run !test — all through apply_async.
+        let mut session = crate::session::Session::new();
+
+        // Define async function
+        let define_source = "\
++fn fetch_data (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
++end
+";
+        let results = session.apply_async(define_source, None).await;
+        assert!(results.is_ok(), "define should succeed: {:?}", results);
+
+        // Register mock
+        let mock_source = "!mock http_get \"example.com\" -> \"mocked_response\"";
+        let results = session.apply_async(mock_source, None).await;
+        assert!(results.is_ok(), "mock should succeed: {:?}", results);
+
+        // Run test — async function with mock, no io_sender needed (mock-only)
+        let test_source = "\
+!test fetch_data
+  +with url=\"https://example.com/api\" -> expect \"mocked_response\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "async test with mock should pass: {:?}", results[0]);
+        assert!(results[0].0.contains("PASS"), "result should be PASS: {:?}", results[0]);
+    }
+
+    #[tokio::test]
+    async fn test_session_apply_async_nested_async_with_mocks() {
+        // Nested async: wrapper -> inner_fetch -> http_get
+        let mut session = crate::session::Session::new();
+
+        let source = "\
++fn inner_fetch (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return resp
++end
+
++fn wrapper (url:String)->String [async]
+  +call data:String = inner_fetch(url)
+  +return data
++end
+";
+        let _ = session.apply_async(source, None).await;
+
+        let mock_source = "!mock http_get \"api.test\" -> \"nested_result\"";
+        let _ = session.apply_async(mock_source, None).await;
+
+        let test_source = "\
+!test wrapper
+  +with url=\"https://api.test/v1\" -> expect \"nested_result\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "nested async test should pass: {:?}", results[0]);
+    }
+
+    #[tokio::test]
+>>>>>>> syntax-fixes
     async fn test_async_eval_delegates_sync_to_sync_path() {
         let source = "\
 +fn add (a:Int, b:Int)->Int
   +let sum:Int = a + b
   +return sum
+<<<<<<< HEAD
+=======
++end
+>>>>>>> syntax-fixes
 ";
         let program = build_program(source);
 

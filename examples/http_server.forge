@@ -8,6 +8,7 @@
   +set response = concat(response, "\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n")
   +set response = concat(response, body)
   +return response
++end
 
 +fn handle_connection (conn:Int, counter:Int)->Int [io,async]
   +await request:String = tcp_read(conn)
@@ -16,6 +17,7 @@
   +await ok:Int = tcp_write(conn, response)
   +await ok2:Int = tcp_close(conn)
   +return 0
++end
 
 +fn main ()->Int [io,async]
   +let counter:Int = 0
@@ -24,4 +26,6 @@
     +await conn:Int = tcp_accept(server)
     +set counter = counter + 1
     +spawn handle_connection(conn, counter)
+  +end
   +return 0
++end

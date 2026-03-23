@@ -9,6 +9,8 @@
     +return "buzz"
   +else
     +return "other"
+  +end
++end
 
 !test fizzbuzz
   +with 15 -> expect "fizzbuzz"

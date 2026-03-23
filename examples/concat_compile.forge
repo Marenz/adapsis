@@ -1,7 +1,9 @@
 +fn greet_world ()->String
   +let hello:String = concat("Hello, ", "World")
   +return hello
++end
 
 +fn make_greeting (prefix:String, name:String)->String
   +let result:String = concat(prefix, name)
   +return result
++end

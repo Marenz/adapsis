@@ -9,6 +9,8 @@
     +return true
   +else
     +return false
+  +end
++end
 
 +fn is_letter (ch:String)->Bool
   +if ch == "_"
@@ -16,12 +18,16 @@
   +else
     +let code:Int = index_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", ch)
     +return code >= 0
+  +end
++end
 
 +fn is_whitespace (ch:String)->Bool
   +if ch == " " OR ch == "\t" OR ch == "\n"
     +return true
   +else
     +return false
+  +end
++end
 
 +fn is_operator (ch:String)->Bool
   +if ch == "+" OR ch == "-" OR ch == "*" OR ch == "/" OR ch == "%" OR ch == "="
@@ -32,6 +38,8 @@
     +return true
   +else
     +return false
+  +end
++end
 
 +fn read_number (input:String, start:Int)->String
   +let i:Int = start
@@ -41,7 +49,10 @@
       +set i = i + 1
     +else
       +return substring(input, start, i)
+    +end
+  +end
   +return substring(input, start, i)
++end
 
 +fn read_identifier (input:String, start:Int)->String
   +let i:Int = start
@@ -51,7 +62,10 @@
       +set i = i + 1
     +else
       +return substring(input, start, i)
+    +end
+  +end
   +return substring(input, start, i)
++end
 
 +fn read_string_literal (input:String, start:Int)->String
   +let i:Int = start + 1
@@ -61,7 +75,10 @@
       +return substring(input, start, i + 1)
     +else
       +set i = i + 1
+    +end
+  +end
   +return substring(input, start, i)
++end
 
 +fn tokenize (input:String)->List<String>
   +let tokens:List<String> = list()
@@ -88,11 +105,15 @@
     +else
       +set tokens = push(tokens, ch)
       +set i = i + 1
+    +end
+  +end
   +return tokens
++end
 
 +fn token_count (input:String)->Int
   +let tokens:List<String> = tokenize(input)
   +return tokens.len
++end
 
 !test is_digit
   +with "5" -> expect true

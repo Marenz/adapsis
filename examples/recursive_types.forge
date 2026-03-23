@@ -18,9 +18,12 @@
     +let l:Int = eval_expr(left)
     +let r:Int = eval_expr(right)
     +return l * r
+  +end
++end
 
 +fn make_example ()->Int
   +let expr:Expr = Add(Literal(1), Mul(Literal(2), Literal(3)))
   +return eval_expr(expr)
++end
 
 !eval make_example

@@ -64,7 +64,6 @@ pub enum HistoryEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// Current program state
-    #[serde(skip)]
     pub program: ast::Program,
     /// Append-only mutation log
     pub mutations: Vec<MutationEntry>,
@@ -297,6 +296,23 @@ pub struct ChatMessage {
 }
 
 impl Session {
+    /// Invalidate test status for functions affected by this operation.
+    fn invalidate_tests_for(&mut self, op: &parser::Operation) {
+        match op {
+            parser::Operation::Module(m) => {
+                for body_op in &m.body {
+                    if let parser::Operation::Function(f) = body_op {
+                        self.tested_functions.remove(&format!("{}.{}", m.name, f.name));
+                    }
+                }
+            }
+            parser::Operation::Replace(r) => {
+                self.tested_functions.remove(&r.target);
+            }
+            _ => {}
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             program: ast::Program::default(),
@@ -450,6 +466,190 @@ impl Session {
                 }
                 _ => {
                     any_definition = true;
+                    self.invalidate_tests_for(op);
+                    match validator::apply_and_validate(&mut self.program, op) {
+                        Ok(msg) => results.push((msg, true)),
+                        Err(e) => results.push((format!("{e}"), false)),
+                    }
+                }
+            }
+        }
+
+        let success = results.iter().all(|(_, ok)| *ok);
+        let summary = if results.is_empty() {
+            "no mutations".to_string()
+        } else {
+            results
+                .iter()
+                .map(|(msg, ok)| {
+                    if *ok {
+                        format!("OK: {msg}")
+                    } else {
+                        format!("ERR: {msg}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        if any_definition {
+            self.revision += 1;
+            self.mutations.push(MutationEntry {
+                revision: self.revision,
+                timestamp: now(),
+                source: source.to_string(),
+                summary,
+                success,
+            });
+            self.sources.push(source.to_string());
+        }
+
+        Ok(results)
+    }
+
+    /// Apply a block of Forge source code, running async tests through the
+    /// coroutine runtime when an `io_sender` is available. Falls back to
+    /// mock-only execution otherwise. Must be called from within a tokio runtime.
+    pub async fn apply_async(
+        &mut self,
+        source: &str,
+        io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
+    ) -> Result<Vec<(String, bool)>> {
+        let operations = parser::parse(source)?;
+        let mut results = Vec::new();
+        let mut any_definition = false;
+
+        for op in &operations {
+            match op {
+                parser::Operation::Test(test) => {
+                    let mut all_passed = true;
+                    let needs_async = self
+                        .program
+                        .get_function(&test.function_name)
+                        .is_some_and(|f| {
+                            f.effects.iter().any(|e| {
+                                matches!(e, ast::Effect::Async | ast::Effect::Io)
+                            })
+                        });
+
+                    for case in &test.cases {
+                        let case_result = if needs_async {
+                            if let Some(sender) = io_sender {
+                                crate::eval::eval_test_case_async(
+                                    &self.program,
+                                    &test.function_name,
+                                    case,
+                                    &self.io_mocks,
+                                    sender.clone(),
+                                )
+                                .await
+                            } else {
+                                crate::eval::eval_test_case_with_mocks(
+                                    &self.program,
+                                    &test.function_name,
+                                    case,
+                                    &self.io_mocks,
+                                )
+                            }
+                        } else {
+                            crate::eval::eval_test_case_with_mocks(
+                                &self.program,
+                                &test.function_name,
+                                case,
+                                &self.io_mocks,
+                            )
+                        };
+
+                        match case_result {
+                            Ok(msg) => results.push((format!("PASS: {msg}"), true)),
+                            Err(e) => {
+                                all_passed = false;
+                                results.push((format!("FAIL: {e}"), false));
+                            }
+                        }
+                    }
+                    if all_passed && !test.cases.is_empty() {
+                        self.tested_functions.insert(test.function_name.clone());
+                    }
+                }
+                parser::Operation::Trace(_)
+                | parser::Operation::Eval(_)
+                | parser::Operation::Query(_) => {}
+                parser::Operation::Plan(action) => match action {
+                    parser::PlanAction::Set(steps) => {
+                        self.plan = steps
+                            .iter()
+                            .map(|s| PlanStep {
+                                description: s.clone(),
+                                status: PlanStatus::Pending,
+                            })
+                            .collect();
+                        results.push((format!("Plan: {} steps", steps.len()), true));
+                    }
+                    parser::PlanAction::Progress(n) => {
+                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                            step.status = PlanStatus::Done;
+                            results.push((format!("Step {n} done"), true));
+                        }
+                    }
+                    parser::PlanAction::Fail(n) => {
+                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                            step.status = PlanStatus::Failed;
+                            results.push((format!("Step {n} failed"), true));
+                        }
+                    }
+                    parser::PlanAction::Show => {
+                        let plan_str = self
+                            .plan
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| {
+                                let icon = match s.status {
+                                    PlanStatus::Pending => "[ ]",
+                                    PlanStatus::InProgress => "[~]",
+                                    PlanStatus::Done => "[x]",
+                                    PlanStatus::Failed => "[!]",
+                                };
+                                format!("{} {}: {}", icon, i + 1, s.description)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        results.push((
+                            if plan_str.is_empty() {
+                                "No plan set".to_string()
+                            } else {
+                                format!("Plan:\n{plan_str}")
+                            },
+                            true,
+                        ));
+                    }
+                },
+                parser::Operation::Mock {
+                    operation,
+                    pattern,
+                    response,
+                } => {
+                    self.io_mocks.push(IoMock {
+                        operation: operation.clone(),
+                        pattern: pattern.clone(),
+                        response: response.clone(),
+                    });
+                    results.push((
+                        format!(
+                            "mock: {operation} \"{pattern}\" -> \"{}\"",
+                            response.chars().take(50).collect::<String>()
+                        ),
+                        true,
+                    ));
+                }
+                parser::Operation::Unmock => {
+                    let count = self.io_mocks.len();
+                    self.io_mocks.clear();
+                    results.push((format!("cleared {count} mocks"), true));
+                }
+                _ => {
+                    any_definition = true;
+                    self.invalidate_tests_for(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => results.push((msg, true)),
                         Err(e) => results.push((format!("{e}"), false)),
@@ -643,22 +843,8 @@ impl Session {
         let json = std::fs::read_to_string(path)?;
         let mut session: Session = serde_json::from_str(&json)?;
 
-        // Replay all mutations to reconstruct program state
-        session.program = ast::Program::default();
-        for source in &session.sources {
-            let operations = parser::parse(source)?;
-            for op in &operations {
-                match op {
-                    parser::Operation::Test(_)
-                    | parser::Operation::Trace(_)
-                    | parser::Operation::Eval(_)
-                    | parser::Operation::Query(_) => {}
-                    _ => {
-                        let _ = validator::apply_and_validate(&mut session.program, op);
-                    }
-                }
-            }
-        }
+        // Rebuild function index (not serialized)
+        session.program.rebuild_function_index();
 
         Ok(session)
     }
