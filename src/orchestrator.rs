@@ -14,6 +14,9 @@ pub struct Orchestrator<B: LlmBackend = crate::llm::OpenAiBackend> {
     llm: LlmClient<B>,
     max_iterations: usize,
     event_bus: Option<EventBus>,
+    /// Optional runtime registries for ?tasks / ?inspect queries.
+    task_registry: Option<crate::coroutine::TaskRegistry>,
+    snapshot_registry: Option<crate::coroutine::TaskSnapshotRegistry>,
 }
 
 impl<B: LlmBackend> Orchestrator<B> {
@@ -22,6 +25,8 @@ impl<B: LlmBackend> Orchestrator<B> {
             llm,
             max_iterations,
             event_bus: None,
+            task_registry: None,
+            snapshot_registry: None,
         }
     }
 
@@ -30,7 +35,20 @@ impl<B: LlmBackend> Orchestrator<B> {
             llm,
             max_iterations,
             event_bus: Some(bus),
+            task_registry: None,
+            snapshot_registry: None,
         }
+    }
+
+    /// Attach runtime registries so ?tasks / ?inspect queries work.
+    pub fn with_registries(
+        mut self,
+        task_registry: crate::coroutine::TaskRegistry,
+        snapshot_registry: crate::coroutine::TaskSnapshotRegistry,
+    ) -> Self {
+        self.task_registry = Some(task_registry);
+        self.snapshot_registry = Some(snapshot_registry);
+        self
     }
 
     fn emit(&self, event: ForgeEvent) {
@@ -210,9 +228,9 @@ impl<B: LlmBackend> Orchestrator<B> {
                     }
                     parser::Operation::Query(query) => {
                         let response = if query.trim() == "?tasks" {
-                            crate::api::format_tasks(&None)
+                            crate::api::format_tasks(&self.task_registry)
                         } else if let Some(tid) = crate::api::parse_inspect_task_query(query.trim()) {
-                            crate::api::format_inspect_task(&None, &None, tid)
+                            crate::api::format_inspect_task(&self.task_registry, &self.snapshot_registry, tid)
                         } else {
                             let table = typeck::build_symbol_table(&program);
                             typeck::handle_query(&program, &table, query)
