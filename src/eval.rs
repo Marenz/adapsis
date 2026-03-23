@@ -2049,6 +2049,17 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             // Check if this is a zero-arg user function (e.g. initial_context_state)
             if let Some(func) = program.get_function(name) {
                 if func.params.is_empty() {
+                    // Reject functions with side effects in test expressions
+                    let has_side_effects = func.effects.iter().any(|e| {
+                        matches!(e, ast::Effect::Io | ast::Effect::Async | ast::Effect::Mut | ast::Effect::Unsafe)
+                    });
+                    if has_side_effects {
+                        bail!(
+                            "cannot call `{name}` in test expression: function has side effects {:?} — \
+                             use !mock and an async test wrapper instead",
+                            func.effects
+                        );
+                    }
                     let mut env = Env::new();
                     return eval_function_body(program, &func.body, &mut env);
                 }
@@ -2071,6 +2082,17 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             }
             // Try as user function
             if let Some(func) = program.get_function(&name) {
+                // Reject functions with side effects in test expressions
+                let has_side_effects = func.effects.iter().any(|e| {
+                    matches!(e, ast::Effect::Io | ast::Effect::Async | ast::Effect::Mut | ast::Effect::Unsafe)
+                });
+                if has_side_effects {
+                    bail!(
+                        "cannot call `{name}` in test expression: function has side effects {:?} — \
+                         use !mock and an async test wrapper instead",
+                        func.effects
+                    );
+                }
                 let eval_args: Vec<Value> = args
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
@@ -3318,5 +3340,86 @@ mod tests {
         let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
         assert!(result.is_ok(), "builtin positional strings: {:?}", result);
         assert_eq!(result.unwrap().0, "\"foobar\"");
+    }
+
+    // ── Side-effect checks for function calls in test params ──────────
+
+    #[test]
+    fn test_impure_function_rejected_in_test_param_bare() {
+        // A function with [io,async] effects used as a bare name in a test
+        // param should produce a clear error, not a confusing runtime failure
+        let source = "\
++type State = {count:Int, name:String}
+
++fn fetch_state ()->State [io,async]
+  +await data:String = http_get(\"http://example.com\")
+  +let s:State = {count: 0, name: data}
+  +return s
+
++fn get_name (state:State)->String
+  +return state.name
+
+!test get_name
+  +with state=fetch_state -> expect \"default\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_err(), "impure function should be rejected: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("side effects"), "error should mention side effects: {err}");
+        assert!(err.contains("fetch_state"), "error should name the function: {err}");
+    }
+
+    #[test]
+    fn test_impure_function_rejected_in_test_param_call() {
+        // Same but with parens: state=fetch_state()
+        let source = "\
++type State = {count:Int, name:String}
+
++fn fetch_state ()->State [io,async]
+  +await data:String = http_get(\"http://example.com\")
+  +let s:State = {count: 0, name: data}
+  +return s
+
++fn get_name (state:State)->String
+  +return state.name
+
+!test get_name
+  +with state=fetch_state() -> expect \"default\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_err(), "impure function call should be rejected: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("side effects"), "error should mention side effects: {err}");
+    }
+
+    #[test]
+    fn test_fail_effect_allowed_in_test_param() {
+        // [fail] is not a side effect — it should be allowed
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn validated_config (host:String, port:Int)->Config [fail]
+  +check valid_port port > 0 ~err_invalid_port
+  +let c:Config = {host: host, port: port}
+  +return c
+
++fn get_host (cfg:Config)->String
+  +return cfg.host
+
+!test get_host
+  +with cfg=validated_config(\"localhost\", 8080) -> expect \"localhost\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "[fail] function should be allowed in test params: {:?}", result);
+        assert!(result.unwrap().contains("expected \"localhost\""));
     }
 }

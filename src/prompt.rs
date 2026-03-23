@@ -408,7 +408,7 @@ For nested structs:
 
 ### Function calls in test values
 
-Test parameter values can call user-defined functions to construct complex inputs.
+Test parameter values can call **pure** user-defined functions to construct complex inputs.
 Both `func_name()` (with parens) and bare `func_name` (zero-arg only) work:
 
 !test process
@@ -426,6 +426,9 @@ Function calls also work on the expected side:
 
 !test identity
   +with c=make_default() -> expect make_default()
+
+Only pure functions (no [io], [async], [mut], [unsafe] effects) can be called in test values.
+Functions with [fail] are allowed. For IO functions, use !mock + async test wrappers instead.
 
 ### Testing async functions
 
