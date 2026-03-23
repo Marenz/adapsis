@@ -466,33 +466,43 @@ pub fn bind_input_to_params(
                     }
                 }
             } else {
-                // Smart distribution: fields may belong to struct-typed params
-                // For each param, check if it's a struct type and collect matching fields
-                let mut used_fields: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-
-                for param in &func.params {
-                    // Check if this param matches a field directly
-                    if let Some(val) = fields.get(&param.name) {
-                        env.set(&param.name, val.clone());
-                        used_fields.insert(param.name.clone());
-                        continue;
+                // Check for positional fields (_0, _1, ...) from space-separated args
+                let is_positional = fields.keys().any(|k| k.starts_with('_') && k[1..].parse::<usize>().is_ok());
+                if is_positional && fields.len() == func.params.len() {
+                    for (i, param) in func.params.iter().enumerate() {
+                        if let Some(val) = fields.get(&format!("_{i}")) {
+                            env.set(&param.name, val.clone());
+                        }
                     }
+                } else {
+                    // Smart distribution: fields may belong to struct-typed params
+                    // For each param, check if it's a struct type and collect matching fields
+                    let mut used_fields: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
 
-                    // Check if this param is a struct type — look up its field names
-                    if let ast::Type::Struct(type_name) = &param.ty {
-                        if let Some(type_fields) = get_struct_fields(program, type_name) {
-                            // Collect input fields that match this struct's fields
-                            let mut struct_fields = HashMap::new();
-                            for (tf_name, _) in &type_fields {
-                                if let Some(val) = fields.get(tf_name) {
-                                    struct_fields.insert(tf_name.clone(), val.clone());
-                                    used_fields.insert(tf_name.clone());
+                    for param in &func.params {
+                        // Check if this param matches a field directly
+                        if let Some(val) = fields.get(&param.name) {
+                            env.set(&param.name, val.clone());
+                            used_fields.insert(param.name.clone());
+                            continue;
+                        }
+
+                        // Check if this param is a struct type — look up its field names
+                        if let ast::Type::Struct(type_name) = &param.ty {
+                            if let Some(type_fields) = get_struct_fields(program, type_name) {
+                                // Collect input fields that match this struct's fields
+                                let mut struct_fields = HashMap::new();
+                                for (tf_name, _) in &type_fields {
+                                    if let Some(val) = fields.get(tf_name) {
+                                        struct_fields.insert(tf_name.clone(), val.clone());
+                                        used_fields.insert(tf_name.clone());
+                                    }
                                 }
-                            }
-                            if !struct_fields.is_empty() {
-                                let struct_val = Value::Struct(type_name.clone(), struct_fields);
-                                env.set(&param.name, struct_val);
+                                if !struct_fields.is_empty() {
+                                    let struct_val = Value::Struct(type_name.clone(), struct_fields);
+                                    env.set(&param.name, struct_val);
+                                }
                             }
                         }
                     }
@@ -3220,5 +3230,93 @@ mod tests {
         let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
         assert!(result.is_ok(), "function call in expected value: {:?}", result);
         assert!(result.unwrap().contains("expected"));
+    }
+
+    // ── Positional (space-separated) args in !eval and +with ──────────
+
+    #[test]
+    fn test_eval_positional_multiple_strings() {
+        let source = "\
++fn concat_two (a:String, b:String)->String
+  +let result:String = concat(a, b)
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = r#"!eval concat_two "hello" "world""#;
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "positional string args should work: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"helloworld\"");
+    }
+
+    #[test]
+    fn test_eval_positional_mixed_types() {
+        let source = "\
++fn show (a:String, b:Int)->String
+  +let result:String = concat(a, to_string(b))
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = r#"!eval show "count:" 42"#;
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "mixed positional args: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"count:42\"");
+    }
+
+    #[test]
+    fn test_eval_positional_ints() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let result:Int = a + b
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = "!eval add 3 4";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "positional int args: {:?}", result);
+        assert_eq!(result.unwrap().0, "7");
+    }
+
+    #[test]
+    fn test_with_positional_strings() {
+        let source = "\
++fn concat_two (a:String, b:String)->String
+  +let result:String = concat(a, b)
+  +return result
+
+!test concat_two
+  +with \"hello\" \"world\" -> expect \"helloworld\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "+with positional strings: {:?}", result);
+        assert!(result.unwrap().contains("expected \"helloworld\""));
+    }
+
+    #[test]
+    fn test_eval_builtin_positional_strings() {
+        // Test that positional args also work for builtins
+        let program = ast::Program::default();
+        let eval_source = r#"!eval concat "foo" "bar""#;
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "builtin positional strings: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"foobar\"");
     }
 }
