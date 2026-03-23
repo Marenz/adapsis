@@ -76,6 +76,8 @@ pub enum Operation {
     },
     /// Clear all mocks: !unmock
     Unmock,
+    /// Signal task completion
+    Done,
     /// Check inbox: ?inbox [agent_name]
     Query(String),
 }
@@ -835,6 +837,11 @@ impl<'a> Parser<'a> {
                 // Treat as set with single step
                 return Ok(Operation::Plan(PlanAction::Set(vec![rest.to_string()])));
             }
+        }
+
+        if text == "!done" {
+            self.index += 1;
+            return Ok(Operation::Done);
         }
 
         if let Some(rest) = text.strip_prefix("!remove") {
