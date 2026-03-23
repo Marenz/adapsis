@@ -64,7 +64,6 @@ pub enum HistoryEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// Current program state
-    #[serde(skip)]
     pub program: ast::Program,
     /// Append-only mutation log
     pub mutations: Vec<MutationEntry>,
@@ -840,22 +839,8 @@ impl Session {
         let json = std::fs::read_to_string(path)?;
         let mut session: Session = serde_json::from_str(&json)?;
 
-        // Replay all mutations to reconstruct program state
-        session.program = ast::Program::default();
-        for source in &session.sources {
-            let operations = parser::parse(source)?;
-            for op in &operations {
-                match op {
-                    parser::Operation::Test(_)
-                    | parser::Operation::Trace(_)
-                    | parser::Operation::Eval(_)
-                    | parser::Operation::Query(_) => {}
-                    _ => {
-                        let _ = validator::apply_and_validate(&mut session.program, op);
-                    }
-                }
-            }
-        }
+        // Rebuild function index (not serialized)
+        session.program.rebuild_function_index();
 
         Ok(session)
     }
