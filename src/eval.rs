@@ -2755,4 +2755,66 @@ mod tests {
         let result = eval_test_case_async(&program, fn_name, case, &[], tx).await;
         assert!(result.is_ok(), "sync function via async path should pass: {:?}", result);
     }
+
+    // ── UTF-8 regression tests ───────────────────────────────────────
+
+    #[test]
+    fn test_json_get_preserves_utf8() {
+        // Verify json_get returns multi-byte UTF-8 characters intact
+        // Use a wrapper that builds the JSON internally to avoid parser quoting issues
+        let source = r#"
++fn get_cafe ()->String
+  +let json:String = "{\"name\":\"café\"}"
+  +return json_get(json, "name")
+"#;
+        let program = build_program(source);
+        let input = parser::parse("!eval get_cafe")
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, r#""café""#, "json_get should preserve UTF-8 chars");
+    }
+
+    #[test]
+    fn test_json_escape_preserves_utf8() {
+        // Verify json_escape passes multi-byte UTF-8 through unchanged
+        let source = r#"
++fn escape_it (s:String)->String
+  +return json_escape(s)
+"#;
+        let program = build_program(source);
+        let input = parser::parse(r#"!eval escape_it s="café élève naïve""#)
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, r#""café élève naïve""#, "json_escape should preserve UTF-8 chars");
+    }
+
+    #[test]
+    fn test_value_display_utf8_string() {
+        // Verify Value::String Display preserves multi-byte UTF-8
+        let val = Value::String("café ☕ 日本語".to_string());
+        let displayed = format!("{val}");
+        assert_eq!(displayed, r#""café ☕ 日本語""#, "Value display should preserve UTF-8");
+    }
+
+    #[test]
+    fn test_concat_preserves_utf8() {
+        let source = r#"
++fn greet (name:String)->String
+  +return concat("Bonjour, ", name)
+"#;
+        let program = build_program(source);
+        let input = parser::parse(r#"!eval greet name="André""#)
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, r#""Bonjour, André""#, "concat should preserve UTF-8");
+    }
 }
