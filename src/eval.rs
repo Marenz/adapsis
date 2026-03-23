@@ -2512,7 +2512,7 @@ mod tests {
 ";
         let program = build_program(fn_source);
 
-        // This is how it would appear in a .forge file — escaped quotes
+        // This is how it would appear in a .ax file — escaped quotes
         // Forge source: !mock http_get "api.svc" -> "{\"status\":\"healthy\",\"uptime\":99}"
         let mock_source = "!mock http_get \"api.svc\" -> \"{\\\"status\\\":\\\"healthy\\\",\\\"uptime\\\":99}\"";
         let mocks = extract_mocks(mock_source);

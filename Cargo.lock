@@ -3,6 +3,33 @@
 version = 4
 
 [[package]]
+name = "adapsis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "base64",
+ "clap",
+ "cranelift",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "exec",
+ "futures",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "target-lexicon",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -608,33 +635,6 @@ name = "foreign-types-shared"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
-
-[[package]]
-name = "forge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "axum",
- "base64",
- "clap",
- "cranelift",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "exec",
- "futures",
- "libc",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "target-lexicon",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "form_urlencoded"

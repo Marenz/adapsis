@@ -26,7 +26,7 @@ This is the default `forge os` mode.
 AdapsisOS loads a **pre-built Adapsis program** and the AI can modify/extend it at runtime
 via the mutation protocol. Like a live-patching server.
 
-- Start with: `forge os --load program.forge --adaptive`
+- Start with: `forge os --load program.ax --adaptive`
 - The program runs (e.g. an HTTP server, a data pipeline, a game)
 - The AI monitors it via `!watch` and `?tasks`
 - When the user or an event triggers a change, the AI hot-patches the running program

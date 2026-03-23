@@ -33,14 +33,14 @@ cargo run -- repl --session my-project.json
 # Browser UI
 cargo run -- serve --task "Build a calculator" --port 3000
 
-# Parse and validate a .forge file
-cargo run -- check examples/fizzbuzz.forge
+# Parse and validate a .adapsis file
+cargo run -- check examples/fizzbuzz.adapsis
 
 # Run tests
-cargo run -- test examples/fizzbuzz.forge
+cargo run -- test examples/fizzbuzz.adapsis
 
 # Compile to native code and execute
-cargo run -- compile examples/compile_test.forge -f add -a "3,4"
+cargo run -- compile examples/compile_test.adapsis -f add -a "3,4"
 ```
 
 ## Adapsis syntax
@@ -119,7 +119,7 @@ Tested with Qwen3.5 family (9B, 35B-A3B MoE). The model learns Adapsis syntax fr
 
 ## Design document
 
-See [forge-design-doc.md](forge-design-doc.md) for the full language design, including the mutation protocol, effect system, provenance tracking, and self-hosting roadmap.
+See [adapsis-design-doc.md](adapsis-design-doc.md) for the full language design, including the mutation protocol, effect system, provenance tracking, and self-hosting roadmap.
 
 ## Status
 
@@ -135,7 +135,7 @@ Adapsis can host itself — the REPL is written in Adapsis:
 
 ```bash
 # Start the self-hosted REPL (with AI-in-the-loop)
-cargo run -- run-async examples/self_hosted_repl.forge
+cargo run -- run-async examples/self_hosted_repl.adapsis
 
 # Features:
 #   x = 10+5           — variable assignment

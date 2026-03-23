@@ -6,7 +6,7 @@
 +end
 
 +fn main ()->Int [io,async]
-  +await source:String = file_read("examples/self_read.forge")
+  +await source:String = file_read("examples/self_read.ax")
   +let line_count:Int = count_lines(source)
   +await ok:Int = file_write("/tmp/forge-self-read-result.txt", concat("This program has ", concat(to_string(line_count), " lines")))
   +return line_count

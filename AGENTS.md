@@ -3,7 +3,7 @@
 ## Overview
 Adapsis is an AI-native program representation and mutation protocol with a constrained surface language. Programs are built incrementally through validated mutations. The AST is the source of truth, changes happen through small mutations with immediate feedback, and every modification is logged in an append-only revision history.
 
-See `forge-design-doc.md` for the full design document.
+See `adapsis-design-doc.md` for the full design document.
 
 ## Build & Run
 
@@ -26,13 +26,13 @@ cargo run -- architect --task "description" --port 3000
 cargo run -- serve --task "description" --port 3000
 
 # Parse and validate
-cargo run -- check examples/fizzbuzz.forge
+cargo run -- check examples/fizzbuzz.ax
 
 # Run tests
-cargo run -- test examples/fizzbuzz.forge
+cargo run -- test examples/fizzbuzz.ax
 
 # Compile to native code
-cargo run -- compile examples/compile_test.forge -f add -a "3,4"
+cargo run -- compile examples/compile_test.ax -f add -a "3,4"
 ```
 
 ## HTTP API (AdapsisOS mode)
@@ -69,13 +69,13 @@ src/
 web/
   index.html       — Browser UI (vanilla JS, Tokyo Night theme)
 examples/
-  validate.forge   — Validation with checks
-  fizzbuzz.forge   — If/elif/else with modulo
-  if_else.forge    — Age classification
-  modulo.forge     — Modulo operator
-  result_chain.forge — Error propagation (auto + explicit)
-  simple_syntax.forge — key=value test syntax
-  compile_test.forge  — Compiler test (5 functions)
+  validate.ax   — Validation with checks
+  fizzbuzz.ax   — If/elif/else with modulo
+  if_else.ax    — Age classification
+  modulo.ax     — Modulo operator
+  result_chain.ax — Error propagation (auto + explicit)
+  simple_syntax.ax — key=value test syntax
+  compile_test.ax  — Compiler test (5 functions)
 training/
   generate_corpus.py     — Manual training examples (35)
   auto_generate_corpus.py — Auto-generation via LLM (42 tasks)
@@ -145,10 +145,10 @@ Multiple LLM backends available:
 
 ```bash
 # All examples
-for f in examples/*.forge; do echo "$f:"; cargo run -q -- test "$f" | grep -c PASS; done
+for f in examples/*.ax; do echo "$f:"; cargo run -q -- test "$f" | grep -c PASS; done
 
 # Compiler test
-cargo run -- compile examples/compile_test.forge -f fizz_type -a "15"
+cargo run -- compile examples/compile_test.ax -f fizz_type -a "15"
 ```
 
 ## Dependencies

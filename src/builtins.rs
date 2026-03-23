@@ -556,6 +556,11 @@ pub static ACTIONS: &[ActionCommand] = &[
         description: "revert last mutation",
     },
     ActionCommand {
+        name: "!roadmap",
+        args: "show/add <item>/done N/remove N",
+        description: "manage long-term roadmap. Persists across sessions.",
+    },
+    ActionCommand {
         name: "!plan",
         args: "set/done N/fail N/show",
         description:

@@ -666,7 +666,7 @@ def main():
             continue
 
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".forge", delete=False
+            mode="w", suffix=".ax", delete=False
         ) as tmp:
             tmp.write(code)
             tmp_path = tmp.name

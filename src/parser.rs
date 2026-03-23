@@ -9,6 +9,14 @@ pub enum PlanAction {
 }
 
 #[derive(Debug, Clone)]
+pub enum RoadmapAction {
+    Show,
+    Add(String),
+    Done(usize),
+    Remove(usize),
+}
+
+#[derive(Debug, Clone)]
 pub enum Operation {
     Module(ModuleDecl),
     Type(TypeDecl),
@@ -34,6 +42,7 @@ pub enum Operation {
         target_module: String,
     },
     Plan(PlanAction),
+    Roadmap(RoadmapAction),
     Watch {
         function_name: String,
         args: String,
@@ -771,6 +780,27 @@ impl<'a> Parser<'a> {
             } else {
                 // Treat as set with single step
                 return Ok(Operation::Plan(PlanAction::Set(vec![rest.to_string()])));
+            }
+        }
+
+        if let Some(rest) = text.strip_prefix("!roadmap") {
+            let rest = rest.trim();
+            self.index += 1;
+            if rest.is_empty() || rest == "show" {
+                return Ok(Operation::Roadmap(RoadmapAction::Show));
+            } else if let Some(desc) = rest.strip_prefix("add") {
+                return Ok(Operation::Roadmap(RoadmapAction::Add(
+                    desc.trim().to_string(),
+                )));
+            } else if let Some(n) = rest.strip_prefix("done") {
+                let n: usize = n.trim().parse().unwrap_or(1);
+                return Ok(Operation::Roadmap(RoadmapAction::Done(n)));
+            } else if let Some(n) = rest.strip_prefix("remove") {
+                let n: usize = n.trim().parse().unwrap_or(1);
+                return Ok(Operation::Roadmap(RoadmapAction::Remove(n)));
+            } else {
+                // Treat as add
+                return Ok(Operation::Roadmap(RoadmapAction::Add(rest.to_string())));
             }
         }
 

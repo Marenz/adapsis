@@ -101,21 +101,21 @@ enum Command {
         port: u16,
     },
 
-    /// Parse a .forge file and validate it
+    /// Parse a .ax file and validate it
     Check {
-        /// Path to .forge file
+        /// Path to .ax file
         path: String,
     },
 
-    /// Parse a .forge file and run its !test blocks
+    /// Parse a .ax file and run its !test blocks
     Test {
-        /// Path to .forge file
+        /// Path to .ax file
         path: String,
     },
 
-    /// Compile a .forge file to native code and run it
+    /// Compile a .ax file to native code and run it
     Compile {
-        /// Path to .forge file
+        /// Path to .ax file
         path: String,
 
         /// Function to call
@@ -129,7 +129,7 @@ enum Command {
 
     /// Run an Adapsis program with async IO (coroutine runtime)
     RunAsync {
-        /// Path to .forge file
+        /// Path to .ax file
         path: String,
 
         /// Function to call (default: main)

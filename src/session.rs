@@ -79,6 +79,9 @@ pub struct Session {
     /// Active/completed agent statuses
     #[serde(default)]
     pub agent_log: Vec<AgentStatus>,
+    /// Long-term roadmap — persists across sessions, the AI can modify it
+    #[serde(default)]
+    pub roadmap: Vec<RoadmapItem>,
     /// Current plan/goal tracking
     #[serde(default)]
     pub plan: Vec<PlanStep>,
@@ -94,6 +97,13 @@ pub struct Session {
     /// IO mock table: (operation, url_pattern) -> response. Used during !test.
     #[serde(default)]
     pub io_mocks: Vec<IoMock>,
+}
+
+/// A long-term roadmap item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoadmapItem {
+    pub description: String,
+    pub done: bool,
 }
 
 /// A mock IO response — matches operation + URL prefix, returns a fixed value.
@@ -327,6 +337,7 @@ impl Session {
             tested_functions: std::collections::HashSet::new(),
             opencode_session_id: None,
             io_mocks: Vec::new(),
+            roadmap: Vec::new(),
         }
     }
 
@@ -441,6 +452,7 @@ impl Session {
                         ));
                     }
                 },
+                parser::Operation::Roadmap(action) => { results.push(self.handle_roadmap(action)); }
                 parser::Operation::Mock {
                     operation,
                     pattern,
@@ -624,6 +636,7 @@ impl Session {
                         ));
                     }
                 },
+                parser::Operation::Roadmap(action) => { results.push(self.handle_roadmap(action)); }
                 parser::Operation::Mock {
                     operation,
                     pattern,
@@ -849,6 +862,34 @@ impl Session {
 
         Ok(session)
     }
+
+    fn handle_roadmap(&mut self, action: &parser::RoadmapAction) -> (String, bool) {
+        match action {
+            parser::RoadmapAction::Show => {
+                let items = self.roadmap.iter().enumerate().map(|(i, item)| {
+                    format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
+                }).collect::<Vec<_>>().join("\n");
+                (if items.is_empty() { "Roadmap is empty.".to_string() } else { format!("Roadmap:\n{items}") }, true)
+            }
+            parser::RoadmapAction::Add(desc) => {
+                self.roadmap.push(RoadmapItem { description: desc.clone(), done: false });
+                (format!("Roadmap: added \"{}\" (#{}).", desc, self.roadmap.len()), true)
+            }
+            parser::RoadmapAction::Done(n) => {
+                if let Some(item) = self.roadmap.get_mut(n.saturating_sub(1)) {
+                    item.done = true;
+                    (format!("Roadmap: #{n} done."), true)
+                } else { (format!("Roadmap: #{n} not found."), false) }
+            }
+            parser::RoadmapAction::Remove(n) => {
+                let idx = n.saturating_sub(1);
+                if idx < self.roadmap.len() {
+                    let removed = self.roadmap.remove(idx);
+                    (format!("Roadmap: removed \"{}\".", removed.description), true)
+                } else { (format!("Roadmap: #{n} not found."), false) }
+            }
+        }
+    }
 }
 
 fn now() -> String {
@@ -858,3 +899,4 @@ fn now() -> String {
         .unwrap_or_default();
     format!("{}s", dur.as_secs())
 }
+
