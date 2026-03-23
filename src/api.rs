@@ -783,7 +783,7 @@ pub async fn ask(
     let system_prompt = {
         let base = crate::prompt::system_prompt();
         let builtins = crate::builtins::format_for_prompt();
-        let identity = crate::prompt::forgeos_identity();
+        let identity = crate::prompt::adapsis_identity();
         format!("{base}\n\n{builtins}\n\n{identity}")
     };
 
@@ -1563,7 +1563,7 @@ pub async fn ask_stream(
         let system_prompt = {
             let base = crate::prompt::system_prompt();
             let builtins = crate::builtins::format_for_prompt();
-            let identity = crate::prompt::forgeos_identity();
+            let identity = crate::prompt::adapsis_identity();
             format!("{base}\n\n{builtins}\n\n{identity}")
         };
 
