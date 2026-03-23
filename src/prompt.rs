@@ -138,7 +138,8 @@ Async IO (need +await and [io,async] effect):
   llm_call(system_prompt, user_prompt) -> String,
   llm_agent(system_prompt, task) -> String (full agentic loop),
   sleep(ms), shell_exec(command) -> String,
-  file_read(path), file_write(path, data), file_exists(path) -> Bool
+  file_read(path) -> String, file_write(path, data) -> String ("OK" on success),
+  file_exists(path) -> Bool
 
 Commands:
   !module Name — switch module context (all +fn/+type after go into this module)

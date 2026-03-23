@@ -732,7 +732,7 @@ impl CoroutineHandle {
                 let data = match &args[1] { Value::String(s) => s.clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::FileWrite(path.clone()), IoRequest::FileWrite { path, data, reply: tx }, rx)?;
-                return Ok(Value::Int(0));
+                return Ok(Value::String("OK".to_string()));
             }
             "file_exists" => {
                 let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_exists expects String path") };
