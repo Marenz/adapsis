@@ -239,6 +239,27 @@ impl Env {
 ///
 /// If `cache` is provided along with a `revision`, the compiled module is reused
 /// when the revision hasn't changed, avoiding recompilation on every eval call.
+/// Find similar function names for "did you mean" suggestions.
+pub fn suggest_similar(program: &ast::Program, name: &str) -> String {
+    let bare = name.rsplit('.').next().unwrap_or(name);
+    let mut candidates: Vec<String> = Vec::new();
+    for m in &program.modules {
+        for f in &m.functions {
+            let qname = format!("{}.{}", m.name, f.name);
+            if f.name == bare || f.name.contains(bare) || bare.contains(&f.name) {
+                candidates.push(qname);
+            }
+        }
+    }
+    for f in &program.functions {
+        if f.name.contains(bare) || bare.contains(&f.name) {
+            candidates.push(f.name.clone());
+        }
+    }
+    if candidates.is_empty() { String::new() }
+    else { format!(". Did you mean: {}?", candidates.join(", ")) }
+}
+
 pub fn eval_compiled_or_interpreted(
     program: &ast::Program,
     function_name: &str,
@@ -263,7 +284,7 @@ pub fn eval_compiled_or_interpreted_cached(
 
     let func = program
         .get_function(function_name)
-        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+        .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     // Try compiled path
     let returns_string = matches!(&func.return_type, ast::Type::String);
@@ -620,7 +641,7 @@ pub fn eval_test_case_with_mocks(
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
-        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+        .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     let has_async = func
         .effects
@@ -656,7 +677,7 @@ fn eval_test_case_with_runtime(
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
-        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+        .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     let input = eval_parser_expr_with_program(&case.input, program)?;
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
@@ -737,7 +758,7 @@ pub async fn eval_test_case_async(
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
-        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+        .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     let has_async = func
         .effects
@@ -2205,7 +2226,7 @@ pub fn trace_function(
 ) -> Result<Vec<TraceStep>> {
     let func = program
         .get_function(function_name)
-        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+        .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     let input_val = eval_parser_expr_standalone(input)?;
     let mut env = Env::new();
