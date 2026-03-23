@@ -1496,87 +1496,108 @@ pub async fn opencode_task(
     State(config): State<AppConfig>,
     Json(req): Json<OpenCodeRequest>,
 ) -> Json<OpenCodeResponse> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
     let project_dir = &config.project_dir;
     let tx = EventSender::broadcast_only(config.event_broadcast.clone());
 
     tx.send(serde_json::json!({"type": "opencode_start", "task": req.task})).await;
 
-    // Run opencode with the task in the project directory
-    let result = tokio::process::Command::new("opencode")
+    // Spawn with piped stdout so we can stream lines and emit SSE events
+    // as they happen (instead of buffering until exit).
+    let child = tokio::process::Command::new("opencode")
         .arg("run")
         .arg("--format")
         .arg("json")
         .arg(&req.task)
         .current_dir(project_dir)
-        .output()
-        .await;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
 
-    match result {
-        Ok(output) => {
-            let raw = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output.status.code().unwrap_or(-1);
-
-            // Parse JSON events to extract text and tool results
-            let mut text_parts = Vec::new();
-            let mut tool_results = Vec::new();
-            for line in raw.lines() {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
-                    match event.get("type").and_then(|t| t.as_str()) {
-                        Some("text") => {
-                            if let Some(text) = event.pointer("/part/text").and_then(|t| t.as_str()) {
-                                text_parts.push(text.to_string());
-                                tx.send(serde_json::json!({"type": "opencode_progress", "kind": "text", "text": text})).await;
-                            }
-                        }
-                        Some("tool_result") => {
-                            if let Some(content) = event.pointer("/part/content") {
-                                tool_results.push(content.to_string());
-                                tx.send(serde_json::json!({"type": "opencode_progress", "kind": "tool_result", "content": content})).await;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            let summary = if !text_parts.is_empty() {
-                text_parts.join("\n")
-            } else if !tool_results.is_empty() {
-                tool_results.join("\n")
-            } else {
-                raw.chars().take(500).collect()
-            };
-
-            eprintln!("[web:opencode] exit={code} text={}chars tools={}", summary.len(), tool_results.len());
-            if !summary.is_empty() {
-                eprintln!("[web:opencode:text] {}", summary.chars().take(300).collect::<String>());
-            }
-
-            if code == 0 {
-                tx.send(serde_json::json!({"type": "opencode_done", "exit_code": code})).await;
-            } else {
-                tx.send(serde_json::json!({"type": "opencode_error", "exit_code": code, "message": stderr})).await;
-            }
-
-            Json(OpenCodeResponse {
-                stdout: summary,
-                stderr,
-                exit_code: code,
-                success: code == 0,
-            })
-        }
+    let mut child = match child {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("[web:opencode:err] {e}");
             tx.send(serde_json::json!({"type": "opencode_error", "exit_code": -1, "message": format!("Failed to run opencode: {e}")})).await;
-            Json(OpenCodeResponse {
+            return Json(OpenCodeResponse {
                 stdout: String::new(),
                 stderr: format!("Failed to run opencode: {e}"),
                 exit_code: -1,
                 success: false,
-            })
+            });
+        }
+    };
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr_pipe = child.stderr.take().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+
+    // Drain stderr in background so it doesn't block the process.
+    let stderr_handle = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = String::new();
+        let mut reader = BufReader::new(stderr_pipe);
+        let _ = reader.read_to_string(&mut buf).await;
+        buf
+    });
+
+    // Read stdout line-by-line, emitting SSE events in real time.
+    let mut text_parts = Vec::new();
+    let mut tool_results = Vec::new();
+    let mut raw_lines = Vec::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        raw_lines.push(line.clone());
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+            match event.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(text) = event.pointer("/part/text").and_then(|t| t.as_str()) {
+                        text_parts.push(text.to_string());
+                        tx.send(serde_json::json!({"type": "opencode_progress", "kind": "text", "text": text})).await;
+                    }
+                }
+                Some("tool_result") => {
+                    if let Some(content) = event.pointer("/part/content") {
+                        tool_results.push(content.to_string());
+                        tx.send(serde_json::json!({"type": "opencode_progress", "kind": "tool_result", "content": content})).await;
+                    }
+                }
+                _ => {}
+            }
         }
     }
+
+    // Wait for process exit and stderr collection.
+    let status = child.wait().await;
+    let stderr = stderr_handle.await.unwrap_or_default();
+    let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+
+    let raw = raw_lines.join("\n");
+    let summary = if !text_parts.is_empty() {
+        text_parts.join("\n")
+    } else if !tool_results.is_empty() {
+        tool_results.join("\n")
+    } else {
+        raw.chars().take(500).collect()
+    };
+
+    eprintln!("[web:opencode] exit={code} text={}chars tools={}", summary.len(), tool_results.len());
+    if !summary.is_empty() {
+        eprintln!("[web:opencode:text] {}", summary.chars().take(300).collect::<String>());
+    }
+
+    if code == 0 {
+        tx.send(serde_json::json!({"type": "opencode_done", "exit_code": code})).await;
+    } else {
+        tx.send(serde_json::json!({"type": "opencode_error", "exit_code": code, "message": stderr})).await;
+    }
+
+    Json(OpenCodeResponse {
+        stdout: summary,
+        stderr,
+        exit_code: code,
+        success: code == 0,
+    })
 }
 
 #[derive(Deserialize)]
