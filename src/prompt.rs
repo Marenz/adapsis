@@ -386,6 +386,25 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 - Be specific in your !opencode description — say exactly what to change, which
   file, what pattern to follow. The more precise, the faster it works.
 
+### Testing with structs
+
+When a function returns a struct, test with the struct literal syntax:
+
+!test MyModule.make_user
+  +with name="alice" age=25 -> expect {name: "alice", age: 25}
+
+!test MyModule.make_config
+  +with -> expect {token: "abc", port: 8080}
+
+When a function takes a struct parameter, pass it as named fields:
+
+!test MyModule.is_admin
+  +with config={token: "x", admin_id: 42} user_id=42 -> expect true
+
+For nested structs:
+!test MyModule.get_name
+  +with user={name: "bob", address: {city: "Berlin"}} -> expect "bob"
+
 ### Testing async functions
 
 Use `!mock` to register fake IO responses, then `!test` works with async functions:
