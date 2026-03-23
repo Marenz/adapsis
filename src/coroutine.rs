@@ -209,7 +209,8 @@ impl Runtime {
                     let mut s = stream.lock().await;
                     match s.read(&mut buf).await {
                         Ok(n) => {
-                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let data = String::from_utf8(buf[..n].to_vec())
+                                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
                             let _ = reply.send(Ok(data));
                         }
                         Err(e) => { let _ = reply.send(Err(e.into())); }
@@ -337,8 +338,15 @@ impl Runtime {
                 tokio::spawn(async move {
                     let client = reqwest::Client::new();
                     match client.get(&url).send().await {
-                        Ok(resp) => match resp.text().await {
-                            Ok(body) => { let _ = reply.send(Ok(body)); }
+                        Ok(resp) => match resp.bytes().await {
+                            Ok(bytes) => {
+                                // Always decode as UTF-8 (resp.text() may use
+                                // the charset from Content-Type which can be
+                                // latin-1, causing mojibake for UTF-8 content).
+                                let body = String::from_utf8(bytes.to_vec())
+                                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                                let _ = reply.send(Ok(body));
+                            }
                             Err(e) => { let _ = reply.send(Err(e.into())); }
                         },
                         Err(e) => { let _ = reply.send(Err(e.into())); }
@@ -348,13 +356,27 @@ impl Runtime {
             IoRequest::HttpPost { url, body, content_type, reply } => {
                 tokio::spawn(async move {
                     let client = reqwest::Client::new();
+                    // Ensure charset=utf-8 is present in Content-Type for
+                    // text-based types so servers know the body encoding.
+                    let ct = if !content_type.contains("charset=") &&
+                        (content_type.starts_with("application/json") ||
+                         content_type.starts_with("text/"))
+                    {
+                        format!("{content_type}; charset=utf-8")
+                    } else {
+                        content_type
+                    };
                     match client.post(&url)
-                        .header("Content-Type", &content_type)
+                        .header("Content-Type", &ct)
                         .body(body)
                         .send().await
                     {
-                        Ok(resp) => match resp.text().await {
-                            Ok(body) => { let _ = reply.send(Ok(body)); }
+                        Ok(resp) => match resp.bytes().await {
+                            Ok(bytes) => {
+                                let body = String::from_utf8(bytes.to_vec())
+                                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                                let _ = reply.send(Ok(body));
+                            }
                             Err(e) => { let _ = reply.send(Err(e.into())); }
                         },
                         Err(e) => { let _ = reply.send(Err(e.into())); }
