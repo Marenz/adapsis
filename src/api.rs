@@ -65,7 +65,7 @@ pub struct MutateResponse {
     pub results: Vec<MutationResult>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MutationResult {
     pub message: String,
     pub success: bool,
@@ -226,7 +226,7 @@ pub struct TestResponse {
     pub results: Vec<TestCaseResult>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TestCaseResult {
     pub message: String,
     pub pass: bool,
@@ -640,7 +640,7 @@ pub struct AskRequest {
     pub message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AskResponse {
     pub reply: String,
     pub code: String,
