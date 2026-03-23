@@ -12,6 +12,11 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             let converted = convert_type_decl(type_decl)?;
             // Check for duplicate type name
             let name = converted.name();
+            if program.require_modules {
+                bail!(
+                    "type `{name}` must be inside a module. Use: !module MyModule\\n+type {name} = ..."
+                );
+            }
             if program.types.iter().any(|t| t.name() == name) {
                 bail!("duplicate type declaration: `{name}`");
             }
