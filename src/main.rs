@@ -995,9 +995,16 @@ async fn main() -> Result<()> {
                             // Stream the response to log it
                             use futures::StreamExt;
                             let mut stream = resp.bytes_stream();
+                            let mut raw_buf: Vec<u8> = Vec::new();
                             while let Some(chunk) = stream.next().await {
                                 if let Ok(bytes) = chunk {
-                                    let text = String::from_utf8_lossy(&bytes);
+                                    raw_buf.extend_from_slice(&bytes);
+                                    let valid_up_to = match std::str::from_utf8(&raw_buf) {
+                                        Ok(_) => raw_buf.len(),
+                                        Err(e) => e.valid_up_to(),
+                                    };
+                                    if valid_up_to == 0 { continue; }
+                                    let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
                                     // SSE events are logged via the handler, just consume them
                                     for line in text.lines() {
                                         if let Some(data) = line.strip_prefix("data: ") {
@@ -1008,6 +1015,7 @@ async fn main() -> Result<()> {
                                             }
                                         }
                                     }
+                                    raw_buf.drain(..valid_up_to);
                                 }
                             }
                         }
