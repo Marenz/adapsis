@@ -44,7 +44,20 @@ impl fmt::Display for Value {
             Value::Int(v) => write!(f, "{v}"),
             Value::Float(v) => write!(f, "{v}"),
             Value::Bool(v) => write!(f, "{v}"),
-            Value::String(v) => write!(f, "\"{v}\""),
+            Value::String(v) => {
+                write!(f, "\"")?;
+                for ch in v.chars() {
+                    match ch {
+                        '"' => write!(f, "\\\"")?,
+                        '\\' => write!(f, "\\\\")?,
+                        '\n' => write!(f, "\\n")?,
+                        '\r' => write!(f, "\\r")?,
+                        '\t' => write!(f, "\\t")?,
+                        c => write!(f, "{c}")?,
+                    }
+                }
+                write!(f, "\"")
+            }
             Value::Struct(name, fields) => {
                 write!(f, "{name}{{")?;
                 for (i, (k, v)) in fields.iter().enumerate() {
@@ -3071,5 +3084,93 @@ mod tests {
         let results = session.apply_async(test_source, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].1, "mocked LLM UTF-8 test should pass: {:?}", results[0]);
+    }
+
+    // ── Escaped quotes in string literals ─────────────────────────────
+
+    #[test]
+    fn test_escaped_quotes_in_test_value() {
+        // Key=value test input with JSON strings containing escaped quotes
+        let source = r#"
++fn echo (s:String)->String
+  +return s
+
+!test echo
+  +with s="{\"key\":\"value\"}" -> expect "{\"key\":\"value\"}"
+"#;
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "escaped quotes in test value should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_escaped_quotes_nested_json() {
+        // Deeply nested JSON with escaped quotes
+        let source = r#"
++fn echo (s:String)->String
+  +return s
+
+!test echo
+  +with s="{\"message\":{\"chat\":{\"id\":42}}}" -> expect "{\"message\":{\"chat\":{\"id\":42}}}"
+"#;
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "nested JSON with escaped quotes should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_escaped_quotes_in_let_expr() {
+        // +let with a JSON string literal containing escaped quotes
+        let source = r#"
++fn make_json ()->String
+  +let body:String = "{\"model\":\"gpt\",\"messages\":[{\"role\":\"user\"}]}"
+  +return body
+
+!test make_json
+  +with -> expect "{\"model\":\"gpt\",\"messages\":[{\"role\":\"user\"}]}"
+"#;
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "JSON string in +let should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_value_display_escapes_embedded_quotes() {
+        // Value::String with embedded quotes should escape them in Display
+        let val = Value::String("hello \"world\"".to_string());
+        let displayed = format!("{val}");
+        assert_eq!(displayed, "\"hello \\\"world\\\"\"");
+
+        // Also test newlines and backslashes
+        let val2 = Value::String("line1\nline2\\end".to_string());
+        let displayed2 = format!("{val2}");
+        assert_eq!(displayed2, "\"line1\\nline2\\\\end\"");
+    }
+
+    #[test]
+    fn test_escaped_quotes_multiple_test_values() {
+        // Multiple key=value pairs where values contain escaped quotes
+        let source = r#"
++fn pair (a:String, b:String)->String
+  +return concat(a, b)
+
+!test pair
+  +with a="{\"x\":1}" b="{\"y\":2}" -> expect "{\"x\":1}{\"y\":2}"
+"#;
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "multiple JSON test values should work: {:?}", result);
     }
 }
