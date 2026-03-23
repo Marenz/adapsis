@@ -115,7 +115,37 @@ For multi-param functions, use space-separated key=value pairs (named after the 
   +with name="alice" age=25 -> expect Ok
   +with name="" age=25 -> expect Err(err_empty_name)
 
-(Queries and commands are listed separately via the registry.)
+### Key Builtins
+
+String: concat(a,b), substring(s,start,len), split(s,delim), join(list,sep),
+  trim(s), starts_with(s,prefix), ends_with(s,suffix), contains(s,sub),
+  index_of(s,sub), char_at(s,i), length(s), to_string(x), to_int(s),
+  regex_match(s,pattern), regex_replace(s,pattern,replacement)
+
+JSON: json_get(json_string, "path.to.key"), json_array_len(json_string),
+  json_escape(s) — escape a string for use inside JSON values
+
+Math: abs(x), min(a,b), max(a,b), pow(base,exp), sqrt(x), floor(x)
+
+Async IO (need +await and [io,async] effect):
+  http_get(url) -> String, http_post(url, body, content_type) -> String,
+  llm_call(system_prompt, user_prompt) -> String,
+  llm_agent(system_prompt, task) -> String (full agentic loop),
+  sleep(ms), shell_exec(command) -> String,
+  file_read(path), file_write(path, data), file_exists(path) -> Bool
+
+Commands:
+  !module Name — switch module context (all +fn/+type after go into this module)
+  !plan set / !plan done N / !plan show — manage task plan
+  !roadmap add <item> / !roadmap done N / !roadmap show — long-term roadmap
+  !mock op "pattern" -> "response" — register mock IO for testing
+  !unmock — clear all mocks
+  !eval fn_name arg1=val — evaluate a function
+  !test Module.fn — run tests (see Testing section above)
+  !opencode <description> — request Rust-level runtime change
+  !done — signal task completion
+
+Queries: ?symbols, ?source fn_name, ?tasks, ?inbox, ?deps fn_name
 
 ## Important Rules
 
@@ -123,7 +153,8 @@ For multi-param functions, use space-separated key=value pairs (named after the 
 2. Every binding must have an explicit type annotation.
 3. Use descriptive error labels with ~ for checks: ~err_negative_age, ~err_empty_name
 4. One statement per line. Indentation marks nesting (2 spaces).
-5. Only modules end with `end`. Functions and test blocks do NOT use `end`.
+5. Use +end to close +fn, +if, +while, +match, +each blocks. Modules use !module (no +end).
+   Test blocks do NOT need +end.
 6. Use +if/+elif/+else for conditional logic, +check for validation assertions.
 7. No closures, no inheritance, no operator overloading, no exceptions.
 8. String concatenation uses concat(), not +.
@@ -347,12 +378,21 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 - Be specific in your !opencode description — say exactly what to change, which
   file, what pattern to follow. The more precise, the faster it works.
 
-### Known Limitations (things you can fix via !opencode)
+### Testing async functions
 
-- `!test` cannot run async functions — they fail with "requires async context".
-  Fix: make eval_test_case in eval.rs detect async effects and run through the
-  coroutine executor. Look at how !eval handles async in api.rs.
-- String escaping is limited — use `json_escape()` builtin for JSON strings.
+Use `!mock` to register fake IO responses, then `!test` works with async functions:
+
+!mock http_get "api.telegram.org" -> "{\"ok\":true,\"result\":[]}"
+!mock llm_call "You are" -> "Hello! How can I help?"
+
+!test MyModule.get_updates
+  +with offset=0 -> expect "{\"ok\":true,\"result\":[]}"
+
+!unmock
+
+Mocks intercept +await calls during tests — if the operation and args match the
+pattern, the mock value is returned without real IO. Use !unmock to clear all mocks.
+Tests with mocks run async functions through the coroutine executor automatically.
 
 ### Design Principles
 
