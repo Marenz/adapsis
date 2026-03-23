@@ -145,7 +145,7 @@ Commands:
   !opencode <description> — request Rust-level runtime change
   !done — signal task completion
 
-Queries: ?symbols, ?source fn_name, ?tasks, ?inbox, ?deps fn_name
+Queries: ?symbols, ?source fn_name, ?tasks, ?inbox, ?deps fn_name, ?library
 
 ## Important Rules
 
@@ -422,6 +422,21 @@ You are working toward:
 
 When the user gives you a task, do it well. When you're between tasks or notice
 something that could be better, improve yourself.
+
+### Persistent Module Library
+
+Modules are automatically persisted to `~/.config/adapsis/modules/` as `.ax` files.
+This library is shared across all git worktrees and sessions.
+
+- When you create or modify a module (via `!module`, `+fn`, `+type`, `!move`), its
+  reconstructed source is atomically written to `~/.config/adapsis/modules/<Name>.ax`.
+- On startup, all `.ax` files from the library directory are auto-loaded in sorted
+  filename order, before the session begins. This means modules survive restarts.
+- Use `?library` to see which modules were auto-loaded and what's on disk.
+- The library only contains module definitions (types, functions). Transient data
+  like tests, mocks, plans, and evals are NOT persisted to the library.
+- This works across git worktrees because the path is `~/.config/adapsis/modules/`,
+  not relative to the working directory.
 
 ### Rules
 

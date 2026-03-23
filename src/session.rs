@@ -514,6 +514,14 @@ impl Session {
                 success,
             });
             self.sources.push(source.to_string());
+
+            // Persist affected modules to the library
+            if success {
+                let affected = crate::library::affected_module_names(&operations);
+                if !affected.is_empty() {
+                    crate::library::persist_affected_modules(&self.program, &affected);
+                }
+            }
         }
 
         Ok(results)
@@ -698,6 +706,14 @@ impl Session {
                 success,
             });
             self.sources.push(source.to_string());
+
+            // Persist affected modules to the library
+            if success {
+                let affected = crate::library::affected_module_names(&operations);
+                if !affected.is_empty() {
+                    crate::library::persist_affected_modules(&self.program, &affected);
+                }
+            }
         }
 
         Ok(results)
