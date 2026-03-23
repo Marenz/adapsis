@@ -665,17 +665,33 @@ pub struct AskResponse {
     pub has_errors: bool,
 }
 
-/// Write a structured log entry to the AI activity log.
-/// Channel wrapper that sends to both the response mpsc and the broadcast channel.
+/// Channel wrapper that sends events to the broadcast channel (and optionally an mpsc
+/// response channel used by the SSE streaming endpoint).  Both `/api/ask` and
+/// `/api/ask-stream` use this so events always appear on `/api/events`.
 struct EventSender {
-    tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+    tx: Option<tokio::sync::mpsc::Sender<serde_json::Value>>,
     broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 impl EventSender {
+    /// Broadcast-only sender (used by plain `/api/ask`).
+    fn broadcast_only(broadcast: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
+        Self { tx: None, broadcast }
+    }
+
+    /// Broadcast + per-request mpsc sender (used by `/api/ask-stream`).
+    fn with_mpsc(tx: tokio::sync::mpsc::Sender<serde_json::Value>, broadcast: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
+        Self { tx: Some(tx), broadcast }
+    }
+
     async fn send(&self, event: serde_json::Value) {
         let _ = self.broadcast.send(event.clone());
-        let _ = self.tx.send(event).await;
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(event).await;
+        } else {
+            // Yield so broadcast receivers get a chance to process the event.
+            tokio::task::yield_now().await;
+        }
     }
 }
 
@@ -786,7 +802,8 @@ pub async fn ask(
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
     eprintln!("\n[web:user] {}", req.message);
-    let _ = config.event_broadcast.send(serde_json::json!({"type": "start", "message": req.message}));
+    let tx = EventSender::broadcast_only(config.event_broadcast.clone());
+    tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
     let llm = crate::llm::LlmClient::new_with_model_and_key(
         &config.llm_url, &config.llm_model, config.llm_api_key.clone(),
     );
@@ -844,7 +861,7 @@ pub async fn ask(
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[web:error] LLM: {e}");
-                let _ = config.event_broadcast.send(serde_json::json!({"type": "error", "message": format!("LLM error: {e}")}));
+                tx.send(serde_json::json!({"type": "error", "message": format!("LLM error: {e}")})).await;
                 reply_text.push_str(&format!("\n\nLLM error: {e}"));
                 break;
             }
@@ -864,30 +881,30 @@ pub async fn ask(
         }
         let clean = clean.trim();
         if !clean.is_empty() {
-            let _ = config.event_broadcast.send(serde_json::json!({"type": "text", "text": clean}));
+            tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
             reply_text.push_str(clean);
         }
         if !output.thinking.is_empty() {
             eprintln!("[web:think] {}...", output.thinking.chars().take(100).collect::<String>());
-            let _ = config.event_broadcast.send(serde_json::json!({"type": "thinking", "text": output.thinking}));
+            tx.send(serde_json::json!({"type": "thinking", "text": output.thinking})).await;
         }
 
         // Check for !done or no code (AI is asking a question / responding with text)
         if code.trim() == "!done" {
             eprintln!("[web:done] model said !done at iteration {}", iteration + 1);
-            let _ = config.event_broadcast.send(serde_json::json!({"type": "done"}));
+            tx.send(serde_json::json!({"type": "done"})).await;
             break;
         }
         if code.is_empty() {
             // No code block = AI is responding with text only (question or explanation)
             eprintln!("[web:text-only] no code block, stopping");
-            let _ = config.event_broadcast.send(serde_json::json!({"type": "done"}));
+            tx.send(serde_json::json!({"type": "done"})).await;
             break;
         }
 
         eprintln!("[web:code]\n{}", code.chars().take(200).collect::<String>());
-        let _ = config.event_broadcast.send(serde_json::json!({"type": "code", "code": code}));
+        tx.send(serde_json::json!({"type": "code", "code": code})).await;
         if !all_code.is_empty() { all_code.push_str("\n\n// --- iteration ---\n"); }
         all_code.push_str(&code);
 
@@ -1462,9 +1479,9 @@ pub async fn ask(
 
     let has_errors = all_results.iter().any(|r| !r.success) || all_test_results.iter().any(|r| !r.pass);
     if has_errors {
-        let _ = config.event_broadcast.send(serde_json::json!({"type": "error", "message": "request completed with errors"}));
+        tx.send(serde_json::json!({"type": "error", "message": "request completed with errors"})).await;
     }
-    let _ = config.event_broadcast.send(serde_json::json!({"type": "done"}));
+    tx.send(serde_json::json!({"type": "done"})).await;
     Json(AskResponse {
         reply: reply_text,
         code: all_code,
@@ -1582,7 +1599,7 @@ pub async fn ask_stream(
     // Spawn the processing loop
     let config_clone = config.clone();
     tokio::spawn(async move {
-        let tx = EventSender { tx: raw_tx, broadcast: config_clone.event_broadcast.clone() };
+        let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone());
         let llm = crate::llm::LlmClient::new_with_model_and_key(
             &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
         );
