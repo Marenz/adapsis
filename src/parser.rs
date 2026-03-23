@@ -996,13 +996,22 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Query(query));
         }
 
-        // Skip unknown operations instead of aborting the whole block
+        // Treat unknown ! operations as queries (AI often uses !symbols instead of ?symbols)
+        if text.starts_with('!') {
+            let as_query = format!("?{}", &text[1..]);
+            eprintln!(
+                "[parser] line {}: treating `{}` as `{}`",
+                line.number, text, as_query
+            );
+            self.index += 1;
+            return Ok(Operation::Query(as_query));
+        }
+        // Skip truly unknown operations
         eprintln!(
-            "[parser] line {}: skipping unknown operation `{}`",
+            "[parser] line {}: skipping unknown `{}`",
             line.number, line.text
         );
         self.index += 1;
-        // Return as a query so the feedback shows the warning
         Ok(Operation::Query(format!(
             "WARNING: unknown operation `{}` (skipped)",
             line.text
