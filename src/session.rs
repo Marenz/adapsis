@@ -91,6 +91,10 @@ pub struct Session {
     /// Functions that have been tested (passed at least one test). Eval/spawn blocked until tested.
     #[serde(default)]
     pub tested_functions: std::collections::HashSet<String>,
+    /// Stored test sources — re-run automatically when functions change.
+    /// Each entry is the raw source string of a !test block.
+    #[serde(default)]
+    pub stored_tests: Vec<String>,
     /// OpenCode session ID — reused across !opencode calls to maintain context
     #[serde(default)]
     pub opencode_session_id: Option<String>,
@@ -338,6 +342,7 @@ impl Session {
             sources: Vec::new(),
             agent_mailbox: HashMap::new(),
             tested_functions: std::collections::HashSet::new(),
+            stored_tests: Vec::<String>::new(),
             opencode_session_id: None,
             io_mocks: Vec::new(),
             roadmap: Vec::new(),
