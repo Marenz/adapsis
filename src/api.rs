@@ -1789,6 +1789,11 @@ pub async fn ask_stream(
 
             // Empty code = AI responded with prose only, no operations
             if code.is_empty() {
+                // Push a user message so the conversation doesn't end on assistant
+                // (some models like MiMo require the last message to be from the user)
+                messages.push(crate::llm::ChatMessage::user(
+                    "Your response contained no Adapsis operations. Write code with +, !, or ? prefixes.".to_string()
+                ));
                 continue;
             }
 
