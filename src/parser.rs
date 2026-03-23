@@ -1091,27 +1091,13 @@ impl<'a> Parser<'a> {
         )))
     }
 
-    fn parse_test_cases(&mut self, parent_indent: usize) -> Result<Vec<TestCase>> {
+    fn parse_test_cases(&mut self, _parent_indent: usize) -> Result<Vec<TestCase>> {
         let mut cases = Vec::new();
-        let Some(indent) = self.child_indent(parent_indent) else {
-            let line = self
-                .lines
-                .get(self.index.saturating_sub(1))
-                .map(|line| line.number)
-                .unwrap_or(1);
-            bail!(
-                "line {}: !test requires at least one indented `+with` case",
-                line
-            );
-        };
 
         while let Some(line) = self.current() {
-            if line.indent < indent {
+            let trimmed = line.text.trim();
+            if !trimmed.starts_with("+with") {
                 break;
-            }
-
-            if line.indent > indent {
-                bail!("line {}: unexpected indentation in test block", line.number);
             }
 
             let rest = line
