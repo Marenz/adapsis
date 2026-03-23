@@ -1995,7 +1995,7 @@ pub async fn ask_stream(
                                         if let Some(sid) = &oc_session_id {
                                             cmd.arg("--session").arg(sid);
                                         }
-                                        let full_task = format!("{task}. When done, create clean atomic git commits with descriptive messages for each logical change.");
+                                        let full_task = format!("{task}. When done: 1) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 2) Register new builtins in src/builtins.rs. 3) Create clean atomic git commits with descriptive messages for each logical change.");
                                         cmd.arg(&full_task);
                                         let mut child = cmd
                                             .current_dir(&work_dir)
