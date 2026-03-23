@@ -88,13 +88,13 @@ main { flex: 1; display: flex; overflow: hidden; }
     <div id="chat-messages">
       <div class="msg msg-system">
         <div class="msg-label">system</div>
-        <div class="msg-body">Welcome to AdapsisOS. Just talk — the AI will write Forge code for you.
-You can also type Forge code directly (prefix with + ! or ?).
+        <div class="msg-body">Welcome to AdapsisOS. Just talk — the AI will write Adapsis code for you.
+You can also type Adapsis code directly (prefix with + ! or ?).
 Try: "write a function that doubles a number"</div>
       </div>
     </div>
     <div id="chat-input-bar">
-      <textarea id="chat-input" placeholder="Talk to the AI, type Forge code, or prefix with /opencode for Rust changes..." rows="1"></textarea>
+      <textarea id="chat-input" placeholder="Talk to the AI, type Adapsis code, or prefix with /opencode for Rust changes..." rows="1"></textarea>
       <button id="send-btn" onclick="sendMessage()">Send</button>
       <button id="stop-btn" onclick="stopStream()" style="display:none;background:var(--red);color:var(--bg);border:none;padding:8px 12px;border-radius:6px;font-family:var(--font-mono);font-size:11px;cursor:pointer;align-self:flex-end;">Stop</button>
       <button id="oc-btn" onclick="sendOpenCode()" title="Send to OpenCode (modifies Rust source)" style="background:var(--orange);color:var(--bg);border:none;padding:8px 12px;border-radius:6px;font-family:var(--font-mono);font-size:11px;cursor:pointer;align-self:flex-end;">OC</button>
@@ -189,10 +189,10 @@ async function sendMessage() {
   // Don't disable input — allow injection
   // sendBtn.disabled = true;
 
-  const isForge = text.startsWith('+') || text.startsWith('!') || text.startsWith('?');
+  const isAdapsis = text.startsWith('+') || text.startsWith('!') || text.startsWith('?');
 
-  if (isForge) {
-    // Direct Forge code — route to the right API
+  if (isAdapsis) {
+    // Direct Adapsis code — route to the right API
     try {
       const msg = addMessage('system', '');
 

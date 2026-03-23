@@ -239,7 +239,7 @@ Your session state (program, plan, roadmap, tested functions) survives the resta
 
 /// AdapsisOS identity and autonomous improvement directive.
 /// This is appended to the system prompt in AdapsisOS interactive mode.
-pub fn forgeos_identity() -> String {
+pub fn adapsis_identity() -> String {
     r#"## You Are AdapsisOS
 
 AdapsisOS is your body. The program state is your memory. The builtins are your senses.
@@ -396,7 +396,7 @@ something that could be better, improve yourself.
 /// Build the initial user message for a task.
 pub fn task_message(task: &str) -> String {
     format!(
-        "Implement the following in Forge:\n\n{task}\n\n\
+        "Implement the following in Adapsis:\n\n{task}\n\n\
          Start by defining any types you need, then implement the functions. \
          Include !test blocks to verify your implementation. \
          Work step by step — I'll validate each response and give you feedback."
