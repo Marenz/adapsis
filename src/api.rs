@@ -1497,6 +1497,9 @@ pub async fn opencode_task(
     Json(req): Json<OpenCodeRequest>,
 ) -> Json<OpenCodeResponse> {
     let project_dir = &config.project_dir;
+    let tx = EventSender::broadcast_only(config.event_broadcast.clone());
+
+    tx.send(serde_json::json!({"type": "opencode_start", "task": req.task})).await;
 
     // Run opencode with the task in the project directory
     let result = tokio::process::Command::new("opencode")
@@ -1523,11 +1526,13 @@ pub async fn opencode_task(
                         Some("text") => {
                             if let Some(text) = event.pointer("/part/text").and_then(|t| t.as_str()) {
                                 text_parts.push(text.to_string());
+                                tx.send(serde_json::json!({"type": "opencode_progress", "kind": "text", "text": text})).await;
                             }
                         }
                         Some("tool_result") => {
                             if let Some(content) = event.pointer("/part/content") {
                                 tool_results.push(content.to_string());
+                                tx.send(serde_json::json!({"type": "opencode_progress", "kind": "tool_result", "content": content})).await;
                             }
                         }
                         _ => {}
@@ -1548,6 +1553,12 @@ pub async fn opencode_task(
                 eprintln!("[web:opencode:text] {}", summary.chars().take(300).collect::<String>());
             }
 
+            if code == 0 {
+                tx.send(serde_json::json!({"type": "opencode_done", "exit_code": code})).await;
+            } else {
+                tx.send(serde_json::json!({"type": "opencode_error", "exit_code": code, "message": stderr})).await;
+            }
+
             Json(OpenCodeResponse {
                 stdout: summary,
                 stderr,
@@ -1557,6 +1568,7 @@ pub async fn opencode_task(
         }
         Err(e) => {
             eprintln!("[web:opencode:err] {e}");
+            tx.send(serde_json::json!({"type": "opencode_error", "exit_code": -1, "message": format!("Failed to run opencode: {e}")})).await;
             Json(OpenCodeResponse {
                 stdout: String::new(),
                 stderr: format!("Failed to run opencode: {e}"),
