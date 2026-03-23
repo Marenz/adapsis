@@ -601,29 +601,107 @@ pub fn eval_test_case_with_mocks(
         .get_function(function_name)
         .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
 
-    let input = eval_parser_expr_with_program(&case.input, program)?;
-    let expected = eval_parser_expr_with_program(&case.expected, program)?;
-
-    let mut env = Env::new();
-
-    // If function has async/io effects, always set up a mock coroutine handle
-    // so that +await statements don't fail with "requires async context".
-    // Mocked IO responses are checked first; unmatched ops error out.
     let has_async = func
         .effects
         .iter()
         .any(|e| matches!(e, ast::Effect::Async | ast::Effect::Io));
+
     if has_async {
-        let handle = crate::coroutine::CoroutineHandle::new_mock(mocks.to_vec());
-        env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+        // Async function: spin up a temporary coroutine runtime so +await
+        // operations execute through real IO (with mock fallback if provided).
+        // This avoids "requires async context" and "no mock for ..." errors.
+        return eval_test_case_with_runtime(program, function_name, case, mocks);
     }
 
+    let input = eval_parser_expr_with_program(&case.input, program)?;
+    let expected = eval_parser_expr_with_program(&case.expected, program)?;
+
+    let mut env = Env::new();
     bind_input_to_params(program, func, &input, &mut env);
 
     // Execute function body
     let result = eval_function_body(program, &func.body, &mut env);
 
     check_test_result(result, &func.return_type, &input, &expected)
+}
+
+/// Run a test case for an async function by spinning up a temporary coroutine
+/// runtime. Mocks are checked first; unmatched IO operations execute for real.
+fn eval_test_case_with_runtime(
+    program: &ast::Program,
+    function_name: &str,
+    case: &parser::TestCase,
+    mocks: &[crate::session::IoMock],
+) -> Result<String> {
+    let func = program
+        .get_function(function_name)
+        .ok_or_else(|| anyhow!("function `{function_name}` not found"))?;
+
+    let input = eval_parser_expr_with_program(&case.input, program)?;
+    let expected = eval_parser_expr_with_program(&case.expected, program)?;
+    let return_type = func.return_type.clone();
+    let program = program.clone();
+    let fn_name = function_name.to_string();
+    let mocks = mocks.to_vec();
+
+    // Spin up a temporary tokio runtime + coroutine IO loop on a dedicated
+    // thread.  This works whether or not the caller is already inside a tokio
+    // runtime (nested block_on is not allowed, so we always use a fresh thread).
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow!("failed to create async test runtime: {e}"))?;
+
+        rt.block_on(async {
+            let (runtime, mut io_rx) = crate::coroutine::Runtime::new();
+            let runtime = std::sync::Arc::new(runtime);
+            let io_sender = runtime.io_sender();
+
+            // Spawn the IO handler loop
+            let rt_handle = runtime.clone();
+            let io_loop = tokio::spawn(async move {
+                while let Some(request) = io_rx.recv().await {
+                    let rt = rt_handle.clone();
+                    tokio::spawn(async move {
+                        rt.handle_io(request).await;
+                    });
+                }
+            });
+
+            // Run the evaluation in a blocking task so blocking_send/blocking_recv
+            // don't stall the tokio executor.
+            let eval_result = tokio::task::spawn_blocking(move || {
+                let func = program
+                    .get_function(&fn_name)
+                    .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
+
+                let mut env = Env::new();
+
+                // Create handle: mocks checked first, unmatched ops use real IO.
+                let handle = if mocks.is_empty() {
+                    crate::coroutine::CoroutineHandle::new(io_sender)
+                } else {
+                    crate::coroutine::CoroutineHandle::new_mock_with_sender(mocks, io_sender)
+                };
+                env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+
+                bind_input_to_params(&program, func, &input, &mut env);
+                let result = eval_function_body(&program, &func.body, &mut env);
+                check_test_result(result, &return_type, &input, &expected)
+            })
+            .await
+            .map_err(|e| anyhow!("async test task panicked: {e}"))??;
+
+            // Shut down the IO loop
+            io_loop.abort();
+
+            Ok(eval_result)
+        })
+    })
+    .join()
+    .map_err(|_| anyhow!("async test thread panicked"))?
 }
 
 /// Run a test case through the real coroutine runtime (for async functions with
@@ -666,15 +744,14 @@ pub async fn eval_test_case_async(
 
         let mut env = Env::new();
 
-        // If mocks are provided, use a mock handle (mocks checked first, unmatched
-        // ops fall through to the real IO sender). Otherwise use the real sender.
-        if mocks.is_empty() {
-            let handle = crate::coroutine::CoroutineHandle::new(io_sender);
-            env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+        // Create handle: mocks are checked first, unmatched ops fall through
+        // to real IO via the sender.
+        let handle = if mocks.is_empty() {
+            crate::coroutine::CoroutineHandle::new(io_sender)
         } else {
-            let handle = crate::coroutine::CoroutineHandle::new_mock(mocks);
-            env.set("__coroutine_handle", Value::CoroutineHandle(handle));
-        }
+            crate::coroutine::CoroutineHandle::new_mock_with_sender(mocks, io_sender)
+        };
+        env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
         bind_input_to_params(&program, func, &input, &mut env);
 
@@ -2318,30 +2395,26 @@ mod tests {
     }
 
     #[test]
-    fn test_async_function_without_mock_gets_handle() {
-        // An async function tested without mocks should still get a coroutine
-        // handle and fail with "no mock" rather than "requires async context"
+    fn test_async_function_without_mock_runs_real_io() {
+        // An async function tested without mocks should spin up a temporary
+        // coroutine runtime and execute IO operations for real.
         let source = "\
-+fn fetch_data (url:String)->String [async]
-  +await resp:String = http_get(url)
-  +return resp
++fn delayed_value ()->String [async]
+  +await _:String = sleep(1)
+  +return \"done\"
 ";
         let program = build_program(source);
 
         let test_source = "\
-!test fetch_data
-  +with url=\"https://example.com\" -> expect \"hello\"
+!test delayed_value
+  +with -> expect \"done\"
 ";
         let cases = extract_test_cases(test_source);
         let (fn_name, case) = &cases[0];
 
+        // No mocks — should execute sleep(1ms) for real and return "done"
         let result = eval_test_case(&program, fn_name, case);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("no mock"),
-            "expected 'no mock' error, got: {err}"
-        );
+        assert!(result.is_ok(), "async test without mocks should run real IO: {:?}", result);
     }
 
     #[test]
