@@ -2036,6 +2036,13 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     payload: vec![],
                 });
             }
+            // Check if this is a zero-arg user function (e.g. initial_context_state)
+            if let Some(func) = program.get_function(name) {
+                if func.params.is_empty() {
+                    let mut env = Env::new();
+                    return eval_function_body(program, &func.body, &mut env);
+                }
+            }
             // Fall through to standalone handling
             eval_parser_expr_standalone(expr)
         }
@@ -2066,6 +2073,48 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             }
             // Fall through to standalone (handles union constructors, Ok, Err)
             eval_parser_expr_standalone(expr)
+        }
+        // StructLiteral needs program access so field values can call user functions
+        parser::Expr::StructLiteral(fields) => {
+            let mut field_map = HashMap::new();
+            for f in fields {
+                let val = eval_parser_expr_with_program(&f.value, program)?;
+                field_map.insert(f.name.clone(), val);
+            }
+            Ok(Value::Struct(String::new(), field_map))
+        }
+        // Unary expressions need program access for their inner expression
+        parser::Expr::Unary { op, expr: inner } => {
+            let val = eval_parser_expr_with_program(inner, program)?;
+            match op {
+                parser::UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
+                parser::UnaryOp::Neg => match val {
+                    Value::Int(n) => Ok(Value::Int(-n)),
+                    Value::Float(n) => Ok(Value::Float(-n)),
+                    _ => bail!("cannot negate {val}"),
+                },
+            }
+        }
+        // Binary expressions need program access for both sides
+        parser::Expr::Binary { left, op, right } => {
+            let l = eval_parser_expr_with_program(left, program)?;
+            let r = eval_parser_expr_with_program(right, program)?;
+            let ast_op = match op {
+                parser::BinaryOp::Add => ast::BinaryOp::Add,
+                parser::BinaryOp::Sub => ast::BinaryOp::Sub,
+                parser::BinaryOp::Mul => ast::BinaryOp::Mul,
+                parser::BinaryOp::Div => ast::BinaryOp::Div,
+                parser::BinaryOp::Mod => ast::BinaryOp::Mod,
+                parser::BinaryOp::Eq => ast::BinaryOp::Equal,
+                parser::BinaryOp::Neq => ast::BinaryOp::NotEqual,
+                parser::BinaryOp::Gt => ast::BinaryOp::GreaterThan,
+                parser::BinaryOp::Lt => ast::BinaryOp::LessThan,
+                parser::BinaryOp::Gte => ast::BinaryOp::GreaterThanOrEqual,
+                parser::BinaryOp::Lte => ast::BinaryOp::LessThanOrEqual,
+                parser::BinaryOp::And => ast::BinaryOp::And,
+                parser::BinaryOp::Or => ast::BinaryOp::Or,
+            };
+            eval_binary_op(&l, &ast_op, &r)
         }
         // Everything else delegates to standalone
         _ => eval_parser_expr_standalone(expr),
@@ -3071,5 +3120,105 @@ mod tests {
         let results = session.apply_async(test_source, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].1, "mocked LLM UTF-8 test should pass: {:?}", results[0]);
+    }
+
+    // ── Pure function calls in test parameters ────────────────────────
+
+    #[test]
+    fn test_zero_arg_function_as_test_param_value() {
+        // A function call with () used as a test parameter value
+        // should call the function and use its return value
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_default ()->Config
+  +let c:Config = {host: \"localhost\", port: 8080}
+  +return c
+
++fn get_host (c:Config)->String
+  +return c.host
+
+!test get_host
+  +with c=make_default() -> expect \"localhost\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "zero-arg function call as param value should work: {:?}", result);
+        assert!(result.unwrap().contains("expected \"localhost\""));
+    }
+
+    #[test]
+    fn test_bare_function_name_as_test_param_value() {
+        // A bare function name (no parens) for a zero-arg function should
+        // be called, not turned into Err("make_default")
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_default ()->Config
+  +let c:Config = {host: \"localhost\", port: 8080}
+  +return c
+
++fn get_host (c:Config)->String
+  +return c.host
+
+!test get_host
+  +with c=make_default -> expect \"localhost\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "bare function name as param value should call function: {:?}", result);
+        assert!(result.unwrap().contains("expected \"localhost\""));
+    }
+
+    #[test]
+    fn test_function_call_with_args_in_test_param() {
+        // A function call with arguments in a test parameter should work
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_config (h:String, p:Int)->Config
+  +let c:Config = {host: h, port: p}
+  +return c
+
++fn get_port (c:Config)->Int
+  +return c.port
+
+!test get_port
+  +with c=make_config(\"example.com\", 3000) -> expect 3000
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "function call with args as param value: {:?}", result);
+        assert!(result.unwrap().contains("expected 3000"));
+    }
+
+    #[test]
+    fn test_function_call_in_expected_value() {
+        // Function calls should also work on the expected side of ->
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_default ()->Config
+  +let c:Config = {host: \"localhost\", port: 8080}
+  +return c
+
++fn identity (c:Config)->Config
+  +return c
+
+!test identity
+  +with c=make_default() -> expect make_default()
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "function call in expected value: {:?}", result);
+        assert!(result.unwrap().contains("expected"));
     }
 }
