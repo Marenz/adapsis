@@ -2005,14 +2005,14 @@ pub async fn ask_stream(
 
                                         let stdout = child.stdout.take().unwrap();
                                         let mut reader = BufReader::new(stdout).lines();
-                                        let idle_timeout = std::time::Duration::from_secs(120);
+                                        let idle_timeout = std::time::Duration::from_secs(300);
                                         loop {
                                             let line = match tokio::time::timeout(idle_timeout, reader.next_line()).await {
                                                 Ok(Ok(Some(line))) => line,
                                                 Ok(Ok(None)) => break, // EOF
                                                 Ok(Err(e)) => { eprintln!("[opencode] read error: {e}"); break; }
                                                 Err(_) => {
-                                                    eprintln!("[opencode] idle timeout (2 min no output), killing");
+                                                    eprintln!("[opencode] idle timeout (5 min no output), killing");
                                                     let _ = child.kill().await;
                                                     break;
                                                 }
