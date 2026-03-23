@@ -5,11 +5,25 @@ use std::fmt;
 pub type NodeId = String;
 pub type Identifier = String;
 
+/// A registered HTTP route that dispatches to an Adapsis function.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HttpRoute {
+    /// HTTP method (e.g. "POST", "GET")
+    pub method: String,
+    /// URL path (e.g. "/webhook/telegram")
+    pub path: String,
+    /// Name of the Adapsis function to call (receives body:String, returns String)
+    pub handler_fn: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Program {
     pub modules: Vec<Module>,
     pub functions: Vec<FunctionDecl>,
     pub types: Vec<TypeDecl>,
+    /// Registered HTTP routes — dispatched by the Axum server at runtime.
+    #[serde(default)]
+    pub http_routes: Vec<HttpRoute>,
     /// Maps function name → index in `functions` Vec. Derived index, not serialized.
     #[serde(skip)]
     fn_index: HashMap<String, usize>,
@@ -23,6 +37,7 @@ impl PartialEq for Program {
         self.modules == other.modules
             && self.functions == other.functions
             && self.types == other.types
+            && self.http_routes == other.http_routes
     }
 }
 
@@ -76,10 +91,11 @@ impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "Program: {} module(s), {} standalone function(s), {} standalone type(s)",
+            "Program: {} module(s), {} standalone function(s), {} standalone type(s), {} route(s)",
             self.modules.len(),
             self.functions.len(),
-            self.types.len()
+            self.types.len(),
+            self.http_routes.len()
         )?;
 
         for module in &self.modules {
@@ -98,6 +114,14 @@ impl fmt::Display for Program {
 
         for type_decl in &self.types {
             writeln!(f, "- type {}", type_decl.name())?;
+        }
+
+        for route in &self.http_routes {
+            writeln!(
+                f,
+                "- route {} {} -> {}",
+                route.method, route.path, route.handler_fn
+            )?;
         }
 
         Ok(())
