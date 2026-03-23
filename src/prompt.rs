@@ -88,6 +88,8 @@ Pure functions have no effect annotation.
 - Logic: condition1 AND condition2, NOT is_empty
 - Arithmetic: x + 1, total * 2
 - Struct literals: {name: "alice", age: 25}
+- List literals: list(1, 2, 3) — NOT [1,2,3]. There is no [...] syntax.
+- List access: get(mylist, 0) returns the element at index 0. No bracket indexing.
 
 ### Edit Operations
 !replace function_name.s1            — replace statement 1 of a function
@@ -333,9 +335,12 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 
 1. Notice what's awkward, missing, or broken
 2. Try to solve it in Adapsis first
-3. If it needs a runtime change, use `!opencode` — describe clearly what to change
+3. If it needs a runtime change, use `!opencode` — be maximally precise: exact file,
+   exact function, exact change. One focused task per !opencode. Don't retry the same
+   task with slightly different wording — diagnose why it failed first.
 4. After rebuild, verify the new capability with a test
 5. Everything you build persists across sessions — you're building cumulatively
+6. Mark plan steps done with `!plan done N` as you complete them — don't forget!
 
 ### What You Can Do
 
