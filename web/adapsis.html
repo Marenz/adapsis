@@ -247,115 +247,16 @@ async function sendMessage() {
     let currentMsg = null;
 
     try {
-      const response = await fetch('/api/ask-stream', {
+      const response = await fetch('/api/inject', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({message: text}),
       });
-
-      const reader = response.body.getReader();
-      activeReader = reader;
-      document.getElementById('stop-btn').style.display = 'block';
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const {done, value} = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, {stream: true});
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.substring(6);
-          if (!data) continue;
-
-          let event;
-          try { event = JSON.parse(data); } catch { continue; }
-
-          switch (event.type) {
-            case 'iteration':
-              if (event.n > 1) {
-                addMessage('system', `⟳ Iteration ${event.n}`);
-              }
-              currentMsg = addMessage('ai', '');
-              break;
-            case 'thinking':
-              if (currentMsg) {
-                const wrapper = document.createElement('div');
-                const toggle = document.createElement('span');
-                toggle.className = 'thinking-toggle';
-                toggle.textContent = '▶ thinking...';
-                const content = document.createElement('div');
-                content.className = 'thinking-content thinking';
-                content.textContent = event.text;
-                toggle.onclick = () => {
-                  content.classList.toggle('open');
-                  toggle.textContent = content.classList.contains('open') ? '▼ thinking' : '▶ thinking...';
-                };
-                wrapper.appendChild(toggle);
-                wrapper.appendChild(content);
-                currentMsg.querySelector('.msg-body').appendChild(wrapper);
-              }
-              break;
-            case 'text':
-              if (currentMsg) {
-                const el = document.createElement('div');
-                el.textContent = event.text;
-                currentMsg.querySelector('.msg-body').appendChild(el);
-              }
-              break;
-            case 'code':
-              if (currentMsg) addCodeBlock(currentMsg, event.code);
-              break;
-            case 'result':
-              if (currentMsg) addResult(currentMsg, (event.success ? 'OK: ' : 'ERROR: ') + event.message, event.success ? 'ok' : 'error');
-              break;
-            case 'test':
-              if (currentMsg) addResult(currentMsg, (event.pass ? 'PASS: ' : 'FAIL: ') + event.message, event.pass ? 'pass' : 'fail');
-              break;
-            case 'eval':
-              if (currentMsg) {
-                const evalOk = event.success !== false;
-                addResult(currentMsg, `${evalOk ? '=' : 'ERROR:'} ${event.function ? event.function + '() ' : ''}${event.result}`, evalOk ? 'ok' : 'error');
-              }
-              break;
-            case 'query':
-              if (currentMsg) {
-                const qEl = document.createElement('div');
-                qEl.style.cssText = 'background:var(--surface2);border-radius:4px;padding:6px 8px;margin:4px 0;font-size:11px;color:var(--text-dim);white-space:pre-wrap;';
-                qEl.textContent = `${event.query}:\n${event.response}`;
-                currentMsg.querySelector('.msg-body').appendChild(qEl);
-              }
-              break;
-            case 'plan':
-              renderPlan(event.plan);
-              break;
-            case 'feedback':
-              addMessage('system', event.message);
-              refreshProgram();
-              break;
-            case 'error':
-              addMessage('system', 'Error: ' + event.message);
-              break;
-            case 'done':
-              addMessage('system', '✓ Done');
-              break;
-          }
-
-          chatEl.scrollTop = chatEl.scrollHeight;
-        }
-      }
+      const result = await response.json();
+      addMessage('system', 'Message queued — results will appear via broadcast.');
     } catch (e) {
-      if (e.name !== 'AbortError') {
-        addMessage('system', 'Connection error: ' + e.message);
-      }
+      addMessage('system', 'Failed to send: ' + e.message);
     }
-
-    activeReader = null;
-    document.getElementById('stop-btn').style.display = 'none';
     await refreshProgram();
   }
 
