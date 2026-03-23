@@ -1984,6 +1984,7 @@ pub async fn ask_stream(
 
                                 let recent_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
                                 let recent_for_stream = recent_lines.clone();
+                                let full_task = format!("{task}. When done: 1) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 2) Register new builtins in src/builtins.rs. 3) Create clean atomic git commits with descriptive messages for each logical change.");
                                 let oc_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(3600),
                                     async {
@@ -1991,16 +1992,15 @@ pub async fn ask_stream(
                                         cmd.arg("run").arg("--format").arg("json")
                                             .arg("--attach").arg("http://localhost:4096")
                                             .arg("--dir").arg(&work_dir);
-                                        // Continue existing session if we have one
                                         if let Some(sid) = &oc_session_id {
-                                            cmd.arg("--session").arg(sid);
+                                            cmd.arg("--session").arg(sid).arg("--fork");
                                         }
-                                        let full_task = format!("{task}. When done: 1) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 2) Register new builtins in src/builtins.rs. 3) Create clean atomic git commits with descriptive messages for each logical change.");
                                         cmd.arg(&full_task);
                                         let mut child = cmd
                                             .current_dir(&work_dir)
                                             .stdout(std::process::Stdio::piped())
                                             .stderr(std::process::Stdio::piped())
+                                            .process_group(0) // Create new process group so we can kill all children
                                             .spawn()?;
 
                                         let stdout = child.stdout.take().unwrap();
@@ -2013,6 +2013,10 @@ pub async fn ask_stream(
                                                 Ok(Err(e)) => { eprintln!("[opencode] read error: {e}"); break; }
                                                 Err(_) => {
                                                     eprintln!("[opencode] idle timeout (5 min no output), killing");
+                                                    // Kill entire process group to clean up opencode subprocesses
+                                                    if let Some(pid) = child.id() {
+                                                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                                                    }
                                                     let _ = child.kill().await;
                                                     break;
                                                 }
@@ -2065,6 +2069,93 @@ pub async fn ask_stream(
                                         child.wait().await
                                     }
                                 ).await;
+
+                                // Detect stale session: exit 0 but zero output means --session/--fork silently failed.
+                                // Retry without session reuse.
+                                let got_output = !recent_lines.lock().unwrap().is_empty();
+                                if !got_output && oc_session_id.is_some() {
+                                    if let Ok(Ok(status)) = &oc_result {
+                                        if status.success() {
+                                            eprintln!("[opencode] stale session (exit 0, no output), retrying fresh");
+                                            log_activity(&config_clone.log_file, "opencode-retry", "stale session, retrying without --fork").await;
+                                            let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode session stale, retrying fresh...", "success": true})).await;
+                                            // Clear session ID
+                                            {
+                                                let mut s = config_clone.session.lock().await;
+                                                s.opencode_session_id = None;
+                                            }
+                                            // Retry without --session/--fork
+                                            let recent_for_retry = recent_lines.clone();
+                                            let retry_result = tokio::time::timeout(
+                                                std::time::Duration::from_secs(3600),
+                                                async {
+                                                    let mut cmd2 = tokio::process::Command::new("opencode");
+                                                    cmd2.arg("run").arg("--format").arg("json")
+                                                        .arg("--attach").arg("http://localhost:4096")
+                                                        .arg("--dir").arg(&work_dir)
+                                                        .arg(&full_task);
+                                                    let mut child2 = cmd2
+                                                        .current_dir(&work_dir)
+                                                        .stdout(std::process::Stdio::piped())
+                                                        .stderr(std::process::Stdio::piped())
+                                                        .process_group(0)
+                                                        .spawn()?;
+                                                    let stdout2 = child2.stdout.take().unwrap();
+                                                    let mut reader2 = BufReader::new(stdout2).lines();
+                                                    let idle_timeout = std::time::Duration::from_secs(300);
+                                                    loop {
+                                                        let line = match tokio::time::timeout(idle_timeout, reader2.next_line()).await {
+                                                            Ok(Ok(Some(line))) => line,
+                                                            Ok(Ok(None)) => break,
+                                                            Ok(Err(_)) => break,
+                                                            Err(_) => {
+                                                                if let Some(pid) = child2.id() {
+                                                                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                                                                }
+                                                                let _ = child2.kill().await;
+                                                                break;
+                                                            }
+                                                        };
+                                                        {
+                                                            let mut rl = recent_for_retry.lock().unwrap();
+                                                            rl.push(line.clone());
+                                                            if rl.len() > 20 { rl.remove(0); }
+                                                        }
+                                                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                                                            // Capture new session ID
+                                                            if let Some(sid) = event.get("sessionID").and_then(|s| s.as_str()) {
+                                                                let mut s = config_clone.session.lock().await;
+                                                                if s.opencode_session_id.is_none() {
+                                                                    s.opencode_session_id = Some(sid.to_string());
+                                                                }
+                                                            }
+                                                            let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                                            if event_type == "text" {
+                                                                if let Some(text) = event.get("part").and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                                                                    let preview: String = text.chars().take(200).collect();
+                                                                    eprintln!("[opencode:text] {preview}");
+                                                                    log_activity(&config_clone.log_file, "opencode-text", text).await;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    child2.wait().await
+                                                }
+                                            ).await;
+                                            // Use retry result
+                                            match retry_result {
+                                                Ok(Ok(s)) if s.success() => {} // fall through to success handling
+                                                _ => {
+                                                    has_errors = true;
+                                                    let ctx = recent_lines.lock().unwrap().join("\n");
+                                                    feedback_details.push(format!("ERROR: OpenCode retry failed\n{ctx}"));
+                                                    session = config_clone.session.lock().await;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
 
                                 match oc_result {
                                     Ok(Ok(status)) if status.success() => {
