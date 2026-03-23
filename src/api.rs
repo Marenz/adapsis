@@ -51,6 +51,8 @@ pub struct AppConfig {
     pub opencode_git_dir: String,
     /// Sequential lock for !opencode — only one at a time
     pub opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Message queue for injecting messages into the autonomous loop
+    pub message_queue: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     /// Maximum iterations per AI request
     pub max_iterations: usize,
     /// JSONL training data log — one entry per iteration with input/output/outcome
@@ -2545,6 +2547,8 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/query", post(query))
         .route("/api/ask", post(ask))
         .route("/api/ask-stream", post(ask_stream))
+        .route("/api/inject", post(inject_message))
+        .route("/api/drain-queue", post(drain_queue))
         .route("/api/opencode", post(opencode_task))
         .route("/api/tasks", get(tasks))
         .route("/api/log", get(get_log))
@@ -2666,6 +2670,25 @@ async fn adapsis_route_dispatch(
 }
 
 /// GET /api/events — SSE stream of all AI activity (subscribe from web UI).
+/// POST /api/inject — queue a message for the autonomous loop (no parallel stream)
+async fn inject_message(
+    State(config): State<AppConfig>,
+    Json(req): Json<AskRequest>,
+) -> Json<serde_json::Value> {
+    config.message_queue.lock().await.push(req.message.clone());
+    eprintln!("[inject] queued: {}...", req.message.chars().take(80).collect::<String>());
+    Json(serde_json::json!({"status": "queued", "message": req.message}))
+}
+
+/// POST /api/drain-queue — drain queued messages (called by autonomous loop)
+async fn drain_queue(
+    State(config): State<AppConfig>,
+) -> Json<serde_json::Value> {
+    let mut queue = config.message_queue.lock().await;
+    let messages: Vec<String> = queue.drain(..).collect();
+    Json(serde_json::json!({"messages": messages}))
+}
+
 async fn events_stream(
     State(config): State<AppConfig>,
 ) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {

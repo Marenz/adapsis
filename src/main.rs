@@ -854,6 +854,7 @@ async fn main() -> Result<()> {
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
                 max_iterations,
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
             };
 
@@ -1024,38 +1025,58 @@ async fn main() -> Result<()> {
                             is_first = false;
                             goal_message.clone()
                         } else {
-                            // Check session state to give the right nudge
-                            let status = match client.get(format!("http://127.0.0.1:{auto_port}/api/status"))
+                            // Check for injected messages first
+                            let injected = match client.post(format!("http://127.0.0.1:{auto_port}/api/drain-queue"))
                                 .send().await {
-                                    Ok(r) => r.json::<serde_json::Value>().await.ok(),
+                                    Ok(r) => r.json::<serde_json::Value>().await.ok()
+                                        .and_then(|q| q.get("messages").cloned())
+                                        .and_then(|m| m.as_array().cloned())
+                                        .and_then(|arr| {
+                                            let non_empty: Vec<String> = arr.iter()
+                                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                                .filter(|s| !s.is_empty())
+                                                .collect();
+                                            if non_empty.is_empty() { None } else { Some(non_empty.join("\n\n")) }
+                                        }),
                                     Err(_) => None,
                                 };
 
-                            if let Some(ref status) = status {
-                                let plan = status.get("plan").and_then(|p| p.as_array());
-                                let has_pending_plan = plan.map(|p| p.iter().any(|s| {
-                                    let st = s.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                                    st == "pending" || st == "in_progress"
-                                })).unwrap_or(false);
-
-                                // Check roadmap for undone items
-                                let roadmap = status.get("roadmap").and_then(|r| r.as_array());
-                                let has_undone_roadmap = roadmap.map(|r| r.iter().any(|item| {
-                                    item.get("done").and_then(|d| d.as_bool()) == Some(false)
-                                })).unwrap_or(false);
-
-                                if has_pending_plan {
-                                    "You hit the iteration limit but your plan has unfinished steps. Continue working on the current plan.".to_string()
-                                } else if has_undone_roadmap {
-                                    "Plan completed. Use !roadmap done N to mark the current roadmap item done, then check !roadmap for the next undone item. Create a new !plan and start working on it.".to_string()
-                                } else {
-                                    // Nothing left — idle
-                                    eprintln!("[autonomous] all roadmap items done, idling...");
-                                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                                    continue;
-                                }
+                            if let Some(injected_msg) = injected {
+                                eprintln!("[autonomous] processing injected: {}...", injected_msg.chars().take(80).collect::<String>());
+                                injected_msg
                             } else {
-                                "Continue working. Check !roadmap and !plan for current state.".to_string()
+                                // Check session state to give the right nudge
+                                let status = match client.get(format!("http://127.0.0.1:{auto_port}/api/status"))
+                                    .send().await {
+                                        Ok(r) => r.json::<serde_json::Value>().await.ok(),
+                                        Err(_) => None,
+                                    };
+
+                                if let Some(ref status) = status {
+                                    let plan = status.get("plan").and_then(|p| p.as_array());
+                                    let has_pending_plan = plan.map(|p| p.iter().any(|s| {
+                                        let st = s.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                                        st == "pending" || st == "in_progress"
+                                    })).unwrap_or(false);
+
+                                    let roadmap = status.get("roadmap").and_then(|r| r.as_array());
+                                    let has_undone_roadmap = roadmap.map(|r| r.iter().any(|item| {
+                                        item.get("done").and_then(|d| d.as_bool()) == Some(false)
+                                    })).unwrap_or(false);
+
+                                    if has_pending_plan {
+                                        "You hit the iteration limit but your plan has unfinished steps. Continue working on the current plan.".to_string()
+                                    } else if has_undone_roadmap {
+                                        "Plan completed. Use !roadmap done N to mark the current roadmap item done, then check !roadmap for the next undone item. Create a new !plan and start working on it.".to_string()
+                                    } else {
+                                        // Nothing left — idle, but check queue periodically
+                                        eprintln!("[autonomous] all roadmap items done, idling...");
+                                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                        continue;
+                                    }
+                                } else {
+                                    "Continue working. Check !roadmap and !plan for current state.".to_string()
+                                }
                             }
                         };
                         eprintln!("[autonomous] sending: {}...", msg.chars().take(80).collect::<String>());
