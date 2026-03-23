@@ -518,7 +518,7 @@ pub static QUERIES: &[QueryCommand] = &[
     QueryCommand {
         name: "?library",
         args: "",
-        description: "show persistent module library status (auto-loaded modules, files on disk)",
+        description: "show persistent module library: dir path, loaded modules, files on disk, load/save errors",
     },
 ];
 

@@ -432,7 +432,8 @@ This library is shared across all git worktrees and sessions.
   reconstructed source is atomically written to `~/.config/adapsis/modules/<Name>.ax`.
 - On startup, all `.ax` files from the library directory are auto-loaded in sorted
   filename order, before the session begins. This means modules survive restarts.
-- Use `?library` to see which modules were auto-loaded and what's on disk.
+- Use `?library` to see which modules were auto-loaded, files on disk, and any
+  load/save errors this session.
 - The library only contains module definitions (types, functions). Transient data
   like tests, mocks, plans, and evals are NOT persisted to the library.
 - This works across git worktrees because the path is `~/.config/adapsis/modules/`,

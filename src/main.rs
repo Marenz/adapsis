@@ -700,14 +700,13 @@ async fn main() -> Result<()> {
             sess.program.require_modules = true;
 
             // Auto-load persistent module library (~/.config/adapsis/modules/)
-            let library_modules = library::load_module_library(&mut sess.program);
-            if !library_modules.is_empty() {
+            let lib_state = library::load_module_library(&mut sess.program);
+            if !lib_state.loaded_modules.is_empty() {
                 sess.program.rebuild_function_index();
             }
+            sess.library_state = Some(lib_state);
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
-            // Store library module names for ?library query
-            let library_module_names = std::sync::Arc::new(library_modules);
 
             // Set up coroutine runtime for async IO
             let (mut runtime, mut io_rx) = coroutine::Runtime::new();
@@ -842,7 +841,6 @@ async fn main() -> Result<()> {
                 max_iterations,
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
-                library_module_names: library_module_names.clone(),
             };
 
             let app = axum::Router::new()
