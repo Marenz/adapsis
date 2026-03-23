@@ -405,6 +405,27 @@ For nested structs:
 !test MyModule.get_name
   +with user={name: "bob", address: {city: "Berlin"}} -> expect "bob"
 
+### Function calls in test values
+
+Test parameter values can call user-defined functions to construct complex inputs.
+Both `func_name()` (with parens) and bare `func_name` (zero-arg only) work:
+
+!test process
+  +with ctx=make_default_context() -> expect "ok"
+
+!test process
+  +with ctx=make_default_context -> expect "ok"
+
+Functions with arguments also work:
+
+!test process
+  +with ctx=make_context("prod", 8080) -> expect "ok"
+
+Function calls also work on the expected side:
+
+!test identity
+  +with c=make_default() -> expect make_default()
+
 ### Testing async functions
 
 Use `!mock` to register fake IO responses, then `!test` works with async functions:
