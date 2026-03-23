@@ -984,42 +984,54 @@ async fn main() -> Result<()> {
                 eprintln!("[autonomous] injecting goal: {}...", goal_message.chars().take(100).collect::<String>());
                 let auto_port = port;
                 tokio::spawn(async move {
-                    // Wait for the server to be ready
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     let client = reqwest::Client::new();
-                    match client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
-                        .json(&serde_json::json!({"message": goal_message}))
-                        .send().await
-                    {
-                        Ok(resp) => {
-                            // Stream the response to log it
-                            use futures::StreamExt;
-                            let mut stream = resp.bytes_stream();
-                            let mut raw_buf: Vec<u8> = Vec::new();
-                            while let Some(chunk) = stream.next().await {
-                                if let Ok(bytes) = chunk {
-                                    raw_buf.extend_from_slice(&bytes);
-                                    let valid_up_to = match std::str::from_utf8(&raw_buf) {
-                                        Ok(_) => raw_buf.len(),
-                                        Err(e) => e.valid_up_to(),
-                                    };
-                                    if valid_up_to == 0 { continue; }
-                                    let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
-                                    // SSE events are logged via the handler, just consume them
-                                    for line in text.lines() {
-                                        if let Some(data) = line.strip_prefix("data: ") {
-                                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                                if event.get("type").and_then(|t| t.as_str()) == Some("end") {
-                                                    eprintln!("[autonomous] first goal iteration complete");
+                    let mut is_first = true;
+                    loop {
+                        let msg = if is_first {
+                            is_first = false;
+                            goal_message.clone()
+                        } else {
+                            "Previous task completed or hit iteration limit. Check ?symbols and ?tasks for current state. Review the roadmap or plan and continue with the next item. If everything is done, create a new plan for the next priority.".to_string()
+                        };
+                        eprintln!("[autonomous] sending: {}...", msg.chars().take(80).collect::<String>());
+                        match client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
+                            .json(&serde_json::json!({"message": msg}))
+                            .send().await
+                        {
+                            Ok(resp) => {
+                                use futures::StreamExt;
+                                let mut stream = resp.bytes_stream();
+                                let mut raw_buf: Vec<u8> = Vec::new();
+                                while let Some(chunk) = stream.next().await {
+                                    if let Ok(bytes) = chunk {
+                                        raw_buf.extend_from_slice(&bytes);
+                                        let valid_up_to = match std::str::from_utf8(&raw_buf) {
+                                            Ok(_) => raw_buf.len(),
+                                            Err(e) => e.valid_up_to(),
+                                        };
+                                        if valid_up_to == 0 { continue; }
+                                        let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
+                                        for line in text.lines() {
+                                            if let Some(data) = line.strip_prefix("data: ") {
+                                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                                    if event.get("type").and_then(|t| t.as_str()) == Some("end") {
+                                                        eprintln!("[autonomous] iteration complete, continuing...");
+                                                    }
                                                 }
                                             }
                                         }
+                                        raw_buf.drain(..valid_up_to);
                                     }
-                                    raw_buf.drain(..valid_up_to);
                                 }
                             }
+                            Err(e) => {
+                                eprintln!("[autonomous] request failed: {e}, retrying in 10s");
+                                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            }
                         }
-                        Err(e) => eprintln!("[autonomous] failed to inject goal: {e}"),
+                        // Brief pause between autonomous rounds
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 });
                 } // else (fresh session)
