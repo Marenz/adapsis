@@ -980,18 +980,10 @@ async fn main() -> Result<()> {
             // Skip if session already has chat history (e.g. after !opencode restart)
             let session_has_history = shared_session.lock().await.chat_messages.len() > 1;
             if let Some(goal) = autonomous {
-                if session_has_history {
-                    eprintln!("[autonomous] session has history, injecting continue message instead of full goal");
-                    let auto_port = port;
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        let client = reqwest::Client::new();
-                        let _ = client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
-                            .json(&serde_json::json!({"message": "AdapsisOS was restarted after an !opencode change. The runtime has been updated. Continue where you left off — check ?symbols and ?tasks, then keep working on your plan."}))
-                            .send().await;
-                    });
-                } else {
-                let goal_message = if goal == "roadmap" {
+                let goal_message = if session_has_history {
+                    eprintln!("[autonomous] session has history, using continue message");
+                    "AdapsisOS was restarted. Continue where you left off — check !roadmap and ?symbols, then keep working.".to_string()
+                } else if goal == "roadmap" {
                     // Read the current priority from ROADMAP.md
                     let roadmap_path = format!("{}/ROADMAP.md", project_dir);
                     match std::fs::read_to_string(&roadmap_path) {
@@ -1102,6 +1094,7 @@ async fn main() -> Result<()> {
                                             if let Some(data) = line.strip_prefix("data: ") {
                                                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                                                     let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                                    eprintln!("[autonomous] SSE event: {etype}");
                                                     if etype == "end" || etype == "done" {
                                                         eprintln!("[autonomous] SSE {etype} received, ending request...");
                                                         got_end = true;
@@ -1123,7 +1116,6 @@ async fn main() -> Result<()> {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 });
-                } // else (fresh session)
             }
 
             // Telegram bot (long-polling, runs alongside the HTTP server)
