@@ -119,15 +119,13 @@ pub fn build_symbol_table(program: &Program) -> SymbolTable {
                 return_type: func.return_type.clone(),
                 effects: func.effects.clone(),
             };
-            // Register with module-qualified name (canonical)
+            // Register with module-qualified name (canonical for external queries)
             table
                 .functions
                 .insert(format!("{}.{}", module.name, func.name), sig.clone());
-            // Also register with unqualified name for intra-module resolution
-            // (only if not already taken by a top-level function)
-            if !table.functions.contains_key(&func.name) {
-                table.functions.insert(func.name.clone(), sig);
-            }
+            // Also register bare name for internal type-checking resolution.
+            // query_symbols() filters these out of display output.
+            table.functions.entry(func.name.clone()).or_insert(sig);
         }
     }
 
@@ -960,8 +958,8 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
         "?routes" => query_routes(program),
         // ?tasks is handled at the API level (needs runtime access, not just program)
         "?tasks" => "tasks query requires runtime context".to_string(),
-        // ?library is handled at the API level (needs library_module_names)
-        "?library" => "library query requires runtime context".to_string(),
+        // ?library works from any query path — reads disk state directly
+        "?library" => crate::library::query_library(program, None),
         _ => format!("unknown query: {}", parts[0]),
     }
 }
