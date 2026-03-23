@@ -2144,13 +2144,37 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
     let input = input.trim_start();
 
     if input.starts_with('"') {
-        // Quoted string — find closing quote
-        let end = input[1..]
-            .find('"')
+        // Quoted string — scan for unescaped closing quote, handling backslash escapes
+        let mut value = String::new();
+        let mut chars = input[1..].char_indices();
+        let mut end_offset = None; // offset into input (past the closing quote)
+        while let Some((i, ch)) = chars.next() {
+            match ch {
+                '"' => {
+                    end_offset = Some(1 + i + 1); // 1 for opening quote + i + 1 past closing quote
+                    break;
+                }
+                '\\' => {
+                    if let Some((_, escaped)) = chars.next() {
+                        value.push(match escaped {
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            '\\' => '\\',
+                            '"' => '"',
+                            other => other,
+                        });
+                    } else {
+                        bail!("line {}: unfinished escape in test value string", line);
+                    }
+                }
+                other => value.push(other),
+            }
+        }
+        let end_offset = end_offset
             .ok_or_else(|| anyhow!("line {}: unterminated string in test value", line))?;
-        let s = &input[1..end + 1];
-        let rest = &input[end + 2..];
-        Ok((Expr::String(s.to_string()), rest))
+        let rest = &input[end_offset..];
+        Ok((Expr::String(value), rest))
     } else if input.starts_with('{') {
         // Nested struct literal — find matching brace
         let mut depth = 0;
