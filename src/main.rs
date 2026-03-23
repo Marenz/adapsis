@@ -428,8 +428,14 @@ async fn main() -> Result<()> {
                         }
                     }
                     parser::Operation::Query(query) => {
-                        let table = typeck::build_symbol_table(&program);
-                        let response = typeck::handle_query(&program, &table, query);
+                        let response = if query.trim() == "?tasks" {
+                            api::format_tasks(&None)
+                        } else if let Some(tid) = api::parse_inspect_task_query(query.trim()) {
+                            api::format_inspect_task(&None, &None, tid)
+                        } else {
+                            let table = typeck::build_symbol_table(&program);
+                            typeck::handle_query(&program, &table, query)
+                        };
                         println!("\n--- Query: {query} ---\n{response}");
                     }
                     _ => match validator::apply_and_validate(&mut program, op) {
