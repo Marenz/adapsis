@@ -469,9 +469,18 @@ impl CoroutineHandle {
     }
 
     /// Create a mock handle for testing — no real IO, returns mock responses.
+    /// Unmatched operations error with "no mock for..." since there's no real
+    /// IO sender to fall through to.
+    #[allow(dead_code)]
     pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
         let (tx, _) = mpsc::channel(1); // dummy channel, never used
         Self { io_tx: tx, task_id: None, task_registry: None, mocks: Some(mocks) }
+    }
+
+    /// Create a handle with mocks AND a real IO sender — mocks are checked first,
+    /// unmatched operations fall through to real IO via the sender.
+    pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
+        Self { io_tx, task_id: None, task_registry: None, mocks: Some(mocks) }
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
