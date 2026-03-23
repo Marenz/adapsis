@@ -387,7 +387,7 @@ something that could be better, improve yourself.
   Add tests with mocks
   Verify end-to-end
   Steps are auto-numbered. Do NOT number them yourself.
-- Keep working step by step until the task is FULLY done, then respond with DONE.
+- Keep working step by step until the task is FULLY done, then respond with !done.
 - If you need to ask the user a question, respond with text only (no <code> block).
 - For IO builtins, write a minimal [io,async] function and `!eval` it.
 - You can use `shell_exec` to run system commands for testing (e.g. calling

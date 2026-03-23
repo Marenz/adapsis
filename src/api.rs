@@ -853,9 +853,9 @@ pub async fn ask(
             eprintln!("[web:think] {}...", output.thinking.chars().take(100).collect::<String>());
         }
 
-        // Check for DONE or no code (AI is asking a question / responding with text)
-        if code.trim() == "DONE" {
-            eprintln!("[web:done] model said DONE at iteration {}", iteration + 1);
+        // Check for !done or no code (AI is asking a question / responding with text)
+        if code.trim() == "!done" {
+            eprintln!("[web:done] model said !done at iteration {}", iteration + 1);
             break;
         }
         if code.is_empty() {
@@ -1179,7 +1179,7 @@ pub async fn ask(
                                         "SCOPE: full. You can modify anything.".to_string(),
                                 };
                                 let agent_system = format!(
-                                    "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Adapsis code. When done, respond with DONE in a <code> block.",
+                                    "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Adapsis code. When done, respond with !done in a <code> block.",
                                     crate::prompt::system_prompt(),
                                     crate::builtins::format_for_prompt()
                                 );
@@ -1214,7 +1214,7 @@ pub async fn ask(
                                     agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));
 
                                     let code = output.code.clone();
-                                    if code.trim() == "DONE" || code.is_empty() {
+                                    if code.trim() == "!done" || code.is_empty() {
                                         eprintln!("[agent:{agent_name}] done at iter {agent_iter}");
                                         break;
                                     }
@@ -1243,7 +1243,7 @@ pub async fn ask(
                                             if has_err {
                                                 agent_messages.push(crate::llm::ChatMessage::user(format!("Errors:\n{feedback}\nFix and continue.")));
                                             } else {
-                                                agent_messages.push(crate::llm::ChatMessage::user(format!("Results:\n{feedback}\nContinue or DONE.")));
+                                                agent_messages.push(crate::llm::ChatMessage::user(format!("Results:\n{feedback}\nContinue or !done.")));
                                             }
                                         }
                                         Err(e) => {
@@ -1411,7 +1411,7 @@ pub async fn ask(
             // Success — tell the AI to continue or finish
             let results_summary: Vec<String> = iter_results.iter().map(|r| r.message.clone()).collect();
             let feedback = format!(
-                "Results:\n{}\n\nIf the task is complete, respond with DONE. Otherwise continue with the next step.",
+                "Results:\n{}\n\nIf the task is complete, respond with !done. Otherwise continue with the next step.",
                 results_summary.join("\n")
             );
             messages.push(crate::llm::ChatMessage::user(feedback));
@@ -1642,18 +1642,18 @@ pub async fn ask_stream(
                 let _ = tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             }
 
-            // Strip "DONE" from code — the AI sometimes appends it to a code block
+            // Strip "!done" from code — the AI sometimes appends it to a code block
             let raw_code = output.code.trim().to_string();
-            let (code, is_done) = if raw_code.ends_with("\nDONE") || raw_code.ends_with("\n\nDONE") {
+            let (code, is_done) = if raw_code.ends_with("\n!done") || raw_code.ends_with("\n\n!done") {
                 (raw_code.rsplit_once('\n').map(|(before, _)| before.trim().to_string()).unwrap_or_default(), true)
-            } else if raw_code == "DONE" || raw_code.is_empty() {
+            } else if raw_code == "!done" || raw_code.is_empty() {
                 (String::new(), true)
             } else {
                 (raw_code, false)
             };
 
             if code.is_empty() {
-                // Check for untested functions before accepting DONE
+                // Check for untested functions before accepting !done
                 if config_clone.session.lock().await.program.require_modules {
                     let session = config_clone.session.lock().await;
                     let untested: Vec<String> = session.program.modules.iter().flat_map(|m| {
@@ -1666,16 +1666,16 @@ pub async fn ask_stream(
                     }).collect();
                     if !untested.is_empty() {
                         let challenge = format!(
-                            "Cannot accept DONE: {} untested functions: {}. Write !test blocks for them.",
+                            "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
                             untested.len(), untested.join(", ")
                         );
                         log_activity(&config_clone.log_file, "done-rejected", &challenge).await;
-                        let _ = tx.send(serde_json::json!({"type": "feedback", "message": "DONE rejected: untested functions"})).await;
+                        let _ = tx.send(serde_json::json!({"type": "feedback", "message": "!done rejected: untested functions"})).await;
                         messages.push(crate::llm::ChatMessage::user(challenge));
                         continue;
                     }
                 }
-                log_activity(&config_clone.log_file, "done", &format!("AI said DONE at iteration {}", iteration + 1)).await;
+                log_activity(&config_clone.log_file, "done", &format!("AI said !done at iteration {}", iteration + 1)).await;
                 let _ = tx.send(serde_json::json!({"type": "done"})).await;
                 break;
             }
@@ -2210,7 +2210,7 @@ pub async fn ask_stream(
                 if total == 0 {
                     "No plan set. Create one with !plan set.".to_string()
                 } else if pending.is_empty() && in_progress.is_empty() && failed.is_empty() {
-                    format!("All {total} plan steps completed. Verify everything works, then DONE.")
+                    format!("All {total} plan steps completed. Verify everything works, then !done.")
                 } else {
                     let mut msg = format!("Plan: {done}/{total} done.");
                     if !failed.is_empty() {
@@ -2251,7 +2251,7 @@ pub async fn ask_stream(
                 log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, false, train_tests_passed, train_tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
-                // If the AI said DONE alongside this code and there were no errors, check untested
+                // If the AI said !done alongside this code and there were no errors, check untested
                 if is_done {
                     if config_clone.session.lock().await.program.require_modules {
                         let session = config_clone.session.lock().await;
@@ -2265,16 +2265,16 @@ pub async fn ask_stream(
                         }).collect();
                         if !untested.is_empty() {
                             let challenge = format!(
-                                "Cannot accept DONE: {} untested functions: {}. Write !test blocks for them.",
+                                "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
                                 untested.len(), untested.join(", ")
                             );
                             log_activity(&config_clone.log_file, "done-rejected", &challenge).await;
-                            let _ = tx.send(serde_json::json!({"type": "feedback", "message": "DONE rejected: untested functions"})).await;
+                            let _ = tx.send(serde_json::json!({"type": "feedback", "message": "!done rejected: untested functions"})).await;
                             messages.push(crate::llm::ChatMessage::user(challenge));
                             continue;
                         }
                     }
-                    log_activity(&config_clone.log_file, "done", &format!("AI said DONE (with code) at iteration {}", iteration + 1)).await;
+                    log_activity(&config_clone.log_file, "done", &format!("AI said !done (with code) at iteration {}", iteration + 1)).await;
                     let _ = tx.send(serde_json::json!({"type": "done"})).await;
                     break;
                 }
