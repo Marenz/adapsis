@@ -123,12 +123,16 @@ impl OpenAiBackend {
         let req = http
             .post(self.endpoint())
             .json(&self.request_body(request, true));
-        let response = self.apply_auth(req)
+        let http_resp = self.apply_auth(req)
             .send()
             .await
-            .context("failed to send streaming chat completion request")?
-            .error_for_status()
-            .context("streaming chat completion request failed")?;
+            .context("failed to send streaming chat completion request")?;
+        let status = http_resp.status();
+        if !status.is_success() {
+            let body = http_resp.text().await.unwrap_or_default();
+            anyhow::bail!("LLM API error {status}: {}", body.chars().take(500).collect::<String>());
+        }
+        let response = http_resp;
 
         // Buffer raw bytes so multi-byte UTF-8 sequences that are split
         // across HTTP chunks are not corrupted by from_utf8_lossy.
@@ -226,12 +230,16 @@ impl OpenAiBackend {
         let req = http
             .post(self.endpoint())
             .json(&self.request_body(request, false));
-        let response: ChatCompletionResponse = self.apply_auth(req)
+        let http_resp = self.apply_auth(req)
             .send()
             .await
-            .context("failed to send chat completion request")?
-            .error_for_status()
-            .context("chat completion request failed")?
+            .context("failed to send chat completion request")?;
+        let status = http_resp.status();
+        if !status.is_success() {
+            let body = http_resp.text().await.unwrap_or_default();
+            anyhow::bail!("LLM API error {status}: {}", body.chars().take(500).collect::<String>());
+        }
+        let response: ChatCompletionResponse = http_resp
             .json()
             .await
             .context("failed to deserialize chat completion response")?;
