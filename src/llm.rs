@@ -282,10 +282,11 @@ impl LlmClient<OpenAiBackend> {
     }
 
     pub fn new_with_model(base_url: &str, model: &str) -> Self {
-        // Use higher token limit for capable models
         let max_tokens = if model.contains("opus") { 64000 } else { 32000 };
         Self {
-            http: Client::new(),
+            http: Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .build().unwrap_or_else(|_| Client::new()),
             backend: OpenAiBackend::new(base_url).with_model(model),
             temperature: 0.7,
             max_tokens,
@@ -295,7 +296,9 @@ impl LlmClient<OpenAiBackend> {
     pub fn new_with_model_and_key(base_url: &str, model: &str, api_key: Option<String>) -> Self {
         let max_tokens = if model.contains("opus") { 64000 } else { 32000 };
         Self {
-            http: Client::new(),
+            http: Client::builder()
+                .timeout(std::time::Duration::from_secs(300)) // 5 min per LLM request
+                .build().unwrap_or_else(|_| Client::new()),
             backend: OpenAiBackend::new(base_url).with_model(model).with_api_key(api_key),
             temperature: 0.7,
             max_tokens,
