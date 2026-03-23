@@ -965,12 +965,13 @@ async fn main() -> Result<()> {
                     match std::fs::read_to_string(&roadmap_path) {
                         Ok(content) => format!(
                             "You are running in autonomous mode. Here is the project roadmap:\n\n{}\n\n\
-                             Work on the current priority (the first item under 'In Progress' or the top of 'Next Targets'). \
-                             Create a plan, then start building. Use !opencode when you need Rust-level changes. \
-                             Keep going until the goal is complete or you get stuck and need user input.",
+                             First, use !roadmap add to populate your roadmap with the undone items above. \
+                             Then check !roadmap, pick the first undone item, create a !plan, and start working. \
+                             Use !roadmap done N when you finish an item. Use !opencode for Rust-level changes. \
+                             Keep going — when one item is done, move to the next.",
                             content
                         ),
-                        Err(_) => "You are running in autonomous mode. Identify the most impactful improvement you can make to AdapsisOS and start working on it.".to_string(),
+                        Err(_) => "You are running in autonomous mode. Check !roadmap for tasks. If empty, identify improvements and !roadmap add them. Then start working.".to_string(),
                     }
                 } else {
                     format!(
@@ -992,7 +993,28 @@ async fn main() -> Result<()> {
                             is_first = false;
                             goal_message.clone()
                         } else {
-                            "Previous task completed or hit iteration limit. Check ?symbols and ?tasks for current state. Review the roadmap or plan and continue with the next item. If everything is done, create a new plan for the next priority.".to_string()
+                            // Check session state to give the right nudge
+                            let status = match client.get(format!("http://127.0.0.1:{auto_port}/api/status"))
+                                .send().await {
+                                    Ok(r) => r.json::<serde_json::Value>().await.ok(),
+                                    Err(_) => None,
+                                };
+
+                            if let Some(ref status) = status {
+                                let plan = status.get("plan").and_then(|p| p.as_array());
+                                let has_pending_plan = plan.map(|p| p.iter().any(|s| {
+                                    s.get("status").and_then(|s| s.as_str()) == Some("pending")
+                                    || s.get("status").and_then(|s| s.as_str()) == Some("in_progress")
+                                })).unwrap_or(false);
+
+                                if has_pending_plan {
+                                    "You hit the iteration limit but your plan has unfinished steps. Continue working on the current plan.".to_string()
+                                } else {
+                                    "Plan completed. Use !roadmap done N to mark the current roadmap item done, then check !roadmap for the next undone item. Create a new !plan and start working on it.".to_string()
+                                }
+                            } else {
+                                "Continue working. Check !roadmap and !plan for current state.".to_string()
+                            }
                         };
                         eprintln!("[autonomous] sending: {}...", msg.chars().take(80).collect::<String>());
                         match client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
