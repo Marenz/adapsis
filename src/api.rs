@@ -1,3 +1,4 @@
+// test comment
 //! HTTP API for AdapsisOS — programmatic access to the session.
 //!
 //! Endpoints:
@@ -785,6 +786,7 @@ pub async fn ask(
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
     eprintln!("\n[web:user] {}", req.message);
+    let _ = config.event_broadcast.send(serde_json::json!({"type": "start", "message": req.message}));
     let llm = crate::llm::LlmClient::new_with_model_and_key(
         &config.llm_url, &config.llm_model, config.llm_api_key.clone(),
     );
@@ -842,6 +844,7 @@ pub async fn ask(
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[web:error] LLM: {e}");
+                let _ = config.event_broadcast.send(serde_json::json!({"type": "error", "message": format!("LLM error: {e}")}));
                 reply_text.push_str(&format!("\n\nLLM error: {e}"));
                 break;
             }
@@ -861,25 +864,30 @@ pub async fn ask(
         }
         let clean = clean.trim();
         if !clean.is_empty() {
+            let _ = config.event_broadcast.send(serde_json::json!({"type": "text", "text": clean}));
             if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
             reply_text.push_str(clean);
         }
         if !output.thinking.is_empty() {
             eprintln!("[web:think] {}...", output.thinking.chars().take(100).collect::<String>());
+            let _ = config.event_broadcast.send(serde_json::json!({"type": "thinking", "text": output.thinking}));
         }
 
         // Check for !done or no code (AI is asking a question / responding with text)
         if code.trim() == "!done" {
             eprintln!("[web:done] model said !done at iteration {}", iteration + 1);
+            let _ = config.event_broadcast.send(serde_json::json!({"type": "done"}));
             break;
         }
         if code.is_empty() {
             // No code block = AI is responding with text only (question or explanation)
             eprintln!("[web:text-only] no code block, stopping");
+            let _ = config.event_broadcast.send(serde_json::json!({"type": "done"}));
             break;
         }
 
         eprintln!("[web:code]\n{}", code.chars().take(200).collect::<String>());
+        let _ = config.event_broadcast.send(serde_json::json!({"type": "code", "code": code}));
         if !all_code.is_empty() { all_code.push_str("\n\n// --- iteration ---\n"); }
         all_code.push_str(&code);
 
@@ -1453,6 +1461,10 @@ pub async fn ask(
     }
 
     let has_errors = all_results.iter().any(|r| !r.success) || all_test_results.iter().any(|r| !r.pass);
+    if has_errors {
+        let _ = config.event_broadcast.send(serde_json::json!({"type": "error", "message": "request completed with errors"}));
+    }
+    let _ = config.event_broadcast.send(serde_json::json!({"type": "done"}));
     Json(AskResponse {
         reply: reply_text,
         code: all_code,
