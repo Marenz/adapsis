@@ -173,13 +173,22 @@ fn format_type(ty: &ast::Type) -> String {
 /// Returns a `LibraryState` tracking what was loaded and any errors.
 pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
     let mut state = LibraryState::new();
+    let dir_path = library_dir();
+    eprintln!(
+        "[library] init: resolved library dir = {}",
+        dir_path.display()
+    );
+    eprintln!("[library] init: HOME = {:?}", std::env::var("HOME").ok());
 
     // Always create the directory on startup so persist can write later
     let dir = match ensure_library_dir() {
-        Ok(d) => d,
+        Ok(d) => {
+            eprintln!("[library] init: directory ready at {}", d.display());
+            d
+        }
         Err(e) => {
             let msg = format!("could not create library dir: {e}");
-            eprintln!("[library] {msg}");
+            eprintln!("[library] init: ERROR — {msg}");
             state.record_error(msg);
             return state;
         }
@@ -271,6 +280,11 @@ pub fn persist_module(module: &ast::Module) -> Result<()> {
     let dir = ensure_library_dir()?;
     let target = dir.join(format!("{}.ax", module.name));
     let tmp = dir.join(format!(".{}.ax.tmp", module.name));
+    eprintln!(
+        "[library] persist: writing module `{}` to {}",
+        module.name,
+        target.display()
+    );
 
     let source = reconstruct_module_source(module);
 
@@ -330,6 +344,8 @@ pub fn persist_affected_modules(
 }
 
 /// Format a summary of the library state for the ?library query.
+/// Works with or without LibraryState — when called from typeck::handle_query
+/// without runtime context, lib_state is None but still shows useful info.
 pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -> String {
     let dir = library_dir();
     let mut out = String::new();
@@ -361,8 +377,6 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
                 }
             }
         }
-    } else {
-        out.push_str("Library state not initialized.\n");
     }
 
     // List .ax files on disk
@@ -404,4 +418,191 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reconstruct_module_source_roundtrips() {
+        let source = "!module TestMod\n+fn greet (name:String)->String\n  +return name\n";
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        let module = program
+            .modules
+            .iter()
+            .find(|m| m.name == "TestMod")
+            .unwrap();
+        let reconstructed = reconstruct_module_source(module);
+        assert!(reconstructed.contains("!module TestMod"));
+        assert!(reconstructed.contains("+fn greet"));
+        assert!(reconstructed.contains("+return name"));
+
+        // Verify roundtrip: parse the reconstructed source into a fresh program
+        let mut program2 = ast::Program::default();
+        let ops2 = parser::parse(&reconstructed).unwrap();
+        for op in &ops2 {
+            validator::apply_and_validate(&mut program2, op).unwrap();
+        }
+        assert_eq!(program2.modules.len(), 1);
+        assert_eq!(program2.modules[0].name, "TestMod");
+        assert_eq!(program2.modules[0].functions.len(), 1);
+        assert_eq!(program2.modules[0].functions[0].name, "greet");
+    }
+
+    #[test]
+    fn test_persist_and_load_module() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib_dir = tmp.path().join("modules");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        // Create a program with a module
+        let source = "!module Probe\n+fn hi ()->String\n  +return \"ok\"\n";
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+
+        // Persist manually to the temp dir
+        let module = program.modules.iter().find(|m| m.name == "Probe").unwrap();
+        let target = lib_dir.join("Probe.ax");
+        let src = reconstruct_module_source(module);
+        std::fs::write(&target, &src).unwrap();
+        assert!(target.exists());
+
+        // Load into fresh program
+        let mut program2 = ast::Program::default();
+        let content = std::fs::read_to_string(&target).unwrap();
+        let ops2 = parser::parse(&content).unwrap();
+        for op in &ops2 {
+            validator::apply_and_validate(&mut program2, op).unwrap();
+        }
+        assert_eq!(program2.modules.len(), 1);
+        assert_eq!(program2.modules[0].name, "Probe");
+        assert_eq!(program2.modules[0].functions[0].name, "hi");
+    }
+
+    #[test]
+    fn test_affected_module_names() {
+        let source = "!module Foo\n+fn bar ()->Int\n  +return 1\n";
+        let ops = parser::parse(source).unwrap();
+        let names = affected_module_names(&ops);
+        assert!(names.contains("Foo"));
+        assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn test_query_library_without_state() {
+        let program = ast::Program::default();
+        let output = query_library(&program, None);
+        assert!(output.contains("Module library:"));
+        assert!(output.contains("Directory exists:"));
+        // Must NOT say "Library state not initialized" — that's removed
+        // When no state, it just omits the loaded modules section
+    }
+
+    #[test]
+    fn test_symbols_no_bare_duplicates() {
+        let source = "!module Probe\n+fn hi ()->String\n  +return \"ok\"\n+fn answer ()->Int\n  +return 42\n";
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        let table = crate::typeck::build_symbol_table(&program);
+        let output = crate::typeck::handle_query(&program, &table, "?symbols");
+        // Must contain qualified names
+        assert!(
+            output.contains("Probe.hi"),
+            "missing Probe.hi in:\n{output}"
+        );
+        assert!(
+            output.contains("Probe.answer"),
+            "missing Probe.answer in:\n{output}"
+        );
+        // Must NOT contain bare unqualified names in Functions listing
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("hi (") || trimmed.starts_with("answer (") {
+                panic!("bare unqualified name found in ?symbols output:\n{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_source_qualified_lookup() {
+        let source = "!module Probe\n+fn hi ()->String\n  +return \"ok\"\n";
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        let table = crate::typeck::build_symbol_table(&program);
+        let output = crate::typeck::handle_query(&program, &table, "?source Probe.hi");
+        assert!(
+            output.contains("+fn hi"),
+            "?source Probe.hi failed:\n{output}"
+        );
+        assert!(output.contains("+return"), "missing body in:\n{output}");
+    }
+
+    #[test]
+    fn test_library_query_in_handle_query() {
+        let program = ast::Program::default();
+        let table = crate::typeck::build_symbol_table(&program);
+        let output = crate::typeck::handle_query(&program, &table, "?library");
+        // Must NOT return "unknown query"
+        assert!(
+            !output.contains("unknown query"),
+            "?library returned unknown:\n{output}"
+        );
+        assert!(
+            output.contains("Module library:"),
+            "wrong output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_session_apply_persists_module() {
+        // This test verifies that session.apply() calls persist logic
+        let mut session = crate::session::Session::new();
+        // Give it a library state
+        session.library_state = Some(LibraryState::new());
+
+        let source = "!module TestPersist\n+fn check ()->Int\n  +return 1\n";
+        let result = session.apply(source);
+        assert!(result.is_ok(), "apply failed: {result:?}");
+        let results = result.unwrap();
+        assert!(
+            results.iter().any(|(_, ok)| *ok),
+            "no success in: {results:?}"
+        );
+
+        // Check the module exists in program
+        assert!(
+            session
+                .program
+                .modules
+                .iter()
+                .any(|m| m.name == "TestPersist"),
+            "module not in program"
+        );
+
+        // Check that the library dir + file were created
+        let dir = library_dir();
+        let file = dir.join("TestPersist.ax");
+        assert!(
+            file.exists(),
+            "module file not persisted at {}",
+            file.display()
+        );
+
+        // Clean up
+        let _ = std::fs::remove_file(&file);
+    }
 }

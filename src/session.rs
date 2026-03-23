@@ -520,15 +520,14 @@ impl Session {
             self.sources.push(source.to_string());
 
             // Persist affected modules to the library
-            if success {
-                let affected = crate::library::affected_module_names(&operations);
-                if !affected.is_empty() {
-                    crate::library::persist_affected_modules(
-                        &self.program,
-                        &affected,
-                        self.library_state.as_ref(),
-                    );
-                }
+            let affected = crate::library::affected_module_names(&operations);
+            eprintln!("[library] apply: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.library_state.is_some());
+            if success && !affected.is_empty() {
+                crate::library::persist_affected_modules(
+                    &self.program,
+                    &affected,
+                    self.library_state.as_ref(),
+                );
             }
         }
 
@@ -716,15 +715,14 @@ impl Session {
             self.sources.push(source.to_string());
 
             // Persist affected modules to the library
-            if success {
-                let affected = crate::library::affected_module_names(&operations);
-                if !affected.is_empty() {
-                    crate::library::persist_affected_modules(
-                        &self.program,
-                        &affected,
-                        self.library_state.as_ref(),
-                    );
-                }
+            let affected = crate::library::affected_module_names(&operations);
+            eprintln!("[library] apply_async: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.library_state.is_some());
+            if success && !affected.is_empty() {
+                crate::library::persist_affected_modules(
+                    &self.program,
+                    &affected,
+                    self.library_state.as_ref(),
+                );
             }
         }
 
