@@ -97,6 +97,9 @@ pub struct Session {
     /// IO mock table: (operation, url_pattern) -> response. Used during !test.
     #[serde(default)]
     pub io_mocks: Vec<IoMock>,
+    /// Library state — tracks loaded modules and errors. Not serialized.
+    #[serde(skip)]
+    pub library_state: Option<crate::library::LibraryState>,
 }
 
 /// A long-term roadmap item.
@@ -338,6 +341,7 @@ impl Session {
             opencode_session_id: None,
             io_mocks: Vec::new(),
             roadmap: Vec::new(),
+            library_state: None,
         }
     }
 
@@ -519,7 +523,11 @@ impl Session {
             if success {
                 let affected = crate::library::affected_module_names(&operations);
                 if !affected.is_empty() {
-                    crate::library::persist_affected_modules(&self.program, &affected);
+                    crate::library::persist_affected_modules(
+                        &self.program,
+                        &affected,
+                        self.library_state.as_ref(),
+                    );
                 }
             }
         }
@@ -711,7 +719,11 @@ impl Session {
             if success {
                 let affected = crate::library::affected_module_names(&operations);
                 if !affected.is_empty() {
-                    crate::library::persist_affected_modules(&self.program, &affected);
+                    crate::library::persist_affected_modules(
+                        &self.program,
+                        &affected,
+                        self.library_state.as_ref(),
+                    );
                 }
             }
         }
