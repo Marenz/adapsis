@@ -323,7 +323,7 @@ pub fn eval_compiled_or_interpreted_cached(
                     if let Some((_, ref mut compiled)) = *guard {
                         if returns_string {
                             if let Ok(result) = compiled.call_string(function_name, &args) {
-                                return Ok((format!("\"{result}\""), true));
+                                return Ok((crate::ast::format_string_literal(&result), true));
                             }
                         } else {
                             if let Ok(result) = compiled.call_i64(function_name, &args) {
@@ -337,7 +337,7 @@ pub fn eval_compiled_or_interpreted_cached(
                 if let Ok(mut compiled) = crate::compiler::compile(program) {
                     if returns_string {
                         if let Ok(result) = compiled.call_string(function_name, &args) {
-                            return Ok((format!("\"{result}\""), true));
+                            return Ok((crate::ast::format_string_literal(&result), true));
                         }
                     } else {
                         if let Ok(result) = compiled.call_i64(function_name, &args) {
@@ -3172,5 +3172,67 @@ mod tests {
         let (fn_name, case) = &cases[0];
         let result = eval_test_case(&program, fn_name, case);
         assert!(result.is_ok(), "multiple JSON test values should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_string_literal_roundtrip_with_quotes() {
+        // Parse source with escaped quotes, reconstruct via ?source,
+        // re-parse the reconstructed source, and verify it produces the
+        // same result.
+        let source = r#"
++fn make_json ()->String
+  +let body:String = "{\"model\":\"gpt\",\"messages\":[{\"role\":\"user\"}]}"
+  +return body
+"#;
+        let program = build_program(source);
+        let table = crate::typeck::build_symbol_table(&program);
+
+        // Reconstruct source via typeck (same path as ?source)
+        let reconstructed = crate::typeck::handle_query(&program, &table, "?source make_json");
+        // The reconstructed source should contain escaped quotes
+        assert!(
+            reconstructed.contains("\\\"model\\\""),
+            "reconstructed source should escape inner quotes: {}",
+            reconstructed
+        );
+
+        // Re-parse the reconstructed source — it should produce valid program
+        let program2 = build_program(&reconstructed);
+
+        // Evaluate both programs and compare results
+        let mut env1 = super::Env::new();
+        let func1 = program.get_function("make_json").unwrap();
+        let result1 = super::eval_function_body(&program, &func1.body, &mut env1).unwrap();
+
+        let mut env2 = super::Env::new();
+        let func2 = program2.get_function("make_json").unwrap();
+        let result2 = super::eval_function_body(&program2, &func2.body, &mut env2).unwrap();
+
+        assert!(
+            result1.matches(&result2),
+            "round-tripped program should produce the same value: {:?} vs {:?}",
+            result1, result2
+        );
+    }
+
+    #[test]
+    fn test_format_string_literal_escaping() {
+        // Direct test of the escape/format helper
+        assert_eq!(
+            crate::ast::format_string_literal("hello"),
+            "\"hello\""
+        );
+        assert_eq!(
+            crate::ast::format_string_literal("say \"hi\""),
+            "\"say \\\"hi\\\"\""
+        );
+        assert_eq!(
+            crate::ast::format_string_literal("back\\slash"),
+            "\"back\\\\slash\""
+        );
+        assert_eq!(
+            crate::ast::format_string_literal("line1\nline2"),
+            "\"line1\\nline2\""
+        );
     }
 }

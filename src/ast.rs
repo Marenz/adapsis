@@ -380,3 +380,26 @@ pub enum UnaryOp {
     Not,
     Neg,
 }
+
+/// Escape a string for use inside an Adapsis string literal.
+/// Produces the content between the outer quotes: `\"` → `\\\"`, `\\` → `\\\\`,
+/// newline → `\\n`, etc.
+pub fn escape_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Format a string as a complete Adapsis string literal (with outer quotes).
+pub fn format_string_literal(s: &str) -> String {
+    format!("\"{}\"", escape_string_literal(s))
+}

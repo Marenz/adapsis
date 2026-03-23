@@ -853,7 +853,7 @@ fn reconstruct_expr(expr: &Expr) -> String {
             crate::ast::Literal::Int(n) => n.to_string(),
             crate::ast::Literal::Float(f) => f.to_string(),
             crate::ast::Literal::Bool(b) => b.to_string(),
-            crate::ast::Literal::String(s) => format!("\"{s}\""),
+            crate::ast::Literal::String(s) => crate::ast::format_string_literal(s),
         },
         Expr::Identifier(name) => name.clone(),
         Expr::FieldAccess { base, field } => format!("{}.{field}", reconstruct_expr(base)),
