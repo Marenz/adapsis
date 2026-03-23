@@ -996,7 +996,17 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Query(query));
         }
 
-        bail!("line {}: unknown operation `{}`", line.number, line.text)
+        // Skip unknown operations instead of aborting the whole block
+        eprintln!(
+            "[parser] line {}: skipping unknown operation `{}`",
+            line.number, line.text
+        );
+        self.index += 1;
+        // Return as a query so the feedback shows the warning
+        Ok(Operation::Query(format!(
+            "WARNING: unknown operation `{}` (skipped)",
+            line.text
+        )))
     }
 
     fn parse_test_cases(&mut self, parent_indent: usize) -> Result<Vec<TestCase>> {
