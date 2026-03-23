@@ -52,6 +52,8 @@ pub struct AppConfig {
     pub max_iterations: usize,
     /// JSONL training data log — one entry per iteration with input/output/outcome
     pub training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    /// Module names auto-loaded from the persistent library at startup
+    pub library_module_names: std::sync::Arc<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -348,6 +350,8 @@ pub async fn query(
         else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
     } else if req.query.trim() == "?tasks" {
         format_tasks(&config.task_registry)
+    } else if req.query.trim() == "?library" {
+        crate::library::query_library(&session.program, &config.library_module_names)
     } else {
         let table = typeck::build_symbol_table(&session.program);
         typeck::handle_query(&session.program, &table, &req.query)
@@ -1101,6 +1105,8 @@ pub async fn ask(
                                 }
                             } else if query.trim() == "?tasks" {
                                 format_tasks(&config.task_registry)
+                            } else if query.trim() == "?library" {
+                                crate::library::query_library(&session.program, &config.library_module_names)
                             } else {
                                 let table = crate::typeck::build_symbol_table(&session.program);
                                 crate::typeck::handle_query(&session.program, &table, query)
@@ -1898,6 +1904,8 @@ pub async fn ask_stream(
                                     }
                                 } else if query.trim() == "?tasks" {
                                     format_tasks(&config_clone.task_registry)
+                                } else if query.trim() == "?library" {
+                                    crate::library::query_library(&session.program, &config_clone.library_module_names)
                                 } else {
                                     let table = crate::typeck::build_symbol_table(&session.program);
                                     crate::typeck::handle_query(&session.program, &table, query)
@@ -2178,6 +2186,8 @@ pub async fn ask_stream(
                         if let crate::parser::Operation::Query(query) = op {
                             let response = if query.trim() == "?tasks" {
                                 format_tasks(&config_clone.task_registry)
+                            } else if query.trim() == "?library" {
+                                crate::library::query_library(&session.program, &config_clone.library_module_names)
                             } else if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
                                 let msgs = session.peek_messages("main");
                                 if msgs.is_empty() { "No messages.".to_string() }

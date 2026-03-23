@@ -821,6 +821,11 @@ fn reconstruct_stmt(out: &mut String, stmt: &Statement, indent: usize) {
     }
 }
 
+/// Public wrapper for `reconstruct_stmt` — used by the module library serializer.
+pub fn reconstruct_stmt_pub(out: &mut String, stmt: &Statement, indent: usize) {
+    reconstruct_stmt(out, stmt, indent);
+}
+
 fn reconstruct_expr(expr: &Expr) -> String {
     match expr {
         Expr::Literal(lit) => match lit {
@@ -932,6 +937,8 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
         "?routes" => query_routes(program),
         // ?tasks is handled at the API level (needs runtime access, not just program)
         "?tasks" => "tasks query requires runtime context".to_string(),
+        // ?library is handled at the API level (needs library_module_names)
+        "?library" => "library query requires runtime context".to_string(),
         _ => format!("unknown query: {}", parts[0]),
     }
 }
