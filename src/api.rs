@@ -39,6 +39,8 @@ pub struct AppConfig {
     pub self_trigger: tokio::sync::mpsc::Sender<String>,
     /// Task registry for tracking spawned async tasks
     pub task_registry: Option<crate::coroutine::TaskRegistry>,
+    /// Task snapshot registry for live interpreter state inspection
+    pub snapshot_registry: Option<crate::coroutine::TaskSnapshotRegistry>,
     /// Structured log file for AI activity
     pub log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// JIT compilation cache — reuses compiled modules across evals when revision unchanged
@@ -349,6 +351,8 @@ pub async fn query(
         else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
     } else if req.query.trim() == "?tasks" {
         format_tasks(&config.task_registry)
+    } else if let Some(task_id) = parse_inspect_task_query(req.query.trim()) {
+        format_inspect_task(&config.task_registry, &config.snapshot_registry, task_id)
     } else if req.query.trim() == "?library" {
         crate::library::query_library(&session.program, session.library_state.as_ref())
     } else {
@@ -357,6 +361,16 @@ pub async fn query(
     };
     session.record_query(&req.query, &response);
     Json(QueryResponse { response })
+}
+
+/// Parse `?inspect task N` queries, returning the task ID if matched.
+fn parse_inspect_task_query(query: &str) -> Option<i64> {
+    let parts: Vec<&str> = query.split_whitespace().collect();
+    if parts.len() == 3 && parts[0] == "?inspect" && parts[1] == "task" {
+        parts[2].parse::<i64>().ok()
+    } else {
+        None
+    }
 }
 
 #[derive(Serialize)]
@@ -779,6 +793,52 @@ fn format_tasks(registry: &Option<crate::coroutine::TaskRegistry>) -> String {
     out
 }
 
+/// Format a detailed inspection of a single task, combining TaskInfo and TaskSnapshot.
+fn format_inspect_task(
+    task_registry: &Option<crate::coroutine::TaskRegistry>,
+    snapshot_registry: &Option<crate::coroutine::TaskSnapshotRegistry>,
+    task_id: i64,
+) -> String {
+    let Some(task_reg) = task_registry else {
+        return "No task registry (async not available).".to_string();
+    };
+    let tasks = task_reg.lock().unwrap();
+    let Some(info) = tasks.get(&task_id) else {
+        return format!("No task with id {task_id}.");
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("Task {}\n", info.id));
+    out.push_str(&format!("  function: {}\n", info.function_name));
+    out.push_str(&format!("  started:  {}\n", info.started_at));
+    out.push_str(&format!("  status:   {}\n", info.status));
+
+    if let Some(snap_reg) = snapshot_registry {
+        if let Ok(snaps) = snap_reg.lock() {
+            if let Some(snap) = snaps.get(&task_id) {
+                if let Some(ref stmt_id) = snap.current_stmt_id {
+                    out.push_str(&format!("  stmt:     {}\n", stmt_id));
+                }
+                out.push_str(&format!("  depth:    {}\n", snap.frame_depth));
+                if snap.locals.is_empty() {
+                    out.push_str("  locals:   (none)\n");
+                } else {
+                    out.push_str("  locals:\n");
+                    for (name, val) in &snap.locals {
+                        out.push_str(&format!("    {} = {}\n", name, val));
+                    }
+                }
+            } else {
+                out.push_str("  snapshot: (not yet captured)\n");
+            }
+        }
+    } else {
+        out.push_str("  snapshot: (registry not available)\n");
+    }
+
+    out
+}
+
 /// Build plan context string and whether the AI needs to create a new plan.
 fn build_plan_context(plan: &[crate::session::PlanStep]) -> (String, bool) {
     if plan.is_empty() {
@@ -1128,6 +1188,8 @@ pub async fn ask(
                                 }
                             } else if query.trim() == "?tasks" {
                                 format_tasks(&config.task_registry)
+                            } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+                                format_inspect_task(&config.task_registry, &config.snapshot_registry, tid)
                             } else if query.trim() == "?library" {
                                 crate::library::query_library(&session.program, session.library_state.as_ref())
                             } else {
@@ -1964,6 +2026,8 @@ pub async fn ask_stream(
                                     }
                                 } else if query.trim() == "?tasks" {
                                     format_tasks(&config_clone.task_registry)
+                                } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+                                    format_inspect_task(&config_clone.task_registry, &config_clone.snapshot_registry, tid)
                                 } else if query.trim() == "?library" {
                                     crate::library::query_library(&session.program, session.library_state.as_ref())
                                 } else {
@@ -2246,6 +2310,8 @@ pub async fn ask_stream(
                         if let crate::parser::Operation::Query(query) = op {
                             let response = if query.trim() == "?tasks" {
                                 format_tasks(&config_clone.task_registry)
+                            } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+                                format_inspect_task(&config_clone.task_registry, &config_clone.snapshot_registry, tid)
                             } else if query.trim() == "?library" {
                                 crate::library::query_library(&session.program, session.library_state.as_ref())
                             } else if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {

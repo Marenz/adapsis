@@ -145,7 +145,7 @@ Commands:
   !opencode <description> — request Rust-level runtime change
   !done — signal task completion
 
-Queries: ?symbols, ?source fn_name, ?tasks, ?inbox, ?deps fn_name, ?library
+Queries: ?symbols, ?source fn_name, ?tasks, ?inspect task N, ?inbox, ?deps fn_name, ?library
 
 ## Important Rules
 
@@ -350,7 +350,7 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 - Define types, functions, modules
 - Write and run tests (`!test`)
 - Evaluate functions (`!eval`)
-- Query program state (`?symbols`, `?source`, `?deps`, `?tasks`, `?inbox`)
+- Query program state (`?symbols`, `?source`, `?deps`, `?tasks`, `?inspect task N`, `?inbox`)
 - Manage plans (`!plan set/done/fail`)
 - Spawn sub-agents (`!agent name --scope <scope> task`)
 - Send messages between agents (`!msg agent text`)
