@@ -1048,7 +1048,26 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Query(query));
         }
 
-        bail!("line {}: unknown operation `{}`", line.number, line.text)
+        // Treat unknown ! operations as queries (AI often uses !symbols instead of ?symbols)
+        if text.starts_with('!') {
+            let as_query = format!("?{}", &text[1..]);
+            eprintln!(
+                "[parser] line {}: treating `{}` as `{}`",
+                line.number, text, as_query
+            );
+            self.index += 1;
+            return Ok(Operation::Query(as_query));
+        }
+        // Skip truly unknown operations
+        eprintln!(
+            "[parser] line {}: skipping unknown `{}`",
+            line.number, line.text
+        );
+        self.index += 1;
+        Ok(Operation::Query(format!(
+            "WARNING: unknown operation `{}` (skipped)",
+            line.text
+        )))
     }
 
     fn parse_test_cases(&mut self, parent_indent: usize) -> Result<Vec<TestCase>> {

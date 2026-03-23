@@ -451,6 +451,8 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
         thinking.clone()
     };
     let clean_content = strip_tags(&content, "think");
+    let clean_content = strip_tags(&clean_content, "tool_call");
+    let clean_content = strip_tags(&clean_content, "tool_result");
 
     // Extract code: prefer <code> blocks, but also scan for Forge operations anywhere
     let code_blocks = extract_tag_contents(&clean_content, "code");
