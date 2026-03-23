@@ -377,6 +377,21 @@ impl Session {
             .unwrap_or(&[])
     }
 
+    /// Mark a function as tested, resolving bare names to qualified module names.
+    pub fn mark_tested(&mut self, fn_name: &str) {
+        self.tested_functions.insert(fn_name.to_string());
+        if !fn_name.contains('.') {
+            let qnames: Vec<String> = self.program.modules.iter()
+                .flat_map(|m| m.functions.iter()
+                    .filter(|f| f.name == fn_name)
+                    .map(|f| format!("{}.{}", m.name, f.name)))
+                .collect();
+            for qn in qnames {
+                self.tested_functions.insert(qn);
+            }
+        }
+    }
+
     /// Apply a block of Forge source code as a mutation.
     /// Returns (results, new_revision) on success.
     pub fn apply(&mut self, source: &str) -> Result<Vec<(String, bool)>> {
@@ -404,7 +419,7 @@ impl Session {
                         }
                     }
                     if all_passed && !test.cases.is_empty() {
-                        self.tested_functions.insert(test.function_name.clone());
+                        self.mark_tested(&test.function_name);
                     }
                 }
                 parser::Operation::Trace(_)
@@ -601,7 +616,7 @@ impl Session {
                         }
                     }
                     if all_passed && !test.cases.is_empty() {
-                        self.tested_functions.insert(test.function_name.clone());
+                        self.mark_tested(&test.function_name);
                     }
                 }
                 parser::Operation::Trace(_)

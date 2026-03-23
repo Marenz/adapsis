@@ -320,7 +320,7 @@ pub async fn test_fn(
             }).collect();
             session.record_test(&test.function_name, passed, failed, details);
             if passed > 0 && failed == 0 {
-                session.tested_functions.insert(test.function_name.clone());
+                session.mark_tested(&test.function_name);
             }
         }
     }
@@ -1115,7 +1115,7 @@ pub async fn ask(
                                 }
                             }
                             if all_passed && !test.cases.is_empty() {
-                                session.tested_functions.insert(test.function_name.clone());
+                                session.mark_tested(&test.function_name);
                             }
                         }
                         crate::parser::Operation::Eval(ev) => {
@@ -1922,7 +1922,7 @@ pub async fn ask_stream(
                                     }
                                 }
                                 if all_passed && !test.cases.is_empty() {
-                                    session.tested_functions.insert(test.function_name.clone());
+                                    session.mark_tested(&test.function_name);
                                 }
                             }
                             crate::parser::Operation::Eval(ev) => {
