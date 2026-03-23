@@ -91,10 +91,10 @@ pub struct Session {
     /// Functions that have been tested (passed at least one test). Eval/spawn blocked until tested.
     #[serde(default)]
     pub tested_functions: std::collections::HashSet<String>,
-    /// Stored test sources — re-run automatically when functions change.
-    /// Each entry is the raw source string of a !test block.
+    /// Stored test cases — re-run automatically when functions change.
+    /// Key is the function name; value is the list of stored cases.
     #[serde(default)]
-    pub stored_tests: Vec<String>,
+    pub stored_tests: HashMap<String, Vec<StoredTestCase>>,
     /// OpenCode session ID — reused across !opencode calls to maintain context
     #[serde(default)]
     pub opencode_session_id: Option<String>,
@@ -119,6 +119,13 @@ pub struct IoMock {
     pub operation: String, // e.g. "http_get", "http_post", "llm_call"
     pub pattern: String,   // URL/arg prefix to match
     pub response: String,  // value to return
+}
+
+/// A stored test case — input and expected as source-level strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTestCase {
+    pub input: String,
+    pub expected: String,
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -313,23 +320,6 @@ pub struct ChatMessage {
 }
 
 impl Session {
-    /// Invalidate test status for functions affected by this operation.
-    fn invalidate_tests_for(&mut self, op: &parser::Operation) {
-        match op {
-            parser::Operation::Module(m) => {
-                for body_op in &m.body {
-                    if let parser::Operation::Function(f) = body_op {
-                        self.tested_functions.remove(&format!("{}.{}", m.name, f.name));
-                    }
-                }
-            }
-            parser::Operation::Replace(r) => {
-                self.tested_functions.remove(&r.target);
-            }
-            _ => {}
-        }
-    }
-
     pub fn new() -> Self {
         Self {
             program: ast::Program::default(),
@@ -342,7 +332,7 @@ impl Session {
             sources: Vec::new(),
             agent_mailbox: HashMap::new(),
             tested_functions: std::collections::HashSet::new(),
-            stored_tests: Vec::<String>::new(),
+            stored_tests: HashMap::new(),
             opencode_session_id: None,
             io_mocks: Vec::new(),
             roadmap: Vec::new(),
@@ -392,6 +382,138 @@ impl Session {
         }
     }
 
+    /// Store test cases for a function, keyed by both bare and qualified name.
+    pub fn store_test(&mut self, fn_name: &str, cases: &[parser::TestCase]) {
+        let stored: Vec<StoredTestCase> = cases
+            .iter()
+            .map(|c| StoredTestCase {
+                input: format_expr(&c.input),
+                expected: format_expr(&c.expected),
+            })
+            .collect();
+
+        self.stored_tests
+            .insert(fn_name.to_string(), stored.clone());
+
+        // Also store under qualified name(s) if bare
+        if !fn_name.contains('.') {
+            let qnames: Vec<String> = self
+                .program
+                .modules
+                .iter()
+                .flat_map(|m| {
+                    m.functions
+                        .iter()
+                        .filter(|f| f.name == fn_name)
+                        .map(|f| format!("{}.{}", m.name, f.name))
+                })
+                .collect();
+            for qn in qnames {
+                self.stored_tests.insert(qn, stored.clone());
+            }
+        }
+    }
+
+    /// Invalidate test status for affected functions, then re-run any stored
+    /// tests. Returns a list of (fn_name, passed, detail) for each re-run.
+    /// Must be called AFTER `apply_and_validate` so the function is already
+    /// updated in the program.
+    fn invalidate_and_retest(
+        &mut self,
+        op: &parser::Operation,
+    ) -> Vec<(String, bool, String)> {
+        // Collect affected function names
+        let affected: Vec<String> = match op {
+            parser::Operation::Module(m) => {
+                m.body
+                    .iter()
+                    .filter_map(|body_op| {
+                        if let parser::Operation::Function(f) = body_op {
+                            Some(format!("{}.{}", m.name, f.name))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            parser::Operation::Replace(r) => vec![r.target.clone()],
+            _ => return Vec::new(),
+        };
+
+        // Invalidate
+        for name in &affected {
+            self.tested_functions.remove(name);
+        }
+
+        let mut retest_results = Vec::new();
+
+        for name in &affected {
+            // Find stored tests: try exact name, then bare name
+            let cases = self.stored_tests.get(name).cloned().or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.stored_tests.get(bare).cloned()
+            });
+
+            let cases = match cases {
+                Some(c) if !c.is_empty() => c,
+                _ => continue,
+            };
+
+            // Reconstruct test source and re-run
+            let bare = name.rsplit('.').next().unwrap_or(name);
+            let mut test_src = format!("!test {bare}\n");
+            for case in &cases {
+                test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, case.expected));
+            }
+
+            match parser::parse(&test_src) {
+                Ok(ops) => {
+                    for test_op in &ops {
+                        if let parser::Operation::Test(test) = test_op {
+                            let mut all_passed = true;
+                            for case in &test.cases {
+                                match crate::eval::eval_test_case_with_mocks(
+                                    &self.program,
+                                    &test.function_name,
+                                    case,
+                                    &self.io_mocks,
+                                ) {
+                                    Ok(msg) => {
+                                        retest_results.push((
+                                            name.clone(),
+                                            true,
+                                            format!("retest PASS: {msg}"),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        all_passed = false;
+                                        retest_results.push((
+                                            name.clone(),
+                                            false,
+                                            format!("retest FAIL: {e}"),
+                                        ));
+                                    }
+                                }
+                            }
+                            if all_passed {
+                                self.mark_tested(name);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    retest_results.push((
+                        name.clone(),
+                        false,
+                        format!("retest parse error: {e}"),
+                    ));
+                }
+            }
+        }
+
+        retest_results
+    }
+
     /// Apply a block of Forge source code as a mutation.
     /// Returns (results, new_revision) on success.
     pub fn apply(&mut self, source: &str) -> Result<Vec<(String, bool)>> {
@@ -420,6 +542,7 @@ impl Session {
                     }
                     if all_passed && !test.cases.is_empty() {
                         self.mark_tested(&test.function_name);
+                        self.store_test(&test.function_name, &test.cases);
                     }
                 }
                 parser::Operation::Trace(_)
@@ -502,9 +625,14 @@ impl Session {
                 }
                 _ => {
                     any_definition = true;
-                    self.invalidate_tests_for(op);
                     match validator::apply_and_validate(&mut self.program, op) {
-                        Ok(msg) => results.push((msg, true)),
+                        Ok(msg) => {
+                            results.push((msg, true));
+                            for (name, passed, detail) in self.invalidate_and_retest(op) {
+                                results.push((detail, passed));
+                                let _ = name;
+                            }
+                        }
                         Err(e) => results.push((format!("{e}"), false)),
                     }
                 }
@@ -617,6 +745,7 @@ impl Session {
                     }
                     if all_passed && !test.cases.is_empty() {
                         self.mark_tested(&test.function_name);
+                        self.store_test(&test.function_name, &test.cases);
                     }
                 }
                 parser::Operation::Trace(_)
@@ -697,9 +826,14 @@ impl Session {
                 }
                 _ => {
                     any_definition = true;
-                    self.invalidate_tests_for(op);
                     match validator::apply_and_validate(&mut self.program, op) {
-                        Ok(msg) => results.push((msg, true)),
+                        Ok(msg) => {
+                            results.push((msg, true));
+                            for (name, passed, detail) in self.invalidate_and_retest(op) {
+                                results.push((detail, passed));
+                                let _ = name;
+                            }
+                        }
                         Err(e) => results.push((format!("{e}"), false)),
                     }
                 }
@@ -935,6 +1069,57 @@ impl Session {
                 } else { (format!("Roadmap: #{n} not found."), false) }
             }
         }
+    }
+}
+
+/// Format a parser::Expr back into source-level syntax suitable for `+with` lines.
+fn format_expr(expr: &parser::Expr) -> String {
+    match expr {
+        parser::Expr::Int(n) => n.to_string(),
+        parser::Expr::Float(f) => format!("{f}"),
+        parser::Expr::Bool(b) => b.to_string(),
+        parser::Expr::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        parser::Expr::Ident(id) => id.clone(),
+        parser::Expr::FieldAccess { base, field } => {
+            format!("{}.{}", format_expr(base), field)
+        }
+        parser::Expr::Call { callee, args } => {
+            let args_str = args.iter().map(|a| format_expr(a)).collect::<Vec<_>>().join(", ");
+            format!("{}({})", format_expr(callee), args_str)
+        }
+        parser::Expr::Binary { op, left, right } => {
+            let op_str = match op {
+                parser::BinaryOp::Add => "+",
+                parser::BinaryOp::Sub => "-",
+                parser::BinaryOp::Mul => "*",
+                parser::BinaryOp::Div => "/",
+                parser::BinaryOp::Mod => "%",
+                parser::BinaryOp::Gte => ">=",
+                parser::BinaryOp::Lte => "<=",
+                parser::BinaryOp::Eq => "==",
+                parser::BinaryOp::Neq => "!=",
+                parser::BinaryOp::Gt => ">",
+                parser::BinaryOp::Lt => "<",
+                parser::BinaryOp::And => "AND",
+                parser::BinaryOp::Or => "OR",
+            };
+            format!("{} {} {}", format_expr(left), op_str, format_expr(right))
+        }
+        parser::Expr::Unary { op, expr: inner } => {
+            let op_str = match op {
+                parser::UnaryOp::Not => "NOT ",
+                parser::UnaryOp::Neg => "-",
+            };
+            format!("{}{}", op_str, format_expr(inner))
+        }
+        parser::Expr::StructLiteral(fields) => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{}={}", f.name, format_expr(&f.value)))
+                .collect();
+            parts.join(" ")
+        }
+        parser::Expr::Cast { expr: inner, .. } => format_expr(inner),
     }
 }
 
