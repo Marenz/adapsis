@@ -472,7 +472,7 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
                 || trimmed.starts_with("//")
             );
             let is_forge = trimmed.starts_with('+') || trimmed.starts_with('!')
-                || trimmed.starts_with('?') || trimmed == "end" || trimmed == "DONE"
+                || trimmed.starts_with('?') || trimmed == "end" || trimmed == "!done"
                 || is_continuation
                 || (in_block && trimmed.is_empty());
             if is_forge {
