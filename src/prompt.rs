@@ -340,12 +340,21 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 - Be specific in your !opencode description — say exactly what to change, which
   file, what pattern to follow. The more precise, the faster it works.
 
-### Known Limitations (things you can fix via !opencode)
+### Testing async functions
 
-- `!test` cannot run async functions — they fail with "requires async context".
-  Fix: make eval_test_case in eval.rs detect async effects and run through the
-  coroutine executor. Look at how !eval handles async in api.rs.
-- String escaping is limited — use `json_escape()` builtin for JSON strings.
+Use `!mock` to register fake IO responses, then `!test` works with async functions:
+
+!mock http_get "api.telegram.org" -> "{\"ok\":true,\"result\":[]}"
+!mock llm_call "You are" -> "Hello! How can I help?"
+
+!test MyModule.get_updates
+  +with offset=0 -> expect "{\"ok\":true,\"result\":[]}"
+
+!unmock
+
+Mocks intercept +await calls during tests — if the operation and args match the
+pattern, the mock value is returned without real IO. Use !unmock to clear all mocks.
+Tests with mocks run async functions through the coroutine executor automatically.
 
 ### Design Principles
 
