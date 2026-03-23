@@ -2008,7 +2008,7 @@ fn token_text(token: &Token) -> String {
         Token::Ident(value) => value.clone(),
         Token::Int(value) => value.to_string(),
         Token::Float(value) => value.to_string(),
-        Token::String(value) => format!("\"{}\"", value),
+        Token::String(value) => crate::ast::format_string_literal(value),
         Token::Symbol(ch) => ch.to_string(),
         Token::Arrow => "->".to_string(),
         Token::EqEq => "==".to_string(),
