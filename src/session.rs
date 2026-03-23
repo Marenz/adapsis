@@ -297,6 +297,23 @@ pub struct ChatMessage {
 }
 
 impl Session {
+    /// Invalidate test status for functions affected by this operation.
+    fn invalidate_tests_for(&mut self, op: &parser::Operation) {
+        match op {
+            parser::Operation::Module(m) => {
+                for body_op in &m.body {
+                    if let parser::Operation::Function(f) = body_op {
+                        self.tested_functions.remove(&format!("{}.{}", m.name, f.name));
+                    }
+                }
+            }
+            parser::Operation::Replace(r) => {
+                self.tested_functions.remove(&r.target);
+            }
+            _ => {}
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             program: ast::Program::default(),
@@ -446,6 +463,7 @@ impl Session {
                 }
                 _ => {
                     any_definition = true;
+                    self.invalidate_tests_for(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => results.push((msg, true)),
                         Err(e) => results.push((format!("{e}"), false)),
@@ -628,6 +646,7 @@ impl Session {
                 }
                 _ => {
                     any_definition = true;
+                    self.invalidate_tests_for(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => results.push((msg, true)),
                         Err(e) => results.push((format!("{e}"), false)),

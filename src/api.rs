@@ -2202,20 +2202,23 @@ pub async fn ask_stream(
             // Build plan status summary for feedback
             let plan_summary = {
                 let session = config_clone.session.lock().await;
-                let pending: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending | crate::session::PlanStatus::InProgress)).collect();
+                let in_progress: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::InProgress)).collect();
+                let pending: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending)).collect();
                 let failed: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Failed)).collect();
                 let total = session.plan.len();
                 let done = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Done)).count();
                 if total == 0 {
                     "No plan set. Create one with !plan set.".to_string()
-                } else if pending.is_empty() && failed.is_empty() {
+                } else if pending.is_empty() && in_progress.is_empty() && failed.is_empty() {
                     format!("All {total} plan steps completed. Verify everything works, then DONE.")
                 } else {
                     let mut msg = format!("Plan: {done}/{total} done.");
                     if !failed.is_empty() {
                         msg.push_str(&format!(" {} failed.", failed.len()));
                     }
-                    // Show next 2 pending steps only
+                    for s in &in_progress {
+                        msg.push_str(&format!(" Current: {}", s.description));
+                    }
                     for s in pending.iter().take(2) {
                         msg.push_str(&format!(" Next: {}", s.description));
                     }
