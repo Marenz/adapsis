@@ -2817,4 +2817,107 @@ mod tests {
         let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
         assert_eq!(result, r#""Bonjour, André""#, "concat should preserve UTF-8");
     }
+
+    #[test]
+    fn test_unicode_string_literal_roundtrip() {
+        // Full Unicode string literal: parse → eval → display must preserve
+        // all multi-byte characters exactly.
+        let source = "
++fn probe ()->String
+  +return \"hé — 你好 ✓ ★\"
+";
+        let program = build_program(source);
+        let input = parser::parse("!eval probe")
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, "\"hé — 你好 ✓ ★\"",
+            "Unicode string literal must survive parse/eval/display without mojibake");
+        // Verify actual byte representation
+        let inner = &result[1..result.len()-1]; // strip quotes
+        assert_eq!(inner.as_bytes(), "hé — 你好 ✓ ★".as_bytes(),
+            "UTF-8 byte representation must match");
+    }
+
+    #[test]
+    fn test_unicode_json_serialization_roundtrip() {
+        // Build JSON containing Unicode via json_escape, then extract via json_get.
+        // This simulates what send_message_body does with Unicode text.
+        let source = r#"
++fn build_json (text:String)->String
+  +let escaped:String = json_escape(text)
+  +let body:String = concat("{\"text\":\"", concat(escaped, "\"}"))
+  +return body
+
++fn extract_text (json:String)->String
+  +return json_get(json, "text")
+
++fn roundtrip (text:String)->String
+  +let json:String = build_json(text)
+  +return extract_text(json)
+"#;
+        let program = build_program(source);
+        let input = parser::parse("!eval roundtrip text=\"café — 你好 ✓ ★\"")
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, "\"café — 你好 ✓ ★\"",
+            "Unicode text must survive json_escape → JSON embedding → json_get roundtrip");
+    }
+
+    #[tokio::test]
+    async fn test_mocked_http_utf8_roundtrip() {
+        // Simulate an http_get returning UTF-8 text via mock, then extracting it.
+        let mut session = crate::session::Session::new();
+
+        let source = "
++fn fetch_text (url:String)->String [async]
+  +await resp:String = http_get(url)
+  +return json_get(resp, \"text\")
+";
+        let _ = session.apply_async(source, None).await;
+
+        // Mock returns JSON with Unicode content
+        let mock_source = "!mock http_get \"unicode-test\" -> \"{\\\"text\\\":\\\"café — 你好 ✓\\\"}\"";
+        let _ = session.apply_async(mock_source, None).await;
+
+        let test_source = "
+!test fetch_text
+  +with url=\"https://unicode-test.example.com\" -> expect \"café — 你好 ✓\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "mocked HTTP UTF-8 test should pass: {:?}", results[0]);
+        assert!(results[0].0.contains("PASS"),
+            "mocked HTTP returning UTF-8 JSON should round-trip: {:?}", results[0]);
+    }
+
+    #[tokio::test]
+    async fn test_mocked_llm_utf8_roundtrip() {
+        // Simulate llm_call returning UTF-8 text via mock.
+        let mut session = crate::session::Session::new();
+
+        let source = "
++fn ask_llm (prompt:String)->String [async]
+  +await reply:String = llm_call(prompt, \"echo\")
+  +return reply
+";
+        let _ = session.apply_async(source, None).await;
+
+        // Mock llm_call to return Unicode text
+        let mock_source = "!mock llm_call \"test\" -> \"café — 你好 ✓ ★\"";
+        let _ = session.apply_async(mock_source, None).await;
+
+        let test_source = "
+!test ask_llm
+  +with prompt=\"test prompt\" -> expect \"café — 你好 ✓ ★\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "mocked LLM UTF-8 test should pass: {:?}", results[0]);
+    }
 }
