@@ -1305,7 +1305,7 @@ pub async fn ask(
                             eprintln!("[web:opencode] {task}");
                             drop(session);
                             let oc_result = tokio::time::timeout(
-                                std::time::Duration::from_secs(1800),
+                                std::time::Duration::from_secs(3600),
                                 tokio::process::Command::new("opencode")
                                     .arg("run").arg("--format").arg("json")
                                     .arg("--attach").arg("http://localhost:4096")
@@ -1985,7 +1985,7 @@ pub async fn ask_stream(
                                 let recent_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
                                 let recent_for_stream = recent_lines.clone();
                                 let oc_result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(1800),
+                                    std::time::Duration::from_secs(3600),
                                     async {
                                         let mut cmd = tokio::process::Command::new("opencode");
                                         cmd.arg("run").arg("--format").arg("json")

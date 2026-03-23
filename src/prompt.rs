@@ -219,18 +219,21 @@ When the runtime reports errors, fix them with targeted !replace operations or b
 
 ## Self-Extension via OpenCode
 
-When you hit a limitation that CANNOT be solved in Adapsis (missing builtin, runtime bug,
-need a new IO operation), you can request a Rust-level change. Emit this in your response:
+!opencode is for fixing your own runtime — use it ONLY when:
+- The runtime has a bug (parser error, evaluator crash, wrong behavior)
+- Something is excessively cumbersome without a builtin (e.g. string escaping,
+  HTTP encoding, binary data handling)
+- You need a new IO operation that doesn't exist yet
+
+Do NOT use !opencode for application logic. If you're building a Telegram bot,
+write the bot in Adapsis. If you need a missing string function, THEN !opencode it.
 
 !opencode <description of what needs to change in the Rust source>
 
-Example: !opencode Add a hex_decode(s:String)->List<Int> builtin to eval.rs that converts hex string to bytes
+Example: !opencode Add a url_encode(s:String)->String builtin to eval.rs
 
-The system will delegate to OpenCode which has full access to the Rust codebase,
-can edit files, run cargo build, and run tests. After the change, AdapsisOS rebuilds
-and restarts automatically. You can then use the new feature.
-
-Only use !opencode when something truly cannot be done in Adapsis. Try Adapsis first.
+OpenCode edits the Rust source, rebuilds, and restarts AdapsisOS automatically.
+Your session state (program, plan, roadmap, tested functions) survives the restart.
 "#.to_string()
 }
 

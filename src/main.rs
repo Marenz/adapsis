@@ -1003,14 +1003,25 @@ async fn main() -> Result<()> {
                             if let Some(ref status) = status {
                                 let plan = status.get("plan").and_then(|p| p.as_array());
                                 let has_pending_plan = plan.map(|p| p.iter().any(|s| {
-                                    s.get("status").and_then(|s| s.as_str()) == Some("pending")
-                                    || s.get("status").and_then(|s| s.as_str()) == Some("in_progress")
+                                    let st = s.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                                    st == "pending" || st == "in_progress"
+                                })).unwrap_or(false);
+
+                                // Check roadmap for undone items
+                                let roadmap = status.get("roadmap").and_then(|r| r.as_array());
+                                let has_undone_roadmap = roadmap.map(|r| r.iter().any(|item| {
+                                    item.get("done").and_then(|d| d.as_bool()) == Some(false)
                                 })).unwrap_or(false);
 
                                 if has_pending_plan {
                                     "You hit the iteration limit but your plan has unfinished steps. Continue working on the current plan.".to_string()
-                                } else {
+                                } else if has_undone_roadmap {
                                     "Plan completed. Use !roadmap done N to mark the current roadmap item done, then check !roadmap for the next undone item. Create a new !plan and start working on it.".to_string()
+                                } else {
+                                    // Nothing left — idle
+                                    eprintln!("[autonomous] all roadmap items done, idling...");
+                                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                    continue;
                                 }
                             } else {
                                 "Continue working. Check !roadmap and !plan for current state.".to_string()
