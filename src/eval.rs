@@ -230,7 +230,7 @@ impl Env {
             }
         }
         // Check shared vars: derive "Module.name" key from current function context
-        if self.shared_runtime.is_some() {
+        if !self.shared_cache.is_empty() {
             let module_name = FN_NAME_STACK.with(|s| {
                 let stack = s.borrow();
                 stack.last().and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
