@@ -127,6 +127,34 @@ String test values support escape sequences (same as string literals):
 !test echo
   +with s="{\\\"key\\\":\\\"value\\\"}" -> expect "{\\\"key\\\":\\\"value\\\"}"
 
+### Test matchers (flexible assertions)
+
+Instead of exact values, use matchers when the result is long or non-deterministic:
+
+!test WebChat.setup
+  +with -> expect contains("ready")
+
+!test Bot.fetch_page
+  +with url="https://example.com" -> expect starts_with("<html")
+
+!test validate
+  +with name="alice" age=25 -> expect Ok
+  +with name="" age=25 -> expect Err
+  +with name="" age=25 -> expect Err("err_empty_name")
+
+### +after assertions (side-effect checks)
+
+After `+with` lines, add `+after` to verify side effects. State is checked after the function runs.
+
+!test WebChat.setup
+  +with -> expect contains("ready")
+  +after routes contains "/chat"
+  +after modules contains "WebChat"
+
+!test Bot.start
+  +with token="abc" -> expect Ok
+  +after tasks contains "poll_loop"
+
 (Builtins, commands, and queries are auto-generated from the registry below.)
 
 ## Important Rules

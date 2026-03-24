@@ -674,7 +674,15 @@ pub fn eval_test_case_with_mocks(
     // Execute function body
     let result = eval_function_body(program, &func.body, &mut env);
 
-    check_test_result(result, &func.return_type, &input, &expected)
+    let msg = check_test_result(result, &func.return_type, &input, &expected, case.matcher.as_ref())?;
+
+    // Check +after assertions (sync path — program is immutable here, so
+    // after_checks on routes/modules work; tasks/mocks not applicable in sync)
+    for after in &case.after_checks {
+        check_after(program, after, None)?;
+    }
+
+    Ok(msg)
 }
 
 /// Run a test case for an async function by spinning up a temporary coroutine
@@ -695,6 +703,8 @@ fn eval_test_case_with_runtime(
     let program = program.clone();
     let fn_name = function_name.to_string();
     let mocks = mocks.to_vec();
+    let matcher = case.matcher.clone();
+    let after_checks = case.after_checks.clone();
 
     // Spin up a temporary tokio runtime + coroutine IO loop on a dedicated
     // thread.  This works whether or not the caller is already inside a tokio
@@ -741,7 +751,14 @@ fn eval_test_case_with_runtime(
 
                 bind_input_to_params(&program, func, &input, &mut env);
                 let result = eval_function_body(&program, &func.body, &mut env);
-                check_test_result(result, &return_type, &input, &expected)
+                let msg = check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
+
+                // Check +after assertions
+                for after in &after_checks {
+                    check_after(&program, after, None)?;
+                }
+
+                Ok::<String, anyhow::Error>(msg)
             })
             .await
             .map_err(|e| anyhow!("async test task panicked: {e}"))??;
@@ -788,6 +805,8 @@ pub async fn eval_test_case_async(
     let fn_name = function_name.to_string();
     let return_type = func.return_type.clone();
     let mocks = mocks.to_vec();
+    let matcher = case.matcher.clone();
+    let after_checks = case.after_checks.clone();
 
     let eval_result = tokio::task::spawn_blocking(move || {
         let func = program
@@ -808,7 +827,14 @@ pub async fn eval_test_case_async(
         bind_input_to_params(&program, func, &input, &mut env);
 
         let result = eval_function_body(&program, &func.body, &mut env);
-        check_test_result(result, &return_type, &input, &expected)
+        let msg = check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
+
+        // Check +after assertions
+        for after in &after_checks {
+            check_after(&program, after, None)?;
+        }
+
+        Ok::<String, anyhow::Error>(msg)
     })
     .await
     .map_err(|e| anyhow!("async test task panicked: {e}"))??;
@@ -817,11 +843,13 @@ pub async fn eval_test_case_async(
 }
 
 /// Compare the eval result against expected, handling Result<T> wrapping.
+/// When a `TestMatcher` is present, it overrides exact comparison.
 fn check_test_result(
     result: Result<Value>,
     return_type: &ast::Type,
     input: &Value,
     expected: &Value,
+    matcher: Option<&parser::TestMatcher>,
 ) -> Result<String> {
     let returns_result = matches!(return_type, ast::Type::Result(_));
 
@@ -844,11 +872,114 @@ fn check_test_result(
         }
     };
 
-    if actual.matches(expected) {
-        Ok(format!("input={input} => {actual} (expected {expected})"))
+    // If a matcher is present, use it instead of exact comparison
+    if let Some(m) = matcher {
+        // For string matchers (contains/starts_with), extract the raw string
+        // content when the value is a String or Ok(String), avoiding the
+        // Display quotes that wrap String values.
+        let raw_text = match &actual {
+            Value::String(s) => s.clone(),
+            Value::Ok(inner) => match inner.as_ref() {
+                Value::String(s) => s.clone(),
+                other => format!("{other}"),
+            },
+            other => format!("{other}"),
+        };
+        let matched = match m {
+            parser::TestMatcher::Contains(s) => {
+                raw_text.contains(s.as_str())
+            }
+            parser::TestMatcher::StartsWith(s) => {
+                raw_text.starts_with(s.as_str())
+            }
+            parser::TestMatcher::AnyOk => {
+                matches!(&actual, Value::Ok(_))
+            }
+            parser::TestMatcher::AnyErr => {
+                matches!(&actual, Value::Err(_))
+            }
+            parser::TestMatcher::ErrContaining(s) => {
+                matches!(&actual, Value::Err(msg) if msg.contains(s.as_str()))
+            }
+        };
+        if matched {
+            Ok(format!("input={input} => {actual} (matcher: {m:?})"))
+        } else {
+            bail!("input={input} => {actual}, matcher {m:?} did not match")
+        }
     } else {
-        bail!("input={input} => {actual}, expected {expected}")
+        // Exact comparison
+        if actual.matches(expected) {
+            Ok(format!("input={input} => {actual} (expected {expected})"))
+        } else {
+            bail!("input={input} => {actual}, expected {expected}")
+        }
     }
+}
+
+/// Check a single `+after` assertion against the current program state.
+///
+/// `mocks` is provided when the test has access to session-level IO mocks.
+fn check_after(
+    program: &ast::Program,
+    after: &parser::AfterCheck,
+    mocks: Option<&[crate::session::IoMock]>,
+) -> Result<()> {
+    match after.target.as_str() {
+        "routes" => {
+            match after.matcher.as_str() {
+                "contains" => {
+                    let found = program.http_routes.iter().any(|r| {
+                        r.path.contains(&after.value) || r.handler_fn.contains(&after.value)
+                    });
+                    if !found {
+                        bail!("+after routes contains \"{}\": no matching route found (routes: {:?})",
+                            after.value,
+                            program.http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
+                    }
+                }
+                other => bail!("+after routes: unknown matcher `{other}` (expected `contains`)"),
+            }
+        }
+        "modules" => {
+            match after.matcher.as_str() {
+                "contains" => {
+                    let found = program.modules.iter().any(|m| m.name.contains(&after.value));
+                    if !found {
+                        bail!("+after modules contains \"{}\": no matching module found (modules: {:?})",
+                            after.value,
+                            program.modules.iter().map(|m| &m.name).collect::<Vec<_>>());
+                    }
+                }
+                other => bail!("+after modules: unknown matcher `{other}` (expected `contains`)"),
+            }
+        }
+        "mocks" => {
+            match after.matcher.as_str() {
+                "contains" => {
+                    if let Some(mocks) = mocks {
+                        let found = mocks.iter().any(|m| {
+                            m.operation.contains(&after.value)
+                                || m.patterns.iter().any(|p| p.contains(&after.value))
+                        });
+                        if !found {
+                            bail!("+after mocks contains \"{}\": no matching mock found", after.value);
+                        }
+                    } else {
+                        bail!("+after mocks: mock state not available in this test context");
+                    }
+                }
+                other => bail!("+after mocks: unknown matcher `{other}` (expected `contains`)"),
+            }
+        }
+        "tasks" => {
+            // Tasks are runtime-level and not directly inspectable from the program.
+            // For now, this is a no-op with a warning.
+            eprintln!("[test] +after tasks check skipped (tasks require live runtime context)");
+        }
+        other => bail!("+after: unknown target `{other}` (expected routes, modules, mocks, or tasks)"),
+    }
+    Ok(())
 }
 
 /// Public entry point for running a function body with an env.
@@ -3683,5 +3814,324 @@ mod tests {
         assert_eq!(reparsed_cases.len(), 1);
         let result = eval_test_case_with_mocks(&program, &reparsed_cases[0].0, &reparsed_cases[0].1, &[]);
         assert!(result.is_ok(), "reparsed test should pass: {:?}", result);
+    }
+
+    // ── Test matchers ────────────────────────────────────────────────
+
+    #[test]
+    fn test_contains_matcher() {
+        let source = "\
++fn greet (name:String)->String
+  +return concat(\"hello \", name, \"!\")
+
+!test greet
+  +with name=\"world\" -> expect contains(\"hello\")
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        assert!(case.matcher.is_some(), "should have a matcher");
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "contains matcher should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_contains_matcher_fails_when_not_present() {
+        let source = "\
++fn greet (name:String)->String
+  +return concat(\"hello \", name, \"!\")
+
+!test greet
+  +with name=\"world\" -> expect contains(\"goodbye\")
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "contains matcher should fail when substring absent");
+    }
+
+    #[test]
+    fn test_starts_with_matcher() {
+        let source = "\
++fn greet (name:String)->String
+  +return concat(\"hello \", name)
+
+!test greet
+  +with name=\"world\" -> expect starts_with(\"hello\")
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "starts_with matcher should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_starts_with_matcher_fails() {
+        let source = "\
++fn greet (name:String)->String
+  +return concat(\"hello \", name)
+
+!test greet
+  +with name=\"world\" -> expect starts_with(\"goodbye\")
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "starts_with matcher should fail on wrong prefix");
+    }
+
+    #[test]
+    fn test_any_ok_matcher() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+
+!test validate
+  +with x=5 -> expect Ok
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        assert!(matches!(case.matcher, Some(parser::TestMatcher::AnyOk)));
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "AnyOk matcher should pass for Ok result: {:?}", result);
+    }
+
+    #[test]
+    fn test_any_ok_matcher_fails_on_err() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+
+!test validate
+  +with x=-1 -> expect Ok
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "AnyOk matcher should fail on Err result");
+    }
+
+    #[test]
+    fn test_any_err_matcher() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+
+!test validate
+  +with x=-1 -> expect Err
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        assert!(matches!(case.matcher, Some(parser::TestMatcher::AnyErr)));
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "AnyErr matcher should pass for Err result: {:?}", result);
+    }
+
+    #[test]
+    fn test_any_err_matcher_fails_on_ok() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+
+!test validate
+  +with x=5 -> expect Err
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "AnyErr matcher should fail on Ok result");
+    }
+
+    #[test]
+    fn test_err_containing_matcher() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+
+!test validate
+  +with x=-1 -> expect Err(\"err_negative\")
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        assert!(matches!(case.matcher, Some(parser::TestMatcher::ErrContaining(_))));
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "ErrContaining matcher should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_err_containing_matcher_fails_on_wrong_msg() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+
+!test validate
+  +with x=-1 -> expect Err(\"err_something_else\")
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "ErrContaining should fail on wrong message");
+    }
+
+    // ── +after checks ────────────────────────────────────────────────
+
+    #[test]
+    fn test_after_routes_contains_pass() {
+        // Build a program with a route, then test with +after routes contains
+        let source = "\
++fn handler (body:String)->String
+  +return \"ok\"
+
++route POST \"/chat\" -> handler
+
+!test handler
+  +with body=\"hello\" -> expect \"ok\"
+  +after routes contains \"/chat\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        assert_eq!(case.after_checks.len(), 1);
+        assert_eq!(case.after_checks[0].target, "routes");
+        assert_eq!(case.after_checks[0].value, "/chat");
+
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "+after routes should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_after_routes_contains_fail() {
+        // Route doesn't exist — +after should fail
+        let source = "\
++fn handler (body:String)->String
+  +return \"ok\"
+
+!test handler
+  +with body=\"hello\" -> expect \"ok\"
+  +after routes contains \"/nonexistent\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "+after routes should fail when route missing");
+    }
+
+    #[test]
+    fn test_after_modules_contains_pass() {
+        let source = "\
+!module TestMod
+
++fn helper ()->Int
+  +return 42
+
+!test helper
+  +with -> expect 42
+  +after modules contains \"TestMod\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "+after modules should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_after_modules_contains_fail() {
+        let source = "\
++fn helper ()->Int
+  +return 42
+
+!test helper
+  +with -> expect 42
+  +after modules contains \"NonExistent\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "+after modules should fail when module missing");
+    }
+
+    #[test]
+    fn test_matchers_combined_with_after() {
+        // Combine a matcher with +after checks
+        let source = "\
++fn handler (body:String)->String
+  +return concat(\"processed: \", body)
+
++route GET \"/api\" -> handler
+
+!test handler
+  +with body=\"test\" -> expect contains(\"processed\")
+  +after routes contains \"/api\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        assert!(case.matcher.is_some());
+        assert_eq!(case.after_checks.len(), 1);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "matcher + after should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_multiple_after_checks() {
+        let source = "\
+!module MyMod
+
++fn handler (body:String)->String
+  +return \"ok\"
+
++route POST \"/webhook\" -> handler
+
+!test handler
+  +with body=\"x\" -> expect \"ok\"
+  +after routes contains \"/webhook\"
+  +after modules contains \"MyMod\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        assert_eq!(case.after_checks.len(), 2);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "multiple +after checks should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_exact_err_still_works_without_matcher() {
+        // Err(err_label) without quotes should still work as exact match (no matcher)
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+
+!test validate
+  +with x=-1 -> expect Err(err_negative)
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        // No matcher — this is the old exact match behavior
+        assert!(case.matcher.is_none(), "Err(bare_ident) should not create a matcher");
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "exact Err match should still work: {:?}", result);
     }
 }
