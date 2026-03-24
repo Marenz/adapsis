@@ -150,13 +150,14 @@ impl<B: LlmBackend> Orchestrator<B> {
                     parser::Operation::Test(test) => {
                         test_ops.push(test.clone());
                     }
-                    parser::Operation::Mock { operation, pattern, response } => {
+                    parser::Operation::Mock { operation, patterns, response } => {
+                        let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                         io_mocks.push(crate::session::IoMock {
                             operation: operation.clone(),
-                            pattern: pattern.clone(),
+                            patterns: patterns.clone(),
                             response: response.clone(),
                         });
-                        results.push((format!("mock: {operation} \"{pattern}\""), true));
+                        results.push((format!("mock: {operation} {pattern_display}"), true));
                     }
                     parser::Operation::Unmock => {
                         let count = io_mocks.len();
@@ -571,13 +572,14 @@ impl<B: LlmBackend> Orchestrator<B> {
 
                 for op in &operations {
                     match op {
-                        parser::Operation::Mock { operation, pattern, response } => {
+                        parser::Operation::Mock { operation, patterns, response } => {
+                            let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                             io_mocks.push(crate::session::IoMock {
                                 operation: operation.clone(),
-                                pattern: pattern.clone(),
+                                patterns: patterns.clone(),
                                 response: response.clone(),
                             });
-                            results.push((format!("mock: {operation} \"{pattern}\""), true));
+                            results.push((format!("mock: {operation} {pattern_display}"), true));
                         }
                         parser::Operation::Unmock => {
                             let count = io_mocks.len();
