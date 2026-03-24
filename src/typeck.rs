@@ -652,7 +652,43 @@ fn reconstruct_source(program: &Program, target: &str) -> String {
     for stmt in &func.body {
         reconstruct_stmt(&mut out, stmt, 1);
     }
+
+    // Include persisted tests in source reconstruction
+    if !func.tests.is_empty() {
+        out.push('\n');
+        out.push_str(&format!("!test {}\n", func.name));
+        for tc in &func.tests {
+            let expect_part = reconstruct_test_expect(&tc.expected, tc.matcher.as_deref());
+            out.push_str(&format!("  +with {} -> expect {}\n", tc.input, expect_part));
+            for ac in &tc.after_checks {
+                out.push_str(&format!(
+                    "  +after {} {} \"{}\"\n",
+                    ac.target, ac.matcher, ac.value
+                ));
+            }
+        }
+    }
+
     out
+}
+
+/// Reconstruct the expect portion of a test case, translating serialized
+/// matcher strings back into Adapsis test syntax.
+fn reconstruct_test_expect(expected: &str, matcher: Option<&str>) -> String {
+    if let Some(m) = matcher {
+        if m == "AnyOk" {
+            return "Ok".to_string();
+        } else if m == "AnyErr" {
+            return "Err".to_string();
+        } else if let Some(msg) = m.strip_prefix("ErrContaining:") {
+            return format!("Err(\"{}\")", msg);
+        } else if let Some(sub) = m.strip_prefix("contains:") {
+            return format!("contains(\"{}\")", sub);
+        } else if let Some(pre) = m.strip_prefix("starts_with:") {
+            return format!("starts_with(\"{}\")", pre);
+        }
+    }
+    expected.to_string()
 }
 
 fn reconstruct_type_source(td: &TypeDecl) -> String {
