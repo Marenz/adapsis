@@ -222,6 +222,8 @@ pub struct FieldDecl {
 pub struct TestCase {
     pub input: String,
     pub expected: String,
+    #[serde(default)]
+    pub passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
