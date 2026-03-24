@@ -438,7 +438,7 @@ async fn main() -> Result<()> {
                             api::format_inspect_task(&Some(task_registry.clone()), &Some(snapshot_registry.clone()), tid)
                         } else {
                             let table = typeck::build_symbol_table(&program);
-                            typeck::handle_query(&program, &table, query)
+                            typeck::handle_query(&program, &table, query, &[])
                         };
                         println!("\n--- Query: {query} ---\n{response}");
                     }
@@ -452,7 +452,7 @@ async fn main() -> Result<()> {
                 if let parser::Operation::Test(test) = test_op {
                     println!("\n--- Testing {} ---", test.function_name);
                     for (i, case) in test.cases.iter().enumerate() {
-                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks) {
+                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
                             Ok(msg) => println!("  PASS [{i}]: {msg}"),
                             Err(e) => eprintln!("  FAIL [{i}]: {e}"),
                         }

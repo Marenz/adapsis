@@ -548,7 +548,7 @@ mod tests {
             validator::apply_and_validate(&mut program, op).unwrap();
         }
         let table = crate::typeck::build_symbol_table(&program);
-        let output = crate::typeck::handle_query(&program, &table, "?symbols");
+        let output = crate::typeck::handle_query(&program, &table, "?symbols", &[]);
         // Must contain qualified names
         assert!(
             output.contains("Probe.hi"),
@@ -576,7 +576,7 @@ mod tests {
             validator::apply_and_validate(&mut program, op).unwrap();
         }
         let table = crate::typeck::build_symbol_table(&program);
-        let output = crate::typeck::handle_query(&program, &table, "?source Probe.hi");
+        let output = crate::typeck::handle_query(&program, &table, "?source Probe.hi", &[]);
         assert!(
             output.contains("+fn hi"),
             "?source Probe.hi failed:\n{output}"
@@ -588,7 +588,7 @@ mod tests {
     fn test_library_query_in_handle_query() {
         let program = ast::Program::default();
         let table = crate::typeck::build_symbol_table(&program);
-        let output = crate::typeck::handle_query(&program, &table, "?library");
+        let output = crate::typeck::handle_query(&program, &table, "?library", &[]);
         // Must NOT return "unknown query"
         assert!(
             !output.contains("unknown query"),

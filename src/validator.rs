@@ -158,57 +158,12 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             }
             bail!("`{target}` not found");
         }
-        parser::Operation::RemoveRoute { method, path } => {
-            let before = program.http_routes.len();
-            let mut removed_handler = None;
-            program.http_routes.retain(|r| {
-                if r.method == *method && r.path == *path {
-                    removed_handler = Some(r.handler_fn.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            if program.http_routes.len() < before {
-                Ok(format!(
-                    "removed route {} {} (was -> `{}`)",
-                    method,
-                    path,
-                    removed_handler.unwrap_or_default()
-                ))
-            } else {
-                bail!("no route found for {} {}", method, path);
-            }
+        parser::Operation::RemoveRoute { .. } => {
+            Ok("route removal (handled by session)".to_string())
         }
         parser::Operation::Mock { .. } => Ok("mock (handled by session)".to_string()),
         parser::Operation::Unmock => Ok("unmock (handled by session)".to_string()),
-        parser::Operation::Route {
-            method,
-            path,
-            handler_fn,
-        } => {
-            // Register or replace an HTTP route in program state
-            let route = ast::HttpRoute {
-                method: method.clone(),
-                path: path.clone(),
-                handler_fn: handler_fn.clone(),
-            };
-            // Replace existing route for same method+path, or add new
-            if let Some(existing) = program
-                .http_routes
-                .iter_mut()
-                .find(|r| r.method == *method && r.path == *path)
-            {
-                let old_fn = existing.handler_fn.clone();
-                existing.handler_fn = handler_fn.clone();
-                Ok(format!(
-                    "updated route {method} {path} -> `{handler_fn}` (was `{old_fn}`)"
-                ))
-            } else {
-                program.http_routes.push(route);
-                Ok(format!("added route {method} {path} -> `{handler_fn}`"))
-            }
-        }
+        parser::Operation::Route { .. } => Ok("route (handled by session)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements at top level — execute immediately (not stored in AST)
         parser::Operation::Let(_)
@@ -228,19 +183,10 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
     }
 }
 
-/// Remove all HTTP routes whose handler_fn matches the given function name.
-/// Returns a list of "METHOD /path" strings for the removed routes.
-fn remove_routes_for_handler(program: &mut ast::Program, handler_name: &str) -> Vec<String> {
-    let mut removed = Vec::new();
-    program.http_routes.retain(|r| {
-        if r.handler_fn == handler_name {
-            removed.push(format!("{} {}", r.method, r.path));
-            false
-        } else {
-            true
-        }
-    });
-    removed
+/// Route cleanup is now handled by Session — validator no longer touches routes.
+/// Returns empty; callers will be updated to use session-level route removal.
+fn remove_routes_for_handler(_program: &mut ast::Program, _handler_name: &str) -> Vec<String> {
+    Vec::new()
 }
 
 fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result<String> {
@@ -1368,16 +1314,7 @@ pub fn program_summary_compact(program: &ast::Program) -> String {
         out.push_str(&format!(" fns=[{}]\n", fns.join(", ")));
     }
 
-    if !program.http_routes.is_empty() {
-        out.push_str("Routes:\n");
-        for route in &program.http_routes {
-            out.push_str(&format!(
-                "  {} {} -> {}\n",
-                route.method, route.path, route.handler_fn
-            ));
-        }
-    }
-
+    // Routes are now in RuntimeState, not Program — use ?routes to see them.
     out.push_str("\nUse ?symbols, ?callers, ?callees, ?deps, ?routes for details.\n");
     out
 }
