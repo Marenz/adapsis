@@ -375,7 +375,7 @@ pub fn eval_call_with_input(
 ) -> Result<String> {
     // Try user-defined function first
     if let Some(func) = program.get_function(function_name) {
-        let input_val = eval_parser_expr_with_program(input, program)?;
+        let input_val = eval_parser_expr_standalone(input)?;
         let mut env = Env::new();
         bind_input_to_params(program, func, &input_val, &mut env);
 
@@ -405,11 +405,11 @@ pub fn eval_call_with_input(
                 // Preserve field order from the parser
                 fields
                     .iter()
-                    .map(|f| eval_parser_expr_with_program(&f.value, program))
+                    .map(|f| eval_parser_expr_standalone(&f.value))
                     .collect::<Result<Vec<_>>>()?
             }
             _ => {
-                let input_val = eval_parser_expr_with_program(input, program)?;
+                let input_val = eval_parser_expr_standalone(input)?;
                 match &input_val {
                     Value::None => vec![],
                     other => vec![other.clone()],
@@ -1041,7 +1041,84 @@ fn eval_function_body(
                             bail!("+match: no arm matched variant `{variant}`");
                         }
                     }
-                    _ => bail!("+match expects a union value, got {val}"),
+                    // Treat Ok/Err as union variants for pattern matching
+                    Value::Ok(inner) => {
+                        let as_union = Value::Union { variant: "Ok".to_string(), payload: vec![inner.as_ref().clone()] };
+                        let mut matched = false;
+                        for arm in arms {
+                            if arm.variant == "Ok" {
+                                env.push_scope();
+                                if let Some(binding) = arm.bindings.first() {
+                                    if binding != "_" { env.set(binding, inner.as_ref().clone()); }
+                                }
+                                let result = eval_function_body(program, &arm.body, env);
+                                env.pop_scope();
+                                let result = result?;
+                                if !matches!(result, Value::None) { return Ok(result); }
+                                matched = true;
+                                break;
+                            } else if arm.variant == "_" {
+                                env.push_scope();
+                                if arm.bindings.len() == 1 && arm.bindings[0] != "_" {
+                                    env.set(&arm.bindings[0], as_union.clone());
+                                }
+                                let result = eval_function_body(program, &arm.body, env);
+                                env.pop_scope();
+                                let result = result?;
+                                if !matches!(result, Value::None) { return Ok(result); }
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched { bail!("+match: no arm matched Ok"); }
+                    }
+                    Value::Err(msg) => {
+                        let as_union = Value::Union { variant: "Err".to_string(), payload: vec![Value::String(msg.clone())] };
+                        let mut matched = false;
+                        for arm in arms {
+                            if arm.variant == "Err" {
+                                env.push_scope();
+                                if let Some(binding) = arm.bindings.first() {
+                                    if binding != "_" { env.set(binding, Value::String(msg.clone())); }
+                                }
+                                let result = eval_function_body(program, &arm.body, env);
+                                env.pop_scope();
+                                let result = result?;
+                                if !matches!(result, Value::None) { return Ok(result); }
+                                matched = true;
+                                break;
+                            } else if arm.variant == "_" {
+                                env.push_scope();
+                                if arm.bindings.len() == 1 && arm.bindings[0] != "_" {
+                                    env.set(&arm.bindings[0], as_union.clone());
+                                }
+                                let result = eval_function_body(program, &arm.body, env);
+                                env.pop_scope();
+                                let result = result?;
+                                if !matches!(result, Value::None) { return Ok(result); }
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched { bail!("+match: no arm matched Err"); }
+                    }
+                    // Also match on None (Option type)
+                    Value::None => {
+                        let mut matched = false;
+                        for arm in arms {
+                            if arm.variant == "None" || arm.variant == "_" {
+                                env.push_scope();
+                                let result = eval_function_body(program, &arm.body, env);
+                                env.pop_scope();
+                                let result = result?;
+                                if !matches!(result, Value::None) { return Ok(result); }
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched { bail!("+match: no arm matched None"); }
+                    }
+                    _ => bail!("+match expects a union, Ok/Err, or None value, got {val}"),
                 }
             }
             ast::StatementKind::Await { name, call, .. } => {
@@ -1242,37 +1319,6 @@ fn eval_builtin_or_user(
                 bail!("to_string() expects 1 argument");
             }
             Ok(Value::String(format!("{}", args[0])))
-        }
-        "is_ok" => {
-            if args.len() != 1 {
-                bail!("is_ok() expects 1 argument");
-            }
-            Ok(Value::Bool(matches!(&args[0], Value::Ok(_))))
-        }
-        "is_err" => {
-            if args.len() != 1 {
-                bail!("is_err() expects 1 argument");
-            }
-            Ok(Value::Bool(matches!(&args[0], Value::Err(_))))
-        }
-        "unwrap" => {
-            if args.len() != 1 {
-                bail!("unwrap() expects 1 argument");
-            }
-            match &args[0] {
-                Value::Ok(v) => Ok(v.as_ref().clone()),
-                Value::Err(e) => bail!("unwrap on Err({e})"),
-                other => Ok(other.clone()),
-            }
-        }
-        "unwrap_err" | "error" => {
-            if args.len() != 1 {
-                bail!("unwrap_err() expects 1 argument");
-            }
-            match &args[0] {
-                Value::Err(e) => Ok(Value::String(e.clone())),
-                other => bail!("unwrap_err on non-Err value: {other}"),
-            }
         }
         "char_at" => {
             if args.len() != 2 {
@@ -2178,24 +2224,6 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                 parser::BinaryOp::Or => ast::BinaryOp::Or,
             };
             eval_binary_op(&l, &ast_op, &r)
-        }
-        // FieldAccess needs program access to evaluate the base (e.g. build_state(100).messages)
-        parser::Expr::FieldAccess { base, field } => {
-            let base_val = eval_parser_expr_with_program(base, program)?;
-            match &base_val {
-                Value::Struct(_, fields) => fields
-                    .get(field)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("field `{field}` not found on {base_val}")),
-                Value::Ok(inner) => match inner.as_ref() {
-                    Value::Struct(_, fields) => fields
-                        .get(field)
-                        .cloned()
-                        .ok_or_else(|| anyhow!("field `{field}` not found")),
-                    _ => bail!("cannot access field `{field}` on {base_val}"),
-                },
-                _ => bail!("cannot access field `{field}` on {base_val}"),
-            }
         }
         // Everything else delegates to standalone
         _ => eval_parser_expr_standalone(expr),
@@ -3523,80 +3551,5 @@ mod tests {
         assert_eq!(cases.len(), 1);
         let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
         assert!(result.is_ok(), "newline escape in test value: {:?}", result);
-    }
-
-    // ── Field access on function call results in test params ──────────
-
-    #[test]
-    fn test_field_access_on_function_call_in_with() {
-        // state=build_state(100).messages should call build_state, then access .messages
-        let source = "\
-+type State = {messages:Int, limit:Int}
-
-+fn build_state (limit:Int)->State
-  +let s:State = {messages: 5, limit: limit}
-  +return s
-
-+fn identity (n:Int)->Int
-  +return n
-
-!test identity
-  +with n=build_state(100).messages -> expect 5
-";
-        let program = build_program(source);
-        let cases = extract_test_cases(source);
-        assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
-        assert!(result.is_ok(), "field access on func call in +with: {:?}", result);
-        assert!(result.unwrap().contains("expected 5"));
-    }
-
-    #[test]
-    fn test_field_access_on_function_call_in_eval() {
-        // !eval identity build_state(100).messages should work via positional args
-        let source = "\
-+type State = {messages:Int, limit:Int}
-
-+fn build_state (limit:Int)->State
-  +let s:State = {messages: 5, limit: limit}
-  +return s
-
-+fn identity (n:Int)->Int
-  +return n
-";
-        let program = build_program(source);
-        let eval_source = "!eval identity build_state(100).messages";
-        let ops = parser::parse(eval_source).expect("parse should succeed");
-        let ev = ops.into_iter()
-            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
-            .expect("should have eval op");
-        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
-        assert!(result.is_ok(), "field access in !eval: {:?}", result);
-        assert_eq!(result.unwrap().0, "5");
-    }
-
-    #[test]
-    fn test_chained_field_access_on_function_call() {
-        let source = "\
-+type Inner = {value:Int}
-+type Outer = {inner:Inner}
-
-+fn make_outer (v:Int)->Outer
-  +let i:Inner = {value: v}
-  +let o:Outer = {inner: i}
-  +return o
-
-+fn identity (n:Int)->Int
-  +return n
-
-!test identity
-  +with n=make_outer(42).inner.value -> expect 42
-";
-        let program = build_program(source);
-        let cases = extract_test_cases(source);
-        assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
-        assert!(result.is_ok(), "chained field access: {:?}", result);
-        assert!(result.unwrap().contains("expected 42"));
     }
 }

@@ -277,30 +277,6 @@ pub static BUILTINS: &[Builtin] = &[
         description: "Option value constructor",
         category: BuiltinCategory::Result,
     },
-    Builtin {
-        name: "is_ok",
-        aliases: &[],
-        description: "check if Result is Ok (Bool)",
-        category: BuiltinCategory::Result,
-    },
-    Builtin {
-        name: "is_err",
-        aliases: &[],
-        description: "check if Result is Err (Bool)",
-        category: BuiltinCategory::Result,
-    },
-    Builtin {
-        name: "unwrap",
-        aliases: &[],
-        description: "extract Ok value, fails on Err",
-        category: BuiltinCategory::Result,
-    },
-    Builtin {
-        name: "unwrap_err",
-        aliases: &["error"],
-        description: "extract Err message, fails on Ok",
-        category: BuiltinCategory::Result,
-    },
     // Regex
     Builtin {
         name: "regex_match",
