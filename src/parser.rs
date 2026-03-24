@@ -1275,6 +1275,15 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
 fn parse_function_header(line: usize, input: &str) -> Result<FunctionHeader> {
     let (name, rest) =
         take_ident(input).ok_or_else(|| anyhow!("line {}: expected function name", line))?;
+    // Support Module.function_name — strip the module prefix, keep just the function name
+    let (name, rest) = if rest.starts_with('.') {
+        let after_dot = &rest[1..];
+        let (fn_name, rest2) = take_ident(after_dot)
+            .ok_or_else(|| anyhow!("line {}: expected function name after '.'", line))?;
+        (fn_name, rest2)
+    } else {
+        (name, rest)
+    };
     let rest = rest.trim();
 
     let params_start = rest
