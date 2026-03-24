@@ -147,6 +147,39 @@ fn reconstruct_function_source(func: &ast::FunctionDecl) -> String {
     for stmt in &func.body {
         typeck::reconstruct_stmt_pub(&mut out, stmt, 1);
     }
+
+    // Include persisted tests in source reconstruction
+    if !func.tests.is_empty() {
+        out.push('\n');
+        out.push_str(&format!("!test {}\n", func.name));
+        for tc in &func.tests {
+            let expect_part = if let Some(ref m) = tc.matcher {
+                if m == "AnyOk" {
+                    "Ok".to_string()
+                } else if m == "AnyErr" {
+                    "Err".to_string()
+                } else if let Some(msg) = m.strip_prefix("ErrContaining:") {
+                    format!("Err(\"{}\")", msg)
+                } else if let Some(sub) = m.strip_prefix("contains:") {
+                    format!("contains(\"{}\")", sub)
+                } else if let Some(pre) = m.strip_prefix("starts_with:") {
+                    format!("starts_with(\"{}\")", pre)
+                } else {
+                    tc.expected.clone()
+                }
+            } else {
+                tc.expected.clone()
+            };
+            out.push_str(&format!("  +with {} -> expect {}\n", tc.input, expect_part));
+            for ac in &tc.after_checks {
+                out.push_str(&format!(
+                    "  +after {} {} \"{}\"\n",
+                    ac.target, ac.matcher, ac.value
+                ));
+            }
+        }
+    }
+
     out
 }
 
