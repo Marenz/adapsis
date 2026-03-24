@@ -2357,22 +2357,38 @@ pub async fn ask_stream(
                                     }
                                 }
 
-                                // Detect text-only exit: OpenCode exited successfully but made
-                                // no tool calls.  This usually means it asked for clarification
-                                // or gave up.  Report the text as an error so the Adapsis LLM
-                                // can retry with a better prompt instead of silently succeeding.
+                                // Detect no-op exit: OpenCode exited successfully but made no
+                                // file changes.  This usually means it asked for clarification
+                                // or only read files.  Report the text as an error so the
+                                // Adapsis LLM can retry with a better prompt.
                                 if let Ok(Ok(ref status)) = oc_result {
-                                    if status.success() && !had_tool_calls.load(std::sync::atomic::Ordering::Relaxed) {
-                                        let text = last_text.lock().unwrap().clone();
-                                        let preview: String = text.chars().take(500).collect();
-                                        let msg = format!("OpenCode exited without making any changes (text-only response). It may have asked for clarification instead of proceeding. OpenCode said: {preview}");
-                                        eprintln!("[opencode:text-only] {msg}");
-                                        log_activity(&config_clone.log_file, "opencode-text-only", &msg).await;
-                                        has_errors = true;
-                                        feedback_details.push(format!("ERROR: {msg}"));
-                                        let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
-                                        session = config_clone.session.lock().await;
-                                        continue;
+                                    if status.success() {
+                                        let has_changes = tokio::process::Command::new("git")
+                                            .args(["diff", "--stat", "HEAD"])
+                                            .current_dir(&work_dir)
+                                            .output()
+                                            .await
+                                            .map(|o| !o.stdout.is_empty())
+                                            .unwrap_or(true); // assume changes if git fails
+                                        let has_new_commits = tokio::process::Command::new("git")
+                                            .args(["log", "--oneline", "-1", "--since=2 minutes ago"])
+                                            .current_dir(&work_dir)
+                                            .output()
+                                            .await
+                                            .map(|o| !o.stdout.is_empty())
+                                            .unwrap_or(true);
+                                        if !has_changes && !has_new_commits {
+                                            let text = last_text.lock().unwrap().clone();
+                                            let preview: String = text.chars().take(500).collect();
+                                            let msg = format!("OpenCode exited without making any file changes. It may have asked for clarification instead of proceeding. OpenCode said: {preview}");
+                                            eprintln!("[opencode:no-changes] {msg}");
+                                            log_activity(&config_clone.log_file, "opencode-no-changes", &msg).await;
+                                            has_errors = true;
+                                            feedback_details.push(format!("ERROR: {msg}"));
+                                            let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
+                                            session = config_clone.session.lock().await;
+                                            continue;
+                                        }
                                     }
                                 }
 
