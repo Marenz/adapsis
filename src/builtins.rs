@@ -641,8 +641,20 @@ pub static ACTIONS: &[ActionCommand] = &[
     ActionCommand {
         name: "!remove",
         args: "<Module.function | Module | TypeName>",
-        short: "remove a function, type, or entire module",
-        long: "Removes a function, type, or entire module from the program. Use fully qualified names for functions, and be careful because this mutates stored program state.",
+        short: "remove a function, type, or entire module (also removes associated routes)",
+        long: "Removes a function, type, or entire module from the program. Use fully qualified names for functions, and be careful because this mutates stored program state. When removing a function or module, any HTTP routes pointing to the removed handler are also automatically removed.",
+    },
+    ActionCommand {
+        name: "!remove route",
+        args: "<METHOD> <path>",
+        short: "remove an HTTP route by method and path",
+        long: "Removes a registered HTTP route by its method and path. Example: !remove route POST /api/ask. The handler function is NOT removed, only the route entry.",
+    },
+    ActionCommand {
+        name: "!unroute",
+        args: "<METHOD> <path>",
+        short: "remove an HTTP route by method and path (alias for !remove route)",
+        long: "Shorthand for `!remove route METHOD /path`. Removes a registered HTTP route by its method and path. Example: !unroute GET /health. The handler function is NOT removed, only the route entry.",
     },
     ActionCommand {
         name: "!move",
