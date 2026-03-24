@@ -149,13 +149,30 @@ impl Value {
 /// variable, and lookups walk the stack from top to bottom.
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
+    /// Shared runtime state for +shared variable access.
+    shared_runtime: Option<crate::session::SharedRuntime>,
+    /// Local cache of shared vars (key = "Module.name") for borrow-friendly reads.
+    shared_cache: HashMap<String, Value>,
 }
 
 impl Env {
     pub fn new() -> Self {
         Self {
             scopes: vec![HashMap::new()],
+            shared_runtime: None,
+            shared_cache: HashMap::new(),
         }
+    }
+
+    /// Attach shared runtime state for +shared variable access.
+    pub fn set_runtime(&mut self, rt: crate::session::SharedRuntime) {
+        // Pre-populate the local cache from the runtime's current shared_vars.
+        if let Ok(state) = rt.read() {
+            for (key, val) in &state.shared_vars {
+                self.shared_cache.insert(key.clone(), val.clone());
+            }
+        }
+        self.shared_runtime = Some(rt);
     }
 
     /// Push a new empty scope onto the stack.
@@ -179,8 +196,9 @@ impl Env {
     }
 
     /// Mutate an existing variable: walk scopes top-to-bottom, update the
-    /// first scope that contains `name`. If not found, insert into the top
-    /// scope (same as `set`). Used by `+set`.
+    /// first scope that contains `name`. If not found in local scopes, check
+    /// shared vars (keyed by "Module.name"). If still not found, insert into
+    /// the top scope (same as `set`). Used by `+set`.
     fn set_existing(&mut self, name: &str, value: Value) {
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(name) {
@@ -188,15 +206,49 @@ impl Env {
                 return;
             }
         }
+        // Check shared vars: derive "Module.name" key from current function context
+        if self.shared_runtime.is_some() {
+            let module_name = FN_NAME_STACK.with(|s| {
+                let stack = s.borrow();
+                stack.last().and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
+            });
+            if let Some(module) = module_name {
+                let key = format!("{module}.{name}");
+                if self.shared_cache.contains_key(&key) {
+                    self.shared_cache.insert(key.clone(), value.clone());
+                    // Write through to runtime
+                    if let Some(rt) = &self.shared_runtime {
+                        if let Ok(mut state) = rt.write() {
+                            state.shared_vars.insert(key, value);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // Not found anywhere — define in current scope
         self.set(name, value);
     }
 
     /// Look up a variable by walking scopes from top to bottom.
+    /// Falls back to shared vars cache (keyed by "Module.name") if not found locally.
     fn get(&self, name: &str) -> Result<&Value> {
         for scope in self.scopes.iter().rev() {
             if let Some(val) = scope.get(name) {
                 return Ok(val);
+            }
+        }
+        // Check shared vars: derive "Module.name" key from current function context
+        if !self.shared_cache.is_empty() {
+            let module_name = FN_NAME_STACK.with(|s| {
+                let stack = s.borrow();
+                stack.last().and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
+            });
+            if let Some(module) = module_name {
+                let key = format!("{module}.{name}");
+                if let Some(val) = self.shared_cache.get(&key) {
+                    return Ok(val);
+                }
             }
         }
         Err(anyhow!("undefined variable `{name}`"))
