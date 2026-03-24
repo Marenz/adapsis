@@ -748,8 +748,9 @@ pub fn eval_test_case_with_mocks(
     env.populate_shared_from_program(program);
     bind_input_to_params(program, func, &input, &mut env);
 
-    // Execute function body
-    let result = eval_function_body(program, &func.body, &mut env);
+    // Execute function body (use named variant so FN_NAME_STACK has the qualified name
+    // for shared variable resolution in Env::get())
+    let result = eval_function_body_named(program, function_name, &func.body, &mut env);
 
     let msg = check_test_result(result, &func.return_type, &input, &expected, case.matcher.as_ref())?;
 
