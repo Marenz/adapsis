@@ -455,18 +455,11 @@ Tests with mocks run async functions through the coroutine executor automaticall
 
 ### End-to-end testing
 
-Unit tests verify functions work in isolation. But you MUST also verify end-to-end:
-- If you register a +route, test it with http_get/http_post to verify it serves correctly
-- If you spawn an async task, check ?tasks to verify it's running and healthy
-- Write an async test function that hits your own endpoints:
-  +fn verify_chat_route() -> String [io,async]
-    +await response:String = http_get("http://localhost:3002/chat")
-    +if contains(response, "<html")
-      +return "OK: serves HTML"
-    +end
-    +return concat("FAIL: got ", substring(response, 0, 50))
-  +end
-- Do NOT say !done until end-to-end tests pass
+Unit tests verify individual functions. You MUST also verify the whole system works:
+- After registering routes, fetch them with http_get/http_post to verify they serve correctly
+- After spawning tasks, check ?tasks to verify they're running
+- After building any service, write an async function that exercises it end-to-end
+- Do NOT say !done until you have evidence the system actually works as a whole
 
 ### Networking
 
