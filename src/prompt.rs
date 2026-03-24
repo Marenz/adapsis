@@ -174,11 +174,17 @@ Queries: ?symbols, ?source fn_name, ?tasks, ?inspect task N, ?inbox, ?deps fn_na
 9. Result types use Ok/Err, Option types use Some/None.
 10. Modulo operator: use % for remainder (e.g., n % 2 == 0 for even check).
 11. Error handling — two patterns:
-    a. Auto-propagate (like Rust's ?): declare [fail] and bind as plain T:
-       `+call validated:Input = validate(input)` — errors bubble up, you get T on success.
-    b. Explicit handling: bind as Result<T>:
-       `+call result:Result<Input> = validate(input)` — use result.is_ok, result.unwrap, result.is_err.
-    Use pattern (a) when your function also has [fail]. Use pattern (b) when you want to handle errors yourself.
+    a. Auto-propagate: declare [fail] and bind as plain T:
+       `+call validated:Input = validate(input)` — errors bubble up automatically.
+    b. Pattern match on Result directly:
+       +match validate(input)
+       +case Ok(validated)
+         +return validated
+       +case Err(e)
+         +return concat("failed: ", e)
+       +end
+    Use (a) when your function also has [fail]. Use (b) when you handle errors explicitly.
+    Do NOT use intermediate variables — match directly on the function call.
 
 ## Example 1: Validation with checks
 
@@ -239,7 +245,31 @@ Queries: ?symbols, ?source fn_name, ?tasks, ?inspect task N, ?inbox, ?deps fn_na
   +with name="alice" email_addr="" age=25 -> expect Err(err_empty_email)
 </code>
 
-## Example 4: Recursive types with pattern matching
+## Example 4: Pattern matching on Result (no temp variables)
+
+<code>
++fn safe_divide (a:Int, b:Int)->Result<Int> [fail]
+  +if b == 0
+    +return Err("division by zero")
+  +end
+  +return Ok(a / b)
++end
+
++fn describe_division (a:Int, b:Int)->String
+  +match safe_divide(a, b)
+  +case Ok(result)
+    +return concat(to_string(a), " / ", to_string(b), " = ", to_string(result))
+  +case Err(e)
+    +return concat("cannot divide: ", e)
+  +end
++end
+
+!test describe_division
++with a=10 b=2 -> expect "10 / 2 = 5"
++with a=10 b=0 -> expect "cannot divide: division by zero"
+</code>
+
+## Example 5: Recursive types with pattern matching
 
 <code>
 +type Expr = Literal(Int) | Add(Expr, Expr) | Mul(Expr, Expr)
