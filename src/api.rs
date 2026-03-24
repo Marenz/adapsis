@@ -167,7 +167,7 @@ pub async fn eval_fn(
                         let handle = crate::coroutine::CoroutineHandle::new(sender);
                         let mut env = eval::Env::new();
                         env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
-                        let input_val = eval::eval_parser_expr_standalone(&input)?;
+                        let input_val = eval::eval_parser_expr_with_program(&input, &program)?;
                         eval::bind_input_to_params(&program, func, &input_val, &mut env);
                         eval::eval_function_body_pub(&program, &func.body, &mut env)
                     }).await;
@@ -1162,7 +1162,7 @@ pub async fn ask(
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
                                         let mut env = crate::eval::Env::new();
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                        let input_val = crate::eval::eval_parser_expr_standalone(&input)?;
+                                        let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
                                         crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
                                         crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
                                     }).await;
@@ -2002,7 +2002,7 @@ pub async fn ask_stream(
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
                                             let mut env = crate::eval::Env::new();
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                            let input_val = crate::eval::eval_parser_expr_standalone(&input)?;
+                                            let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
                                             crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
                                             crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
                                         }).await;
