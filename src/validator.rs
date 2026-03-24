@@ -556,6 +556,7 @@ fn convert_function(decl: &parser::FunctionDecl) -> Result<ast::FunctionDecl> {
         return_type: convert_type(&decl.return_type)?,
         effects,
         body,
+        tests: vec![],
     })
 }
 
