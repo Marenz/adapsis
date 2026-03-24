@@ -1243,6 +1243,37 @@ fn eval_builtin_or_user(
             }
             Ok(Value::String(format!("{}", args[0])))
         }
+        "is_ok" => {
+            if args.len() != 1 {
+                bail!("is_ok() expects 1 argument");
+            }
+            Ok(Value::Bool(matches!(&args[0], Value::Ok(_))))
+        }
+        "is_err" => {
+            if args.len() != 1 {
+                bail!("is_err() expects 1 argument");
+            }
+            Ok(Value::Bool(matches!(&args[0], Value::Err(_))))
+        }
+        "unwrap" => {
+            if args.len() != 1 {
+                bail!("unwrap() expects 1 argument");
+            }
+            match &args[0] {
+                Value::Ok(v) => Ok(v.as_ref().clone()),
+                Value::Err(e) => bail!("unwrap on Err({e})"),
+                other => Ok(other.clone()),
+            }
+        }
+        "unwrap_err" | "error" => {
+            if args.len() != 1 {
+                bail!("unwrap_err() expects 1 argument");
+            }
+            match &args[0] {
+                Value::Err(e) => Ok(Value::String(e.clone())),
+                other => bail!("unwrap_err on non-Err value: {other}"),
+            }
+        }
         "char_at" => {
             if args.len() != 2 {
                 bail!("char_at(s, i) expects 2 arguments");
