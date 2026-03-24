@@ -126,12 +126,16 @@ pub fn snapshot_program(program: &crate::ast::Program) -> ForgeEvent {
         .iter()
         .map(|m| ModuleSnapshot {
             name: m.name.clone(),
-            functions: m.functions.iter().map(snapshot_function).collect(),
+            functions: m.functions.iter().map(|f| snapshot_function(f)).collect(),
             types: m.types.iter().map(snapshot_type).collect(),
         })
         .collect();
 
-    let functions = program.functions.iter().map(snapshot_function).collect();
+    let functions = program
+        .functions
+        .iter()
+        .map(|f| snapshot_function(f))
+        .collect();
     let types = program.types.iter().map(snapshot_type).collect();
 
     ForgeEvent::ProgramSnapshot {

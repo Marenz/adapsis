@@ -191,7 +191,7 @@ fn is_compilable_expr(expr: &ast::Expr) -> bool {
 
 /// Check if an entire program can be fully compiled.
 pub fn is_fully_compilable(program: &ast::Program) -> bool {
-    program.functions.iter().all(is_compilable_function)
+    program.functions.iter().all(|f| is_compilable_function(f))
 }
 
 // === String runtime functions (called from JIT code) ===
