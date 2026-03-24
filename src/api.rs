@@ -2694,10 +2694,27 @@ async fn adapsis_route_dispatch(
 
     match eval_result {
         Ok(Ok(val)) => {
-            let response_body = format!("{val}");
+            // Extract the raw string for HTTP response (no JSON quoting).
+            // Infer content-type from the response body.
+            let response_body = match &val {
+                eval::Value::String(s) => s.clone(),
+                other => format!("{other}"),
+            };
+            let content_type = {
+                let lower = response_body.trim_start().to_ascii_lowercase();
+                if lower.starts_with("<!doctype") || lower.starts_with("<html") {
+                    "text/html; charset=utf-8"
+                } else if lower.starts_with('{') || lower.starts_with('[') {
+                    "application/json; charset=utf-8"
+                } else if lower.starts_with("<?xml") || lower.starts_with("<svg") {
+                    "application/xml; charset=utf-8"
+                } else {
+                    "text/plain; charset=utf-8"
+                }
+            };
             (
                 StatusCode::OK,
-                [("content-type", "text/plain; charset=utf-8")],
+                [("content-type", content_type)],
                 response_body,
             )
                 .into_response()

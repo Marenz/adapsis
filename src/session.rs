@@ -1075,6 +1075,11 @@ impl Session {
 }
 
 /// Format a parser::Expr back into source-level syntax suitable for `+with` lines.
+/// Public alias for testing.
+pub fn format_expr_pub(expr: &parser::Expr) -> String {
+    format_expr(expr)
+}
+
 fn format_expr(expr: &parser::Expr) -> String {
     match expr {
         parser::Expr::Int(n) => n.to_string(),
@@ -1115,11 +1120,35 @@ fn format_expr(expr: &parser::Expr) -> String {
             format!("{}{}", op_str, format_expr(inner))
         }
         parser::Expr::StructLiteral(fields) => {
-            let parts: Vec<String> = fields
-                .iter()
-                .map(|f| format!("{}={}", f.name, format_expr(&f.value)))
-                .collect();
-            parts.join(" ")
+            if fields.is_empty() {
+                return String::new();
+            }
+            // Use flat key=value format only for simple top-level params
+            // (no nested structs, no function calls as values). Otherwise
+            // use brace struct syntax `{k: v, k: v}` which always round-trips.
+            let all_simple = fields.iter().all(|f| {
+                matches!(
+                    &f.value,
+                    parser::Expr::Int(_)
+                        | parser::Expr::Float(_)
+                        | parser::Expr::Bool(_)
+                        | parser::Expr::String(_)
+                        | parser::Expr::Ident(_)
+                )
+            });
+            if all_simple {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{}={}", f.name, format_expr(&f.value)))
+                    .collect();
+                parts.join(" ")
+            } else {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, format_expr(&f.value)))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
         }
         parser::Expr::Cast { expr: inner, .. } => format_expr(inner),
     }
