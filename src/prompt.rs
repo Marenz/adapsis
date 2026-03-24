@@ -134,9 +134,6 @@ String: concat(a,b), substring(s,start,len), split(s,delim), join(list,sep),
   index_of(s,sub), char_at(s,i), length(s), to_string(x), to_int(s),
   regex_match(s,pattern), regex_replace(s,pattern,replacement)
 
-Result: is_ok(r) -> Bool, is_err(r) -> Bool, unwrap(r) -> T, unwrap_err(r) -> String
-  (also available as methods: r.is_ok, r.is_err, r.unwrap, r.error)
-
 JSON: json_get(json_string, "path.to.key"), json_array_len(json_string),
   json_escape(s) — escape a string for use inside JSON values
 
