@@ -1063,6 +1063,13 @@ pub fn eval_function_body_pub(
     eval_function_body(program, body, env)
 }
 
+/// Evaluate an AST expression in isolation (no function context).
+/// Used for evaluating +shared variable default values like `0`, `""`, `true`.
+pub fn eval_expr_standalone(program: &ast::Program, expr: &ast::Expr) -> Result<Value> {
+    let mut env = Env::new();
+    eval_ast_expr(program, expr, &mut env)
+}
+
 /// Public entry point that also sets the top-level function name for snapshot tracking.
 /// Use this for spawned tasks so `?inspect task N` shows the correct function name.
 pub fn eval_function_body_named(

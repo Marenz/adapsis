@@ -85,13 +85,19 @@ pub async fn mutate(
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
     let mut session = config.session.lock().await;
     match session.apply_async(&req.source, config.io_sender.as_ref()).await {
-        Ok(results) => Json(MutateResponse {
-            revision: session.revision,
-            results: results
-                .into_iter()
-                .map(|(message, success)| MutationResult { message, success })
-                .collect(),
-        }),
+        Ok(results) => {
+            // Sync shared vars to the Arc<RwLock> runtime
+            if let Ok(mut rt) = config.runtime.write() {
+                rt.shared_vars = session.runtime.shared_vars.clone();
+            }
+            Json(MutateResponse {
+                revision: session.revision,
+                results: results
+                    .into_iter()
+                    .map(|(message, success)| MutationResult { message, success })
+                    .collect(),
+            })
+        }
         Err(e) => Json(MutateResponse {
             revision: session.revision,
             results: vec![MutationResult {
@@ -1079,6 +1085,10 @@ pub async fn ask(
                 if has_mutations {
                     match session.apply(&code) {
                         Ok(res) => {
+                            // Sync shared vars to the Arc<RwLock> runtime
+                            if let Ok(mut rt) = config.runtime.write() {
+                                rt.shared_vars = session.runtime.shared_vars.clone();
+                            }
                             for (msg, ok) in res {
                                 eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
                                 if !ok { iter_has_errors = true; }
@@ -1917,6 +1927,10 @@ pub async fn ask_stream(
                     if has_mutations {
                         match session.apply(&code) {
                             Ok(res) => {
+                                // Sync shared vars to the Arc<RwLock> runtime
+                                if let Ok(mut rt) = config_clone.runtime.write() {
+                                    rt.shared_vars = session.runtime.shared_vars.clone();
+                                }
                                 for (msg, ok) in &res {
                                     if !*ok { has_errors = true; }
                                     feedback_details.push(format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}));

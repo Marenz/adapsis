@@ -437,6 +437,22 @@ impl Session {
         self.runtime.http_routes.iter().find(|r| r.method == method && r.path == path)
     }
 
+    /// Initialize shared variables from module declarations.
+    /// For each +shared decl, if the key "Module.name" does not already exist
+    /// in runtime.shared_vars, evaluate the default expression and insert it.
+    pub fn init_shared_vars(&mut self) {
+        for module in &self.program.modules {
+            for sv in &module.shared_vars {
+                let key = format!("{}.{}", module.name, sv.name);
+                if !self.runtime.shared_vars.contains_key(&key) {
+                    let value = crate::eval::eval_expr_standalone(&self.program, &sv.default)
+                        .unwrap_or(crate::eval::Value::Int(0));
+                    self.runtime.shared_vars.insert(key, value);
+                }
+            }
+        }
+    }
+
     /// Store test cases for a function in the AST.
     /// Populates the function's `tests` field (replace, not append).
     pub fn store_test(&mut self, fn_name: &str, cases: &[parser::TestCase]) {
@@ -839,6 +855,9 @@ impl Session {
             }
         }
 
+        // Initialize any newly-declared shared variables
+        self.init_shared_vars();
+
         Ok(results)
     }
 
@@ -1058,6 +1077,9 @@ impl Session {
                 );
             }
         }
+
+        // Initialize any newly-declared shared variables
+        self.init_shared_vars();
 
         Ok(results)
     }
