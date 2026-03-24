@@ -1037,8 +1037,32 @@ fn query_symbols(_program: &Program, table: &SymbolTable, scope: &str) -> String
             ));
         }
     } else {
-        // Query specific scope
-        if let Some(sig) = table.resolve_function(scope) {
+        // Check if scope is a module name — list its contents
+        if let Some(module) = _program.modules.iter().find(|m| m.name == scope) {
+            out.push_str(&format!("Module {}:\n", scope));
+            if !module.types.is_empty() {
+                out.push_str("  Types:\n");
+                for t in &module.types {
+                    out.push_str(&format!("    {}\n", t.name()));
+                }
+            }
+            out.push_str("  Functions:\n");
+            for f in &module.functions {
+                let effects: Vec<String> = f.effects.iter().map(|e| format!("{e:?}")).collect();
+                let params: Vec<String> = f
+                    .params
+                    .iter()
+                    .map(|p| format!("{}:{:?}", p.name, p.ty))
+                    .collect();
+                out.push_str(&format!(
+                    "    {} ({})->{:?} [{}]\n",
+                    f.name,
+                    params.join(", "),
+                    f.return_type,
+                    effects.join(", ")
+                ));
+            }
+        } else if let Some(sig) = table.resolve_function(scope) {
             out.push_str(&format!("Function {}:\n", scope));
             out.push_str(&format!(
                 "  params: {}\n",
