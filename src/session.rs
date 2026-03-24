@@ -427,7 +427,21 @@ impl Session {
                     })
                     .collect()
             }
-            parser::Operation::Replace(r) => vec![r.target.clone()],
+            parser::Operation::Replace(r) => {
+                // Strip `.sN` suffix — e.g. "Mod.func.s1" → "Mod.func"
+                let target = &r.target;
+                let func_name = if let Some(dot_pos) = target.rfind('.') {
+                    let suffix = &target[dot_pos + 1..];
+                    if suffix.starts_with('s') && suffix[1..].parse::<usize>().is_ok() {
+                        target[..dot_pos].to_string()
+                    } else {
+                        target.clone()
+                    }
+                } else {
+                    target.clone()
+                };
+                vec![func_name]
+            }
             _ => return Vec::new(),
         };
 
