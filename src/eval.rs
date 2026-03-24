@@ -974,11 +974,15 @@ fn eval_function_body(
                         for item in items {
                             env.push_scope();
                             env.set(&binding.name, item);
-                            // Execute body but don't return from each unless explicitly returned
                             let result = eval_function_body(program, each_body, env);
                             env.pop_scope();
                             match result {
-                                Ok(_) => {}
+                                Ok(val) => {
+                                    // Propagate explicit +return from inside +each
+                                    if !matches!(val, Value::None) {
+                                        return Ok(val);
+                                    }
+                                }
                                 Err(e) => return Err(e),
                             }
                         }
@@ -1873,6 +1877,13 @@ fn eval_builtin_or_user(
                         variant: callee.to_string(),
                         payload: args,
                     });
+                }
+                // Check if it's an IO builtin called without +await
+                if crate::builtins::is_io_builtin(callee) {
+                    bail!(
+                        "`{callee}` is an async IO operation, use: +await result:String = {callee}({})",
+                        args.iter().enumerate().map(|(i, _)| format!("arg{i}")).collect::<Vec<_>>().join(", ")
+                    )
                 }
                 bail!(
                     "undefined function `{}` (called with {} args)",
@@ -3551,5 +3562,126 @@ mod tests {
         assert_eq!(cases.len(), 1);
         let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
         assert!(result.is_ok(), "newline escape in test value: {:?}", result);
+    }
+
+    // ── IO builtin error message tests ──────────────────────────────
+
+    #[test]
+    fn test_io_builtin_without_await_gives_helpful_error() {
+        // Calling an IO builtin like http_get without +await should give a
+        // specific error, not "undefined function"
+        let source = "\
++fn broken (url:String)->String
+  +let resp:String = http_get(url)
+  +return resp
+";
+        let program = build_program(source);
+        let test_source = "\
+!test broken
+  +with url=\"http://example.com\" -> expect \"\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_err(), "should fail when IO builtin used without +await");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("async IO operation"), "error should mention async IO: {err}");
+        assert!(err.contains("+await"), "error should suggest +await: {err}");
+        assert!(!err.contains("undefined function"), "should NOT say undefined function: {err}");
+    }
+
+    // ── +each scoping tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_each_return_propagation() {
+        // +return inside +each should propagate to the enclosing function
+        let source = "\
++type Message = {role:String, content:String}
+
++fn find_role (messages:List<Message>)->String
+  +each messages msg:Message
+    +return msg.role
+  +end
+  +return \"none\"
+
+!test find_role
+  +with messages=list({role: \"user\", content: \"hi\"}) -> expect \"user\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "+return inside +each should propagate: {:?}", result);
+    }
+
+    #[test]
+    fn test_each_field_access_and_let() {
+        // +let with field access on the loop variable should work
+        let source = "\
++type Message = {role:String, content:String}
+
++fn build_text (messages:List<Message>)->String
+  +let result:String = \"\"
+  +each messages msg:Message
+    +let role:String = msg.role
+    +set result = concat(result, role, \" \")
+  +end
+  +return result
+
+!test build_text
+  +with messages=list({role: \"user\", content: \"hi\"}, {role: \"bot\", content: \"hello\"}) -> expect \"user bot \"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "+let with field access in +each: {:?}", result);
+    }
+
+    // ── format_expr round-trip tests ──────────────────────────────────
+
+    #[test]
+    fn test_format_expr_struct_with_list_roundtrip() {
+        // Bug: format_expr produced `messages=list()last_id=0` (missing separator)
+        // for struct fields containing function calls, causing reparse failure.
+        use crate::session::StoredTestCase;
+
+        let source = "\
++type State = {messages:List<String>, last_id:Int}
+
++fn process (s:State)->Int
+  +return s.last_id
+";
+        let program = build_program(source);
+
+        // Simulate a stored test with struct input containing list()
+        let test_source = "\
+!test process
+  +with s={messages: list(), last_id: 0} -> expect 0
+";
+        let cases = extract_test_cases(test_source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+
+        // First, verify the test passes directly
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        assert!(result.is_ok(), "direct test should pass: {:?}", result);
+
+        // Now simulate the store/reparse cycle that invalidate_and_retest does
+        let input_str = crate::session::format_expr_pub(&case.input);
+        let expected_str = crate::session::format_expr_pub(&case.expected);
+
+        // Reconstruct test source (same as invalidate_and_retest)
+        let reconstructed = format!("!test process\n  +with {} -> expect {}\n", input_str, expected_str);
+
+        // The reconstructed source must parse successfully
+        let reparse = parser::parse(&reconstructed);
+        assert!(reparse.is_ok(), "reconstructed test should parse: {:?} from source: {}", reparse.err(), reconstructed);
+
+        // And the reparsed test should pass
+        let reparsed_cases = extract_test_cases(&reconstructed);
+        assert_eq!(reparsed_cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &reparsed_cases[0].0, &reparsed_cases[0].1, &[]);
+        assert!(result.is_ok(), "reparsed test should pass: {:?}", result);
     }
 }

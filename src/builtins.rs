@@ -784,7 +784,7 @@ pub fn format_for_prompt() -> String {
     out
 }
 
-/// Check if a name is a builtin.
+/// Check if a name is a builtin (sync or IO).
 pub fn is_builtin(name: &str) -> bool {
     BUILTINS
         .iter()
@@ -792,4 +792,11 @@ pub fn is_builtin(name: &str) -> bool {
         || IO_BUILTINS
             .iter()
             .any(|b| b.name == name || b.aliases.contains(&name))
+}
+
+/// Check if a name is an IO builtin (requires +await).
+pub fn is_io_builtin(name: &str) -> bool {
+    IO_BUILTINS
+        .iter()
+        .any(|b| b.name == name || b.aliases.contains(&name))
 }
