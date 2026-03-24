@@ -819,7 +819,7 @@ async fn main() -> Result<()> {
             if !exe_str.contains(resolved_git_dir) {
                 eprintln!("WARNING: AdapsisOS binary ({}) is not inside the opencode git dir ({}).", exe_str, resolved_git_dir);
                 eprintln!("  !opencode self-restart will not pick up rebuilt binaries.");
-                eprintln!("  Run from: {}/target/release/forge", resolved_git_dir);
+                eprintln!("  Run from: {}/target/release/adapsis", resolved_git_dir);
             }
 
             // Self-trigger channel: events feed back into the AI

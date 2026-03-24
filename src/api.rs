@@ -1437,7 +1437,7 @@ pub async fn ask(
                                 Ok(Ok(output)) if output.status.success() => {
                                     eprintln!("[web:opencode:done] rebuilding...");
                                     let build = tokio::process::Command::new("cargo")
-                                        .arg("build").current_dir(&config.project_dir).output().await;
+                                        .arg("build").arg("--release").current_dir(&config.project_dir).output().await;
                                     match build {
                                         Ok(b) if b.status.success() => {
                                             iter_results.push(MutationResult {
