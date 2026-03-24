@@ -383,6 +383,7 @@ impl Session {
     }
 
     /// Store test cases for a function, keyed by both bare and qualified name.
+    /// Also populates the function's `tests` field in the AST.
     pub fn store_test(&mut self, fn_name: &str, cases: &[parser::TestCase]) {
         let stored: Vec<StoredTestCase> = cases
             .iter()
@@ -391,6 +392,18 @@ impl Session {
                 expected: format_expr(&c.expected),
             })
             .collect();
+
+        // Populate the function's tests field in the AST (replace, not append)
+        let ast_tests: Vec<ast::TestCase> = stored
+            .iter()
+            .map(|s| ast::TestCase {
+                input: s.input.clone(),
+                expected: s.expected.clone(),
+            })
+            .collect();
+        if let Some(func) = self.program.get_function_mut(fn_name) {
+            func.tests = ast_tests;
+        }
 
         self.stored_tests
             .insert(fn_name.to_string(), stored.clone());

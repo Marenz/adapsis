@@ -85,6 +85,43 @@ impl Program {
                 .find(|function| function.name == name)
         })
     }
+
+    pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionDecl> {
+        // Module-qualified lookup: "Module.func"
+        if let Some((module_name, function_name)) = name.split_once('.') {
+            return self
+                .modules
+                .iter_mut()
+                .find(|module| module.name == module_name)
+                .and_then(|module| {
+                    module
+                        .functions
+                        .iter_mut()
+                        .find(|function| function.name == function_name)
+                });
+        }
+
+        // Use index for O(1) lookup on top-level functions
+        if !self.fn_index.is_empty() {
+            if let Some(&idx) = self.fn_index.get(name) {
+                return self.functions.get_mut(idx);
+            }
+        } else if let Some(f) = self
+            .functions
+            .iter_mut()
+            .find(|function| function.name == name)
+        {
+            return Some(f);
+        }
+
+        // Search inside modules for unqualified name
+        self.modules.iter_mut().find_map(|module| {
+            module
+                .functions
+                .iter_mut()
+                .find(|function| function.name == name)
+        })
+    }
 }
 
 impl fmt::Display for Program {
