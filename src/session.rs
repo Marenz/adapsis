@@ -241,11 +241,17 @@ pub struct AgentBranch {
     pub fork_revision: usize,
     pub program: ast::Program,
     pub mutations: Vec<String>,
+    /// Forked copy of runtime state (isolated from main session).
+    pub runtime_state: RuntimeState,
+    /// Snapshot of shared_vars at fork time — used to detect changes during merge.
+    runtime_state_snapshot: HashMap<String, crate::eval::Value>,
 }
 
 impl AgentBranch {
     /// Create a new branch forked from the current session state.
     pub fn fork(name: &str, scope: AgentScope, task: &str, session: &Session) -> Self {
+        let runtime_state = session.runtime.clone();
+        let snapshot = runtime_state.shared_vars.clone();
         Self {
             name: name.to_string(),
             scope,
@@ -253,7 +259,14 @@ impl AgentBranch {
             fork_revision: session.revision,
             program: session.program.clone(),
             mutations: Vec::new(),
+            runtime_state,
+            runtime_state_snapshot: snapshot,
         }
+    }
+
+    /// Access the forked runtime state.
+    pub fn runtime(&self) -> &RuntimeState {
+        &self.runtime_state
     }
 
     /// Apply a mutation to this branch (respecting scope).
@@ -308,6 +321,18 @@ impl AgentBranch {
                     }
                 }
                 Err(e) => conflicts.push(format!("merge error: {e}")),
+            }
+        }
+
+        // Merge shared_vars that changed during the branch's lifetime.
+        // Only copy vars where the branch value differs from the fork-time snapshot.
+        for (key, val) in &self.runtime_state.shared_vars {
+            let changed = match self.runtime_state_snapshot.get(key) {
+                Some(old_val) => format!("{old_val}") != format!("{val}"),
+                None => true, // new key added during branch
+            };
+            if changed {
+                session.runtime.shared_vars.insert(key.clone(), val.clone());
             }
         }
 
