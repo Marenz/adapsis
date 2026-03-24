@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 pub type NodeId = String;
 pub type Identifier = String;
@@ -19,7 +20,7 @@ pub struct HttpRoute {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Program {
     pub modules: Vec<Module>,
-    pub functions: Vec<FunctionDecl>,
+    pub functions: Vec<Arc<FunctionDecl>>,
     pub types: Vec<TypeDecl>,
     /// Registered HTTP routes — dispatched by the Axum server at runtime.
     #[serde(default)]
@@ -63,18 +64,19 @@ impl Program {
                         .functions
                         .iter()
                         .find(|function| function.name == function_name)
+                        .map(|f| f.as_ref())
                 });
         }
 
         // Use index for O(1) lookup on top-level functions
         if !self.fn_index.is_empty() {
             if let Some(&idx) = self.fn_index.get(name) {
-                return self.functions.get(idx);
+                return self.functions.get(idx).map(|f| f.as_ref());
             }
         } else if let Some(f) = self.functions.iter().find(|function| function.name == name) {
             // Fallback: linear scan if index not yet built (e.g. after deserialization
             // before first rebuild)
-            return Some(f);
+            return Some(f.as_ref());
         }
 
         // Search inside modules for unqualified name
@@ -83,6 +85,7 @@ impl Program {
                 .functions
                 .iter()
                 .find(|function| function.name == name)
+                .map(|f| f.as_ref())
         })
     }
 
@@ -98,20 +101,21 @@ impl Program {
                         .functions
                         .iter_mut()
                         .find(|function| function.name == function_name)
+                        .map(|f| Arc::make_mut(f))
                 });
         }
 
         // Use index for O(1) lookup on top-level functions
         if !self.fn_index.is_empty() {
             if let Some(&idx) = self.fn_index.get(name) {
-                return self.functions.get_mut(idx);
+                return self.functions.get_mut(idx).map(|f| Arc::make_mut(f));
             }
         } else if let Some(f) = self
             .functions
             .iter_mut()
             .find(|function| function.name == name)
         {
-            return Some(f);
+            return Some(Arc::make_mut(f));
         }
 
         // Search inside modules for unqualified name
@@ -120,6 +124,7 @@ impl Program {
                 .functions
                 .iter_mut()
                 .find(|function| function.name == name)
+                .map(|f| Arc::make_mut(f))
         })
     }
 }
@@ -170,7 +175,7 @@ pub struct Module {
     pub id: NodeId,
     pub name: Identifier,
     pub types: Vec<TypeDecl>,
-    pub functions: Vec<FunctionDecl>,
+    pub functions: Vec<Arc<FunctionDecl>>,
     pub modules: Vec<Module>,
 }
 

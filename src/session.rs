@@ -1302,7 +1302,7 @@ mod tests {
     #[test]
     fn store_test_marks_ast_tests_passed() {
         let mut session = Session::new();
-        session.program.functions.push(test_function("foo"));
+        session.program.functions.push(std::sync::Arc::new(test_function("foo")));
         session.program.rebuild_function_index();
 
         let cases = vec![parser::TestCase {

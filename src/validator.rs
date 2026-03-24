@@ -58,7 +58,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            program.functions.push(converted);
+            program.functions.push(std::sync::Arc::new(converted));
             program.rebuild_function_index();
             Ok(msg)
         }
@@ -296,10 +296,10 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 // Now mutably access module to add/replace function
                 let m = &mut program.modules[mod_idx];
                 if let Some(pos) = m.functions.iter().position(|f| f.name == converted.name) {
-                    m.functions[pos] = converted;
+                    m.functions[pos] = std::sync::Arc::new(converted);
                     replaced_fns += 1;
                 } else {
-                    m.functions.push(converted);
+                    m.functions.push(std::sync::Arc::new(converted));
                     added_fns += 1;
                 }
             }
@@ -359,12 +359,14 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 .functions
                 .iter_mut()
                 .find(|f| f.name == fn_name)
+                .map(|f| std::sync::Arc::make_mut(f))
                 .or_else(|| {
                     program
                         .modules
                         .iter_mut()
                         .flat_map(|m| m.functions.iter_mut())
                         .find(|f| f.name == fn_name)
+                        .map(|f| std::sync::Arc::make_mut(f))
                 })
                 .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
             let mut new_body = vec![];
@@ -389,6 +391,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                     .functions
                     .iter_mut()
                     .find(|f| f.name == fn_name)
+                    .map(|f| std::sync::Arc::make_mut(f))
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
                 replace_statement(&mut func.body, stmt_id, &replace.body)?;
                 Ok(format!("replaced `{}`", replace.target))
@@ -405,6 +408,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                     .functions
                     .iter_mut()
                     .find(|f| f.name == fn_name)
+                    .map(|f| std::sync::Arc::make_mut(f))
                     .ok_or_else(|| {
                         anyhow!("function `{fn_name}` not found in module `{mod_name}`")
                     })?;
@@ -435,6 +439,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 .functions
                 .iter_mut()
                 .find(|f| f.name == fn_name)
+                .map(|f| std::sync::Arc::make_mut(f))
                 .ok_or_else(|| anyhow!("function `{fn_name}` not found in module `{mod_name}`"))?;
             replace_statement(&mut func.body, stmt_id, &replace.body)?;
             Ok(format!("replaced `{}`", replace.target))
@@ -1188,14 +1193,22 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
     let moved_fn_names: std::collections::HashSet<String> = names.iter().cloned().collect();
 
     for func in &mut program.functions {
-        update_call_sites(&mut func.body, &moved_fn_names, target_module);
+        update_call_sites(
+            &mut std::sync::Arc::make_mut(func).body,
+            &moved_fn_names,
+            target_module,
+        );
     }
     for module in &mut program.modules {
         if module.name == target_module {
             continue;
         }
         for func in &mut module.functions {
-            update_call_sites(&mut func.body, &moved_fn_names, target_module);
+            update_call_sites(
+                &mut std::sync::Arc::make_mut(func).body,
+                &moved_fn_names,
+                target_module,
+            );
         }
     }
 
