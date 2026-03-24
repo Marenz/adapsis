@@ -108,6 +108,9 @@ pub struct Session {
     /// IO mock table: (operation, url_pattern) -> response. Used during !test.
     #[serde(default)]
     pub io_mocks: Vec<IoMock>,
+    /// Runtime state (Tier 2): HTTP routes, shared variables. Serialized with session.
+    #[serde(default)]
+    pub runtime: RuntimeState,
     /// Library state — tracks loaded modules and errors. Not serialized.
     #[serde(skip)]
     pub library_state: Option<crate::library::LibraryState>,
@@ -334,6 +337,7 @@ impl Session {
             opencode_session_id: None,
             io_mocks: Vec::new(),
             roadmap: Vec::new(),
+            runtime: RuntimeState::default(),
             library_state: None,
         }
     }
@@ -373,6 +377,64 @@ impl Session {
         } else {
             false
         }
+    }
+
+    /// Add or replace an HTTP route.
+    pub fn add_route(&mut self, route: ast::HttpRoute) -> String {
+        if let Some(existing) = self.runtime.http_routes.iter_mut()
+            .find(|r| r.method == route.method && r.path == route.path)
+        {
+            let old_fn = existing.handler_fn.clone();
+            existing.handler_fn = route.handler_fn.clone();
+            format!("updated route {} {} -> `{}` (was `{old_fn}`)", route.method, route.path, route.handler_fn)
+        } else {
+            let msg = format!("added route {} {} -> `{}`", route.method, route.path, route.handler_fn);
+            self.runtime.http_routes.push(route);
+            msg
+        }
+    }
+
+    /// Remove an HTTP route by method and path.
+    pub fn remove_route(&mut self, method: &str, path: &str) -> Result<String> {
+        let before = self.runtime.http_routes.len();
+        let mut removed_handler = None;
+        self.runtime.http_routes.retain(|r| {
+            if r.method == method && r.path == path {
+                removed_handler = Some(r.handler_fn.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if self.runtime.http_routes.len() < before {
+            Ok(format!("removed route {} {} (was -> `{}`)", method, path, removed_handler.unwrap_or_default()))
+        } else {
+            Err(anyhow!("no route found for {} {}", method, path))
+        }
+    }
+
+    /// Remove all routes whose handler matches a function name.
+    pub fn remove_routes_for_handler(&mut self, handler_name: &str) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.runtime.http_routes.retain(|r| {
+            if r.handler_fn == handler_name {
+                removed.push(format!("{} {}", r.method, r.path));
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    /// Get a snapshot of all HTTP routes.
+    pub fn get_routes(&self) -> &[ast::HttpRoute] {
+        &self.runtime.http_routes
+    }
+
+    /// Find a route by method and path.
+    pub fn find_route(&self, method: &str, path: &str) -> Option<&ast::HttpRoute> {
+        self.runtime.http_routes.iter().find(|r| r.method == method && r.path == path)
     }
 
     /// Store test cases for a function in the AST.
@@ -528,6 +590,7 @@ impl Session {
                                     &test.function_name,
                                     case,
                                     &self.io_mocks,
+                                    &self.runtime.http_routes,
                                 ) {
                                     Ok(msg) => {
                                         retest_results.push((
@@ -612,6 +675,7 @@ impl Session {
                             &test.function_name,
                             case,
                             &self.io_mocks,
+                            &self.runtime.http_routes,
                         ) {
                             Ok(msg) => results.push((format!("PASS: {msg}"), true)),
                             Err(e) => {
@@ -702,6 +766,21 @@ impl Session {
                     let count = self.io_mocks.len();
                     self.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
+                }
+                parser::Operation::Route { method, path, handler_fn } => {
+                    let route = ast::HttpRoute {
+                        method: method.clone(),
+                        path: path.clone(),
+                        handler_fn: handler_fn.clone(),
+                    };
+                    let msg = self.add_route(route);
+                    results.push((msg, true));
+                }
+                parser::Operation::RemoveRoute { method, path } => {
+                    match self.remove_route(method, path) {
+                        Ok(msg) => results.push((msg, true)),
+                        Err(e) => results.push((format!("{e}"), false)),
+                    }
                 }
                 _ => {
                     any_definition = true;
@@ -797,6 +876,7 @@ impl Session {
                                     case,
                                     &self.io_mocks,
                                     sender.clone(),
+                                    &self.runtime.http_routes,
                                 )
                                 .await
                             } else {
@@ -805,6 +885,7 @@ impl Session {
                                     &test.function_name,
                                     case,
                                     &self.io_mocks,
+                                    &self.runtime.http_routes,
                                 )
                             }
                         } else {
@@ -813,6 +894,7 @@ impl Session {
                                 &test.function_name,
                                 case,
                                 &self.io_mocks,
+                                &self.runtime.http_routes,
                             )
                         };
 
@@ -904,6 +986,21 @@ impl Session {
                     let count = self.io_mocks.len();
                     self.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
+                }
+                parser::Operation::Route { method, path, handler_fn } => {
+                    let route = ast::HttpRoute {
+                        method: method.clone(),
+                        path: path.clone(),
+                        handler_fn: handler_fn.clone(),
+                    };
+                    let msg = self.add_route(route);
+                    results.push((msg, true));
+                }
+                parser::Operation::RemoveRoute { method, path } => {
+                    match self.remove_route(method, path) {
+                        Ok(msg) => results.push((msg, true)),
+                        Err(e) => results.push((format!("{e}"), false)),
+                    }
                 }
                 _ => {
                     any_definition = true;

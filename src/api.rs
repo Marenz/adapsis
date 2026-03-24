@@ -276,12 +276,13 @@ pub async fn test_fn(
                         let fn_name = test.function_name.clone();
                         let case = case.clone();
                         let mocks = session.io_mocks.clone();
+                        let routes = session.runtime.http_routes.clone();
                         let sender = sender.clone();
 
                         drop(session); // release lock before blocking
 
                         let result = eval::eval_test_case_async(
-                            &program, &fn_name, &case, &mocks, sender,
+                            &program, &fn_name, &case, &mocks, sender, &routes,
                         ).await;
 
                         session = config.session.lock().await;
@@ -289,13 +290,13 @@ pub async fn test_fn(
                     } else {
                         // No IO sender — fall back to mock-only execution
                         eval::eval_test_case_with_mocks(
-                            &session.program, &test.function_name, case, &session.io_mocks,
+                            &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
                         )
                     }
                 } else {
                     // Sync function — run directly
                     eval::eval_test_case_with_mocks(
-                        &session.program, &test.function_name, case, &session.io_mocks,
+                        &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
                     )
                 };
 
@@ -360,7 +361,7 @@ pub async fn query(
         crate::library::query_library(&session.program, session.library_state.as_ref())
     } else {
         let table = typeck::build_symbol_table(&session.program);
-        typeck::handle_query(&session.program, &table, &req.query)
+        typeck::handle_query(&session.program, &table, &req.query, &session.runtime.http_routes)
     };
     session.record_query(&req.query, &response);
     Json(QueryResponse { response })
@@ -436,7 +437,7 @@ pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse
             .map(|f| f.name.clone())
             .collect(),
         types: session.program.types.iter().map(|t| t.name().to_string()).collect(),
-        routes: session.program.http_routes.iter().map(|r| RouteInfo {
+        routes: session.runtime.http_routes.iter().map(|r| RouteInfo {
             method: r.method.clone(),
             path: r.path.clone(),
             handler_fn: r.handler_fn.clone(),
@@ -1105,21 +1106,22 @@ pub async fn ask(
                                         let fn_name = test.function_name.clone();
                                         let case = case.clone();
                                         let mocks = session.io_mocks.clone();
+                                        let routes = session.runtime.http_routes.clone();
                                         let sender = sender.clone();
                                         drop(session);
                                         let result = crate::eval::eval_test_case_async(
-                                            &program, &fn_name, &case, &mocks, sender,
+                                            &program, &fn_name, &case, &mocks, sender, &routes,
                                         ).await;
                                         session = config.session.lock().await;
                                         result
                                     } else {
                                         crate::eval::eval_test_case_with_mocks(
-                                            &session.program, &test.function_name, case, &session.io_mocks,
+                                            &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
                                         )
                                     }
                                 } else {
                                     crate::eval::eval_test_case_with_mocks(
-                                        &session.program, &test.function_name, case, &session.io_mocks,
+                                        &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
                                     )
                                 };
                                 match case_result {
@@ -1209,7 +1211,7 @@ pub async fn ask(
                                 crate::library::query_library(&session.program, session.library_state.as_ref())
                             } else {
                                 let table = crate::typeck::build_symbol_table(&session.program);
-                                crate::typeck::handle_query(&session.program, &table, query)
+                                crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
                             };
                             iter_results.push(MutationResult { message: response, success: true });
                         }
@@ -1941,21 +1943,22 @@ pub async fn ask_stream(
                                             let fn_name = test.function_name.clone();
                                             let case = case.clone();
                                             let mocks = session.io_mocks.clone();
+                                            let routes = session.runtime.http_routes.clone();
                                             let sender = sender.clone();
                                             drop(session);
                                             let result = crate::eval::eval_test_case_async(
-                                                &program, &fn_name, &case, &mocks, sender,
+                                                &program, &fn_name, &case, &mocks, sender, &routes,
                                             ).await;
                                             session = config_clone.session.lock().await;
                                             result
                                         } else {
                                             crate::eval::eval_test_case_with_mocks(
-                                                &session.program, &test.function_name, case, &session.io_mocks,
+                                                &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
                                             )
                                         }
                                     } else {
                                         crate::eval::eval_test_case_with_mocks(
-                                            &session.program, &test.function_name, case, &session.io_mocks,
+                                            &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
                                         )
                                     };
                                     match case_result {
@@ -2056,7 +2059,7 @@ pub async fn ask_stream(
                                     crate::library::query_library(&session.program, session.library_state.as_ref())
                                 } else {
                                     let table = crate::typeck::build_symbol_table(&session.program);
-                                    crate::typeck::handle_query(&session.program, &table, query)
+                                    crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
                                 };
                                 let _ = tx.send(serde_json::json!({"type": "query", "query": query, "response": response})).await;
                             }
@@ -2520,7 +2523,7 @@ pub async fn ask_stream(
                                 else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
                             } else {
                                 let table = crate::typeck::build_symbol_table(&session.program);
-                                crate::typeck::handle_query(&session.program, &table, query)
+                                crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
                             };
                             feedback_details.push(format!("{query}:\n{response}"));
                         }
@@ -2677,7 +2680,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
 async fn list_routes(State(session): State<SharedSession>) -> Json<serde_json::Value> {
     let session = session.lock().await;
     let routes: Vec<serde_json::Value> = session
-        .program
+        .runtime
         .http_routes
         .iter()
         .map(|r| {
@@ -2715,7 +2718,7 @@ async fn adapsis_route_dispatch(
     // Look up a matching registered route
     let session = config.session.lock().await;
     let route = session
-        .program
+        .runtime
         .http_routes
         .iter()
         .find(|r| r.method == method_str && r.path == path);

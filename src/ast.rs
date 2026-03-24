@@ -22,9 +22,6 @@ pub struct Program {
     pub modules: Vec<Module>,
     pub functions: Vec<Arc<FunctionDecl>>,
     pub types: Vec<TypeDecl>,
-    /// Registered HTTP routes — dispatched by the Axum server at runtime.
-    #[serde(default)]
-    pub http_routes: Vec<HttpRoute>,
     /// Maps function name → index in `functions` Vec. Derived index, not serialized.
     #[serde(skip)]
     fn_index: HashMap<String, usize>,
@@ -38,7 +35,6 @@ impl PartialEq for Program {
         self.modules == other.modules
             && self.functions == other.functions
             && self.types == other.types
-            && self.http_routes == other.http_routes
     }
 }
 
@@ -133,11 +129,10 @@ impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "Program: {} module(s), {} standalone function(s), {} standalone type(s), {} route(s)",
+            "Program: {} module(s), {} standalone function(s), {} standalone type(s)",
             self.modules.len(),
             self.functions.len(),
             self.types.len(),
-            self.http_routes.len()
         )?;
 
         for module in &self.modules {
@@ -156,14 +151,6 @@ impl fmt::Display for Program {
 
         for type_decl in &self.types {
             writeln!(f, "- type {}", type_decl.name())?;
-        }
-
-        for route in &self.http_routes {
-            writeln!(
-                f,
-                "- route {} {} -> {}",
-                route.method, route.path, route.handler_fn
-            )?;
         }
 
         Ok(())

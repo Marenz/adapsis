@@ -943,7 +943,12 @@ fn reconstruct_expr(expr: &Expr) -> String {
     }
 }
 
-pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> String {
+pub fn handle_query(
+    program: &Program,
+    table: &SymbolTable,
+    query: &str,
+    http_routes: &[crate::ast::HttpRoute],
+) -> String {
     let parts: Vec<&str> = query.trim().split_whitespace().collect();
     if parts.is_empty() {
         return "empty query".to_string();
@@ -991,7 +996,7 @@ pub fn handle_query(program: &Program, table: &SymbolTable, query: &str) -> Stri
             let target = parts.get(1).copied().unwrap_or("");
             query_type(table, target)
         }
-        "?routes" => query_routes(program),
+        "?routes" => query_routes(http_routes),
         // ?tasks is handled at the API level (needs runtime access, not just program)
         "?tasks" => "tasks query requires runtime context".to_string(),
         // ?inspect is handled at the API level (needs runtime snapshot registry)
@@ -1290,12 +1295,12 @@ fn query_type(table: &SymbolTable, target: &str) -> String {
     }
 }
 
-fn query_routes(program: &Program) -> String {
-    if program.http_routes.is_empty() {
+fn query_routes(http_routes: &[crate::ast::HttpRoute]) -> String {
+    if http_routes.is_empty() {
         return "No HTTP routes registered.".to_string();
     }
     let mut out = String::from("HTTP Routes:\n");
-    for route in &program.http_routes {
+    for route in http_routes {
         out.push_str(&format!(
             "  {} {} -> {}\n",
             route.method, route.path, route.handler_fn

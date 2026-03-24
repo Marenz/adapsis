@@ -640,7 +640,7 @@ pub fn eval_test_case(
     function_name: &str,
     case: &parser::TestCase,
 ) -> Result<String> {
-    eval_test_case_with_mocks(program, function_name, case, &[])
+    eval_test_case_with_mocks(program, function_name, case, &[], &[])
 }
 
 pub fn eval_test_case_with_mocks(
@@ -648,6 +648,7 @@ pub fn eval_test_case_with_mocks(
     function_name: &str,
     case: &parser::TestCase,
     mocks: &[crate::session::IoMock],
+    http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
@@ -662,7 +663,7 @@ pub fn eval_test_case_with_mocks(
         // Async function: spin up a temporary coroutine runtime so +await
         // operations execute through real IO (with mock fallback if provided).
         // This avoids "requires async context" and "no mock for ..." errors.
-        return eval_test_case_with_runtime(program, function_name, case, mocks);
+        return eval_test_case_with_runtime(program, function_name, case, mocks, http_routes);
     }
 
     let input = eval_parser_expr_with_program(&case.input, program)?;
@@ -679,7 +680,7 @@ pub fn eval_test_case_with_mocks(
     // Check +after assertions (sync path — program is immutable here, so
     // after_checks on routes/modules work; tasks/mocks not applicable in sync)
     for after in &case.after_checks {
-        check_after(program, after, None)?;
+        check_after(program, after, None, http_routes)?;
     }
 
     Ok(msg)
@@ -692,6 +693,7 @@ fn eval_test_case_with_runtime(
     function_name: &str,
     case: &parser::TestCase,
     mocks: &[crate::session::IoMock],
+    http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
@@ -705,6 +707,7 @@ fn eval_test_case_with_runtime(
     let mocks = mocks.to_vec();
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
+    let routes = http_routes.to_vec();
 
     // Spin up a temporary tokio runtime + coroutine IO loop on a dedicated
     // thread.  This works whether or not the caller is already inside a tokio
@@ -755,7 +758,7 @@ fn eval_test_case_with_runtime(
 
                 // Check +after assertions
                 for after in &after_checks {
-                    check_after(&program, after, None)?;
+                    check_after(&program, after, None, &routes)?;
                 }
 
                 Ok::<String, anyhow::Error>(msg)
@@ -782,6 +785,7 @@ pub async fn eval_test_case_async(
     case: &parser::TestCase,
     mocks: &[crate::session::IoMock],
     io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+    http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
@@ -794,7 +798,7 @@ pub async fn eval_test_case_async(
 
     // If the function isn't async, delegate to the sync path
     if !has_async {
-        return eval_test_case_with_mocks(program, function_name, case, mocks);
+        return eval_test_case_with_mocks(program, function_name, case, mocks, http_routes);
     }
 
     let input = eval_parser_expr_with_program(&case.input, program)?;
@@ -807,6 +811,7 @@ pub async fn eval_test_case_async(
     let mocks = mocks.to_vec();
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
+    let routes = http_routes.to_vec();
 
     let eval_result = tokio::task::spawn_blocking(move || {
         let func = program
@@ -831,7 +836,7 @@ pub async fn eval_test_case_async(
 
         // Check +after assertions
         for after in &after_checks {
-            check_after(&program, after, None)?;
+            check_after(&program, after, None, &routes)?;
         }
 
         Ok::<String, anyhow::Error>(msg)
@@ -924,18 +929,19 @@ fn check_after(
     program: &ast::Program,
     after: &parser::AfterCheck,
     mocks: Option<&[crate::session::IoMock]>,
+    http_routes: &[ast::HttpRoute],
 ) -> Result<()> {
     match after.target.as_str() {
         "routes" => {
             match after.matcher.as_str() {
                 "contains" => {
-                    let found = program.http_routes.iter().any(|r| {
+                    let found = http_routes.iter().any(|r| {
                         r.path.contains(&after.value) || r.handler_fn.contains(&after.value)
                     });
                     if !found {
                         bail!("+after routes contains \"{}\": no matching route found (routes: {:?})",
                             after.value,
-                            program.http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
+                            http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
                     }
                 }
                 other => bail!("+after routes: unknown matcher `{other}` (expected `contains`)"),
@@ -2769,7 +2775,7 @@ mod tests {
             patterns: vec!["example.com".to_string()],
             response: "hello".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "async test with mock should pass: {:?}", result);
     }
 
@@ -2817,7 +2823,7 @@ mod tests {
             patterns: vec!["example.com".to_string()],
             response: "world".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "io test with mock should pass: {:?}", result);
     }
 
@@ -2844,7 +2850,7 @@ mod tests {
             patterns: vec!["1000".to_string()],
             response: "".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "sleep mock test should pass: {:?}", result);
     }
 
@@ -2875,7 +2881,7 @@ mod tests {
             patterns: vec!["api.test.com".to_string()],
             response: "nested_ok".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "nested async call should pass: {:?}", result);
     }
 
@@ -2906,7 +2912,7 @@ mod tests {
             patterns: vec!["api.example.com".to_string()],
             response: r#"{"name":"alice","age":30}"#.to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "json_get on mock JSON should pass: {:?}", result);
     }
 
@@ -2933,7 +2939,7 @@ mod tests {
             patterns: vec!["api.example.com".to_string()],
             response: r#"[1,2,3]"#.to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "json_array_len on mock JSON should pass: {:?}", result);
     }
 
@@ -2976,7 +2982,7 @@ mod tests {
         let cases = extract_test_cases(test_source);
         let (fn_name, case) = &cases[0];
 
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "end-to-end mock JSON test should pass: {:?}", result);
     }
 
@@ -3013,7 +3019,7 @@ mod tests {
         for test in &test_ops {
             for case in &test.cases {
                 results.push(eval_test_case_with_mocks(
-                    &program, &test.function_name, case, &io_mocks,
+                    &program, &test.function_name, case, &io_mocks, &[],
                 ));
             }
         }
@@ -3124,7 +3130,7 @@ mod tests {
         }];
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let result = eval_test_case_async(&program, fn_name, case, &mocks, tx).await;
+        let result = eval_test_case_async(&program, fn_name, case, &mocks, tx, &[]).await;
         assert!(result.is_ok(), "async test case should pass: {:?}", result);
     }
 
@@ -3204,7 +3210,7 @@ mod tests {
         let (fn_name, case) = &cases[0];
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let result = eval_test_case_async(&program, fn_name, case, &[], tx).await;
+        let result = eval_test_case_async(&program, fn_name, case, &[], tx, &[]).await;
         assert!(result.is_ok(), "sync function via async path should pass: {:?}", result);
     }
 
@@ -3395,7 +3401,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "zero-arg function call as param value should work: {:?}", result);
         assert!(result.unwrap().contains("expected \"localhost\""));
     }
@@ -3420,7 +3426,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "bare function name as param value should call function: {:?}", result);
         assert!(result.unwrap().contains("expected \"localhost\""));
     }
@@ -3444,7 +3450,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "function call with args as param value: {:?}", result);
         assert!(result.unwrap().contains("expected 3000"));
     }
@@ -3468,7 +3474,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "function call in expected value: {:?}", result);
         assert!(result.unwrap().contains("expected"));
     }
@@ -3542,7 +3548,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "+with positional strings: {:?}", result);
         assert!(result.unwrap().contains("expected \"helloworld\""));
     }
@@ -3584,7 +3590,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_err(), "impure function should be rejected: {:?}", result);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("side effects"), "error should mention side effects: {err}");
@@ -3611,7 +3617,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_err(), "impure function call should be rejected: {:?}", result);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("side effects"), "error should mention side effects: {err}");
@@ -3637,7 +3643,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "[fail] function should be allowed in test params: {:?}", result);
         assert!(result.unwrap().contains("expected \"localhost\""));
     }
@@ -3657,7 +3663,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "escaped quotes in key=value string: {:?}", result);
     }
 
@@ -3675,7 +3681,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "escaped quotes in multiple args: {:?}", result);
     }
 
@@ -3691,7 +3697,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "newline escape in test value: {:?}", result);
     }
 
@@ -3713,7 +3719,7 @@ mod tests {
 ";
         let cases = extract_test_cases(test_source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "should fail when IO builtin used without +await");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("async IO operation"), "error should mention async IO: {err}");
@@ -3741,7 +3747,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "+return inside +each should propagate: {:?}", result);
     }
 
@@ -3765,7 +3771,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "+let with field access in +each: {:?}", result);
     }
 
@@ -3794,7 +3800,7 @@ mod tests {
         let (fn_name, case) = &cases[0];
 
         // First, verify the test passes directly
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "direct test should pass: {:?}", result);
 
         // Now simulate the store/reparse cycle that invalidate_and_retest does
@@ -3811,7 +3817,7 @@ mod tests {
         // And the reparsed test should pass
         let reparsed_cases = extract_test_cases(&reconstructed);
         assert_eq!(reparsed_cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &reparsed_cases[0].0, &reparsed_cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &reparsed_cases[0].0, &reparsed_cases[0].1, &[], &[]);
         assert!(result.is_ok(), "reparsed test should pass: {:?}", result);
     }
 
@@ -3831,7 +3837,7 @@ mod tests {
         assert_eq!(cases.len(), 1);
         let (fn_name, case) = &cases[0];
         assert!(case.matcher.is_some(), "should have a matcher");
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "contains matcher should pass: {:?}", result);
     }
 
@@ -3847,7 +3853,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "contains matcher should fail when substring absent");
     }
 
@@ -3863,7 +3869,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "starts_with matcher should pass: {:?}", result);
     }
 
@@ -3879,7 +3885,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "starts_with matcher should fail on wrong prefix");
     }
 
@@ -3897,7 +3903,7 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert!(matches!(case.matcher, Some(parser::TestMatcher::AnyOk)));
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "AnyOk matcher should pass for Ok result: {:?}", result);
     }
 
@@ -3914,7 +3920,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "AnyOk matcher should fail on Err result");
     }
 
@@ -3932,7 +3938,7 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert!(matches!(case.matcher, Some(parser::TestMatcher::AnyErr)));
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "AnyErr matcher should pass for Err result: {:?}", result);
     }
 
@@ -3949,7 +3955,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "AnyErr matcher should fail on Ok result");
     }
 
@@ -3967,7 +3973,7 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert!(matches!(case.matcher, Some(parser::TestMatcher::ErrContaining(_))));
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "ErrContaining matcher should pass: {:?}", result);
     }
 
@@ -3984,7 +3990,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "ErrContaining should fail on wrong message");
     }
 
@@ -4011,7 +4017,13 @@ mod tests {
         assert_eq!(case.after_checks[0].target, "routes");
         assert_eq!(case.after_checks[0].value, "/chat");
 
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        // Routes are now in RuntimeState, pass them explicitly
+        let routes = vec![crate::ast::HttpRoute {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            handler_fn: "handler".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &routes);
         assert!(result.is_ok(), "+after routes should pass: {:?}", result);
     }
 
@@ -4029,7 +4041,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "+after routes should fail when route missing");
     }
 
@@ -4048,7 +4060,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "+after modules should pass: {:?}", result);
     }
 
@@ -4065,7 +4077,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "+after modules should fail when module missing");
     }
 
@@ -4087,7 +4099,12 @@ mod tests {
         let (fn_name, case) = &cases[0];
         assert!(case.matcher.is_some());
         assert_eq!(case.after_checks.len(), 1);
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let routes = vec![crate::ast::HttpRoute {
+            method: "GET".to_string(),
+            path: "/api".to_string(),
+            handler_fn: "handler".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &routes);
         assert!(result.is_ok(), "matcher + after should pass: {:?}", result);
     }
 
@@ -4110,7 +4127,12 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert_eq!(case.after_checks.len(), 2);
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let routes = vec![crate::ast::HttpRoute {
+            method: "POST".to_string(),
+            path: "/webhook".to_string(),
+            handler_fn: "handler".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &routes);
         assert!(result.is_ok(), "multiple +after checks should pass: {:?}", result);
     }
 
@@ -4130,7 +4152,7 @@ mod tests {
         let (fn_name, case) = &cases[0];
         // No matcher — this is the old exact match behavior
         assert!(case.matcher.is_none(), "Err(bare_ident) should not create a matcher");
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "exact Err match should still work: {:?}", result);
     }
 }
