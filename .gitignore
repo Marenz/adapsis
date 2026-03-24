@@ -14,4 +14,5 @@ forgeos-stdout.log
 *.log
 *-session.json
 *-session*.json
+session.json
 training.jsonl
