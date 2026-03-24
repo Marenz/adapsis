@@ -57,6 +57,8 @@ pub struct AppConfig {
     pub max_iterations: usize,
     /// JSONL training data log — one entry per iteration with input/output/outcome
     pub training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    /// Shared runtime state (Tier 2) — HTTP routes, shared variables
+    pub runtime: crate::session::SharedRuntime,
 }
 
 #[derive(Deserialize)]

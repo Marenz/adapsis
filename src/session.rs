@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,18 @@ use serde::{Deserialize, Serialize};
 use crate::ast;
 use crate::parser;
 use crate::validator;
+
+/// Runtime infrastructure state (Tier 2) — shared across async tasks via Arc<RwLock>.
+/// Holds HTTP routes and shared variables, separate from the AST program state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeState {
+    pub http_routes: Vec<crate::ast::HttpRoute>,
+    #[serde(skip)]
+    pub shared_vars: HashMap<String, crate::eval::Value>,
+}
+
+/// Thread-safe handle to the runtime state.
+pub type SharedRuntime = Arc<RwLock<RuntimeState>>;
 
 /// A single entry in the mutation log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
