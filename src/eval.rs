@@ -157,11 +157,18 @@ pub struct Env {
 
 impl Env {
     pub fn new() -> Self {
-        Self {
+        let mut env = Self {
             scopes: vec![HashMap::new()],
             shared_runtime: None,
             shared_cache: HashMap::new(),
-        }
+        };
+        // Auto-pick up thread-local SharedRuntime if set
+        SHARED_RUNTIME.with(|rt| {
+            if let Some(rt) = rt.borrow().as_ref() {
+                env.set_runtime(rt.clone());
+            }
+        });
+        env
     }
 
     /// Attach shared runtime state for +shared variable access.
@@ -760,11 +767,14 @@ fn eval_test_case_with_runtime(
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
     let routes = http_routes.to_vec();
+    let captured_runtime = SHARED_RUNTIME.with(|rt| rt.borrow().clone());
 
     // Spin up a temporary tokio runtime + coroutine IO loop on a dedicated
     // thread.  This works whether or not the caller is already inside a tokio
     // runtime (nested block_on is not allowed, so we always use a fresh thread).
     std::thread::spawn(move || {
+        // Propagate SharedRuntime to the new thread
+        set_shared_runtime(captured_runtime);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -864,8 +874,12 @@ pub async fn eval_test_case_async(
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
     let routes = http_routes.to_vec();
+    let captured_rt = SHARED_RUNTIME.with(|rt| rt.borrow().clone());
 
     let eval_result = tokio::task::spawn_blocking(move || {
+        // Propagate SharedRuntime to the blocking thread
+        set_shared_runtime(captured_rt);
+
         let func = program
             .get_function(&fn_name)
             .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
@@ -1403,6 +1417,15 @@ std::thread_local! {
     static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Stack of function names for the current call chain (used by task snapshots).
     static FN_NAME_STACK: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Thread-local SharedRuntime so newly-created Env instances automatically
+    /// have access to +shared variables without explicit plumbing.
+    static SHARED_RUNTIME: std::cell::RefCell<Option<crate::session::SharedRuntime>> = std::cell::RefCell::new(None);
+}
+
+/// Set the thread-local SharedRuntime for +shared variable access.
+/// Call this before any eval functions that need shared variable support.
+pub fn set_shared_runtime(rt: Option<crate::session::SharedRuntime>) {
+    SHARED_RUNTIME.with(|s| *s.borrow_mut() = rt);
 }
 
 const MAX_CALL_DEPTH: usize = 256;
