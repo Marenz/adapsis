@@ -396,7 +396,23 @@ impl Session {
         }
     }
 
+    /// Check whether a function is considered "tested":
+    /// either it's in the `tested_functions` HashSet, or the function's AST
+    /// `tests` field is non-empty and all test cases have `passed == true`.
+    pub fn is_function_tested(&self, fn_name: &str) -> bool {
+        if self.tested_functions.contains(fn_name) {
+            return true;
+        }
+        if let Some(func) = self.program.get_function(fn_name) {
+            if !func.tests.is_empty() && func.tests.iter().all(|t| t.passed) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Store test cases for a function, keyed by both bare and qualified name.
+    /// Also populates the function's `tests` field in the AST.
     pub fn store_test(&mut self, fn_name: &str, cases: &[parser::TestCase]) {
         let stored: Vec<StoredTestCase> = cases
             .iter()
@@ -411,6 +427,20 @@ impl Session {
                 }).collect(),
             })
             .collect();
+
+        // Populate the function's tests field in the AST (replace, not append).
+        // store_test is only called after all tests pass, so mark passed=true.
+        let ast_tests: Vec<ast::TestCase> = stored
+            .iter()
+            .map(|s| ast::TestCase {
+                input: s.input.clone(),
+                expected: s.expected.clone(),
+                passed: true,
+            })
+            .collect();
+        if let Some(func) = self.program.get_function_mut(fn_name) {
+            func.tests = ast_tests;
+        }
 
         self.stored_tests
             .insert(fn_name.to_string(), stored.clone());
@@ -460,9 +490,14 @@ impl Session {
             _ => return Vec::new(),
         };
 
-        // Invalidate
+        // Invalidate: remove from tested_functions and reset AST passed flags
         for name in &affected {
             self.tested_functions.remove(name);
+            if let Some(func) = self.program.get_function_mut(name) {
+                for t in &mut func.tests {
+                    t.passed = false;
+                }
+            }
         }
 
         let mut retest_results = Vec::new();
@@ -522,6 +557,12 @@ impl Session {
                             }
                             if all_passed {
                                 self.mark_tested(name);
+                                // Restore passed=true on AST tests after successful retest
+                                if let Some(func) = self.program.get_function_mut(name) {
+                                    for t in &mut func.tests {
+                                        t.passed = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1219,3 +1260,100 @@ fn now() -> String {
     format!("{}s", dur.as_secs())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_function(name: &str) -> ast::FunctionDecl {
+        ast::FunctionDecl {
+            id: "fn-1".to_string(),
+            name: name.to_string(),
+            params: vec![],
+            return_type: ast::Type::Int,
+            effects: vec![],
+            body: vec![
+                ast::Statement {
+                    id: "s1".to_string(),
+                    kind: ast::StatementKind::Let {
+                        name: "x".to_string(),
+                        ty: ast::Type::Int,
+                        value: ast::Expr::Literal(ast::Literal::Int(1)),
+                    },
+                },
+                ast::Statement {
+                    id: "s2".to_string(),
+                    kind: ast::StatementKind::Set {
+                        name: "x".to_string(),
+                        value: ast::Expr::Literal(ast::Literal::Int(2)),
+                    },
+                },
+                ast::Statement {
+                    id: "s3".to_string(),
+                    kind: ast::StatementKind::Return {
+                        value: ast::Expr::Literal(ast::Literal::Int(1)),
+                    },
+                },
+            ],
+            tests: vec![],
+        }
+    }
+
+    #[test]
+    fn store_test_marks_ast_tests_passed() {
+        let mut session = Session::new();
+        session.program.functions.push(test_function("foo"));
+        session.program.rebuild_function_index();
+
+        let cases = vec![parser::TestCase {
+            input: parser::Expr::StructLiteral(vec![]),
+            expected: parser::Expr::Int(1),
+        }];
+
+        session.store_test("foo", &cases);
+        session.tested_functions.clear();
+
+        let func = session.program.get_function("foo").unwrap();
+        assert_eq!(func.tests.len(), 1);
+        assert!(func.tests[0].passed);
+        assert!(session.is_function_tested("foo"));
+    }
+
+    #[test]
+    fn invalidate_and_retest_restores_ast_test_pass_flags() {
+        let mut session = Session::new();
+        session.apply(
+            "+fn foo ()->Int\n  +let x:Int = 1\n  +set x = 2\n  +return 1\n\n!test foo\n  +with -> expect 1\n",
+        )
+        .unwrap();
+
+        let func = session.program.get_function("foo").unwrap();
+        assert!(!func.tests.is_empty());
+        assert!(func.tests.iter().all(|t| t.passed));
+
+        let op = parser::Operation::Replace(parser::ReplaceMutation {
+            target: "foo".to_string(),
+            body: vec![
+                parser::Operation::Let(parser::LetDecl {
+                    name: "x".to_string(),
+                    ty: parser::TypeExpr::Named("Int".to_string()),
+                    expr: parser::Expr::Int(1),
+                }),
+                parser::Operation::Set(parser::SetDecl {
+                    name: "x".to_string(),
+                    expr: parser::Expr::Int(2),
+                }),
+                parser::Operation::Return(parser::ReturnDecl {
+                    expr: parser::Expr::Int(1),
+                }),
+            ],
+        });
+
+        validator::apply_and_validate(&mut session.program, &op).unwrap();
+        let results = session.invalidate_and_retest(&op);
+
+        assert!(!results.is_empty());
+        let func = session.program.get_function("foo").unwrap();
+        assert!(func.tests.iter().all(|t| t.passed));
+        assert!(session.is_function_tested("foo"));
+    }
+}

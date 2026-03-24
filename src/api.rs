@@ -145,7 +145,7 @@ pub async fn eval_fn(
     // Block eval of untested functions (>2 statements) in AdapsisOS mode
     if session.program.require_modules {
         if let Some(func) = session.program.get_function(&ev.function_name) {
-            if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
+            if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
                 return Json(EvalResponse {
                     result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
                     success: false,
@@ -318,8 +318,9 @@ pub async fn test_fn(
                 format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
             }).collect();
             session.record_test(&test.function_name, passed, failed, details);
-            if passed > 0 && failed == 0 {
+            if failed == 0 && !test.cases.is_empty() {
                 session.mark_tested(&test.function_name);
+                session.store_test(&test.function_name, &test.cases);
             }
         }
     }
@@ -1127,13 +1128,14 @@ pub async fn ask(
                             }
                             if all_passed && !test.cases.is_empty() {
                                 session.mark_tested(&test.function_name);
+                                session.store_test(&test.function_name, &test.cases);
                             }
                         }
                         crate::parser::Operation::Eval(ev) => {
                             // Block eval of untested functions in AdapsisOS mode
                             if session.program.require_modules {
                                 if let Some(func) = session.program.get_function(&ev.function_name) {
-                                    if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
+                                    if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
                                         iter_has_errors = true;
                                         iter_results.push(MutationResult {
                                             message: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
@@ -1968,13 +1970,14 @@ pub async fn ask_stream(
                                 }
                                 if all_passed && !test.cases.is_empty() {
                                     session.mark_tested(&test.function_name);
+                                    session.store_test(&test.function_name, &test.cases);
                                 }
                             }
                             crate::parser::Operation::Eval(ev) => {
                                 // Block eval of untested functions (>2 statements) in AdapsisOS mode
                                 if session.program.require_modules {
                                     if let Some(func) = session.program.get_function(&ev.function_name) {
-                                        if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
+                                        if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
                                             has_errors = true;
                                             let msg = format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len());
                                             feedback_details.push(format!("ERROR: {msg}"));
@@ -2113,7 +2116,7 @@ pub async fn ask_stream(
                                     let untested: Vec<String> = session.program.modules.iter().flat_map(|m| {
                                         m.functions.iter().filter_map(|f| {
                                             let qname = format!("{}.{}", m.name, f.name);
-                                            if f.body.len() > 2 && !session.tested_functions.contains(&qname) {
+                                            if f.body.len() > 2 && !session.is_function_tested(&qname) {
                                                 Some(qname)
                                             } else { None }
                                         })
@@ -2489,7 +2492,7 @@ pub async fn ask_stream(
                         for m in &session.program.modules {
                             for f in &m.functions {
                                 let qname = format!("{}.{}", m.name, f.name);
-                                if f.body.len() > 2 && !session.tested_functions.contains(&qname) {
+                                if f.body.len() > 2 && !session.is_function_tested(&qname) {
                                     fns.push(qname);
                                 }
                             }
