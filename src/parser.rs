@@ -1288,7 +1288,7 @@ fn parse_function_header(line: usize, input: &str) -> Result<FunctionHeader> {
 
     let params_start = rest
         .find('(')
-        .ok_or_else(|| anyhow!("line {}: expected parameter list", line))?;
+        .ok_or_else(|| anyhow!("line {}: expected parameter list for function declaration. If this is inside a test expectation, your expected string may contain newlines that split across lines — use a shorter expectation or test specific parts", line))?;
     if params_start != 0 {
         bail!("line {}: unexpected text before parameter list", line);
     }
