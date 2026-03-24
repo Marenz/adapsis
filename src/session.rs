@@ -403,18 +403,9 @@ impl Session {
         }
     }
 
-    /// Invalidate test status for affected functions, then re-run any stored
-    /// tests. If any test fails, REVERT the function body to its pre-change
-    /// state (reject-on-fail). Returns a list of (fn_name, passed, detail)
-    /// for each re-run.
-    /// Must be called AFTER `apply_and_validate` so the function is already
-    /// updated in the program.
-    fn invalidate_and_retest(
-        &mut self,
-        op: &parser::Operation,
-    ) -> Vec<(String, bool, String)> {
-        // Collect affected function names
-        let affected: Vec<String> = match op {
+    /// Extract the function names affected by an operation (for test invalidation).
+    fn affected_function_names(op: &parser::Operation) -> Vec<String> {
+        match op {
             parser::Operation::Module(m) => {
                 m.body
                     .iter()
@@ -442,13 +433,15 @@ impl Session {
                 };
                 vec![func_name]
             }
-            _ => return Vec::new(),
-        };
+            _ => Vec::new(),
+        }
+    }
 
-        // Save backups of affected function bodies before modifying anything.
-        // Only functions that already have tests can be rejected; new functions
-        // (no tests) are unaffected.
-        let mut backups: HashMap<String, Vec<ast::Statement>> = HashMap::new();
+    /// Save pre-mutation backups of function bodies for affected functions
+    /// that already have tests (for reject-on-fail).
+    fn backup_affected_bodies(&self, op: &parser::Operation) -> HashMap<String, Vec<ast::Statement>> {
+        let affected = Self::affected_function_names(op);
+        let mut backups = HashMap::new();
         for name in &affected {
             if let Some(func) = self.program.get_function(name) {
                 if !func.tests.is_empty() {
@@ -456,6 +449,27 @@ impl Session {
                 }
             }
         }
+        backups
+    }
+
+    /// Invalidate test status for affected functions, then re-run any stored
+    /// tests. If any test fails, REVERT the function body to its pre-change
+    /// state (reject-on-fail). Returns a list of (fn_name, passed, detail)
+    /// for each re-run.
+    ///
+    /// `pre_backups` must be captured BEFORE `apply_and_validate` so the
+    /// backup contains the original (pre-mutation) function body.
+    fn invalidate_and_retest(
+        &mut self,
+        op: &parser::Operation,
+        pre_backups: HashMap<String, Vec<ast::Statement>>,
+    ) -> Vec<(String, bool, String)> {
+        let affected = Self::affected_function_names(op);
+        if affected.is_empty() {
+            return Vec::new();
+        }
+
+        let backups = pre_backups;
 
         // Invalidate: reset AST passed flags
         for name in &affected {
@@ -678,10 +692,11 @@ impl Session {
                 }
                 _ => {
                     any_definition = true;
+                    let pre_backups = self.backup_affected_bodies(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => {
                             results.push((msg, true));
-                            for (name, passed, detail) in self.invalidate_and_retest(op) {
+                            for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
                                 results.push((detail, passed));
                                 let _ = name;
                             }
@@ -879,10 +894,11 @@ impl Session {
                 }
                 _ => {
                     any_definition = true;
+                    let pre_backups = self.backup_affected_bodies(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => {
                             results.push((msg, true));
-                            for (name, passed, detail) in self.invalidate_and_retest(op) {
+                            for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
                                 results.push((detail, passed));
                                 let _ = name;
                             }
@@ -1334,8 +1350,9 @@ mod tests {
             ],
         });
 
+        let pre_backups = session.backup_affected_bodies(&op);
         validator::apply_and_validate(&mut session.program, &op).unwrap();
-        let results = session.invalidate_and_retest(&op);
+        let results = session.invalidate_and_retest(&op, pre_backups);
 
         assert!(!results.is_empty());
         let func = session.program.get_function("foo").unwrap();
