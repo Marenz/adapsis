@@ -1307,6 +1307,8 @@ mod tests {
         let cases = vec![parser::TestCase {
             input: parser::Expr::StructLiteral(vec![]),
             expected: parser::Expr::Int(1),
+            matcher: None,
+            after_checks: vec![],
         }];
 
         session.store_test("foo", &cases);

@@ -453,7 +453,7 @@ where
                     if llm_error.is_retryable() && attempt + 1 < MAX_LLM_RETRIES {
                         let delay = llm_error
                             .retry_after()
-                            .unwrap_or_else(|| default_retry_delay(attempt));
+                            .unwrap_or_else(|| default_retry_delay(attempt, llm_error));
                         eprintln!(
                             "[llm:retry] attempt {}/{} in {}ms: {}",
                             attempt + 2,
@@ -506,9 +506,23 @@ async fn ensure_success(response: Response) -> Result<Response> {
     }))
 }
 
-fn default_retry_delay(attempt: usize) -> Duration {
-    let seconds = 1_u64 << attempt.min(6);
-    Duration::from_secs(seconds)
+fn default_retry_delay(attempt: usize, error: &LlmError) -> Duration {
+    let is_rate_limited = matches!(
+        error,
+        LlmError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            ..
+        }
+    );
+    if is_rate_limited {
+        // Rate limits typically last 30-60+ seconds; use a longer base delay.
+        let seconds = 30_u64 * (1 << attempt.min(3));
+        Duration::from_secs(seconds)
+    } else {
+        // Transient server errors: shorter exponential backoff.
+        let seconds = 1_u64 << attempt.min(6);
+        Duration::from_secs(seconds)
+    }
 }
 
 fn extract_retry_delay(headers: &HeaderMap, body: &str) -> Option<Duration> {
