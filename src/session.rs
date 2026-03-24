@@ -436,6 +436,12 @@ impl Session {
                 input: s.input.clone(),
                 expected: s.expected.clone(),
                 passed: true,
+                matcher: s.matcher.clone(),
+                after_checks: s.after_checks.iter().map(|a| ast::AfterCheck {
+                    target: a.target.clone(),
+                    matcher: a.matcher.clone(),
+                    value: a.value.clone(),
+                }).collect(),
             })
             .collect();
         if let Some(func) = self.program.get_function_mut(fn_name) {
