@@ -68,10 +68,11 @@ pub enum Operation {
         to: String,
         content: String,
     },
-    /// Register IO mock: !mock <operation> "<pattern>" -> "<response>"
+    /// Register IO mock: !mock <operation> "<pattern>" ... -> "<response>"
     Mock {
         operation: String,
-        pattern: String,
+        /// One pattern per argument position; single-element for backward compat.
+        patterns: Vec<String>,
         response: String,
     },
     /// Clear all mocks: !unmock
@@ -986,11 +987,33 @@ impl<'a> Parser<'a> {
                     line.number
                 )
             })?;
-            let rest = rest.trim();
-            // Parse: "pattern" -> "response"
-            // Use proper quoted-string parsing so escape sequences are decoded
-            let (pattern_part, rest) = parse_mock_string(line.number, rest)?;
-            let rest = rest.trim();
+            let mut rest = rest.trim();
+            // Parse: "pattern1" "pattern2" ... -> "response"
+            // Collect all quoted strings before the '->' as patterns.
+            let mut patterns = Vec::new();
+            loop {
+                let trimmed = rest.trim();
+                if trimmed.starts_with("->") {
+                    rest = trimmed;
+                    break;
+                }
+                if !trimmed.starts_with('"') {
+                    bail!(
+                        "line {}: expected quoted string or '->' in !mock, got `{}`",
+                        line.number,
+                        &trimmed[..trimmed.len().min(20)]
+                    );
+                }
+                let (pat, remaining) = parse_mock_string(line.number, trimmed)?;
+                patterns.push(pat);
+                rest = remaining;
+            }
+            if patterns.is_empty() {
+                bail!(
+                    "line {}: expected at least one pattern string in !mock",
+                    line.number
+                );
+            }
             let rest = rest.strip_prefix("->").ok_or_else(|| {
                 anyhow!(
                     "line {}: expected '->' between pattern and response in !mock",
@@ -1002,7 +1025,7 @@ impl<'a> Parser<'a> {
             self.index += 1;
             return Ok(Operation::Mock {
                 operation: operation.to_string(),
-                pattern: pattern_part,
+                patterns,
                 response: response_part,
             });
         }

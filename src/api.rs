@@ -2134,12 +2134,13 @@ pub async fn ask_stream(
                                 accepted_done = true;
                                 break;
                             }
-                            crate::parser::Operation::Mock { operation, pattern, response } => {
+                            crate::parser::Operation::Mock { operation, patterns, response } => {
+                                let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                                 session.io_mocks.push(crate::session::IoMock {
-                                    operation: operation.clone(), pattern: pattern.clone(), response: response.clone(),
+                                    operation: operation.clone(), patterns: patterns.clone(), response: response.clone(),
                                 });
-                                feedback_details.push(format!("mock: {operation} \"{pattern}\""));
-                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} \"{pattern}\""), "success": true})).await;
+                                feedback_details.push(format!("mock: {operation} {pattern_display}"));
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} {pattern_display}"), "success": true})).await;
                             }
                             crate::parser::Operation::Unmock => {
                                 let count = session.io_mocks.len();

@@ -2499,8 +2499,8 @@ mod tests {
         let ops = parser::parse(source).expect("parse failed");
         let mut mocks = Vec::new();
         for op in ops {
-            if let parser::Operation::Mock { operation, pattern, response } = op {
-                mocks.push(IoMock { operation, pattern, response });
+            if let parser::Operation::Mock { operation, patterns, response } = op {
+                mocks.push(IoMock { operation, patterns, response });
             }
         }
         mocks
@@ -2565,7 +2565,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "example.com".to_string(),
+            patterns: vec!["example.com".to_string()],
             response: "hello".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2613,7 +2613,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "example.com".to_string(),
+            patterns: vec!["example.com".to_string()],
             response: "world".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2640,7 +2640,7 @@ mod tests {
         // Mock sleep so it returns immediately without real delay
         let mocks = vec![IoMock {
             operation: "sleep".to_string(),
-            pattern: "1000".to_string(),
+            patterns: vec!["1000".to_string()],
             response: "".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2671,7 +2671,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "api.test.com".to_string(),
+            patterns: vec!["api.test.com".to_string()],
             response: "nested_ok".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2702,7 +2702,7 @@ mod tests {
         // *decoded* string (no backslash escapes).
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "api.example.com".to_string(),
+            patterns: vec!["api.example.com".to_string()],
             response: r#"{"name":"alice","age":30}"#.to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2729,7 +2729,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "api.example.com".to_string(),
+            patterns: vec!["api.example.com".to_string()],
             response: r#"[1,2,3]"#.to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2743,7 +2743,7 @@ mod tests {
         let source = "!mock http_get \"api.test\" -> \"{\\\"ok\\\":true,\\\"items\\\":[1,2]}\"";
         let mocks = extract_mocks(source);
         assert_eq!(mocks.len(), 1);
-        assert_eq!(mocks[0].pattern, "api.test");
+        assert_eq!(mocks[0].patterns, vec!["api.test"]);
         // After unescape, response should be valid JSON without backslashes
         assert_eq!(mocks[0].response, r#"{"ok":true,"items":[1,2]}"#);
         // Verify it's valid JSON
@@ -2794,10 +2794,10 @@ mod tests {
         for op in &ops {
             match op {
                 parser::Operation::Test(test) => test_ops.push(test.clone()),
-                parser::Operation::Mock { operation, pattern, response } => {
+                parser::Operation::Mock { operation, patterns, response } => {
                     io_mocks.push(IoMock {
                         operation: operation.clone(),
-                        pattern: pattern.clone(),
+                        patterns: patterns.clone(),
                         response: response.clone(),
                     });
                 }
@@ -2918,7 +2918,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "example.com".to_string(),
+            patterns: vec!["example.com".to_string()],
             response: "async_hello".to_string(),
         }];
 
