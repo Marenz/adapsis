@@ -717,6 +717,8 @@ async fn main() -> Result<()> {
                 sess.program.rebuild_function_index();
             }
             sess.library_state = Some(lib_state);
+            sess.init_shared_vars();
+            let initial_runtime = sess.runtime.clone();
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
@@ -857,7 +859,7 @@ async fn main() -> Result<()> {
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
-                runtime: std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default())),
+                runtime: std::sync::Arc::new(std::sync::RwLock::new(initial_runtime)),
             };
 
             let app = axum::Router::new()
