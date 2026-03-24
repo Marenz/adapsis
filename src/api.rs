@@ -182,6 +182,7 @@ pub async fn eval_fn(
                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
                 let mut env = eval::Env::new();
+                env.populate_shared_from_program(&program);
                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                 let input_val = eval::eval_parser_expr_with_program(&input, &program)?;
                 eval::bind_input_to_params(&program, func, &input_val, &mut env);
@@ -1177,6 +1178,7 @@ pub async fn ask(
                                             .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
                                         let mut env = crate::eval::Env::new();
+                                        env.populate_shared_from_program(&program);
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
                                         let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
                                         crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
@@ -1499,6 +1501,7 @@ pub async fn ask(
                             match crate::validator::convert_statement_op(op) {
                                 Ok(stmt) => {
                                     let mut env = crate::eval::Env::new();
+                                    env.populate_shared_from_program(&session.program);
                                     if let Some(sender) = &config.io_sender {
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
                                             crate::coroutine::CoroutineHandle::new(sender.clone())
@@ -2028,6 +2031,7 @@ pub async fn ask_stream(
                                                 .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
                                             let mut env = crate::eval::Env::new();
+                                            env.populate_shared_from_program(&program);
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
                                             let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
                                             crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
@@ -2098,6 +2102,7 @@ pub async fn ask_stream(
                                 match crate::validator::convert_statement_op(op) {
                                     Ok(stmt) => {
                                         let mut env = crate::eval::Env::new();
+                                        env.populate_shared_from_program(&session.program);
                                         // Propagate coroutine handle if available
                                         if let Some(sender) = &config_clone.io_sender {
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
@@ -2772,6 +2777,7 @@ async fn adapsis_route_dispatch(
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
         let mut env = eval::Env::new();
+        env.populate_shared_from_program(&program);
         let input = eval::Value::String(body_str);
         eval::bind_input_to_params(&program, func, &input, &mut env);
         eval::eval_function_body_pub(&program, &func.body, &mut env)
