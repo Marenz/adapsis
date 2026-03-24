@@ -30,7 +30,7 @@ pub static BUILTINS: &[Builtin] = &[
         name: "concat",
         aliases: &[],
         short: "concatenate two or more strings",
-        long: "+call combined:String = concat(\"hello \", name)\n+call full:String = concat(a, \" \", b, \" \", c)",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
@@ -251,7 +251,7 @@ pub static BUILTINS: &[Builtin] = &[
         name: "list",
         aliases: &[],
         short: "create empty list or list with items",
-        long: "+call empty:List<Int> = list()\n+call nums:List<Int> = list(1, 2, 3)",
+        long: "",
         category: BuiltinCategory::List,
     },
     Builtin {
@@ -265,7 +265,7 @@ pub static BUILTINS: &[Builtin] = &[
         name: "get",
         aliases: &[],
         short: "get item at index",
-        long: "+call items:List<String> = list(\"a\", \"b\", \"c\")\n+call second:String = get(items, 1)",
+        long: "",
         category: BuiltinCategory::List,
     },
     Builtin {
@@ -347,21 +347,21 @@ pub static BUILTINS: &[Builtin] = &[
         name: "json_get",
         aliases: &[],
         short: "extract value from JSON string by key path",
-        long: "+call val:String = json_get(response, \"data.items.0.name\")\n+call nested:String = json_get(json, \"users.0.email\")",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "json_array_len",
         aliases: &[],
         short: "get length of JSON array",
-        long: "+call count:Int = json_array_len(json_get(response, \"items\"))",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "json_escape",
         aliases: &[],
         short: "escape string for use in JSON value",
-        long: "+call body:String = concat(\"{\\\"text\\\": \\\"\", json_escape(user_input), \"\\\"}\") ",
+        long: "",
         category: BuiltinCategory::String,
     },
 ];
@@ -484,7 +484,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "llm_call",
         aliases: &[],
         short: "single LLM text generation: llm_call(system, prompt[, model])",
-        long: "+await answer:String = llm_call(\"You are a helpful assistant.\", \"Explain recursion.\")\n+await answer:String = llm_call(\"system prompt\", question, \"claude-sonnet-4-6\")",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
@@ -498,14 +498,14 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "http_get",
         aliases: &[],
         short: "HTTP GET request, returns response body as String",
-        long: "+await body:String = http_get(\"https://api.example.com/data\")\n+call name:String = json_get(body, \"results.0.name\")",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "http_post",
         aliases: &[],
         short: "HTTP POST request: http_post(url, body, content_type) -> String",
-        long: "+call payload:String = concat(\"{\\\"query\\\": \\\"\", json_escape(q), \"\\\"}\")\n+await resp:String = http_post(\"https://api.example.com/search\", payload, \"application/json\")",
+        long: "",
         category: BuiltinCategory::Io,
     },
 ];
@@ -523,13 +523,13 @@ pub static QUERIES: &[QueryCommand] = &[
         name: "?symbols",
         args: "[name]",
         short: "list all types and functions, or details of one",
-        long: "?symbols\n?symbols MyModule.my_func",
+        long: "",
     },
     QueryCommand {
         name: "?source",
         args: "<fn>",
         short: "show reconstructed source code of a function or type",
-        long: "?source MyModule.process_data",
+        long: "",
     },
     QueryCommand {
         name: "?callers",
@@ -595,7 +595,7 @@ pub static QUERIES: &[QueryCommand] = &[
         name: "?tasks",
         args: "",
         short: "list all spawned async tasks and their current wait state",
-        long: "?tasks",
+        long: "",
     },
     QueryCommand {
         name: "?library",
@@ -618,13 +618,13 @@ pub static ACTIONS: &[ActionCommand] = &[
         name: "!test",
         args: "<fn>\\n  +with ...",
         short: "run test cases for a function",
-        long: "!test Math.add\n  +with a=2, b=3 -> 5\n  +with a=0, b=0 -> 0",
+        long: "",
     },
     ActionCommand {
         name: "!eval",
         args: "<fn> [args]",
         short: "evaluate a function or builtin",
-        long: "!eval Math.add 2 3\n!eval concat \"hello \" \"world\"",
+        long: "",
     },
     ActionCommand {
         name: "!trace",
@@ -642,7 +642,7 @@ pub static ACTIONS: &[ActionCommand] = &[
         name: "!remove",
         args: "<Module.function | Module | TypeName>",
         short: "remove a function, type, or entire module",
-        long: "!remove Utils.old_helper\n!remove OldModule\n!remove MyTypeName",
+        long: "",
     },
     ActionCommand {
         name: "!move",
@@ -660,14 +660,14 @@ pub static ACTIONS: &[ActionCommand] = &[
         name: "!roadmap",
         args: "show/add <item>/done N/remove N",
         short: "manage long-term roadmap. Persists across sessions.",
-        long: "!roadmap show\n!roadmap add Implement HTTP server\n!roadmap done 1\n!roadmap remove 2",
+        long: "",
     },
     ActionCommand {
         name: "!plan",
         args: "set/done N/fail N/show",
         short:
             "manage task plan. Steps are auto-numbered, do NOT include numbers in step text",
-        long: "!plan set\n  Define the data type\n  Write parser function\n  Add tests\n!plan done 1\n!plan fail 2",
+        long: "",
     },
     ActionCommand {
         name: "!watch",
@@ -685,13 +685,13 @@ pub static ACTIONS: &[ActionCommand] = &[
         name: "!mock",
         args: "<operation> \"<pattern>\" -> \"<response>\"",
         short: "register mock IO response for testing. During !test, IO calls matching the pattern return the mock instead of real IO.",
-        long: "!mock http_get \"https://api.example.com/users\" -> \"{\\\"users\\\": [{\\\"name\\\": \\\"Alice\\\"}]}\"",
+        long: "",
     },
     ActionCommand {
         name: "!unmock",
         args: "",
         short: "clear all IO mocks",
-        long: "!unmock",
+        long: "",
     },
     ActionCommand {
         name: "!msg",
@@ -703,19 +703,19 @@ pub static ACTIONS: &[ActionCommand] = &[
         name: "!opencode",
         args: "<description>",
         short: "request Rust-level change via OpenCode (rebuild + restart)",
-        long: "!opencode Add a new builtin function 'url_encode' that percent-encodes a string",
+        long: "",
     },
     ActionCommand {
         name: "!module",
         args: "<Name>",
         short: "switch module context — subsequent +fn/+type definitions go into this module",
-        long: "!module Http\n+fn handle_request(req:String):String [io,async]\n  +await resp:String = http_get(req)\n  +return resp\n+end",
+        long: "",
     },
     ActionCommand {
         name: "!done",
         args: "",
         short: "signal that the current task is complete",
-        long: "!done",
+        long: "",
     },
 ];
 

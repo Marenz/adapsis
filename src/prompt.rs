@@ -127,38 +127,7 @@ String test values support escape sequences (same as string literals):
 !test echo
   +with s="{\\\"key\\\":\\\"value\\\"}" -> expect "{\\\"key\\\":\\\"value\\\"}"
 
-### Key Builtins
-
-String: concat(a,b), substring(s,start,len), split(s,delim), join(list,sep),
-  trim(s), starts_with(s,prefix), ends_with(s,suffix), contains(s,sub),
-  index_of(s,sub), char_at(s,i), length(s), to_string(x), to_int(s),
-  regex_match(s,pattern), regex_replace(s,pattern,replacement)
-
-JSON: json_get(json_string, "path.to.key"), json_array_len(json_string),
-  json_escape(s) — escape a string for use inside JSON values
-
-Math: abs(x), min(a,b), max(a,b), pow(base,exp), sqrt(x), floor(x)
-
-Async IO (need +await and [io,async] effect):
-  http_get(url) -> String, http_post(url, body, content_type) -> String,
-  llm_call(system_prompt, user_prompt) -> String,
-  llm_agent(system_prompt, task) -> String (full agentic loop),
-  sleep(ms), shell_exec(command) -> String,
-  file_read(path) -> String, file_write(path, data) -> String ("OK" on success),
-  file_exists(path) -> Bool
-
-Commands:
-  !module Name — switch module context (all +fn/+type after go into this module)
-  !plan set / !plan done N / !plan show — manage task plan
-  !roadmap add <item> / !roadmap done N / !roadmap show — long-term roadmap
-  !mock op "pattern" -> "response" — register mock IO (multi-arg: !mock op "pat1" "pat2" -> "resp")
-  !unmock — clear all mocks
-  !eval fn_name arg1=val — evaluate a function (also: !eval fn "val1" "val2" 42)
-  !test Module.fn — run tests (see Testing section above)
-  !opencode <description> — request Rust-level runtime change
-  !done — signal task completion
-
-Queries: ?symbols, ?source fn_name, ?tasks, ?inspect task N, ?inbox, ?deps fn_name, ?library
+(Builtins, commands, and queries are auto-generated from the registry below.)
 
 ## Important Rules
 
