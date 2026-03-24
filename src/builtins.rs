@@ -5,7 +5,8 @@
 pub struct Builtin {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
-    pub description: &'static str,
+    pub short: &'static str,
+    pub long: &'static str,
     pub category: BuiltinCategory,
 }
 
@@ -28,292 +29,339 @@ pub static BUILTINS: &[Builtin] = &[
     Builtin {
         name: "concat",
         aliases: &[],
-        description: "concatenate two strings",
+        short: "concatenate two or more strings",
+        long: "+call combined:String = concat(\"hello \", name)\n+call full:String = concat(a, \" \", b, \" \", c)",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "char_at",
         aliases: &[],
-        description: "get character at index i as String",
+        short: "get character at index i as String",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "substring",
         aliases: &["substr"],
-        description: "get substring from start to end",
+        short: "get substring from start to end",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "starts_with",
         aliases: &[],
-        description: "check if string starts with prefix",
+        short: "check if string starts with prefix",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "ends_with",
         aliases: &[],
-        description: "check if string ends with suffix",
+        short: "check if string ends with suffix",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "contains",
         aliases: &[],
-        description: "check if string contains substring",
+        short: "check if string contains substring",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "index_of",
         aliases: &[],
-        description: "find index of substring (-1 if not found)",
+        short: "find index of substring (-1 if not found)",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "split",
         aliases: &[],
-        description: "split string into List<String>",
+        short: "split string into List<String>",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "trim",
         aliases: &[],
-        description: "remove leading/trailing whitespace",
+        short: "remove leading/trailing whitespace",
+        long: "",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "len",
         aliases: &["length"],
-        description: "length of string or list",
+        short: "length of string or list",
+        long: "",
         category: BuiltinCategory::String,
     },
     // Conversion
     Builtin {
         name: "to_string",
         aliases: &["str"],
-        description: "convert any value to String",
+        short: "convert any value to String",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     Builtin {
         name: "to_int",
         aliases: &["parse_int", "int"],
-        description: "convert String/Float/Bool to Int",
+        short: "convert String/Float/Bool to Int",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     Builtin {
         name: "digit_value",
         aliases: &[],
-        description: "single char to digit Int ('5'->5, 'a'->-1)",
+        short: "single char to digit Int ('5'->5, 'a'->-1)",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     Builtin {
         name: "is_digit_char",
         aliases: &[],
-        description: "true if single char is 0-9",
+        short: "true if single char is 0-9",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     Builtin {
         name: "char_code",
         aliases: &["ord"],
-        description: "character to ASCII code Int",
+        short: "character to ASCII code Int",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     Builtin {
         name: "from_char_code",
         aliases: &["chr"],
-        description: "ASCII code to single-char String",
+        short: "ASCII code to single-char String",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     Builtin {
         name: "to_hex",
         aliases: &[],
-        description: "Int to 8-char hex string (32-bit)",
+        short: "Int to 8-char hex string (32-bit)",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     Builtin {
         name: "u32_wrap",
         aliases: &[],
-        description: "wrap Int to unsigned 32-bit range",
+        short: "wrap Int to unsigned 32-bit range",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     // Math
     Builtin {
         name: "abs",
         aliases: &[],
-        description: "absolute value",
+        short: "absolute value",
+        long: "",
         category: BuiltinCategory::Math,
     },
     Builtin {
         name: "sqrt",
         aliases: &[],
-        description: "square root",
+        short: "square root",
+        long: "",
         category: BuiltinCategory::Math,
     },
     Builtin {
         name: "pow",
         aliases: &[],
-        description: "power (base, exponent)",
+        short: "power (base, exponent)",
+        long: "",
         category: BuiltinCategory::Math,
     },
     Builtin {
         name: "floor",
         aliases: &[],
-        description: "floor to integer",
+        short: "floor to integer",
+        long: "",
         category: BuiltinCategory::Math,
     },
     Builtin {
         name: "min",
         aliases: &[],
-        description: "minimum of two values",
+        short: "minimum of two values",
+        long: "",
         category: BuiltinCategory::Math,
     },
     Builtin {
         name: "max",
         aliases: &[],
-        description: "maximum of two values",
+        short: "maximum of two values",
+        long: "",
         category: BuiltinCategory::Math,
     },
     // Bitwise
     Builtin {
         name: "bit_and",
         aliases: &[],
-        description: "bitwise AND",
+        short: "bitwise AND",
+        long: "",
         category: BuiltinCategory::Bitwise,
     },
     Builtin {
         name: "bit_or",
         aliases: &[],
-        description: "bitwise OR",
+        short: "bitwise OR",
+        long: "",
         category: BuiltinCategory::Bitwise,
     },
     Builtin {
         name: "bit_xor",
         aliases: &[],
-        description: "bitwise XOR",
+        short: "bitwise XOR",
+        long: "",
         category: BuiltinCategory::Bitwise,
     },
     Builtin {
         name: "bit_not",
         aliases: &[],
-        description: "bitwise NOT",
+        short: "bitwise NOT",
+        long: "",
         category: BuiltinCategory::Bitwise,
     },
     Builtin {
         name: "shl",
         aliases: &["bit_shl"],
-        description: "shift left",
+        short: "shift left",
+        long: "",
         category: BuiltinCategory::Bitwise,
     },
     Builtin {
         name: "shr",
         aliases: &["bit_shr"],
-        description: "shift right",
+        short: "shift right",
+        long: "",
         category: BuiltinCategory::Bitwise,
     },
     Builtin {
         name: "left_rotate",
         aliases: &["rotl"],
-        description: "32-bit left rotation",
+        short: "32-bit left rotation",
+        long: "",
         category: BuiltinCategory::Bitwise,
     },
     // List
     Builtin {
         name: "list",
         aliases: &[],
-        description: "create empty list or list with items",
+        short: "create empty list or list with items",
+        long: "+call empty:List<Int> = list()\n+call nums:List<Int> = list(1, 2, 3)",
         category: BuiltinCategory::List,
     },
     Builtin {
         name: "push",
         aliases: &[],
-        description: "returns NEW list with item appended",
+        short: "returns NEW list with item appended",
+        long: "",
         category: BuiltinCategory::List,
     },
     Builtin {
         name: "get",
         aliases: &[],
-        description: "get item at index",
+        short: "get item at index",
+        long: "+call items:List<String> = list(\"a\", \"b\", \"c\")\n+call second:String = get(items, 1)",
         category: BuiltinCategory::List,
     },
     Builtin {
         name: "join",
         aliases: &[],
-        description: "join list items into string with delimiter",
+        short: "join list items into string with delimiter",
+        long: "",
         category: BuiltinCategory::List,
     },
     // State
     Builtin {
         name: "state",
         aliases: &[],
-        description: "create shared state handle",
+        short: "create shared state handle",
+        long: "",
         category: BuiltinCategory::State,
     },
     Builtin {
         name: "get_state",
         aliases: &[],
-        description: "read shared state",
+        short: "read shared state",
+        long: "",
         category: BuiltinCategory::State,
     },
     Builtin {
         name: "set_state",
         aliases: &[],
-        description: "write shared state",
+        short: "write shared state",
+        long: "",
         category: BuiltinCategory::State,
     },
     // Result
     Builtin {
         name: "Ok",
         aliases: &[],
-        description: "Result success constructor",
+        short: "Result success constructor",
+        long: "",
         category: BuiltinCategory::Result,
     },
     Builtin {
         name: "Err",
         aliases: &[],
-        description: "Result error constructor",
+        short: "Result error constructor",
+        long: "",
         category: BuiltinCategory::Result,
     },
     Builtin {
         name: "Some",
         aliases: &[],
-        description: "Option value constructor",
+        short: "Option value constructor",
+        long: "",
         category: BuiltinCategory::Result,
     },
     // Regex
     Builtin {
         name: "regex_match",
         aliases: &[],
-        description: "test if text matches regex pattern (Bool)",
+        short: "test if text matches regex pattern (Bool)",
+        long: "",
         category: BuiltinCategory::Regex,
     },
     Builtin {
         name: "regex_replace",
         aliases: &[],
-        description: "regex replace all matches (String)",
+        short: "regex replace all matches (String)",
+        long: "",
         category: BuiltinCategory::Regex,
     },
     // Base64
     Builtin {
         name: "base64_encode",
         aliases: &[],
-        description: "encode string to base64",
+        short: "encode string to base64",
+        long: "",
         category: BuiltinCategory::Conversion,
     },
     // JSON
     Builtin {
         name: "json_get",
         aliases: &[],
-        description: "extract value from JSON string by key path: json_get(json, \"key.0.nested\")",
+        short: "extract value from JSON string by key path",
+        long: "+call val:String = json_get(response, \"data.items.0.name\")\n+call nested:String = json_get(json, \"users.0.email\")",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "json_array_len",
         aliases: &[],
-        description: "get length of JSON array: json_array_len(json) -> Int",
+        short: "get length of JSON array",
+        long: "+call count:Int = json_array_len(json_get(response, \"items\"))",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "json_escape",
         aliases: &[],
-        description: "escape string for use in JSON value: json_escape(s) -> String",
+        short: "escape string for use in JSON value",
+        long: "+call body:String = concat(\"{\\\"text\\\": \\\"\", json_escape(user_input), \"\\\"}\") ",
         category: BuiltinCategory::String,
     },
 ];
@@ -323,121 +371,141 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "tcp_listen",
         aliases: &[],
-        description: "listen on TCP port, returns handle",
+        short: "listen on TCP port, returns handle",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "tcp_accept",
         aliases: &[],
-        description: "accept connection, returns handle",
+        short: "accept connection, returns handle",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "tcp_connect",
         aliases: &[],
-        description: "connect to TCP server, returns handle",
+        short: "connect to TCP server, returns handle",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "tcp_read",
         aliases: &[],
-        description: "read from connection, returns String",
+        short: "read from connection, returns String",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "tcp_write",
         aliases: &[],
-        description: "write String to connection",
+        short: "write String to connection",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "tcp_close",
         aliases: &[],
-        description: "close connection",
+        short: "close connection",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "file_read",
         aliases: &["read_file"],
-        description: "read entire file as String",
+        short: "read entire file as String",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "file_write",
         aliases: &["write_file"],
-        description: "write String to file",
+        short: "write String to file",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "file_exists",
         aliases: &[],
-        description: "check if file exists (Bool)",
+        short: "check if file exists (Bool)",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "list_dir",
         aliases: &[],
-        description: "list directory entries as List<String>",
+        short: "list directory entries as List<String>",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "read_line",
         aliases: &["stdin_read_line"],
-        description: "read line from stdin with prompt",
+        short: "read line from stdin with prompt",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "print",
         aliases: &[],
-        description: "print text (no newline)",
+        short: "print text (no newline)",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "println",
         aliases: &[],
-        description: "print text with newline",
+        short: "print text with newline",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "shell_exec",
         aliases: &["exec"],
-        description: "run shell command, returns stdout",
+        short: "run shell command, returns stdout",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "self_restart",
         aliases: &["restart"],
-        description: "restart AdapsisOS process",
+        short: "restart AdapsisOS process",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "sleep",
         aliases: &[],
-        description: "sleep for milliseconds",
+        short: "sleep for milliseconds",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "llm_call",
         aliases: &[],
-        description: "single LLM text generation: llm_call(system, prompt[, model])",
+        short: "single LLM text generation: llm_call(system, prompt[, model])",
+        long: "+await answer:String = llm_call(\"You are a helpful assistant.\", \"Explain recursion.\")\n+await answer:String = llm_call(\"system prompt\", question, \"claude-sonnet-4-6\")",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "llm_agent",
         aliases: &[],
-        description: "full agentic LLM loop until DONE: llm_agent(system, task[, model])",
+        short: "full agentic LLM loop until DONE: llm_agent(system, task[, model])",
+        long: "",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "http_get",
         aliases: &[],
-        description: "HTTP GET request, returns response body as String",
+        short: "HTTP GET request, returns response body as String",
+        long: "+await body:String = http_get(\"https://api.example.com/data\")\n+call name:String = json_get(body, \"results.0.name\")",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "http_post",
         aliases: &[],
-        description: "HTTP POST request: http_post(url, body, content_type) -> String",
+        short: "HTTP POST request: http_post(url, body, content_type) -> String",
+        long: "+call payload:String = concat(\"{\\\"query\\\": \\\"\", json_escape(q), \"\\\"}\")\n+await resp:String = http_post(\"https://api.example.com/search\", payload, \"application/json\")",
         category: BuiltinCategory::Io,
     },
 ];
@@ -446,79 +514,94 @@ pub static IO_BUILTINS: &[Builtin] = &[
 pub struct QueryCommand {
     pub name: &'static str,
     pub args: &'static str,
-    pub description: &'static str,
+    pub short: &'static str,
+    pub long: &'static str,
 }
 
 pub static QUERIES: &[QueryCommand] = &[
     QueryCommand {
         name: "?symbols",
         args: "[name]",
-        description: "list all types and functions, or details of one",
+        short: "list all types and functions, or details of one",
+        long: "?symbols\n?symbols MyModule.my_func",
     },
     QueryCommand {
         name: "?source",
         args: "<fn>",
-        description: "show reconstructed source code of a function or type",
+        short: "show reconstructed source code of a function or type",
+        long: "?source MyModule.process_data",
     },
     QueryCommand {
         name: "?callers",
         args: "<fn>",
-        description: "who calls this function",
+        short: "who calls this function",
+        long: "",
     },
     QueryCommand {
         name: "?callees",
         args: "<fn>",
-        description: "what does this function call (1 level)",
+        short: "what does this function call (1 level)",
+        long: "",
     },
     QueryCommand {
         name: "?deps",
         args: "<fn>",
-        description: "direct dependencies (1 level)",
+        short: "direct dependencies (1 level)",
+        long: "",
     },
     QueryCommand {
         name: "?deps-all",
         args: "<fn>",
-        description: "full transitive dependency tree",
+        short: "full transitive dependency tree",
+        long: "",
     },
     QueryCommand {
         name: "?deps-modules",
         args: "<fn>",
-        description: "dependencies grouped by module",
+        short: "dependencies grouped by module",
+        long: "",
     },
     QueryCommand {
         name: "?effects",
         args: "<fn>",
-        description: "what effects does this function have",
+        short: "what effects does this function have",
+        long: "",
     },
     QueryCommand {
         name: "?type",
         args: "<type>",
-        description: "show type definition",
+        short: "show type definition",
+        long: "",
     },
     QueryCommand {
         name: "?agents",
         args: "",
-        description: "show status of all agents",
+        short: "show status of all agents",
+        long: "",
     },
     QueryCommand {
         name: "?plan",
         args: "",
-        description: "show current plan (same as !plan)",
+        short: "show current plan (same as !plan)",
+        long: "",
     },
     QueryCommand {
         name: "?inbox",
         args: "",
-        description: "check messages from other agents or main session",
+        short: "check messages from other agents or main session",
+        long: "",
     },
     QueryCommand {
         name: "?tasks",
         args: "",
-        description: "list all spawned async tasks and their current wait state",
+        short: "list all spawned async tasks and their current wait state",
+        long: "?tasks",
     },
     QueryCommand {
         name: "?library",
         args: "",
-        description: "show persistent module library: dir path, loaded modules, files on disk, load/save errors",
+        short: "show persistent module library: dir path, loaded modules, files on disk, load/save errors",
+        long: "",
     },
 ];
 
@@ -526,85 +609,113 @@ pub static QUERIES: &[QueryCommand] = &[
 pub struct ActionCommand {
     pub name: &'static str,
     pub args: &'static str,
-    pub description: &'static str,
+    pub short: &'static str,
+    pub long: &'static str,
 }
 
 pub static ACTIONS: &[ActionCommand] = &[
     ActionCommand {
         name: "!test",
         args: "<fn>\\n  +with ...",
-        description: "run test cases for a function",
+        short: "run test cases for a function",
+        long: "!test Math.add\n  +with a=2, b=3 -> 5\n  +with a=0, b=0 -> 0",
     },
     ActionCommand {
         name: "!eval",
         args: "<fn> [args]",
-        description: "evaluate a function or builtin",
+        short: "evaluate a function or builtin",
+        long: "!eval Math.add 2 3\n!eval concat \"hello \" \"world\"",
     },
     ActionCommand {
         name: "!trace",
         args: "<fn> [args]",
-        description: "step-by-step execution trace",
+        short: "step-by-step execution trace",
+        long: "",
     },
     ActionCommand {
         name: "!replace",
         args: "<fn.sN>\\n  ...",
-        description: "replace a statement in a function",
+        short: "replace a statement in a function",
+        long: "",
     },
     ActionCommand {
         name: "!remove",
         args: "<Module.function | Module | TypeName>",
-        description: "remove a function, type, or entire module",
+        short: "remove a function, type, or entire module",
+        long: "!remove Utils.old_helper\n!remove OldModule\n!remove MyTypeName",
     },
     ActionCommand {
         name: "!move",
         args: "<symbols...> <Module>",
-        description: "move functions/types into a module (auto-updates call sites)",
+        short: "move functions/types into a module (auto-updates call sites)",
+        long: "",
     },
     ActionCommand {
         name: "!undo",
         args: "",
-        description: "revert last mutation",
+        short: "revert last mutation",
+        long: "",
     },
     ActionCommand {
         name: "!roadmap",
         args: "show/add <item>/done N/remove N",
-        description: "manage long-term roadmap. Persists across sessions.",
+        short: "manage long-term roadmap. Persists across sessions.",
+        long: "!roadmap show\n!roadmap add Implement HTTP server\n!roadmap done 1\n!roadmap remove 2",
     },
     ActionCommand {
         name: "!plan",
         args: "set/done N/fail N/show",
-        description:
+        short:
             "manage task plan. Steps are auto-numbered, do NOT include numbers in step text",
+        long: "!plan set\n  Define the data type\n  Write parser function\n  Add tests\n!plan done 1\n!plan fail 2",
     },
     ActionCommand {
         name: "!watch",
         args: "<fn> [args] <ms>",
-        description: "poll a function periodically, alert on change",
+        short: "poll a function periodically, alert on change",
+        long: "",
     },
     ActionCommand {
         name: "!agent",
         args: "<name> --scope <scope> <task>",
-        description: "spawn background agent (scopes: read-only, new-only, module X, full)",
+        short: "spawn background agent (scopes: read-only, new-only, module X, full)",
+        long: "",
     },
     ActionCommand {
         name: "!mock",
         args: "<operation> \"<pattern>\" -> \"<response>\"",
-        description: "register mock IO response for testing. During !test, IO calls matching the pattern return the mock instead of real IO.",
+        short: "register mock IO response for testing. During !test, IO calls matching the pattern return the mock instead of real IO.",
+        long: "!mock http_get \"https://api.example.com/users\" -> \"{\\\"users\\\": [{\\\"name\\\": \\\"Alice\\\"}]}\"",
     },
     ActionCommand {
         name: "!unmock",
         args: "",
-        description: "clear all IO mocks",
+        short: "clear all IO mocks",
+        long: "!unmock",
     },
     ActionCommand {
         name: "!msg",
         args: "<agent> <message>",
-        description: "send a message to an agent (or 'main' for the main session). Agents see messages in their feedback.",
+        short: "send a message to an agent (or 'main' for the main session). Agents see messages in their feedback.",
+        long: "",
     },
     ActionCommand {
         name: "!opencode",
         args: "<description>",
-        description: "request Rust-level change via OpenCode (rebuild + restart)",
+        short: "request Rust-level change via OpenCode (rebuild + restart)",
+        long: "!opencode Add a new builtin function 'url_encode' that percent-encodes a string",
+    },
+    ActionCommand {
+        name: "!module",
+        args: "<Name>",
+        short: "switch module context — subsequent +fn/+type definitions go into this module",
+        long: "!module Http\n+fn handle_request(req:String):String [io,async]\n  +await resp:String = http_get(req)\n  +return resp\n+end",
+    },
+    ActionCommand {
+        name: "!done",
+        args: "",
+        short: "signal that the current task is complete",
+        long: "!done",
     },
 ];
 
@@ -636,19 +747,39 @@ pub fn format_for_prompt() -> String {
         } else {
             format!(" (aliases: {})", b.aliases.join(", "))
         };
-        out.push_str(&format!("  {}{} — {}\n", b.name, aliases, b.description));
+        out.push_str(&format!("  {}{} — {}\n", b.name, aliases, b.short));
+        if !b.long.is_empty() {
+            for line in b.long.lines() {
+                out.push_str(&format!("    {}\n", line));
+            }
+        }
     }
     out.push_str("\n### IO Functions (require [io,async] effect, use +await)\n");
     for b in IO_BUILTINS {
-        out.push_str(&format!("  {} — {}\n", b.name, b.description));
+        out.push_str(&format!("  {} — {}\n", b.name, b.short));
+        if !b.long.is_empty() {
+            for line in b.long.lines() {
+                out.push_str(&format!("    {}\n", line));
+            }
+        }
     }
     out.push_str("\n### Queries (inspect program state)\n");
     for q in QUERIES {
-        out.push_str(&format!("  {} {} — {}\n", q.name, q.args, q.description));
+        out.push_str(&format!("  {} {} — {}\n", q.name, q.args, q.short));
+        if !q.long.is_empty() {
+            for line in q.long.lines() {
+                out.push_str(&format!("    {}\n", line));
+            }
+        }
     }
     out.push_str("\n### Commands\n");
     for a in ACTIONS {
-        out.push_str(&format!("  {} {} — {}\n", a.name, a.args, a.description));
+        out.push_str(&format!("  {} {} — {}\n", a.name, a.args, a.short));
+        if !a.long.is_empty() {
+            for line in a.long.lines() {
+                out.push_str(&format!("    {}\n", line));
+            }
+        }
     }
     out
 }
