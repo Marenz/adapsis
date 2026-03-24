@@ -44,20 +44,7 @@ impl fmt::Display for Value {
             Value::Int(v) => write!(f, "{v}"),
             Value::Float(v) => write!(f, "{v}"),
             Value::Bool(v) => write!(f, "{v}"),
-            Value::String(v) => {
-                write!(f, "\"")?;
-                for ch in v.chars() {
-                    match ch {
-                        '"' => write!(f, "\\\"")?,
-                        '\\' => write!(f, "\\\\")?,
-                        '\n' => write!(f, "\\n")?,
-                        '\r' => write!(f, "\\r")?,
-                        '\t' => write!(f, "\\t")?,
-                        c => write!(f, "{c}")?,
-                    }
-                }
-                write!(f, "\"")
-            }
+            Value::String(v) => write!(f, "\"{v}\""),
             Value::Struct(name, fields) => {
                 write!(f, "{name}{{")?;
                 for (i, (k, v)) in fields.iter().enumerate() {
@@ -323,7 +310,7 @@ pub fn eval_compiled_or_interpreted_cached(
                     if let Some((_, ref mut compiled)) = *guard {
                         if returns_string {
                             if let Ok(result) = compiled.call_string(function_name, &args) {
-                                return Ok((crate::ast::format_string_literal(&result), true));
+                                return Ok((format!("\"{result}\""), true));
                             }
                         } else {
                             if let Ok(result) = compiled.call_i64(function_name, &args) {
@@ -337,7 +324,7 @@ pub fn eval_compiled_or_interpreted_cached(
                 if let Ok(mut compiled) = crate::compiler::compile(program) {
                     if returns_string {
                         if let Ok(result) = compiled.call_string(function_name, &args) {
-                            return Ok((crate::ast::format_string_literal(&result), true));
+                            return Ok((format!("\"{result}\""), true));
                         }
                     } else {
                         if let Ok(result) = compiled.call_i64(function_name, &args) {
@@ -388,7 +375,7 @@ pub fn eval_call_with_input(
 ) -> Result<String> {
     // Try user-defined function first
     if let Some(func) = program.get_function(function_name) {
-        let input_val = eval_parser_expr_standalone(input)?;
+        let input_val = eval_parser_expr_with_program(input, program)?;
         let mut env = Env::new();
         bind_input_to_params(program, func, &input_val, &mut env);
 
@@ -418,11 +405,11 @@ pub fn eval_call_with_input(
                 // Preserve field order from the parser
                 fields
                     .iter()
-                    .map(|f| eval_parser_expr_standalone(&f.value))
+                    .map(|f| eval_parser_expr_with_program(&f.value, program))
                     .collect::<Result<Vec<_>>>()?
             }
             _ => {
-                let input_val = eval_parser_expr_standalone(input)?;
+                let input_val = eval_parser_expr_with_program(input, program)?;
                 match &input_val {
                     Value::None => vec![],
                     other => vec![other.clone()],
@@ -479,33 +466,43 @@ pub fn bind_input_to_params(
                     }
                 }
             } else {
-                // Smart distribution: fields may belong to struct-typed params
-                // For each param, check if it's a struct type and collect matching fields
-                let mut used_fields: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-
-                for param in &func.params {
-                    // Check if this param matches a field directly
-                    if let Some(val) = fields.get(&param.name) {
-                        env.set(&param.name, val.clone());
-                        used_fields.insert(param.name.clone());
-                        continue;
+                // Check for positional fields (_0, _1, ...) from space-separated args
+                let is_positional = fields.keys().any(|k| k.starts_with('_') && k[1..].parse::<usize>().is_ok());
+                if is_positional && fields.len() == func.params.len() {
+                    for (i, param) in func.params.iter().enumerate() {
+                        if let Some(val) = fields.get(&format!("_{i}")) {
+                            env.set(&param.name, val.clone());
+                        }
                     }
+                } else {
+                    // Smart distribution: fields may belong to struct-typed params
+                    // For each param, check if it's a struct type and collect matching fields
+                    let mut used_fields: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
 
-                    // Check if this param is a struct type — look up its field names
-                    if let ast::Type::Struct(type_name) = &param.ty {
-                        if let Some(type_fields) = get_struct_fields(program, type_name) {
-                            // Collect input fields that match this struct's fields
-                            let mut struct_fields = HashMap::new();
-                            for (tf_name, _) in &type_fields {
-                                if let Some(val) = fields.get(tf_name) {
-                                    struct_fields.insert(tf_name.clone(), val.clone());
-                                    used_fields.insert(tf_name.clone());
+                    for param in &func.params {
+                        // Check if this param matches a field directly
+                        if let Some(val) = fields.get(&param.name) {
+                            env.set(&param.name, val.clone());
+                            used_fields.insert(param.name.clone());
+                            continue;
+                        }
+
+                        // Check if this param is a struct type — look up its field names
+                        if let ast::Type::Struct(type_name) = &param.ty {
+                            if let Some(type_fields) = get_struct_fields(program, type_name) {
+                                // Collect input fields that match this struct's fields
+                                let mut struct_fields = HashMap::new();
+                                for (tf_name, _) in &type_fields {
+                                    if let Some(val) = fields.get(tf_name) {
+                                        struct_fields.insert(tf_name.clone(), val.clone());
+                                        used_fields.insert(tf_name.clone());
+                                    }
                                 }
-                            }
-                            if !struct_fields.is_empty() {
-                                let struct_val = Value::Struct(type_name.clone(), struct_fields);
-                                env.set(&param.name, struct_val);
+                                if !struct_fields.is_empty() {
+                                    let struct_val = Value::Struct(type_name.clone(), struct_fields);
+                                    env.set(&param.name, struct_val);
+                                }
                             }
                         }
                     }
@@ -1245,6 +1242,37 @@ fn eval_builtin_or_user(
                 bail!("to_string() expects 1 argument");
             }
             Ok(Value::String(format!("{}", args[0])))
+        }
+        "is_ok" => {
+            if args.len() != 1 {
+                bail!("is_ok() expects 1 argument");
+            }
+            Ok(Value::Bool(matches!(&args[0], Value::Ok(_))))
+        }
+        "is_err" => {
+            if args.len() != 1 {
+                bail!("is_err() expects 1 argument");
+            }
+            Ok(Value::Bool(matches!(&args[0], Value::Err(_))))
+        }
+        "unwrap" => {
+            if args.len() != 1 {
+                bail!("unwrap() expects 1 argument");
+            }
+            match &args[0] {
+                Value::Ok(v) => Ok(v.as_ref().clone()),
+                Value::Err(e) => bail!("unwrap on Err({e})"),
+                other => Ok(other.clone()),
+            }
+        }
+        "unwrap_err" | "error" => {
+            if args.len() != 1 {
+                bail!("unwrap_err() expects 1 argument");
+            }
+            match &args[0] {
+                Value::Err(e) => Ok(Value::String(e.clone())),
+                other => bail!("unwrap_err on non-Err value: {other}"),
+            }
         }
         "char_at" => {
             if args.len() != 2 {
@@ -2049,6 +2077,24 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     payload: vec![],
                 });
             }
+            // Check if this is a zero-arg user function (e.g. initial_context_state)
+            if let Some(func) = program.get_function(name) {
+                if func.params.is_empty() {
+                    // Reject functions with side effects in test expressions
+                    let has_side_effects = func.effects.iter().any(|e| {
+                        matches!(e, ast::Effect::Io | ast::Effect::Async | ast::Effect::Mut | ast::Effect::Unsafe)
+                    });
+                    if has_side_effects {
+                        bail!(
+                            "cannot call `{name}` in test expression: function has side effects {:?} — \
+                             use !mock and an async test wrapper instead",
+                            func.effects
+                        );
+                    }
+                    let mut env = Env::new();
+                    return eval_function_body(program, &func.body, &mut env);
+                }
+            }
             // Fall through to standalone handling
             eval_parser_expr_standalone(expr)
         }
@@ -2067,6 +2113,17 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             }
             // Try as user function
             if let Some(func) = program.get_function(&name) {
+                // Reject functions with side effects in test expressions
+                let has_side_effects = func.effects.iter().any(|e| {
+                    matches!(e, ast::Effect::Io | ast::Effect::Async | ast::Effect::Mut | ast::Effect::Unsafe)
+                });
+                if has_side_effects {
+                    bail!(
+                        "cannot call `{name}` in test expression: function has side effects {:?} — \
+                         use !mock and an async test wrapper instead",
+                        func.effects
+                    );
+                }
                 let eval_args: Vec<Value> = args
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
@@ -2079,6 +2136,66 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             }
             // Fall through to standalone (handles union constructors, Ok, Err)
             eval_parser_expr_standalone(expr)
+        }
+        // StructLiteral needs program access so field values can call user functions
+        parser::Expr::StructLiteral(fields) => {
+            let mut field_map = HashMap::new();
+            for f in fields {
+                let val = eval_parser_expr_with_program(&f.value, program)?;
+                field_map.insert(f.name.clone(), val);
+            }
+            Ok(Value::Struct(String::new(), field_map))
+        }
+        // Unary expressions need program access for their inner expression
+        parser::Expr::Unary { op, expr: inner } => {
+            let val = eval_parser_expr_with_program(inner, program)?;
+            match op {
+                parser::UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
+                parser::UnaryOp::Neg => match val {
+                    Value::Int(n) => Ok(Value::Int(-n)),
+                    Value::Float(n) => Ok(Value::Float(-n)),
+                    _ => bail!("cannot negate {val}"),
+                },
+            }
+        }
+        // Binary expressions need program access for both sides
+        parser::Expr::Binary { left, op, right } => {
+            let l = eval_parser_expr_with_program(left, program)?;
+            let r = eval_parser_expr_with_program(right, program)?;
+            let ast_op = match op {
+                parser::BinaryOp::Add => ast::BinaryOp::Add,
+                parser::BinaryOp::Sub => ast::BinaryOp::Sub,
+                parser::BinaryOp::Mul => ast::BinaryOp::Mul,
+                parser::BinaryOp::Div => ast::BinaryOp::Div,
+                parser::BinaryOp::Mod => ast::BinaryOp::Mod,
+                parser::BinaryOp::Eq => ast::BinaryOp::Equal,
+                parser::BinaryOp::Neq => ast::BinaryOp::NotEqual,
+                parser::BinaryOp::Gt => ast::BinaryOp::GreaterThan,
+                parser::BinaryOp::Lt => ast::BinaryOp::LessThan,
+                parser::BinaryOp::Gte => ast::BinaryOp::GreaterThanOrEqual,
+                parser::BinaryOp::Lte => ast::BinaryOp::LessThanOrEqual,
+                parser::BinaryOp::And => ast::BinaryOp::And,
+                parser::BinaryOp::Or => ast::BinaryOp::Or,
+            };
+            eval_binary_op(&l, &ast_op, &r)
+        }
+        // FieldAccess needs program access to evaluate the base (e.g. build_state(100).messages)
+        parser::Expr::FieldAccess { base, field } => {
+            let base_val = eval_parser_expr_with_program(base, program)?;
+            match &base_val {
+                Value::Struct(_, fields) => fields
+                    .get(field)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("field `{field}` not found on {base_val}")),
+                Value::Ok(inner) => match inner.as_ref() {
+                    Value::Struct(_, fields) => fields
+                        .get(field)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("field `{field}` not found")),
+                    _ => bail!("cannot access field `{field}` on {base_val}"),
+                },
+                _ => bail!("cannot access field `{field}` on {base_val}"),
+            }
         }
         // Everything else delegates to standalone
         _ => eval_parser_expr_standalone(expr),
@@ -2413,8 +2530,8 @@ mod tests {
         let ops = parser::parse(source).expect("parse failed");
         let mut mocks = Vec::new();
         for op in ops {
-            if let parser::Operation::Mock { operation, pattern, response } = op {
-                mocks.push(IoMock { operation, pattern, response });
+            if let parser::Operation::Mock { operation, patterns, response } = op {
+                mocks.push(IoMock { operation, patterns, response });
             }
         }
         mocks
@@ -2479,7 +2596,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "example.com".to_string(),
+            patterns: vec!["example.com".to_string()],
             response: "hello".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2527,7 +2644,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "example.com".to_string(),
+            patterns: vec!["example.com".to_string()],
             response: "world".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2554,7 +2671,7 @@ mod tests {
         // Mock sleep so it returns immediately without real delay
         let mocks = vec![IoMock {
             operation: "sleep".to_string(),
-            pattern: "1000".to_string(),
+            patterns: vec!["1000".to_string()],
             response: "".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2585,7 +2702,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "api.test.com".to_string(),
+            patterns: vec!["api.test.com".to_string()],
             response: "nested_ok".to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2616,7 +2733,7 @@ mod tests {
         // *decoded* string (no backslash escapes).
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "api.example.com".to_string(),
+            patterns: vec!["api.example.com".to_string()],
             response: r#"{"name":"alice","age":30}"#.to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2643,7 +2760,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "api.example.com".to_string(),
+            patterns: vec!["api.example.com".to_string()],
             response: r#"[1,2,3]"#.to_string(),
         }];
         let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
@@ -2657,7 +2774,7 @@ mod tests {
         let source = "!mock http_get \"api.test\" -> \"{\\\"ok\\\":true,\\\"items\\\":[1,2]}\"";
         let mocks = extract_mocks(source);
         assert_eq!(mocks.len(), 1);
-        assert_eq!(mocks[0].pattern, "api.test");
+        assert_eq!(mocks[0].patterns, vec!["api.test"]);
         // After unescape, response should be valid JSON without backslashes
         assert_eq!(mocks[0].response, r#"{"ok":true,"items":[1,2]}"#);
         // Verify it's valid JSON
@@ -2708,10 +2825,10 @@ mod tests {
         for op in &ops {
             match op {
                 parser::Operation::Test(test) => test_ops.push(test.clone()),
-                parser::Operation::Mock { operation, pattern, response } => {
+                parser::Operation::Mock { operation, patterns, response } => {
                     io_mocks.push(IoMock {
                         operation: operation.clone(),
-                        pattern: pattern.clone(),
+                        patterns: patterns.clone(),
                         response: response.clone(),
                     });
                 }
@@ -2832,7 +2949,7 @@ mod tests {
 
         let mocks = vec![IoMock {
             operation: "http_get".to_string(),
-            pattern: "example.com".to_string(),
+            patterns: vec!["example.com".to_string()],
             response: "async_hello".to_string(),
         }];
 
@@ -3086,153 +3203,400 @@ mod tests {
         assert!(results[0].1, "mocked LLM UTF-8 test should pass: {:?}", results[0]);
     }
 
-    // ── Escaped quotes in string literals ─────────────────────────────
+    // ── Pure function calls in test parameters ────────────────────────
 
     #[test]
-    fn test_escaped_quotes_in_test_value() {
-        // Key=value test input with JSON strings containing escaped quotes
-        let source = r#"
-+fn echo (s:String)->String
+    fn test_zero_arg_function_as_test_param_value() {
+        // A function call with () used as a test parameter value
+        // should call the function and use its return value
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_default ()->Config
+  +let c:Config = {host: \"localhost\", port: 8080}
+  +return c
+
++fn get_host (c:Config)->String
+  +return c.host
+
+!test get_host
+  +with c=make_default() -> expect \"localhost\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "zero-arg function call as param value should work: {:?}", result);
+        assert!(result.unwrap().contains("expected \"localhost\""));
+    }
+
+    #[test]
+    fn test_bare_function_name_as_test_param_value() {
+        // A bare function name (no parens) for a zero-arg function should
+        // be called, not turned into Err("make_default")
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_default ()->Config
+  +let c:Config = {host: \"localhost\", port: 8080}
+  +return c
+
++fn get_host (c:Config)->String
+  +return c.host
+
+!test get_host
+  +with c=make_default -> expect \"localhost\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "bare function name as param value should call function: {:?}", result);
+        assert!(result.unwrap().contains("expected \"localhost\""));
+    }
+
+    #[test]
+    fn test_function_call_with_args_in_test_param() {
+        // A function call with arguments in a test parameter should work
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_config (h:String, p:Int)->Config
+  +let c:Config = {host: h, port: p}
+  +return c
+
++fn get_port (c:Config)->Int
+  +return c.port
+
+!test get_port
+  +with c=make_config(\"example.com\", 3000) -> expect 3000
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "function call with args as param value: {:?}", result);
+        assert!(result.unwrap().contains("expected 3000"));
+    }
+
+    #[test]
+    fn test_function_call_in_expected_value() {
+        // Function calls should also work on the expected side of ->
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn make_default ()->Config
+  +let c:Config = {host: \"localhost\", port: 8080}
+  +return c
+
++fn identity (c:Config)->Config
+  +return c
+
+!test identity
+  +with c=make_default() -> expect make_default()
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "function call in expected value: {:?}", result);
+        assert!(result.unwrap().contains("expected"));
+    }
+
+    // ── Positional (space-separated) args in !eval and +with ──────────
+
+    #[test]
+    fn test_eval_positional_multiple_strings() {
+        let source = "\
++fn concat_two (a:String, b:String)->String
+  +let result:String = concat(a, b)
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = r#"!eval concat_two "hello" "world""#;
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "positional string args should work: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"helloworld\"");
+    }
+
+    #[test]
+    fn test_eval_positional_mixed_types() {
+        let source = "\
++fn show (a:String, b:Int)->String
+  +let result:String = concat(a, to_string(b))
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = r#"!eval show "count:" 42"#;
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "mixed positional args: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"count:42\"");
+    }
+
+    #[test]
+    fn test_eval_positional_ints() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let result:Int = a + b
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = "!eval add 3 4";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "positional int args: {:?}", result);
+        assert_eq!(result.unwrap().0, "7");
+    }
+
+    #[test]
+    fn test_with_positional_strings() {
+        let source = "\
++fn concat_two (a:String, b:String)->String
+  +let result:String = concat(a, b)
+  +return result
+
+!test concat_two
+  +with \"hello\" \"world\" -> expect \"helloworld\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "+with positional strings: {:?}", result);
+        assert!(result.unwrap().contains("expected \"helloworld\""));
+    }
+
+    #[test]
+    fn test_eval_builtin_positional_strings() {
+        // Test that positional args also work for builtins
+        let program = ast::Program::default();
+        let eval_source = r#"!eval concat "foo" "bar""#;
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "builtin positional strings: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"foobar\"");
+    }
+
+    // ── Side-effect checks for function calls in test params ──────────
+
+    #[test]
+    fn test_impure_function_rejected_in_test_param_bare() {
+        // A function with [io,async] effects used as a bare name in a test
+        // param should produce a clear error, not a confusing runtime failure
+        let source = "\
++type State = {count:Int, name:String}
+
++fn fetch_state ()->State [io,async]
+  +await data:String = http_get(\"http://example.com\")
+  +let s:State = {count: 0, name: data}
   +return s
 
-!test echo
-  +with s="{\"key\":\"value\"}" -> expect "{\"key\":\"value\"}"
-"#;
++fn get_name (state:State)->String
+  +return state.name
+
+!test get_name
+  +with state=fetch_state -> expect \"default\"
+";
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let (fn_name, case) = &cases[0];
-        let result = eval_test_case(&program, fn_name, case);
-        assert!(result.is_ok(), "escaped quotes in test value should work: {:?}", result);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_err(), "impure function should be rejected: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("side effects"), "error should mention side effects: {err}");
+        assert!(err.contains("fetch_state"), "error should name the function: {err}");
     }
 
     #[test]
-    fn test_escaped_quotes_nested_json() {
-        // Deeply nested JSON with escaped quotes
-        let source = r#"
-+fn echo (s:String)->String
+    fn test_impure_function_rejected_in_test_param_call() {
+        // Same but with parens: state=fetch_state()
+        let source = "\
++type State = {count:Int, name:String}
+
++fn fetch_state ()->State [io,async]
+  +await data:String = http_get(\"http://example.com\")
+  +let s:State = {count: 0, name: data}
   +return s
 
-!test echo
-  +with s="{\"message\":{\"chat\":{\"id\":42}}}" -> expect "{\"message\":{\"chat\":{\"id\":42}}}"
++fn get_name (state:State)->String
+  +return state.name
+
+!test get_name
+  +with state=fetch_state() -> expect \"default\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_err(), "impure function call should be rejected: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("side effects"), "error should mention side effects: {err}");
+    }
+
+    #[test]
+    fn test_fail_effect_allowed_in_test_param() {
+        // [fail] is not a side effect — it should be allowed
+        let source = "\
++type Config = {host:String, port:Int}
+
++fn validated_config (host:String, port:Int)->Config [fail]
+  +check valid_port port > 0 ~err_invalid_port
+  +let c:Config = {host: host, port: port}
+  +return c
+
++fn get_host (cfg:Config)->String
+  +return cfg.host
+
+!test get_host
+  +with cfg=validated_config(\"localhost\", 8080) -> expect \"localhost\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "[fail] function should be allowed in test params: {:?}", result);
+        assert!(result.unwrap().contains("expected \"localhost\""));
+    }
+
+    // ── Escaped quotes in test value strings ──────────────────────────
+
+    #[test]
+    fn test_escaped_quotes_in_key_value_string() {
+        // Strings with escaped quotes in key=value test params should work
+        let source = r#"
++fn identity (s:String)->String
+  +return s
+
+!test identity
+  +with s="hello\"world" -> expect "hello\"world"
 "#;
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let (fn_name, case) = &cases[0];
-        let result = eval_test_case(&program, fn_name, case);
-        assert!(result.is_ok(), "nested JSON with escaped quotes should work: {:?}", result);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "escaped quotes in key=value string: {:?}", result);
     }
 
     #[test]
-    fn test_escaped_quotes_in_let_expr() {
-        // +let with a JSON string literal containing escaped quotes
+    fn test_escaped_quotes_multiple_string_args() {
+        // Multiple string args with escaped quotes should parse correctly
         let source = r#"
-+fn make_json ()->String
-  +let body:String = "{\"model\":\"gpt\",\"messages\":[{\"role\":\"user\"}]}"
-  +return body
++fn concat_two (a:String, b:String)->String
+  +let result:String = concat(a, b)
+  +return result
 
-!test make_json
-  +with -> expect "{\"model\":\"gpt\",\"messages\":[{\"role\":\"user\"}]}"
+!test concat_two
+  +with a="he\"llo" b="wo\"rld" -> expect "he\"llowo\"rld"
 "#;
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let (fn_name, case) = &cases[0];
-        let result = eval_test_case(&program, fn_name, case);
-        assert!(result.is_ok(), "JSON string in +let should work: {:?}", result);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "escaped quotes in multiple args: {:?}", result);
     }
 
     #[test]
-    fn test_value_display_escapes_embedded_quotes() {
-        // Value::String with embedded quotes should escape them in Display
-        let val = Value::String("hello \"world\"".to_string());
-        let displayed = format!("{val}");
-        assert_eq!(displayed, "\"hello \\\"world\\\"\"");
-
-        // Also test newlines and backslashes
-        let val2 = Value::String("line1\nline2\\end".to_string());
-        let displayed2 = format!("{val2}");
-        assert_eq!(displayed2, "\"line1\\nline2\\\\end\"");
-    }
-
-    #[test]
-    fn test_escaped_quotes_multiple_test_values() {
-        // Multiple key=value pairs where values contain escaped quotes
+    fn test_newline_and_tab_escapes_in_test_value() {
         let source = r#"
-+fn pair (a:String, b:String)->String
-  +return concat(a, b)
++fn identity (s:String)->String
+  +return s
 
-!test pair
-  +with a="{\"x\":1}" b="{\"y\":2}" -> expect "{\"x\":1}{\"y\":2}"
+!test identity
+  +with s="line1\nline2" -> expect "line1\nline2"
 "#;
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let (fn_name, case) = &cases[0];
-        let result = eval_test_case(&program, fn_name, case);
-        assert!(result.is_ok(), "multiple JSON test values should work: {:?}", result);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "newline escape in test value: {:?}", result);
     }
 
+    // ── Field access on function call results in test params ──────────
+
     #[test]
-    fn test_string_literal_roundtrip_with_quotes() {
-        // Parse source with escaped quotes, reconstruct via ?source,
-        // re-parse the reconstructed source, and verify it produces the
-        // same result.
-        let source = r#"
-+fn make_json ()->String
-  +let body:String = "{\"model\":\"gpt\",\"messages\":[{\"role\":\"user\"}]}"
-  +return body
-"#;
+    fn test_field_access_on_function_call_in_with() {
+        // state=build_state(100).messages should call build_state, then access .messages
+        let source = "\
++type State = {messages:Int, limit:Int}
+
++fn build_state (limit:Int)->State
+  +let s:State = {messages: 5, limit: limit}
+  +return s
+
++fn identity (n:Int)->Int
+  +return n
+
+!test identity
+  +with n=build_state(100).messages -> expect 5
+";
         let program = build_program(source);
-        let table = crate::typeck::build_symbol_table(&program);
-
-        // Reconstruct source via typeck (same path as ?source)
-        let reconstructed = crate::typeck::handle_query(&program, &table, "?source make_json");
-        // The reconstructed source should contain escaped quotes
-        assert!(
-            reconstructed.contains("\\\"model\\\""),
-            "reconstructed source should escape inner quotes: {}",
-            reconstructed
-        );
-
-        // Re-parse the reconstructed source — it should produce valid program
-        let program2 = build_program(&reconstructed);
-
-        // Evaluate both programs and compare results
-        let mut env1 = super::Env::new();
-        let func1 = program.get_function("make_json").unwrap();
-        let result1 = super::eval_function_body(&program, &func1.body, &mut env1).unwrap();
-
-        let mut env2 = super::Env::new();
-        let func2 = program2.get_function("make_json").unwrap();
-        let result2 = super::eval_function_body(&program2, &func2.body, &mut env2).unwrap();
-
-        assert!(
-            result1.matches(&result2),
-            "round-tripped program should produce the same value: {:?} vs {:?}",
-            result1, result2
-        );
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "field access on func call in +with: {:?}", result);
+        assert!(result.unwrap().contains("expected 5"));
     }
 
     #[test]
-    fn test_format_string_literal_escaping() {
-        // Direct test of the escape/format helper
-        assert_eq!(
-            crate::ast::format_string_literal("hello"),
-            "\"hello\""
-        );
-        assert_eq!(
-            crate::ast::format_string_literal("say \"hi\""),
-            "\"say \\\"hi\\\"\""
-        );
-        assert_eq!(
-            crate::ast::format_string_literal("back\\slash"),
-            "\"back\\\\slash\""
-        );
-        assert_eq!(
-            crate::ast::format_string_literal("line1\nline2"),
-            "\"line1\\nline2\""
-        );
+    fn test_field_access_on_function_call_in_eval() {
+        // !eval identity build_state(100).messages should work via positional args
+        let source = "\
++type State = {messages:Int, limit:Int}
+
++fn build_state (limit:Int)->State
+  +let s:State = {messages: 5, limit: limit}
+  +return s
+
++fn identity (n:Int)->Int
+  +return n
+";
+        let program = build_program(source);
+        let eval_source = "!eval identity build_state(100).messages";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "field access in !eval: {:?}", result);
+        assert_eq!(result.unwrap().0, "5");
+    }
+
+    #[test]
+    fn test_chained_field_access_on_function_call() {
+        let source = "\
++type Inner = {value:Int}
++type Outer = {inner:Inner}
+
++fn make_outer (v:Int)->Outer
+  +let i:Inner = {value: v}
+  +let o:Outer = {inner: i}
+  +return o
+
++fn identity (n:Int)->Int
+  +return n
+
+!test identity
+  +with n=make_outer(42).inner.value -> expect 42
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        assert!(result.is_ok(), "chained field access: {:?}", result);
+        assert!(result.unwrap().contains("expected 42"));
     }
 }

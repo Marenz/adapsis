@@ -593,9 +593,28 @@ impl CoroutineHandle {
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
         // Check mock table first — if a mock matches, return it without real IO
         if let Some(mocks) = &self.mocks {
-            let arg_str = args.iter().map(|a| format!("{a}")).collect::<Vec<_>>().join(" ");
-            for mock in mocks {
-                if mock.operation == op && arg_str.contains(&mock.pattern) {
+            let arg_strs: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+            let arg_str = arg_strs.join(" ");
+            'mock_loop: for mock in mocks {
+                if mock.operation != op {
+                    continue;
+                }
+                // Match each pattern against the corresponding arg position.
+                // Single-pattern mocks match against the joined arg string (backward compat).
+                if mock.patterns.len() == 1 {
+                    if arg_str.contains(&mock.patterns[0]) {
+                        return Ok(Value::String(mock.response.clone()));
+                    }
+                } else {
+                    // Multi-pattern: each pattern must match the corresponding arg
+                    if mock.patterns.len() > arg_strs.len() {
+                        continue;
+                    }
+                    for (pat, arg) in mock.patterns.iter().zip(arg_strs.iter()) {
+                        if !arg.contains(pat) {
+                            continue 'mock_loop;
+                        }
+                    }
                     return Ok(Value::String(mock.response.clone()));
                 }
             }
@@ -732,7 +751,7 @@ impl CoroutineHandle {
                 let data = match &args[1] { Value::String(s) => s.clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::FileWrite(path.clone()), IoRequest::FileWrite { path, data, reply: tx }, rx)?;
-                return Ok(Value::Int(0));
+                return Ok(Value::String("OK".to_string()));
             }
             "file_exists" => {
                 let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_exists expects String path") };

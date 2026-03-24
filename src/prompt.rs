@@ -110,13 +110,14 @@ Pure functions have no effect annotation.
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
 For single-param functions, pass the value directly.
-For multi-param functions, use space-separated key=value pairs (named after the parameters).
+For multi-param functions, use key=value pairs OR positional values (matched by order).
 
 !test double
   +with 5 -> expect 10
 
 !test add
   +with a=3 b=4 -> expect 7
+  +with 3 4 -> expect 7
 
 !test validate
   +with name="alice" age=25 -> expect Ok
@@ -133,6 +134,9 @@ String: concat(a,b), substring(s,start,len), split(s,delim), join(list,sep),
   index_of(s,sub), char_at(s,i), length(s), to_string(x), to_int(s),
   regex_match(s,pattern), regex_replace(s,pattern,replacement)
 
+Result: is_ok(r) -> Bool, is_err(r) -> Bool, unwrap(r) -> T, unwrap_err(r) -> String
+  (also available as methods: r.is_ok, r.is_err, r.unwrap, r.error)
+
 JSON: json_get(json_string, "path.to.key"), json_array_len(json_string),
   json_escape(s) — escape a string for use inside JSON values
 
@@ -143,15 +147,16 @@ Async IO (need +await and [io,async] effect):
   llm_call(system_prompt, user_prompt) -> String,
   llm_agent(system_prompt, task) -> String (full agentic loop),
   sleep(ms), shell_exec(command) -> String,
-  file_read(path), file_write(path, data), file_exists(path) -> Bool
+  file_read(path) -> String, file_write(path, data) -> String ("OK" on success),
+  file_exists(path) -> Bool
 
 Commands:
   !module Name — switch module context (all +fn/+type after go into this module)
   !plan set / !plan done N / !plan show — manage task plan
   !roadmap add <item> / !roadmap done N / !roadmap show — long-term roadmap
-  !mock op "pattern" -> "response" — register mock IO for testing
+  !mock op "pattern" -> "response" — register mock IO (multi-arg: !mock op "pat1" "pat2" -> "resp")
   !unmock — clear all mocks
-  !eval fn_name arg1=val — evaluate a function
+  !eval fn_name arg1=val — evaluate a function (also: !eval fn "val1" "val2" 42)
   !test Module.fn — run tests (see Testing section above)
   !opencode <description> — request Rust-level runtime change
   !done — signal task completion
@@ -411,12 +416,37 @@ For nested structs:
 !test MyModule.get_name
   +with user={name: "bob", address: {city: "Berlin"}} -> expect "bob"
 
+### Function calls in test values
+
+Test parameter values can call **pure** user-defined functions to construct complex inputs.
+Both `func_name()` (with parens) and bare `func_name` (zero-arg only) work:
+
+!test process
+  +with ctx=make_default_context() -> expect "ok"
+
+!test process
+  +with ctx=make_default_context -> expect "ok"
+
+Functions with arguments also work:
+
+!test process
+  +with ctx=make_context("prod", 8080) -> expect "ok"
+
+Function calls also work on the expected side:
+
+!test identity
+  +with c=make_default() -> expect make_default()
+
+Only pure functions (no [io], [async], [mut], [unsafe] effects) can be called in test values.
+Functions with [fail] are allowed. For IO functions, use !mock + async test wrappers instead.
+
 ### Testing async functions
 
 Use `!mock` to register fake IO responses, then `!test` works with async functions:
 
 !mock http_get "api.telegram.org" -> "{\"ok\":true,\"result\":[]}"
 !mock llm_call "You are" -> "Hello! How can I help?"
+!mock llm_call "You are a bot" "What time is it?" -> "I don't know the time."
 
 !test MyModule.get_updates
   +with offset=0 -> expect "{\"ok\":true,\"result\":[]}"
@@ -538,7 +568,7 @@ pub fn architect_system_prompt() -> String {
          Write ONLY the function being requested with `+fn` and `!test` blocks.\n\
          The runtime keeps previous functions — you don't need to repeat them.\n\n\
          **Key patterns to remember:**\n\
-         - Multi-param tests use key=value: `+with a=3 b=4 -> expect 7`\n\
+          - Multi-param tests use key=value: `+with a=3 b=4 -> expect 7` (or positional: `+with 3 4 -> expect 7`)\n\
          - Error auto-propagation: `+call val:T = func(x)` with [fail] — errors bubble up, you get T\n\
          - If a function calls another [fail] function, declare [fail] on the caller too and bind as plain T\n\
          - Do NOT create wrapper types just for tests — use key=value syntax\n\n\
@@ -573,8 +603,8 @@ pub fn architect_implement_message(function_name: &str, program_state: &str) -> 
          Write the implementation for `{function_name}` and its tests.\n\n\
          Rules:\n\
          - Write ONLY `+fn {function_name} ...` and `!test {function_name}`\n\
-         - For multi-param tests use key=value: `+with a=3 b=4 -> expect 7`\n\
-         - For struct-param tests: `+with name=\"alice\" age=25 -> expect Ok`\n\
+          - For multi-param tests use key=value: `+with a=3 b=4 -> expect 7` (or positional: `+with 3 4 -> expect 7`)\n\
+          - For struct-param tests: `+with name=\"alice\" age=25 -> expect Ok`\n\
          - If calling a [fail] function, bind as plain T (errors auto-propagate):\n\
            `+call validated:Input = validate(input)` — NOT `+call result:Result<Input> = ...`\n\
          - The runtime will merge this into the existing program"

@@ -68,10 +68,11 @@ pub enum Operation {
         to: String,
         content: String,
     },
-    /// Register IO mock: !mock <operation> "<pattern>" -> "<response>"
+    /// Register IO mock: !mock <operation> "<pattern>" ... -> "<response>"
     Mock {
         operation: String,
-        pattern: String,
+        /// One pattern per argument position; single-element for backward compat.
+        patterns: Vec<String>,
         response: String,
     },
     /// Clear all mocks: !unmock
@@ -986,11 +987,33 @@ impl<'a> Parser<'a> {
                     line.number
                 )
             })?;
-            let rest = rest.trim();
-            // Parse: "pattern" -> "response"
-            // Use proper quoted-string parsing so escape sequences are decoded
-            let (pattern_part, rest) = parse_mock_string(line.number, rest)?;
-            let rest = rest.trim();
+            let mut rest = rest.trim();
+            // Parse: "pattern1" "pattern2" ... -> "response"
+            // Collect all quoted strings before the '->' as patterns.
+            let mut patterns = Vec::new();
+            loop {
+                let trimmed = rest.trim();
+                if trimmed.starts_with("->") {
+                    rest = trimmed;
+                    break;
+                }
+                if !trimmed.starts_with('"') {
+                    bail!(
+                        "line {}: expected quoted string or '->' in !mock, got `{}`",
+                        line.number,
+                        &trimmed[..trimmed.len().min(20)]
+                    );
+                }
+                let (pat, remaining) = parse_mock_string(line.number, trimmed)?;
+                patterns.push(pat);
+                rest = remaining;
+            }
+            if patterns.is_empty() {
+                bail!(
+                    "line {}: expected at least one pattern string in !mock",
+                    line.number
+                );
+            }
             let rest = rest.strip_prefix("->").ok_or_else(|| {
                 anyhow!(
                     "line {}: expected '->' between pattern and response in !mock",
@@ -1002,7 +1025,7 @@ impl<'a> Parser<'a> {
             self.index += 1;
             return Ok(Operation::Mock {
                 operation: operation.to_string(),
-                pattern: pattern_part,
+                patterns,
                 response: response_part,
             });
         }
@@ -1252,6 +1275,15 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
 fn parse_function_header(line: usize, input: &str) -> Result<FunctionHeader> {
     let (name, rest) =
         take_ident(input).ok_or_else(|| anyhow!("line {}: expected function name", line))?;
+    // Support Module.function_name — strip the module prefix, keep just the function name
+    let (name, rest) = if rest.starts_with('.') {
+        let after_dot = &rest[1..];
+        let (fn_name, rest2) = take_ident(after_dot)
+            .ok_or_else(|| anyhow!("line {}: expected function name after '.'", line))?;
+        (fn_name, rest2)
+    } else {
+        (name, rest)
+    };
     let rest = rest.trim();
 
     let params_start = rest
@@ -2008,7 +2040,7 @@ fn token_text(token: &Token) -> String {
         Token::Ident(value) => value.clone(),
         Token::Int(value) => value.to_string(),
         Token::Float(value) => value.to_string(),
-        Token::String(value) => crate::ast::format_string_literal(value),
+        Token::String(value) => format!("\"{}\"", value),
         Token::Symbol(ch) => ch.to_string(),
         Token::Arrow => "->".to_string(),
         Token::EqEq => "==".to_string(),
@@ -2049,7 +2081,7 @@ fn split_once_required<'a>(
 ///
 /// `key=value` format: `name="alice" age=25 active=true`
 /// Regular format: `{name: "alice", age: 25}` or `5` or `"hello"`
-fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
+pub fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
     let input = input.trim();
     if input.is_empty() {
         // Empty input is valid for zero-parameter functions:
@@ -2058,17 +2090,16 @@ fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
     }
 
     // Detect key=value format: first non-whitespace token contains '=' and doesn't start with {
-    // but is not a comparison like `x==5` or `x>=3`.
-    // Use quote-aware checks so `=` inside string literals doesn't trigger key=value mode.
+    // but is not a comparison like `x==5` or `x>=3`
     if !input.starts_with('{')
         && !input.starts_with('"')
         && !input.starts_with('-')
         && !input.chars().next().unwrap_or(' ').is_ascii_digit()
-        && contains_outside_strings(input, '=')
-        && find_outside_strings(input, "==").is_none()
-        && find_outside_strings(input, ">=").is_none()
-        && find_outside_strings(input, "<=").is_none()
-        && find_outside_strings(input, "!=").is_none()
+        && input.contains('=')
+        && !input.contains("==")
+        && !input.contains(">=")
+        && !input.contains("<=")
+        && !input.contains("!=")
     {
         // Parse as space-separated key=value pairs
         let mut fields = Vec::new();
@@ -2102,8 +2133,41 @@ fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
 
         Ok(Expr::StructLiteral(fields))
     } else {
-        // Regular expression format
-        parse_expr(line, input)
+        // Regular expression format — try as single expression first
+        match parse_expr(line, input) {
+            Ok(expr) => Ok(expr),
+            Err(_) => {
+                // Single expression failed — try parsing as multiple space-separated
+                // values (e.g. "hello" "world" 42). This handles positional args for
+                // !eval and +with when there's no key=value syntax.
+                let mut values = Vec::new();
+                let mut rest = input;
+                while !rest.is_empty() {
+                    rest = rest.trim_start();
+                    if rest.is_empty() {
+                        break;
+                    }
+                    let (val, remaining) = parse_test_value(line, rest)?;
+                    values.push(val);
+                    rest = remaining;
+                }
+                if values.len() <= 1 {
+                    // Re-run parse_expr for its original error message
+                    parse_expr(line, input)
+                } else {
+                    // Multiple positional values: wrap as StructLiteral with _0, _1, ...
+                    let fields = values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| FieldValue {
+                            name: format!("_{i}"),
+                            value: v,
+                        })
+                        .collect();
+                    Ok(Expr::StructLiteral(fields))
+                }
+            }
+        }
     }
 }
 
@@ -2112,9 +2176,37 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
     let input = input.trim_start();
 
     if input.starts_with('"') {
-        // Quoted string with escape decoding (handles \" inside strings)
-        let (s, rest) = parse_quoted_string(line, input)?;
-        Ok((Expr::String(s), rest))
+        // Quoted string — scan for unescaped closing quote, handling backslash escapes
+        let mut value = String::new();
+        let mut chars = input[1..].char_indices();
+        let mut end_offset = None; // offset into input (past the closing quote)
+        while let Some((i, ch)) = chars.next() {
+            match ch {
+                '"' => {
+                    end_offset = Some(1 + i + 1); // 1 for opening quote + i + 1 past closing quote
+                    break;
+                }
+                '\\' => {
+                    if let Some((_, escaped)) = chars.next() {
+                        value.push(match escaped {
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            '\\' => '\\',
+                            '"' => '"',
+                            other => other,
+                        });
+                    } else {
+                        bail!("line {}: unfinished escape in test value string", line);
+                    }
+                }
+                other => value.push(other),
+            }
+        }
+        let end_offset = end_offset
+            .ok_or_else(|| anyhow!("line {}: unterminated string in test value", line))?;
+        let rest = &input[end_offset..];
+        Ok((Expr::String(value), rest))
     } else if input.starts_with('{') {
         // Nested struct literal — find matching brace
         let mut depth = 0;
@@ -2167,13 +2259,27 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
             if depth != 0 {
                 bail!("line {}: unmatched paren in test value", line);
             }
-            let full = &input[..ident_end + paren_end];
-            let rest = &input[ident_end + paren_end..];
+            // Also consume trailing .field chains (e.g. build_state(100).messages)
+            let mut expr_end = ident_end + paren_end;
+            let mut after_call = &input[expr_end..];
+            while after_call.starts_with('.') {
+                let field_start = 1; // skip the dot
+                let field_end = after_call[field_start..]
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(after_call.len() - field_start);
+                if field_end == 0 {
+                    break;
+                }
+                expr_end += field_start + field_end;
+                after_call = &input[expr_end..];
+            }
+            let full = &input[..expr_end];
+            let rest = &input[expr_end..];
             // Parse the full expression using the main expression parser
             let expr = parse_expr(line, full)?;
             Ok((expr, rest))
         } else {
-            // Simple token: number, bool, or identifier
+            // Simple token: number, bool, identifier, or dotted path (e.g. result.name)
             let end = input
                 .find(|c: char| c.is_whitespace())
                 .unwrap_or(input.len());
@@ -2198,83 +2304,12 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
 }
 
 fn split_test_case<'a>(line: usize, input: &'a str) -> Result<(&'a str, &'a str)> {
-    let arrow_pos = find_outside_strings(input, "->")
-        .ok_or_else(|| anyhow!("line {}: expected `->` in `{}`", line, input))?;
-    let left = &input[..arrow_pos];
-    let right = input[arrow_pos + 2..].trim();
+    let (left, right) = split_once_required(line, input, "->")?;
+    let right = right.trim();
     let expected = right
         .strip_prefix("expect")
         .ok_or_else(|| anyhow!("line {}: expected `expect` after `->`", line))?;
     Ok((left, expected))
-}
-
-/// Find the position of `needle` in `input`, skipping occurrences inside
-/// quoted strings (respecting `\"` escape sequences).
-fn find_outside_strings(input: &str, needle: &str) -> Option<usize> {
-    let needle_bytes = needle.as_bytes();
-    let input_bytes = input.as_bytes();
-    let nlen = needle_bytes.len();
-    if nlen == 0 || input_bytes.len() < nlen {
-        return None;
-    }
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < input_bytes.len() {
-        let ch = input_bytes[i];
-        if in_string {
-            if escaped {
-                escaped = false;
-                i += 1;
-                continue;
-            }
-            match ch {
-                b'\\' => escaped = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            i += 1;
-            continue;
-        }
-        if ch == b'"' {
-            in_string = true;
-            i += 1;
-            continue;
-        }
-        if i + nlen <= input_bytes.len() && &input_bytes[i..i + nlen] == needle_bytes {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Check whether `needle` char appears outside of quoted strings.
-fn contains_outside_strings(input: &str, needle: char) -> bool {
-    let mut in_string = false;
-    let mut escaped = false;
-    for ch in input.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        if ch == '"' {
-            in_string = true;
-            continue;
-        }
-        if ch == needle {
-            return true;
-        }
-    }
-    false
 }
 
 fn take_ident(input: &str) -> Option<(&str, &str)> {
@@ -2454,17 +2489,11 @@ fn parse_match_pattern(line_num: usize, input: &str) -> Result<MatchPatternDecl>
         return Ok(MatchPatternDecl::LiteralBool(false));
     }
 
-    // Literal string (with escape decoding)
-    if input.starts_with('"') {
-        let (decoded, rest) = parse_quoted_string(line_num, input)?;
-        if !rest.trim().is_empty() {
-            bail!(
-                "line {}: trailing content after string literal in match pattern: `{}`",
-                line_num,
-                rest.trim()
-            );
-        }
-        return Ok(MatchPatternDecl::LiteralString(decoded));
+    // Literal string
+    if input.starts_with('"') && input.ends_with('"') && input.len() >= 2 {
+        return Ok(MatchPatternDecl::LiteralString(
+            input[1..input.len() - 1].to_string(),
+        ));
     }
 
     // Variant with sub-patterns: e.g. Literal(x) or Add(Literal(0), y)
@@ -2489,14 +2518,18 @@ fn parse_match_pattern(line_num: usize, input: &str) -> Result<MatchPatternDecl>
     Ok(MatchPatternDecl::Binding(input.to_string()))
 }
 
-/// Parse a quoted string with escape decoding (`\"`, `\\`, `\n`, `\r`, `\t`).
-/// Input must start with `"`. Returns the decoded string content and the
-/// remaining unparsed input (after the closing quote).
-fn parse_quoted_string(line: usize, input: &str) -> Result<(String, &str)> {
-    debug_assert!(
-        input.starts_with('"'),
-        "parse_quoted_string requires input starting with '\"'"
-    );
+/// Parse a quoted string from `!mock`, decoding standard escape sequences
+/// (`\"`, `\\`, `\n`, `\r`, `\t`). Returns the decoded string content and
+/// the remaining unparsed input.  If the input doesn't start with `"`, the
+/// content up to the next whitespace (or end) is returned verbatim.
+fn parse_mock_string(line: usize, input: &str) -> Result<(String, &str)> {
+    let input = input.trim_start();
+    if !input.starts_with('"') {
+        // Unquoted token — take until whitespace or end
+        let end = input.find(char::is_whitespace).unwrap_or(input.len());
+        return Ok((input[..end].to_string(), &input[end..]));
+    }
+    // Quoted string with escape processing
     let mut chars = input[1..].char_indices();
     let mut value = String::new();
     while let Some((i, ch)) = chars.next() {
@@ -2508,7 +2541,7 @@ fn parse_quoted_string(line: usize, input: &str) -> Result<(String, &str)> {
             '\\' => {
                 let (_, escaped) = chars
                     .next()
-                    .ok_or_else(|| anyhow!("line {line}: unfinished escape in string literal"))?;
+                    .ok_or_else(|| anyhow!("line {line}: unfinished escape in !mock string"))?;
                 value.push(match escaped {
                     'n' => '\n',
                     'r' => '\r',
@@ -2521,18 +2554,5 @@ fn parse_quoted_string(line: usize, input: &str) -> Result<(String, &str)> {
             other => value.push(other),
         }
     }
-    bail!("line {line}: unterminated string literal")
-}
-
-/// Parse a quoted or unquoted string from `!mock`. For quoted strings, decodes
-/// escape sequences. For unquoted, takes until whitespace.
-fn parse_mock_string(line: usize, input: &str) -> Result<(String, &str)> {
-    let input = input.trim_start();
-    if input.starts_with('"') {
-        parse_quoted_string(line, input)
-    } else {
-        // Unquoted token — take until whitespace or end
-        let end = input.find(char::is_whitespace).unwrap_or(input.len());
-        Ok((input[..end].to_string(), &input[end..]))
-    }
+    bail!("line {line}: unterminated string in !mock")
 }

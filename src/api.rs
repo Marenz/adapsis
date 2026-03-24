@@ -121,102 +121,101 @@ pub async fn eval_fn(
     eprintln!("[web:eval] {} {}", req.function, req.input);
     let mut session = config.session.lock().await;
 
-    let input_source = format!("!eval {} {}", req.function, req.input);
-    let operations = match parser::parse(&input_source) {
-        Ok(ops) => ops,
-        Err(e) => {
-            return Json(EvalResponse {
-                result: format!("parse error: {e}"),
-                success: false,
-                compiled: None,
-            });
+    // Parse input directly instead of reconstructing "!eval fn input" source
+    // which breaks when the input contains unescaped quotes or special chars.
+    let input_expr = if req.input.trim().is_empty() {
+        parser::Expr::StructLiteral(vec![])
+    } else {
+        match parser::parse_test_input(0, &req.input) {
+            Ok(expr) => expr,
+            Err(e) => {
+                return Json(EvalResponse {
+                    result: format!("parse error: {e}"),
+                    success: false,
+                    compiled: None,
+                });
+            }
         }
     };
+    let ev = parser::EvalMutation {
+        function_name: req.function.clone(),
+        input: input_expr,
+    };
 
-    for op in &operations {
-        if let parser::Operation::Eval(ev) = op {
-            // Block eval of untested functions (>2 statements) in AdapsisOS mode
-            if session.program.require_modules {
-                if let Some(func) = session.program.get_function(&ev.function_name) {
-                    if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
-                        return Json(EvalResponse {
-                            result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
-                            success: false,
-                            compiled: None,
-                        });
-                    }
-                }
-            }
-
-            let needs_async = session.program.get_function(&ev.function_name)
-                .is_some_and(|f| f.effects.iter().any(|e|
-                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
-
-            if needs_async {
-                if let Some(sender) = &config.io_sender {
-                    let program = session.program.clone();
-                    let fn_name = ev.function_name.clone();
-                    let input = ev.input.clone();
-                    let sender = sender.clone();
-
-                    drop(session); // release lock before blocking
-
-                    let eval_result = tokio::task::spawn_blocking(move || {
-                        let func = program.get_function(&fn_name)
-                            .ok_or_else(|| anyhow::anyhow!("function not found"))?;
-                        let handle = crate::coroutine::CoroutineHandle::new(sender);
-                        let mut env = eval::Env::new();
-                        env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
-                        let input_val = eval::eval_parser_expr_standalone(&input)?;
-                        eval::bind_input_to_params(&program, func, &input_val, &mut env);
-                        eval::eval_function_body_pub(&program, &func.body, &mut env)
-                    }).await;
-
-                    return match eval_result {
-                        Ok(Ok(val)) => Json(EvalResponse {
-                            result: format!("{val}"),
-                            success: true,
-                            compiled: Some(false),
-                        }),
-                        Ok(Err(e)) => Json(EvalResponse {
-                            result: format!("{e}"),
-                            success: false,
-                            compiled: None,
-                        }),
-                        Err(e) => Json(EvalResponse {
-                            result: format!("task error: {e}"),
-                            success: false,
-                            compiled: None,
-                        }),
-                    };
-                }
-            }
-
-            match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.revision) {
-                Ok((result, compiled)) => {
-                    session.record_eval(&ev.function_name, &req.input, &result);
-                    return Json(EvalResponse {
-                        result,
-                        success: true,
-                        compiled: Some(compiled),
-                    });
-                }
-                Err(e) => {
-                    return Json(EvalResponse {
-                        result: format!("{e}"),
-                        success: false,
-                        compiled: None,
-                    });
-                }
+    // Block eval of untested functions (>2 statements) in AdapsisOS mode
+    if session.program.require_modules {
+        if let Some(func) = session.program.get_function(&ev.function_name) {
+            if func.body.len() > 2 && !session.tested_functions.contains(&ev.function_name) {
+                return Json(EvalResponse {
+                    result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
+                    success: false,
+                    compiled: None,
+                });
             }
         }
     }
 
-    Json(EvalResponse {
-        result: "no eval operation found".to_string(),
-        success: false,
-        compiled: None,
-    })
+    let needs_async = session.program.get_function(&ev.function_name)
+        .is_some_and(|f| f.effects.iter().any(|e|
+            matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
+    if needs_async {
+        if let Some(sender) = &config.io_sender {
+            let program = session.program.clone();
+            let fn_name = ev.function_name.clone();
+            let input = ev.input.clone();
+            let sender = sender.clone();
+
+            drop(session); // release lock before blocking
+
+            let eval_result = tokio::task::spawn_blocking(move || {
+                let func = program.get_function(&fn_name)
+                    .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                let handle = crate::coroutine::CoroutineHandle::new(sender);
+                let mut env = eval::Env::new();
+                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+                let input_val = eval::eval_parser_expr_with_program(&input, &program)?;
+                eval::bind_input_to_params(&program, func, &input_val, &mut env);
+                eval::eval_function_body_pub(&program, &func.body, &mut env)
+            }).await;
+
+            return match eval_result {
+                Ok(Ok(val)) => Json(EvalResponse {
+                    result: format!("{val}"),
+                    success: true,
+                    compiled: Some(false),
+                }),
+                Ok(Err(e)) => Json(EvalResponse {
+                    result: format!("{e}"),
+                    success: false,
+                    compiled: None,
+                }),
+                Err(e) => Json(EvalResponse {
+                    result: format!("task error: {e}"),
+                    success: false,
+                    compiled: None,
+                }),
+            };
+        }
+    }
+
+    match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.revision) {
+        Ok((result, compiled)) => {
+            session.record_eval(&ev.function_name, &req.input, &result);
+            Json(EvalResponse {
+                result,
+                success: true,
+                compiled: Some(compiled),
+            })
+        }
+        Err(e) => {
+            Json(EvalResponse {
+                result: format!("{e}"),
+                success: false,
+                compiled: None,
+            })
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1162,7 +1161,7 @@ pub async fn ask(
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
                                         let mut env = crate::eval::Env::new();
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                        let input_val = crate::eval::eval_parser_expr_standalone(&input)?;
+                                        let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
                                         crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
                                         crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
                                     }).await;
@@ -1230,24 +1229,24 @@ pub async fn ask(
                                     // Evaluate the function
                                     let result = {
                                         let session = session_ref.lock().await;
-                                        let input_source = format!("!eval {fn_name} {fn_args}");
-                                        match crate::parser::parse(&input_source) {
-                                            Ok(ops) => {
-                                                let mut result_str = String::new();
-                                                for op in &ops {
-                                                    if let crate::parser::Operation::Eval(ev) = op {
-                                                        match crate::eval::eval_compiled_or_interpreted_cached(
-                                                            &session.program, &ev.function_name, &ev.input,
-                                                            Some(&watch_jit_cache), session.revision,
-                                                        ) {
-                                                            Ok((r, _)) => result_str = r,
-                                                            Err(e) => result_str = format!("error: {e}"),
-                                                        }
-                                                    }
+                                        let input_expr = if fn_args.trim().is_empty() {
+                                            crate::parser::Expr::StructLiteral(vec![])
+                                        } else {
+                                            match crate::parser::parse_test_input(0, &fn_args) {
+                                                Ok(expr) => expr,
+                                                Err(e) => {
+                                                    format!("parse error: {e}")
+                                                        .clone(); // type doesn't matter, we break below
+                                                    break;
                                                 }
-                                                result_str
                                             }
-                                            Err(e) => format!("parse error: {e}"),
+                                        };
+                                        match crate::eval::eval_compiled_or_interpreted_cached(
+                                            &session.program, &fn_name, &input_expr,
+                                            Some(&watch_jit_cache), session.revision,
+                                        ) {
+                                            Ok((r, _)) => r,
+                                            Err(e) => format!("error: {e}"),
                                         }
                                     };
 
@@ -2002,7 +2001,7 @@ pub async fn ask_stream(
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
                                             let mut env = crate::eval::Env::new();
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                            let input_val = crate::eval::eval_parser_expr_standalone(&input)?;
+                                            let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
                                             crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
                                             crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
                                         }).await;
@@ -2135,12 +2134,13 @@ pub async fn ask_stream(
                                 accepted_done = true;
                                 break;
                             }
-                            crate::parser::Operation::Mock { operation, pattern, response } => {
+                            crate::parser::Operation::Mock { operation, patterns, response } => {
+                                let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                                 session.io_mocks.push(crate::session::IoMock {
-                                    operation: operation.clone(), pattern: pattern.clone(), response: response.clone(),
+                                    operation: operation.clone(), patterns: patterns.clone(), response: response.clone(),
                                 });
-                                feedback_details.push(format!("mock: {operation} \"{pattern}\""));
-                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} \"{pattern}\""), "success": true})).await;
+                                feedback_details.push(format!("mock: {operation} {pattern_display}"));
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} {pattern_display}"), "success": true})).await;
                             }
                             crate::parser::Operation::Unmock => {
                                 let count = session.io_mocks.len();
