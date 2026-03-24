@@ -2049,7 +2049,7 @@ fn split_once_required<'a>(
 ///
 /// `key=value` format: `name="alice" age=25 active=true`
 /// Regular format: `{name: "alice", age: 25}` or `5` or `"hello"`
-fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
+pub fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
     let input = input.trim();
     if input.is_empty() {
         // Empty input is valid for zero-parameter functions:
