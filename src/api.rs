@@ -2357,15 +2357,25 @@ pub async fn ask_stream(
                                             .arg("build").arg("--release").current_dir(&work_dir).output().await;
                                         match build {
                                             Ok(b) if b.status.success() => {
-                                                feedback_details.push("OK: OpenCode + rebuild successful. Restarting...".to_string());
-                                                log_activity(&config_clone.log_file, "opencode-restart", "rebuild successful, restarting").await;
+                                                log_activity(&config_clone.log_file, "opencode-restart", "rebuild successful, attempting restart").await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
-                                                tokio::spawn(async {
-                                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                                    let exe = std::env::current_exe().unwrap_or_default();
-                                                    let args: Vec<String> = std::env::args().collect();
-                                                    let _ = exec::execvp(&exe, &args);
-                                                });
+                                                // Save session before restart
+                                                {
+                                                    let session = config_clone.session.lock().await;
+                                                    if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
+                                                        let _ = session.save(std::path::Path::new(&path));
+                                                    }
+                                                }
+                                                // execvp replaces the process — if it returns, it failed
+                                                let exe = std::env::current_exe().unwrap_or_default();
+                                                let args: Vec<String> = std::env::args().collect();
+                                                let err = exec::execvp(&exe, &args);
+                                                // If we get here, execvp failed
+                                                let msg = format!("RESTART FAILED: exec::execvp returned: {err}. The new binary is built but NOT running. Manual restart required.");
+                                                eprintln!("[opencode] {msg}");
+                                                log_activity(&config_clone.log_file, "opencode-restart-FAILED", &msg).await;
+                                                feedback_details.push(format!("ERROR: {msg}"));
+                                                has_errors = true;
                                             }
                                             Ok(b) => {
                                                 has_errors = true;
