@@ -1,166 +1,137 @@
-# Adapsis — AI-First Programming Language (AdapsisOS)
+# Adapsis — Adaptive, Self-Modifying AI Programming Environment
 
 ## Overview
-Adapsis is an AI-native program representation and mutation protocol with a constrained surface language. Programs are built incrementally through validated mutations. The AST is the source of truth, changes happen through small mutations with immediate feedback, and every modification is logged in an append-only revision history.
+Adapsis is an AI-native programming language and live agentic environment. Programs are built incrementally through validated mutations. The AI writes Adapsis code, gets immediate feedback, and iterates. The system can modify its own runtime via `!opencode`.
 
-See `adapsis-design-doc.md` for the full design document.
+## Language Design Goals
+- **Optimized for LLM-driven construction**, not human typing
+- Every operation starts with `+`, `!`, or `?` — clear code vs prose distinction
+- Explicit types everywhere — no inference
+- Effect system: `[io]`, `[async]`, `[fail]`, `[mut]`
+- `+end` closes all blocks (`+fn`, `+if`, `+while`, `+match`, `+each`)
+- `!module Name` as state change (no `+end` needed for modules)
+- Pattern matching over method chains — `+match`/`+case` is primary
+- Auto-propagation for errors — `[fail]` + `+call val:T = func(x)` propagates errors
+- No `is_ok`/`unwrap` builtins — use `+match` on Result directly:
+  ```
+  +match fetch_data(url)
+  +case Ok(data)
+    +return data
+  +case Err(e)
+    +return concat("error: ", e)
+  +end
+  ```
+- Test enforcement — functions >2 statements must have passing `!test` before `!eval`
+- Tests persist across sessions and auto-rerun when functions change
+- `!mock` for IO testing — intercepts `+await` calls with fake responses
 
-## Build & Run
+## IMPORTANT: Keep the prompt updated
+When modifying the runtime (adding builtins, IO operations, commands, syntax changes):
+1. Update `src/prompt.rs` with documentation and examples
+2. Register new builtins in `src/builtins.rs`
+3. Update this file if the change affects architecture or design
 
+## Build & Test
 ```bash
-cargo build
-
-# AdapsisOS — the full environment (HTTP API + browser UI + persistent session)
-cargo run -- os --port 3000 --session project.json
-
-# Interactive REPL
-cargo run -- repl --session project.json
-
-# LLM feedback loop (one-shot task)
-cargo run -- run --task "description" -m 10
-
-# Architect mode (design first, implement per-function)
-cargo run -- architect --task "description" --port 3000
-
-# Browser UI for one-shot task
-cargo run -- serve --task "description" --port 3000
-
-# Parse and validate
-cargo run -- check examples/fizzbuzz.ax
-
-# Run tests
-cargo run -- test examples/fizzbuzz.ax
-
-# Compile to native code
-cargo run -- compile examples/compile_test.ax -f add -a "3,4"
+cargo build --release
+cargo test --release                    # Rust unit tests
+for f in examples/*.ax; do cargo run -q --release -- test "$f" 2>&1 | grep -c PASS; done | paste -sd+ | bc  # Adapsis tests
 ```
 
-## HTTP API (AdapsisOS mode)
+## Run AdapsisOS
+```bash
+# Interactive with browser UI
+adapsis os --port 3002 --url http://127.0.0.1:4000 --model chatgpt/gpt-5.4 --session my-session.json --log-file my.log
 
+# Autonomous mode (works through roadmap)
+adapsis os --port 3002 --url http://127.0.0.1:4000 --model chatgpt/gpt-5.4 --session my-session.json --log-file my.log --max-iterations 100 --autonomous "Check !roadmap and continue"
+
+# Inject messages to running instance (no parallel streams)
+curl -X POST http://localhost:3002/api/inject -H 'Content-Type: application/json' -d '{"message": "your message"}'
 ```
-POST /api/mutate   — {"source": "+fn add..."} → revision + results
-POST /api/eval     — {"function": "add", "input": "a=3 b=4"} → result
-POST /api/test     — {"source": "!test add\n  +with..."} → pass/fail
-POST /api/query    — {"query": "?symbols"} → response
-GET  /api/status   — program state, revision, function/type list
-POST /api/history  — {"limit": 20} → mutation log + working history
-POST /api/rewind   — {"revision": 5} → rewinds program state
+
+## HTTP API
+```
+POST /api/mutate      — apply Adapsis code mutations
+POST /api/eval        — evaluate a function
+POST /api/query       — semantic queries (?symbols, ?source, ?tasks, ?deps)
+GET  /api/status      — program state, plan, roadmap
+POST /api/inject      — queue message for autonomous loop
+POST /api/drain-queue — drain queued messages
+POST /api/ask-stream  — SSE streaming AI conversation
+GET  /api/events      — SSE broadcast of all activity (for web UI)
+GET  /api/tasks       — list spawned async tasks
+GET  /api/log         — recent log entries
 ```
 
 ## Architecture
-
 ```
 src/
-  main.rs          — CLI entry point (clap)
-  api.rs           — HTTP REST API for AdapsisOS
-  ast.rs           — Core AST types (Program, Module, Function, Statement, Expr, Type, Effect)
-  parser.rs        — Line-oriented parser for mutation syntax
-  validator.rs     — Parser → AST conversion, validation, mutation application
-  typeck.rs        — Type checker, symbol table, semantic queries
-  eval.rs          — Tree-walking interpreter for tests, evals, traces
-  compiler.rs      — Cranelift JIT compiler (Int, Float, Bool → native x86-64)
-  llm.rs           — LLM client (OpenAI-compatible, streaming SSE, Qwen thinking mode)
-  orchestrator.rs  — Feedback loop + architect mode
-  session.rs       — Mutation log, working history, save/load, rewind
-  library.rs       — Persistent module library (~/.config/adapsis/modules/), auto-load/persist
-  repl.rs          — Interactive REPL with /commands
-  events.rs        — Event streaming (WebSocket)
-  server.rs        — Browser UI server
-  prompt.rs        — System prompt and feedback messages
+  main.rs        — CLI, autonomous loop, session management
+  api.rs         — HTTP API, ask/ask_stream handlers, !opencode orchestration
+  ast.rs         — Core AST (Program, Module, Function, Statement, Expr, Type, Effect)
+  parser.rs      — Line-oriented parser (+, !, ? prefixes, +end blocks)
+  validator.rs   — Parser→AST, mutations, !replace, !remove, !module merging
+  eval.rs        — Tree-walking interpreter, builtins, test runner, +match on Result
+  compiler.rs    — Cranelift JIT (Int, Float, Bool, String, Struct, While, Match)
+  coroutine.rs   — Async IO runtime (TCP, HTTP, files, shell, LLM, mocks, task registry)
+  llm.rs         — LLM client (OpenAI-compatible, streaming, thinking mode, retries)
+  session.rs     — Session persistence (program AST, tests, roadmap, plan, mocks, chat)
+  library.rs     — ~/.config/adapsis/modules/ auto-load/persist
+  prompt.rs      — System prompt with language spec, builtins, examples
+  builtins.rs    — Single source of truth for all builtins/commands/queries
+  typeck.rs      — Type checker, symbol table, ?source reconstruction, semantic queries
+  telegram.rs    — Telegram bot integration
 web/
-  index.html       — Browser UI (vanilla JS, Tokyo Night theme)
-examples/
-  validate.ax   — Validation with checks
-  fizzbuzz.ax   — If/elif/else with modulo
-  if_else.ax    — Age classification
-  modulo.ax     — Modulo operator
-  result_chain.ax — Error propagation (auto + explicit)
-  simple_syntax.ax — key=value test syntax
-  compile_test.ax  — Compiler test (5 functions)
-training/
-  generate_corpus.py     — Manual training examples (35)
-  auto_generate_corpus.py — Auto-generation via LLM (42 tasks)
-  train_lora.py          — QLoRA training script (unsloth)
-  benchmark.sh           — Multi-model benchmark
+  adapsis.html   — Browser UI (SSE broadcast, collapsible thinking)
 ```
 
-## Key Design Decisions
-
-- **Append-only mutation log** — every change gets a revision ID. Program state is reconstructable by replaying mutations 0..N. Rewind to any revision.
-- **Two error handling patterns** — auto-propagation (`+call val:T = func(x)` with `[fail]`) and explicit handling (`+call res:Result<T> = func(x)` with `.is_ok`/`.unwrap`/`.error`).
-- **key=value test syntax** — `+with a=3 b=4 -> expect 7` instead of JSON-like struct literals. Cleaner for LLMs.
-- **Parser has its own types** separate from AST. Validator converts between them.
-- **Each LLM response in `run` mode is a fresh program.** In `architect` and `repl` modes, program state persists across iterations.
-- **Session persistence** — JSON file with mutation sources for replay. Auto-saves every 30s in `os` mode.
-
-## LLM Backend
-
-Multiple LLM backends available:
-
-### Cloud (via llm-gateway on port 4000)
-- `anthropic/claude-sonnet-4-6`, `anthropic/claude-opus-4-6`, etc.
-- `chatgpt/gpt-5.4`, `chatgpt/gpt-5.4-mini`
-- URL: `http://127.0.0.1:4000`
-
-### Local (via llama.cpp in podman, GPU-accelerated)
-- **Qwen3.5-9B** (Q4_K_M) — systemd service `llama-server`, port 8081
-  - `systemctl --user start llama-server`
-  - Model: `/home/marenz/models/Qwen3.5-9B-Q4_K_M.gguf`
-- **Qwen3.5-35B-A3B** (Q4_K_XL, MoE active 3B) — systemd service `llama-server-a3`, port 8082
-  - `systemctl --user start llama-server-a3`
-  - Model: `/home/marenz/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`
-  - 20GB model, needs full 3090 (can't run alongside 9B)
-- Both use podman with `llama-server-cuda` image, NVIDIA GPU passthrough
-- Context: 32-64k tokens, flash attention, Q8 KV cache
-
-### Local (via Ollama on port 11434)
-- `glm-4.7-flash`, `gpt-oss:20b`
-- URL: `http://127.0.0.1:11434`
-
-### Available local models
+## Key Adapsis Commands
 ```
-~/models/Qwen3.5-9B-Q4_K_M.gguf
-~/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
-~/models/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled.i1-Q4_K_M.gguf
-~/models/Qwen3.5-4B-Forge-LoRA-BF16.gguf
-~/models/Qwen3.5-9B-Forge-LoRA-v2-Q4_K_M.gguf
-~/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
-~/models/Phi-4-mini-instruct-Q4_K_M.gguf
-~/models/gemma-3-4b-it-Q4_K_M.gguf
+!module Name          — switch module context (all +fn/+type after go here)
+!plan set / done N    — task planning
+!roadmap add/done/show — persistent long-term roadmap
+!mock op "pattern" -> "response"  — IO mocking for tests
+!unmock               — clear mocks
+!test Module.fn       — run tests (blocks !eval if untested)
+!eval Module.fn       — evaluate function
+!remove Module.fn     — remove function/type/module
+!done                 — signal task completion
+!opencode <desc>      — request Rust-level runtime change (use sparingly)
+?symbols / ?source / ?tasks / ?deps — queries
 ```
 
-### Notes
-- Qwen3.5 family learns Adapsis syntax from system prompt alone
-- Non-Qwen models (Gemma, Phi, Llama) produce zero valid Adapsis
-- Handles Qwen's thinking mode (`reasoning_content` field)
+## Autonomous Mode
+- `--autonomous` injects a goal, the loop runs indefinitely
+- After `!done`: checks roadmap for next undone item, continues automatically
+- `/api/inject` queues messages picked up at next iteration (no parallel streams)
+- Session survives restarts (program AST + tests + roadmap + plan serialized)
+- `!opencode` triggers rebuild + exec restart, session preserved
 
-## AdapsisOS !opencode Integration
+## !opencode Rules
+- Use for runtime bugs, missing builtins, or elegant language enhancements
+- Do NOT use for application logic — write that in Adapsis
+- Each call appends: "update src/prompt.rs and src/builtins.rs with new features"
+- Uses `--fork` to avoid stale session issues
+- 60 min timeout, 5 min idle timeout, process group kill
+- Sequential lock — one at a time
 
-- `!opencode` uses `opencode run --attach http://localhost:4096` (connects to running server)
-- Sessions visible in `opencode sessions list`
-- Each `!opencode` gets its own git worktree for isolation
-- Sequential lock: only one `!opencode` at a time
-- Config flags: `--opencode-git-dir`, `--opencode-worktree-dir`
+## LLM Backends
+- **Cloud** (port 4000): claude-sonnet-4-6, claude-opus-4-6, gpt-5.4, mimo-v2-pro
+- **Local 9B** (port 8081): `systemctl --user start llama-server` — Qwen3.5-9B
+- **Local A3** (port 8082): `systemctl --user start llama-server-a3` — Qwen3.5-35B-A3B
+- Qwen3.5 family works from system prompt. Non-Qwen models fail on Adapsis syntax.
 
-## Test Commands
+## Test Infrastructure
+- Tests persist in `session.stored_tests` (HashMap<fn_name, Vec<StoredTestCase>>)
+- Auto-rerun when functions change via `invalidate_and_retest()`
+- `!mock` intercepts `+await` calls during `!test` with fake IO responses
+- Functions >2 statements blocked from `!eval` until tested
+- `!done` rejected if untested functions exist
+- Test expectations should be literal values, not function calls
+- Pure function calls allowed in test inputs (e.g. `+with config=default_config()`)
 
-```bash
-# All examples
-for f in examples/*.ax; do echo "$f:"; cargo run -q -- test "$f" | grep -c PASS; done
-
-# Compiler test
-cargo run -- compile examples/compile_test.ax -f fizz_type -a "15"
-```
-
-## Dependencies
-
-- `reqwest` — HTTP client for LLM API
-- `tokio` — async runtime
-- `serde`/`serde_json` — serialization
-- `clap` — CLI argument parsing
-- `anyhow` — error handling
-- `tracing` — logging
-- `axum` — HTTP/WebSocket server
-- `tower-http` — CORS middleware
-- `futures` — async utilities
-- `cranelift` + `cranelift-jit` + `cranelift-module` + `cranelift-native` — JIT compiler
+## Training Data
+- JSONL training log at `--training-log` path (default: `training.jsonl`)
+- Each iteration: model, context, thinking, code, outcome, tests passed/failed
+- Accumulates in `~/.config/adapsis/training/`
