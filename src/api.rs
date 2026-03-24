@@ -319,7 +319,6 @@ pub async fn test_fn(
             }).collect();
             session.record_test(&test.function_name, passed, failed, details);
             if failed == 0 && !test.cases.is_empty() {
-                session.mark_tested(&test.function_name);
                 session.store_test(&test.function_name, &test.cases);
             }
         }
@@ -1127,7 +1126,6 @@ pub async fn ask(
                                 }
                             }
                             if all_passed && !test.cases.is_empty() {
-                                session.mark_tested(&test.function_name);
                                 session.store_test(&test.function_name, &test.cases);
                             }
                         }
@@ -1974,7 +1972,6 @@ pub async fn ask_stream(
                                     }
                                 }
                                 if all_passed && !test.cases.is_empty() {
-                                    session.mark_tested(&test.function_name);
                                     session.store_test(&test.function_name, &test.cases);
                                 }
                             }
