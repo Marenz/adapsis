@@ -3775,7 +3775,6 @@ mod tests {
     fn test_format_expr_struct_with_list_roundtrip() {
         // Bug: format_expr produced `messages=list()last_id=0` (missing separator)
         // for struct fields containing function calls, causing reparse failure.
-        use crate::session::StoredTestCase;
 
         let source = "\
 +type State = {messages:List<String>, last_id:Int}

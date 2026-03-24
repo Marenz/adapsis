@@ -88,13 +88,7 @@ pub struct Session {
     /// Agent message bus: agent_name → inbox of pending messages
     #[serde(default)]
     pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
-    /// Functions that have been tested (passed at least one test). Eval/spawn blocked until tested.
-    #[serde(default)]
-    pub tested_functions: std::collections::HashSet<String>,
-    /// Stored test cases — re-run automatically when functions change.
-    /// Key is the function name; value is the list of stored cases.
-    #[serde(default)]
-    pub stored_tests: HashMap<String, Vec<StoredTestCase>>,
+
     /// OpenCode session ID — reused across !opencode calls to maintain context
     #[serde(default)]
     pub opencode_session_id: Option<String>,
@@ -119,27 +113,6 @@ pub struct IoMock {
     pub operation: String,      // e.g. "http_get", "http_post", "llm_call"
     pub patterns: Vec<String>,  // One pattern per argument position to match (contains check)
     pub response: String,       // value to return
-}
-
-/// A stored test case — input and expected as source-level strings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredTestCase {
-    pub input: String,
-    pub expected: String,
-    /// Serialized matcher type (e.g. "contains:foo", "starts_with:bar", "AnyOk", "AnyErr", "ErrContaining:msg")
-    #[serde(default)]
-    pub matcher: Option<String>,
-    /// Serialized after checks as "target matcher value" triples
-    #[serde(default)]
-    pub after_checks: Vec<StoredAfterCheck>,
-}
-
-/// Serialized form of a +after check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredAfterCheck {
-    pub target: String,
-    pub matcher: String,
-    pub value: String,
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -345,8 +318,6 @@ impl Session {
             revision: 0,
             sources: Vec::new(),
             agent_mailbox: HashMap::new(),
-            tested_functions: std::collections::HashSet::new(),
-            stored_tests: HashMap::new(),
             opencode_session_id: None,
             io_mocks: Vec::new(),
             roadmap: Vec::new(),
@@ -381,56 +352,19 @@ impl Session {
             .unwrap_or(&[])
     }
 
-    /// Mark a function as tested, resolving bare names to qualified module names.
-    pub fn mark_tested(&mut self, fn_name: &str) {
-        self.tested_functions.insert(fn_name.to_string());
-        if !fn_name.contains('.') {
-            let qnames: Vec<String> = self.program.modules.iter()
-                .flat_map(|m| m.functions.iter()
-                    .filter(|f| f.name == fn_name)
-                    .map(|f| format!("{}.{}", m.name, f.name)))
-                .collect();
-            for qn in qnames {
-                self.tested_functions.insert(qn);
-            }
-        }
-    }
-
     /// Check whether a function is considered "tested":
-    /// either it's in the `tested_functions` HashSet, or the function's AST
-    /// `tests` field is non-empty and all test cases have `passed == true`.
+    /// the function's AST `tests` field is non-empty and all test cases have `passed == true`.
     pub fn is_function_tested(&self, fn_name: &str) -> bool {
-        if self.tested_functions.contains(fn_name) {
-            return true;
-        }
         if let Some(func) = self.program.get_function(fn_name) {
-            if !func.tests.is_empty() && func.tests.iter().all(|t| t.passed) {
-                return true;
-            }
+            !func.tests.is_empty() && func.tests.iter().all(|t| t.passed)
+        } else {
+            false
         }
-        false
     }
 
-    /// Store test cases for a function, keyed by both bare and qualified name.
-    /// Also populates the function's `tests` field in the AST.
+    /// Store test cases for a function in the AST.
+    /// Populates the function's `tests` field (replace, not append).
     pub fn store_test(&mut self, fn_name: &str, cases: &[parser::TestCase]) {
-        let stored: Vec<StoredTestCase> = cases
-            .iter()
-            .map(|c| StoredTestCase {
-                input: format_expr(&c.input),
-                expected: format_expr(&c.expected),
-                matcher: c.matcher.as_ref().map(serialize_matcher),
-                after_checks: c.after_checks.iter().map(|a| StoredAfterCheck {
-                    target: a.target.clone(),
-                    matcher: a.matcher.clone(),
-                    value: a.value.clone(),
-                }).collect(),
-            })
-            .collect();
-
-        // Populate the function's tests field in the AST (replace, not append).
-        // store_test is only called after all tests pass, so mark passed=true.
-        // Build directly from parser::TestCase for accuracy.
         let ast_tests: Vec<ast::TestCase> = cases
             .iter()
             .map(|c| ast::TestCase {
@@ -446,13 +380,9 @@ impl Session {
             })
             .collect();
         if let Some(func) = self.program.get_function_mut(fn_name) {
-            func.tests = ast_tests;
+            func.tests = ast_tests.clone();
         }
-
-        self.stored_tests
-            .insert(fn_name.to_string(), stored.clone());
-
-        // Also store under qualified name(s) if bare
+        // Also store on qualified name(s) if bare name was given
         if !fn_name.contains('.') {
             let qnames: Vec<String> = self
                 .program
@@ -465,8 +395,10 @@ impl Session {
                         .map(|f| format!("{}.{}", m.name, f.name))
                 })
                 .collect();
-            for qn in qnames {
-                self.stored_tests.insert(qn, stored.clone());
+            for qn in &qnames {
+                if let Some(func) = self.program.get_function_mut(qn) {
+                    func.tests = ast_tests.clone();
+                }
             }
         }
     }
@@ -497,9 +429,8 @@ impl Session {
             _ => return Vec::new(),
         };
 
-        // Invalidate: remove from tested_functions and reset AST passed flags
+        // Invalidate: reset AST passed flags
         for name in &affected {
-            self.tested_functions.remove(name);
             if let Some(func) = self.program.get_function_mut(name) {
                 for t in &mut func.tests {
                     t.passed = false;
@@ -561,7 +492,6 @@ impl Session {
                                 }
                             }
                             if all_passed {
-                                self.mark_tested(name);
                                 // Restore passed=true on AST tests after successful retest
                                 if let Some(func) = self.program.get_function_mut(name) {
                                     for t in &mut func.tests {
@@ -612,7 +542,6 @@ impl Session {
                         }
                     }
                     if all_passed && !test.cases.is_empty() {
-                        self.mark_tested(&test.function_name);
                         self.store_test(&test.function_name, &test.cases);
                     }
                 }
@@ -816,7 +745,6 @@ impl Session {
                         }
                     }
                     if all_passed && !test.cases.is_empty() {
-                        self.mark_tested(&test.function_name);
                         self.store_test(&test.function_name, &test.cases);
                     }
                 }
@@ -1317,7 +1245,6 @@ mod tests {
         }];
 
         session.store_test("foo", &cases);
-        session.tested_functions.clear();
 
         let func = session.program.get_function("foo").unwrap();
         assert_eq!(func.tests.len(), 1);
