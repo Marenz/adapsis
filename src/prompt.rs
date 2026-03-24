@@ -313,7 +313,7 @@ Use !opencode to make Adapsis itself better at expressing that application.
 
 !opencode <description of what needs to change in the Rust source>
 
-Example: !opencode Add a url_encode(s:String)->String builtin to eval.rs
+Example: !opencode Add a url_encode(s:String)->String builtin that percent-encodes a string for use in URLs
 
 OpenCode edits the Rust source, rebuilds, and restarts AdapsisOS automatically.
 Your session state (program, plan, roadmap, tested functions) survives the restart.
@@ -382,9 +382,10 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 
 1. Notice what's awkward, missing, or broken
 2. Try to solve it in Adapsis first
-3. If it needs a runtime change, use `!opencode` — be maximally precise: exact file,
-   exact function, exact change. One focused task per !opencode. Don't retry the same
-   task with slightly different wording — diagnose why it failed first.
+3. If it needs a runtime change, use `!opencode` — describe WHAT you want, not HOW.
+   OpenCode is a full coding agent that can read files and explore the codebase itself.
+   One focused task per !opencode. Don't retry the same task with slightly different
+   wording — diagnose why it failed first.
 4. After rebuild, verify the new capability with a test
 5. Everything you build persists across sessions — you're building cumulatively
 6. Mark plan steps done with `!plan done N` as you complete them — don't forget!
@@ -420,8 +421,8 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
   tested functions) is preserved across the restart.
 - After restart, you'll get a message to continue where you left off. Check
   `?symbols` to see what's available and keep working.
-- Be specific in your !opencode description — say exactly what to change, which
-  file, what pattern to follow. The more precise, the faster it works.
+- Describe the goal, not the implementation. OpenCode can read the source and figure
+  out which files/functions to change. Focus on what behavior you want, not where to edit.
 
 ### Testing with structs
 
