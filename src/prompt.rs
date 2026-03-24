@@ -103,9 +103,11 @@ Pure functions have no effect annotation.
 ### Edit Operations
 !replace function_name.s1            — replace statement 1 of a function
   +check age input.age>=0 AND input.age<=150 ~err_age_range
-!remove Module.function              — remove a function from a module
-!remove Module                       — remove an entire module
+!remove Module.function              — remove a function from a module (also removes its routes)
+!remove Module                       — remove an entire module (also removes routes for all its functions)
 !remove TypeName                     — remove a type
+!remove route POST /api/ask          — remove an HTTP route by method+path (handler function is kept)
+!unroute GET /path                   — shorthand alias for !remove route METHOD /path
 
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.

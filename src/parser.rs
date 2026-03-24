@@ -45,6 +45,11 @@ pub enum Operation {
     Roadmap(RoadmapAction),
     /// Remove a function, type, or module: !remove Module.function or !remove Module
     Remove(String),
+    /// Remove an HTTP route by method+path: !remove route POST /api/ask
+    RemoveRoute {
+        method: String,
+        path: String,
+    },
     Watch {
         function_name: String,
         args: String,
@@ -876,15 +881,46 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(rest) = text.strip_prefix("!remove") {
-            let target = rest.trim().to_string();
+            let rest_trimmed = rest.trim();
+            // Check for route removal: !remove route METHOD /path
+            if let Some(route_rest) = rest_trimmed.strip_prefix("route") {
+                let route_rest = route_rest.trim();
+                let parts: Vec<&str> = route_rest.splitn(2, char::is_whitespace).collect();
+                if parts.len() != 2 || parts[0].is_empty() || parts[1].trim().is_empty() {
+                    bail!(
+                        "line {}: !remove route requires METHOD and path, e.g. !remove route POST /api/ask",
+                        line.number
+                    );
+                }
+                let method = parts[0].to_uppercase();
+                let path = parts[1].trim().to_string();
+                self.index += 1;
+                return Ok(Operation::RemoveRoute { method, path });
+            }
+            let target = rest_trimmed.to_string();
             if target.is_empty() {
                 bail!(
-                    "line {}: !remove requires a target (Module.function, Module, or TypeName)",
+                    "line {}: !remove requires a target (Module.function, Module, TypeName, or route METHOD /path)",
                     line.number
                 );
             }
             self.index += 1;
             return Ok(Operation::Remove(target));
+        }
+
+        if let Some(rest) = text.strip_prefix("!unroute") {
+            let rest = rest.trim();
+            let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+            if parts.len() != 2 || parts[0].is_empty() || parts[1].trim().is_empty() {
+                bail!(
+                    "line {}: !unroute requires METHOD and path, e.g. !unroute GET /path",
+                    line.number
+                );
+            }
+            let method = parts[0].to_uppercase();
+            let path = parts[1].trim().to_string();
+            self.index += 1;
+            return Ok(Operation::RemoveRoute { method, path });
         }
 
         if let Some(rest) = text.strip_prefix("!roadmap") {
