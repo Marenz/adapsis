@@ -430,14 +430,15 @@ impl Session {
 
         // Populate the function's tests field in the AST (replace, not append).
         // store_test is only called after all tests pass, so mark passed=true.
-        let ast_tests: Vec<ast::TestCase> = stored
+        // Build directly from parser::TestCase for accuracy.
+        let ast_tests: Vec<ast::TestCase> = cases
             .iter()
-            .map(|s| ast::TestCase {
-                input: s.input.clone(),
-                expected: s.expected.clone(),
+            .map(|c| ast::TestCase {
+                input: format_expr(&c.input),
+                expected: format_expr(&c.expected),
                 passed: true,
-                matcher: s.matcher.clone(),
-                after_checks: s.after_checks.iter().map(|a| ast::AfterCheck {
+                matcher: c.matcher.as_ref().map(serialize_matcher),
+                after_checks: c.after_checks.iter().map(|a| ast::AfterCheck {
                     target: a.target.clone(),
                     matcher: a.matcher.clone(),
                     value: a.value.clone(),
@@ -509,21 +510,19 @@ impl Session {
         let mut retest_results = Vec::new();
 
         for name in &affected {
-            // Find stored tests: try exact name, then bare name
-            let cases = self.stored_tests.get(name).cloned().or_else(|| {
-                let bare = name.rsplit('.').next().unwrap_or(name);
-                self.stored_tests.get(bare).cloned()
-            });
+            // Read test cases from the function's AST (primary source of truth)
+            let ast_cases: Vec<ast::TestCase> = self.program.get_function(name)
+                .map(|f| f.tests.clone())
+                .unwrap_or_default();
 
-            let cases = match cases {
-                Some(c) if !c.is_empty() => c,
-                _ => continue,
-            };
+            if ast_cases.is_empty() {
+                continue;
+            }
 
             // Reconstruct test source and re-run
             let bare = name.rsplit('.').next().unwrap_or(name);
             let mut test_src = format!("!test {bare}\n");
-            for case in &cases {
+            for case in &ast_cases {
                 // Reconstruct the expect portion, including matcher syntax
                 let expect_str = reconstruct_expect(&case.expected, case.matcher.as_deref());
                 test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, expect_str));
