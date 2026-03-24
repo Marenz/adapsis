@@ -182,6 +182,22 @@ impl Env {
         self.shared_runtime = Some(rt);
     }
 
+    /// Populate the shared_cache directly from the program's module shared var
+    /// declarations. This is a fallback for when SharedRuntime is not available
+    /// (e.g. in tests or CLI mode). Evaluates each default expression.
+    pub fn populate_shared_from_program(&mut self, program: &ast::Program) {
+        for module in &program.modules {
+            for sv in &module.shared_vars {
+                let key = format!("{}.{}", module.name, sv.name);
+                if !self.shared_cache.contains_key(&key) {
+                    let value = eval_expr_standalone(program, &sv.default)
+                        .unwrap_or(Value::Int(0));
+                    self.shared_cache.insert(key, value);
+                }
+            }
+        }
+    }
+
     /// Push a new empty scope onto the stack.
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
@@ -729,6 +745,7 @@ pub fn eval_test_case_with_mocks(
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
     let mut env = Env::new();
+    env.populate_shared_from_program(program);
     bind_input_to_params(program, func, &input, &mut env);
 
     // Execute function body
@@ -805,6 +822,7 @@ fn eval_test_case_with_runtime(
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
                 let mut env = Env::new();
+                env.populate_shared_from_program(&program);
 
                 // Create handle: mocks checked first, unmatched ops use real IO.
                 let handle = if mocks.is_empty() {
@@ -885,6 +903,7 @@ pub async fn eval_test_case_async(
             .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
         let mut env = Env::new();
+        env.populate_shared_from_program(&program);
 
         // Create handle: mocks are checked first, unmatched ops fall through
         // to real IO via the sender.
