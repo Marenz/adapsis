@@ -404,7 +404,9 @@ impl Session {
     }
 
     /// Invalidate test status for affected functions, then re-run any stored
-    /// tests. Returns a list of (fn_name, passed, detail) for each re-run.
+    /// tests. If any test fails, REVERT the function body to its pre-change
+    /// state (reject-on-fail). Returns a list of (fn_name, passed, detail)
+    /// for each re-run.
     /// Must be called AFTER `apply_and_validate` so the function is already
     /// updated in the program.
     fn invalidate_and_retest(
@@ -428,6 +430,18 @@ impl Session {
             parser::Operation::Replace(r) => vec![r.target.clone()],
             _ => return Vec::new(),
         };
+
+        // Save backups of affected function bodies before modifying anything.
+        // Only functions that already have tests can be rejected; new functions
+        // (no tests) are unaffected.
+        let mut backups: HashMap<String, Vec<ast::Statement>> = HashMap::new();
+        for name in &affected {
+            if let Some(func) = self.program.get_function(name) {
+                if !func.tests.is_empty() {
+                    backups.insert(name.clone(), func.body.clone());
+                }
+            }
+        }
 
         // Invalidate: reset AST passed flags
         for name in &affected {
@@ -498,15 +512,39 @@ impl Session {
                                         t.passed = true;
                                     }
                                 }
+                            } else {
+                                // Reject: revert to the backed-up body and restore test flags
+                                if let Some(old_body) = backups.get(name) {
+                                    if let Some(func) = self.program.get_function_mut(name) {
+                                        func.body = old_body.clone();
+                                        for t in &mut func.tests {
+                                            t.passed = true;
+                                        }
+                                    }
+                                    retest_results.push((
+                                        name.clone(),
+                                        false,
+                                        "REJECTED: replacement reverted because existing tests failed".to_string(),
+                                    ));
+                                }
                             }
                         }
                     }
                 }
                 Err(e) => {
+                    // Parse error reconstructing tests — revert to be safe
+                    if let Some(old_body) = backups.get(name) {
+                        if let Some(func) = self.program.get_function_mut(name) {
+                            func.body = old_body.clone();
+                            for t in &mut func.tests {
+                                t.passed = true;
+                            }
+                        }
+                    }
                     retest_results.push((
                         name.clone(),
                         false,
-                        format!("retest parse error: {e}"),
+                        format!("retest parse error (reverted): {e}"),
                     ));
                 }
             }
