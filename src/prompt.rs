@@ -80,6 +80,14 @@ Pure functions have no effect annotation.
   to the named Adapsis function, which receives the request body as String and returns String.
   Use ?routes to list registered routes.
 
+### Shared Variables
++shared name:Type = default_value
+  Declare module-scoped mutable state. Must be inside a module.
+  Example:
+  !module Counter
+  +shared count:Int = 0
+  +shared label:String = "default"
+
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
   Move functions, types, or modules into a target module (creates if needed).
