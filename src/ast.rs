@@ -157,6 +157,15 @@ impl fmt::Display for Program {
     }
 }
 
+/// A shared variable declaration: `+shared name:Type = default_expr`.
+/// Module-scoped mutable state, stored in RuntimeState at runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SharedVarDecl {
+    pub name: String,
+    pub ty: Type,
+    pub default: Expr,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module {
     pub id: NodeId,
@@ -164,6 +173,8 @@ pub struct Module {
     pub types: Vec<TypeDecl>,
     pub functions: Vec<Arc<FunctionDecl>>,
     pub modules: Vec<Module>,
+    #[serde(default)]
+    pub shared_vars: Vec<SharedVarDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

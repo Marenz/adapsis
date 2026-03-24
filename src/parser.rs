@@ -86,6 +86,16 @@ pub enum Operation {
     Done,
     /// Check inbox: ?inbox [agent_name]
     Query(String),
+    /// Shared variable declaration: +shared name:Type = default_expr
+    SharedVar(SharedVarDecl),
+}
+
+/// A shared variable declaration at the parser level.
+#[derive(Debug, Clone)]
+pub struct SharedVarDecl {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub default: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -500,8 +510,11 @@ impl<'a> Parser<'a> {
                     self.index += 1; // Skip optional +end (backward compat)
                     break;
                 }
-                // Only +fn, +type belong inside a module — everything else is top-level
-                if !next.text.starts_with("+fn") && !next.text.starts_with("+type") {
+                // Only +fn, +type, +shared belong inside a module — everything else is top-level
+                if !next.text.starts_with("+fn")
+                    && !next.text.starts_with("+type")
+                    && !next.text.starts_with("+shared")
+                {
                     break;
                 }
                 body.push(self.parse_operation(next.indent)?);
@@ -598,6 +611,29 @@ impl<'a> Parser<'a> {
             let decl = parse_binding_decl(line.number, rest.trim(), false)?;
             self.index += 1;
             return Ok(Operation::Let(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+shared") {
+            // Format: +shared name:Type = default_expr
+            let rest = rest.trim();
+            let (name_type, expr_text) = rest.split_once('=').ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected `name:Type = expr` in +shared",
+                    line.number
+                )
+            })?;
+            let name_type = name_type.trim();
+            let (name, type_text) = name_type
+                .split_once(':')
+                .ok_or_else(|| anyhow!("line {}: expected `name:Type` in +shared", line.number))?;
+            let ty = parse_type(line.number, type_text.trim())?;
+            let default = parse_expr(line.number, expr_text.trim())?;
+            self.index += 1;
+            return Ok(Operation::SharedVar(SharedVarDecl {
+                name: name.trim().to_string(),
+                ty,
+                default,
+            }));
         }
 
         if let Some(rest) = text.strip_prefix("+set") {

@@ -62,6 +62,14 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             program.rebuild_function_index();
             Ok(msg)
         }
+        parser::Operation::SharedVar(sv) => {
+            bail!(
+                "+shared `{}` must be inside a module. Use: !module MyModule\\n+shared {}:{} = ...",
+                sv.name,
+                sv.name,
+                format!("{:?}", sv.ty)
+            );
+        }
         parser::Operation::Replace(replace) => apply_replace(program, replace),
         parser::Operation::Test(_) => {
             // Tests are handled separately, not applied to program state
@@ -199,6 +207,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             types: vec![],
             functions: vec![],
             modules: vec![],
+            shared_vars: vec![],
         });
     }
     let mod_idx = existing_idx.unwrap_or(program.modules.len() - 1);
@@ -249,13 +258,27 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     added_fns += 1;
                 }
             }
+            parser::Operation::SharedVar(sv) => {
+                let converted = ast::SharedVarDecl {
+                    name: sv.name.clone(),
+                    ty: convert_type(&sv.ty)?,
+                    default: convert_expr(&sv.default)?,
+                };
+                let m = &mut program.modules[mod_idx];
+                // Replace existing shared var with same name, or add new
+                if let Some(pos) = m.shared_vars.iter().position(|v| v.name == converted.name) {
+                    m.shared_vars[pos] = converted;
+                } else {
+                    m.shared_vars.push(converted);
+                }
+            }
             parser::Operation::Module(nested) => bail!(
                 "nested module `{}` found inside module `{}` — check indentation",
                 nested.name,
                 decl.name
             ),
             other => bail!(
-                "unexpected operation in module `{}`: {:?} — only +fn and +type are allowed",
+                "unexpected operation in module `{}`: {:?} — only +fn, +type, and +shared are allowed",
                 decl.name,
                 std::mem::discriminant(other)
             ),
@@ -1116,6 +1139,7 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
             types: vec![],
             functions: vec![],
             modules: vec![],
+            shared_vars: vec![],
         });
     }
     let target = program
