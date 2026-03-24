@@ -319,7 +319,12 @@ impl Runtime {
                 let _ = reply.send(Ok(()));
                 // Give a moment for the reply to be sent
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let exe = std::env::current_exe().unwrap_or_default();
+                // Use args[0] instead of current_exe() because after cargo rebuild
+                // the old inode is deleted and /proc/self/exe shows "(deleted)".
+                let exe = std::env::args().next()
+                    .map(std::path::PathBuf::from)
+                    .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+                    .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
                 let args: Vec<String> = std::env::args().collect();
                 eprintln!("AdapsisOS restarting: {} {}", exe.display(), args[1..].join(" "));
                 let err = exec::execvp(&exe, &args);
