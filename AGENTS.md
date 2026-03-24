@@ -121,6 +121,7 @@ web/
 - **Local 9B** (port 8081): `systemctl --user start llama-server` — Qwen3.5-9B
 - **Local A3** (port 8082): `systemctl --user start llama-server-a3` — Qwen3.5-35B-A3B
 - Qwen3.5 family works from system prompt. Non-Qwen models fail on Adapsis syntax.
+- LLM retries honor server-provided rate-limit hints when present (`Retry-After`, `x-ratelimit-reset`, JSON `retry_after[_ms]`) before falling back to exponential backoff.
 
 ## Test Infrastructure
 - Tests persist in `session.stored_tests` (HashMap<fn_name, Vec<StoredTestCase>>)

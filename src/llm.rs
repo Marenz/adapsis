@@ -1,9 +1,83 @@
-use anyhow::{Context, Result, anyhow};
-use reqwest::Client;
+use anyhow::{Result, anyhow};
+use reqwest::{Client, Response, StatusCode, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::error::Error;
 use std::io::{self, Write};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
+
+const MAX_LLM_RETRIES: usize = 5;
+const MAX_SERVER_RETRY_DELAY: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug)]
+enum LlmError {
+    Api {
+        status: StatusCode,
+        body: String,
+        retry_after: Option<Duration>,
+    },
+    Transport {
+        message: String,
+        retryable: bool,
+    },
+    Streaming(String),
+    Decode(String),
+}
+
+impl LlmError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Api { status, .. } => matches!(
+                *status,
+                StatusCode::REQUEST_TIMEOUT
+                    | StatusCode::CONFLICT
+                    | StatusCode::TOO_EARLY
+                    | StatusCode::TOO_MANY_REQUESTS
+                    | StatusCode::INTERNAL_SERVER_ERROR
+                    | StatusCode::BAD_GATEWAY
+                    | StatusCode::SERVICE_UNAVAILABLE
+                    | StatusCode::GATEWAY_TIMEOUT
+            ),
+            Self::Transport { retryable, .. } => *retryable,
+            Self::Streaming(_) | Self::Decode(_) => false,
+        }
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Api { retry_after, .. } => *retry_after,
+            Self::Transport { .. } | Self::Streaming(_) | Self::Decode(_) => None,
+        }
+    }
+
+    fn should_fallback_to_non_streaming(&self) -> bool {
+        matches!(self, Self::Streaming(_))
+    }
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Api {
+                status,
+                body,
+                retry_after,
+            } => {
+                write!(f, "LLM API error {status}: {}", body.chars().take(500).collect::<String>())?;
+                if let Some(delay) = retry_after {
+                    write!(f, " (retry after {}s)", delay.as_secs())?;
+                }
+                Ok(())
+            }
+            Self::Transport { message, .. } => write!(f, "{message}"),
+            Self::Streaming(message) => write!(f, "{message}"),
+            Self::Decode(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -119,20 +193,23 @@ impl OpenAiBackend {
         }
     }
 
+    async fn send_request(&self, req: reqwest::RequestBuilder, context: &'static str) -> Result<Response> {
+        let response = self
+            .apply_auth(req)
+            .send()
+            .await
+            .map_err(|error| anyhow!(LlmError::Transport {
+                message: format!("{context}: {error}"),
+                retryable: is_retryable_transport_error(&error),
+            }))?;
+        ensure_success(response).await
+    }
+
     async fn generate_streaming(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput> {
         let req = http
             .post(self.endpoint())
             .json(&self.request_body(request, true));
-        let http_resp = self.apply_auth(req)
-            .send()
-            .await
-            .context("failed to send streaming chat completion request")?;
-        let status = http_resp.status();
-        if !status.is_success() {
-            let body = http_resp.text().await.unwrap_or_default();
-            anyhow::bail!("LLM API error {status}: {}", body.chars().take(500).collect::<String>());
-        }
-        let response = http_resp;
+        let response = self.send_request(req, "failed to send streaming chat completion request").await?;
 
         // Buffer raw bytes so multi-byte UTF-8 sequences that are split
         // across HTTP chunks are not corrupted by from_utf8_lossy.
@@ -146,7 +223,7 @@ impl OpenAiBackend {
         while let Some(chunk) = response
             .chunk()
             .await
-            .context("failed to read streaming response chunk")?
+            .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to read streaming response chunk: {error}"))))?
         {
             raw_buf.extend_from_slice(&chunk);
 
@@ -189,7 +266,7 @@ impl OpenAiBackend {
                     }
 
                     let chunk: ChatCompletionChunk = serde_json::from_str(&data)
-                        .with_context(|| format!("failed to parse SSE chunk: {data}"))?;
+                        .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to parse SSE chunk: {error}; chunk={data}"))))?;
 
                     for choice in chunk.choices {
                         // Handle reasoning_content (Qwen thinking mode)
@@ -230,19 +307,11 @@ impl OpenAiBackend {
         let req = http
             .post(self.endpoint())
             .json(&self.request_body(request, false));
-        let http_resp = self.apply_auth(req)
-            .send()
-            .await
-            .context("failed to send chat completion request")?;
-        let status = http_resp.status();
-        if !status.is_success() {
-            let body = http_resp.text().await.unwrap_or_default();
-            anyhow::bail!("LLM API error {status}: {}", body.chars().take(500).collect::<String>());
-        }
+        let http_resp = self.send_request(req, "failed to send chat completion request").await?;
         let response: ChatCompletionResponse = http_resp
             .json()
             .await
-            .context("failed to deserialize chat completion response")?;
+            .map_err(|error| anyhow!(LlmError::Decode(format!("failed to deserialize chat completion response: {error}"))))?;
 
         let msg = response
             .choices
@@ -263,8 +332,15 @@ impl LlmBackend for OpenAiBackend {
         match self.generate_streaming(http, request).await {
             Ok(output) => Ok(output),
             Err(error) => {
-                warn!(error = %error, "streaming completion failed, falling back to non-streaming");
-                self.generate_non_streaming(http, request).await
+                if error
+                    .downcast_ref::<LlmError>()
+                    .is_some_and(LlmError::should_fallback_to_non_streaming)
+                {
+                    warn!(error = %error, "streaming completion failed, falling back to non-streaming");
+                    self.generate_non_streaming(http, request).await
+                } else {
+                    Err(error)
+                }
             }
         }
     }
@@ -351,14 +427,9 @@ where
             max_tokens: self.max_tokens,
         };
 
-        // Retry with exponential backoff on connection errors
+        // Retry with exponential backoff on transient transport/server errors.
         let mut last_err = None;
-        for attempt in 0..3 {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(1000 * (1 << attempt));
-                eprintln!("[llm:retry] attempt {}/3 after {}ms", attempt + 1, delay.as_millis());
-                tokio::time::sleep(delay).await;
-            }
+        for attempt in 0..MAX_LLM_RETRIES {
             match self.backend.generate(&self.http, &request).await {
                 Ok(output) => {
                     info!("LLM response: thinking={} chars, code={} chars, text={} chars",
@@ -375,22 +446,171 @@ where
                     return Ok(output);
                 }
                 Err(e) => {
-                    let err_str = format!("{e}");
-                    if err_str.contains("connection") || err_str.contains("Connection")
-                        || err_str.contains("timeout") || err_str.contains("reset")
-                        || err_str.contains("broken pipe")
-                    {
-                        eprintln!("[llm:error] {err_str} — will retry");
+                    let Some(llm_error) = e.downcast_ref::<LlmError>() else {
+                        return Err(e);
+                    };
+
+                    if llm_error.is_retryable() && attempt + 1 < MAX_LLM_RETRIES {
+                        let delay = llm_error
+                            .retry_after()
+                            .unwrap_or_else(|| default_retry_delay(attempt));
+                        eprintln!(
+                            "[llm:retry] attempt {}/{} in {}ms: {}",
+                            attempt + 2,
+                            MAX_LLM_RETRIES,
+                            delay.as_millis(),
+                            llm_error
+                        );
+                        tokio::time::sleep(delay).await;
                         last_err = Some(e);
                         continue;
                     }
-                    // Non-retryable error
+
                     return Err(e);
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("LLM request failed after 3 retries")))
+        Err(last_err.unwrap_or_else(|| anyhow!("LLM request failed after {MAX_LLM_RETRIES} retries")))
     }
+}
+
+fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
+    error.is_connect()
+        || error.is_timeout()
+        || error.is_request()
+        || error
+            .source()
+            .map(|source| {
+                let text = source.to_string().to_ascii_lowercase();
+                text.contains("connection")
+                    || text.contains("timeout")
+                    || text.contains("reset")
+                    || text.contains("broken pipe")
+                    || text.contains("temporarily unavailable")
+            })
+            .unwrap_or(false)
+}
+
+async fn ensure_success(response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    let headers = response.headers().clone();
+    let body = response.text().await.unwrap_or_default();
+    Err(anyhow!(LlmError::Api {
+        status,
+        retry_after: extract_retry_delay(&headers, &body),
+        body,
+    }))
+}
+
+fn default_retry_delay(attempt: usize) -> Duration {
+    let seconds = 1_u64 << attempt.min(6);
+    Duration::from_secs(seconds)
+}
+
+fn extract_retry_delay(headers: &HeaderMap, body: &str) -> Option<Duration> {
+    header_retry_delay(headers).or_else(|| body_retry_delay(body))
+}
+
+fn header_retry_delay(headers: &HeaderMap) -> Option<Duration> {
+    if let Some(value) = header_value(headers, "retry-after") {
+        if let Some(delay) = parse_retry_after_seconds(value) {
+            return Some(delay);
+        }
+    }
+
+    for name in ["x-ratelimit-reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"] {
+        if let Some(value) = header_value(headers, name) {
+            if let Some(delay) = parse_reset_timestamp(value) {
+                return Some(delay);
+            }
+        }
+    }
+
+    None
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok()).map(str::trim)
+}
+
+fn body_retry_delay(body: &str) -> Option<Duration> {
+    let json: Value = serde_json::from_str(body).ok()?;
+
+    for key in ["retry_after_ms", "retryAfterMs"] {
+        if let Some(ms) = find_numeric_field(&json, key) {
+            return duration_from_millis(ms);
+        }
+    }
+
+    for key in ["retry_after", "retryAfter"] {
+        if let Some(seconds) = find_numeric_field(&json, key) {
+            return duration_from_secs_f64(seconds);
+        }
+    }
+
+    None
+}
+
+fn find_numeric_field(value: &Value, key: &str) -> Option<f64> {
+    match value {
+        Value::Object(map) => {
+            if let Some(number) = map.get(key).and_then(json_number_to_f64) {
+                return Some(number);
+            }
+            map.values().find_map(|entry| find_numeric_field(entry, key))
+        }
+        Value::Array(items) => items.iter().find_map(|entry| find_numeric_field(entry, key)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+fn json_number_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse().ok(),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn parse_retry_after_seconds(raw: &str) -> Option<Duration> {
+    duration_from_secs_f64(raw.parse().ok()?)
+}
+
+fn parse_reset_timestamp(raw: &str) -> Option<Duration> {
+    let value: f64 = raw.parse().ok()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
+
+    let seconds_until_reset = if value > 1_000_000_000_000.0 {
+        (value / 1000.0) - now
+    } else if value > 1_000_000_000.0 {
+        value - now
+    } else {
+        value
+    };
+
+    duration_from_secs_f64(seconds_until_reset)
+}
+
+fn duration_from_secs_f64(seconds: f64) -> Option<Duration> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+
+    let duration = Duration::from_secs_f64(seconds);
+    (duration <= MAX_SERVER_RETRY_DELAY).then_some(duration)
+}
+
+fn duration_from_millis(milliseconds: f64) -> Option<Duration> {
+    if !milliseconds.is_finite() || milliseconds <= 0.0 {
+        return None;
+    }
+
+    let duration = Duration::from_secs_f64(milliseconds / 1000.0);
+    (duration <= MAX_SERVER_RETRY_DELAY).then_some(duration)
 }
 
 #[derive(Debug, Deserialize)]
@@ -561,4 +781,51 @@ fn strip_tags(text: &str, tag: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_retry_after_seconds_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "7".parse().unwrap());
+
+        assert_eq!(header_retry_delay(&headers), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn parses_retry_after_from_json_body() {
+        let body = r#"{"error":{"message":"slow down","retry_after_ms":1500}}"#;
+
+        assert_eq!(body_retry_delay(body), Some(Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn parses_rate_limit_reset_timestamp_header() {
+        let reset_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-reset", reset_at.to_string().parse().unwrap());
+
+        let delay = header_retry_delay(&headers).unwrap();
+        assert!(delay <= Duration::from_secs(3));
+        assert!(delay >= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn marks_429_as_retryable() {
+        let error = LlmError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit".to_string(),
+            retry_after: Some(Duration::from_secs(9)),
+        };
+
+        assert!(error.is_retryable());
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(9)));
+    }
 }
