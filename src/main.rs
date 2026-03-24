@@ -393,13 +393,14 @@ async fn main() -> Result<()> {
             for op in &operations {
                 match op {
                     parser::Operation::Test(_) => test_ops.push(op.clone()),
-                    parser::Operation::Mock { operation, pattern, response } => {
+                    parser::Operation::Mock { operation, patterns, response } => {
+                        let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                         io_mocks.push(session::IoMock {
                             operation: operation.clone(),
-                            pattern: pattern.clone(),
+                            patterns: patterns.clone(),
                             response: response.clone(),
                         });
-                        println!("OK: mock {operation} \"{pattern}\"");
+                        println!("OK: mock {operation} {pattern_display}");
                     }
                     parser::Operation::Unmock => {
                         let count = io_mocks.len();

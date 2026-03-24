@@ -116,9 +116,9 @@ pub struct RoadmapItem {
 /// A mock IO response — matches operation + URL prefix, returns a fixed value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IoMock {
-    pub operation: String, // e.g. "http_get", "http_post", "llm_call"
-    pub pattern: String,   // URL/arg prefix to match
-    pub response: String,  // value to return
+    pub operation: String,      // e.g. "http_get", "http_post", "llm_call"
+    pub patterns: Vec<String>,  // One pattern per argument position to match (contains check)
+    pub response: String,       // value to return
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -479,17 +479,18 @@ impl Session {
                 parser::Operation::Roadmap(action) => { results.push(self.handle_roadmap(action)); }
                 parser::Operation::Mock {
                     operation,
-                    pattern,
+                    patterns,
                     response,
                 } => {
+                    let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                     self.io_mocks.push(IoMock {
                         operation: operation.clone(),
-                        pattern: pattern.clone(),
+                        patterns: patterns.clone(),
                         response: response.clone(),
                     });
                     results.push((
                         format!(
-                            "mock: {operation} \"{pattern}\" -> \"{}\"",
+                            "mock: {operation} {pattern_display} -> \"{}\"",
                             response.chars().take(50).collect::<String>()
                         ),
                         true,
@@ -674,17 +675,18 @@ impl Session {
                 parser::Operation::Roadmap(action) => { results.push(self.handle_roadmap(action)); }
                 parser::Operation::Mock {
                     operation,
-                    pattern,
+                    patterns,
                     response,
                 } => {
+                    let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                     self.io_mocks.push(IoMock {
                         operation: operation.clone(),
-                        pattern: pattern.clone(),
+                        patterns: patterns.clone(),
                         response: response.clone(),
                     });
                     results.push((
                         format!(
-                            "mock: {operation} \"{pattern}\" -> \"{}\"",
+                            "mock: {operation} {pattern_display} -> \"{}\"",
                             response.chars().take(50).collect::<String>()
                         ),
                         true,

@@ -145,7 +145,7 @@ Commands:
   !module Name — switch module context (all +fn/+type after go into this module)
   !plan set / !plan done N / !plan show — manage task plan
   !roadmap add <item> / !roadmap done N / !roadmap show — long-term roadmap
-  !mock op "pattern" -> "response" — register mock IO for testing
+  !mock op "pattern" -> "response" — register mock IO (multi-arg: !mock op "pat1" "pat2" -> "resp")
   !unmock — clear all mocks
   !eval fn_name arg1=val — evaluate a function (also: !eval fn "val1" "val2" 42)
   !test Module.fn — run tests (see Testing section above)
@@ -437,6 +437,7 @@ Use `!mock` to register fake IO responses, then `!test` works with async functio
 
 !mock http_get "api.telegram.org" -> "{\"ok\":true,\"result\":[]}"
 !mock llm_call "You are" -> "Hello! How can I help?"
+!mock llm_call "You are a bot" "What time is it?" -> "I don't know the time."
 
 !test MyModule.get_updates
   +with offset=0 -> expect "{\"ok\":true,\"result\":[]}"
