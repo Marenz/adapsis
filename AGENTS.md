@@ -130,6 +130,8 @@ web/
 - `!done` rejected if untested functions exist
 - Test expectations should be literal values, not function calls
 - Pure function calls allowed in test inputs (e.g. `+with config=default_config()`)
+- **Test matchers**: `contains("substr")`, `starts_with("prefix")`, bare `Ok`/`Err`, `Err("msg")`
+- **+after assertions**: `+after routes contains "/chat"`, `+after modules contains "Name"` — check side effects after test execution
 
 ## Training Data
 - JSONL training log at `--training-log` path (default: `training.jsonl`)

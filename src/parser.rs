@@ -269,6 +269,36 @@ pub struct TestMutation {
 pub struct TestCase {
     pub input: Expr,
     pub expected: Expr,
+    /// Optional matcher for flexible assertions (e.g. contains, starts_with, AnyOk, AnyErr).
+    pub matcher: Option<TestMatcher>,
+    /// Post-execution side-effect checks (e.g. routes/tasks/modules contain a value).
+    pub after_checks: Vec<AfterCheck>,
+}
+
+/// Flexible test matchers — used instead of exact value comparison.
+#[derive(Debug, Clone)]
+pub enum TestMatcher {
+    /// Result string contains substring
+    Contains(String),
+    /// Result string starts with prefix
+    StartsWith(String),
+    /// Result is any Ok value (without checking inner)
+    AnyOk,
+    /// Result is any Err value
+    AnyErr,
+    /// Result is Err with a specific message
+    ErrContaining(String),
+}
+
+/// Post-execution side-effect check: `+after <target> <matcher> "<value>"`
+#[derive(Debug, Clone)]
+pub struct AfterCheck {
+    /// What to inspect: "routes", "tasks", "modules", "mocks"
+    pub target: String,
+    /// How to check: "contains"
+    pub matcher: String,
+    /// The value to look for
+    pub value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1131,9 +1161,33 @@ impl<'a> Parser<'a> {
 
             let (input_text, expected_text) = split_test_case(line.number, rest)?;
             let input = parse_test_input(line.number, input_text.trim())?;
-            let expected = parse_expr(line.number, expected_text.trim())?;
-            cases.push(TestCase { input, expected });
+            let expected_trimmed = expected_text.trim();
+
+            // Check for matcher syntax in expected position
+            let (expected, matcher) = parse_expected_with_matcher(line.number, expected_trimmed)?;
+
             self.index += 1;
+
+            // Collect any +after lines that follow this +with
+            let mut after_checks = Vec::new();
+            while let Some(next) = self.current() {
+                let next_trimmed = next.text.trim();
+                if let Some(after_rest) = next_trimmed.strip_prefix("+after") {
+                    let after_rest = after_rest.trim();
+                    let check = parse_after_check(next.number, after_rest)?;
+                    after_checks.push(check);
+                    self.index += 1;
+                } else {
+                    break;
+                }
+            }
+
+            cases.push(TestCase {
+                input,
+                expected,
+                matcher,
+                after_checks,
+            });
         }
 
         if cases.is_empty() {
@@ -2296,6 +2350,142 @@ fn split_test_case<'a>(line: usize, input: &'a str) -> Result<(&'a str, &'a str)
         .strip_prefix("expect")
         .ok_or_else(|| anyhow!("line {}: expected `expect` after `->`", line))?;
     Ok((left, expected))
+}
+
+/// Parse the expected portion of a test case, detecting matcher syntax.
+///
+/// Matcher forms:
+///   `contains("substring")`     → TestMatcher::Contains
+///   `starts_with("prefix")`     → TestMatcher::StartsWith
+///   `Ok`                        → TestMatcher::AnyOk  (bare, no parens)
+///   `Err`                       → TestMatcher::AnyErr (bare, no parens)
+///   `Err("specific msg")`       → TestMatcher::ErrContaining
+///
+/// Anything else is parsed as a normal expression (no matcher).
+fn parse_expected_with_matcher(line: usize, input: &str) -> Result<(Expr, Option<TestMatcher>)> {
+    let trimmed = input.trim();
+
+    // contains("...")
+    if let Some(inner) = trimmed.strip_prefix("contains(") {
+        let inner = inner.trim();
+        if let Some(inner) = inner.strip_suffix(')') {
+            let inner = inner.trim();
+            if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
+                let s = unescape_string_content(&inner[1..inner.len() - 1]);
+                // The expected expr is a dummy — matcher takes over
+                return Ok((Expr::String(s.clone()), Some(TestMatcher::Contains(s))));
+            }
+        }
+        bail!("line {}: contains() expects a quoted string argument", line);
+    }
+
+    // starts_with("...")
+    if let Some(inner) = trimmed.strip_prefix("starts_with(") {
+        let inner = inner.trim();
+        if let Some(inner) = inner.strip_suffix(')') {
+            let inner = inner.trim();
+            if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
+                let s = unescape_string_content(&inner[1..inner.len() - 1]);
+                return Ok((Expr::String(s.clone()), Some(TestMatcher::StartsWith(s))));
+            }
+        }
+        bail!(
+            "line {}: starts_with() expects a quoted string argument",
+            line
+        );
+    }
+
+    // Bare Ok (no parens) — AnyOk matcher
+    if trimmed == "Ok" {
+        return Ok((Expr::Ident("Ok".to_string()), Some(TestMatcher::AnyOk)));
+    }
+
+    // Bare Err (no parens) — AnyErr matcher
+    if trimmed == "Err" {
+        return Ok((Expr::Ident("Err".to_string()), Some(TestMatcher::AnyErr)));
+    }
+
+    // Err("specific message") — ErrContaining matcher
+    if let Some(inner) = trimmed.strip_prefix("Err(") {
+        let inner = inner.trim();
+        if let Some(inner) = inner.strip_suffix(')') {
+            let inner = inner.trim();
+            if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
+                let s = unescape_string_content(&inner[1..inner.len() - 1]);
+                return Ok((
+                    Expr::Call {
+                        callee: Box::new(Expr::Ident("Err".to_string())),
+                        args: vec![Expr::String(s.clone())],
+                    },
+                    Some(TestMatcher::ErrContaining(s)),
+                ));
+            }
+            // Non-string arg in Err(...) — fall through to normal parsing.
+            // This handles Err(err_label) as before (exact match, no matcher).
+        }
+    }
+
+    // No matcher — normal expression
+    let expr = parse_expr(line, trimmed)?;
+    Ok((expr, None))
+}
+
+/// Simple unescape for string content between quotes (handles \n, \t, \\, \").
+fn unescape_string_content(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Parse a `+after` check line. Format: `<target> <matcher> "<value>"`
+fn parse_after_check(line: usize, input: &str) -> Result<AfterCheck> {
+    let input = input.trim();
+    // Split: target matcher "value"
+    let (target, rest) = input.split_once(char::is_whitespace).ok_or_else(|| {
+        anyhow!(
+            "line {}: +after expects `<target> <matcher> \"<value>\"`",
+            line
+        )
+    })?;
+    let rest = rest.trim();
+    let (matcher, rest) = rest.split_once(char::is_whitespace).ok_or_else(|| {
+        anyhow!(
+            "line {}: +after expects `<target> <matcher> \"<value>\"`",
+            line
+        )
+    })?;
+    let rest = rest.trim();
+
+    // Value can be quoted or bare
+    let value = if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
+        unescape_string_content(&rest[1..rest.len() - 1])
+    } else {
+        rest.to_string()
+    };
+
+    Ok(AfterCheck {
+        target: target.to_string(),
+        matcher: matcher.to_string(),
+        value,
+    })
 }
 
 fn take_ident(input: &str) -> Option<(&str, &str)> {

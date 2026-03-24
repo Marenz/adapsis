@@ -618,7 +618,9 @@ pub static ACTIONS: &[ActionCommand] = &[
         name: "!test",
         args: "<fn>\\n  +with ...",
         short: "run test cases for a function",
-        long: "Runs stored test cases for a function and records the results. Use `+with` lines to define inputs and expected outputs; for async IO code, pair it with `!mock`.",
+        long: "Runs stored test cases for a function and records the results. Use `+with` lines to define inputs and expected outputs; for async IO code, pair it with `!mock`.\n\
+Test matchers for flexible assertions:\n  +with -> expect contains(\"substring\")   — result contains substring\n  +with -> expect starts_with(\"prefix\")   — result starts with prefix\n  +with -> expect Ok                       — any Ok value\n  +with -> expect Err                      — any Err value\n  +with -> expect Err(\"msg\")              — Err containing specific message\n\
+Side-effect assertions with +after (checked after the function runs, state restored):\n  +after routes contains \"/chat\"          — HTTP route was registered\n  +after modules contains \"WebChat\"       — module exists\n  +after mocks contains \"http_get\"        — mock was registered",
     },
     ActionCommand {
         name: "!eval",

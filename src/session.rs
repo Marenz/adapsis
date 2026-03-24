@@ -126,6 +126,20 @@ pub struct IoMock {
 pub struct StoredTestCase {
     pub input: String,
     pub expected: String,
+    /// Serialized matcher type (e.g. "contains:foo", "starts_with:bar", "AnyOk", "AnyErr", "ErrContaining:msg")
+    #[serde(default)]
+    pub matcher: Option<String>,
+    /// Serialized after checks as "target matcher value" triples
+    #[serde(default)]
+    pub after_checks: Vec<StoredAfterCheck>,
+}
+
+/// Serialized form of a +after check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredAfterCheck {
+    pub target: String,
+    pub matcher: String,
+    pub value: String,
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -389,6 +403,12 @@ impl Session {
             .map(|c| StoredTestCase {
                 input: format_expr(&c.input),
                 expected: format_expr(&c.expected),
+                matcher: c.matcher.as_ref().map(serialize_matcher),
+                after_checks: c.after_checks.iter().map(|a| StoredAfterCheck {
+                    target: a.target.clone(),
+                    matcher: a.matcher.clone(),
+                    value: a.value.clone(),
+                }).collect(),
             })
             .collect();
 
@@ -463,7 +483,12 @@ impl Session {
             let bare = name.rsplit('.').next().unwrap_or(name);
             let mut test_src = format!("!test {bare}\n");
             for case in &cases {
-                test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, case.expected));
+                // Reconstruct the expect portion, including matcher syntax
+                let expect_str = reconstruct_expect(&case.expected, case.matcher.as_deref());
+                test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, expect_str));
+                for ac in &case.after_checks {
+                    test_src.push_str(&format!("  +after {} {} \"{}\"\n", ac.target, ac.matcher, ac.value));
+                }
             }
 
             match parser::parse(&test_src) {
@@ -1151,6 +1176,38 @@ fn format_expr(expr: &parser::Expr) -> String {
             }
         }
         parser::Expr::Cast { expr: inner, .. } => format_expr(inner),
+    }
+}
+
+/// Reconstruct the `expect` portion of a +with line from stored data.
+/// If a matcher was used, emit the matcher syntax; otherwise emit the literal expected value.
+fn reconstruct_expect(expected: &str, matcher: Option<&str>) -> String {
+    match matcher {
+        Some("AnyOk") => "Ok".to_string(),
+        Some("AnyErr") => "Err".to_string(),
+        Some(s) => {
+            if let Some(val) = s.strip_prefix("contains:") {
+                format!("contains(\"{}\")", val.replace('\\', "\\\\").replace('"', "\\\""))
+            } else if let Some(val) = s.strip_prefix("starts_with:") {
+                format!("starts_with(\"{}\")", val.replace('\\', "\\\\").replace('"', "\\\""))
+            } else if let Some(val) = s.strip_prefix("ErrContaining:") {
+                format!("Err(\"{}\")", val.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                expected.to_string()
+            }
+        }
+        None => expected.to_string(),
+    }
+}
+
+/// Serialize a TestMatcher to a string for session persistence.
+fn serialize_matcher(m: &parser::TestMatcher) -> String {
+    match m {
+        parser::TestMatcher::Contains(s) => format!("contains:{s}"),
+        parser::TestMatcher::StartsWith(s) => format!("starts_with:{s}"),
+        parser::TestMatcher::AnyOk => "AnyOk".to_string(),
+        parser::TestMatcher::AnyErr => "AnyErr".to_string(),
+        parser::TestMatcher::ErrContaining(s) => format!("ErrContaining:{s}"),
     }
 }
 
