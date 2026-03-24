@@ -70,6 +70,19 @@ pub fn reconstruct_module_source(module: &ast::Module) -> String {
         out.push('\n');
     }
 
+    // Shared variables (after types, before functions)
+    for sv in &module.shared_vars {
+        out.push_str(&format!(
+            "+shared {}:{} = {}\n",
+            sv.name,
+            format_type(&sv.ty),
+            crate::typeck::reconstruct_expr(&sv.default),
+        ));
+    }
+    if !module.shared_vars.is_empty() {
+        out.push('\n');
+    }
+
     // Then functions
     for func in &module.functions {
         out.push_str(&reconstruct_function_source(func));

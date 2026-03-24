@@ -883,7 +883,7 @@ pub fn reconstruct_stmt_pub(out: &mut String, stmt: &Statement, indent: usize) {
     reconstruct_stmt(out, stmt, indent);
 }
 
-fn reconstruct_expr(expr: &Expr) -> String {
+pub fn reconstruct_expr(expr: &Expr) -> String {
     match expr {
         Expr::Literal(lit) => match lit {
             crate::ast::Literal::Int(n) => n.to_string(),
