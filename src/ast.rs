@@ -180,6 +180,13 @@ pub struct FieldDecl {
     pub ty: Type,
 }
 
+/// A test case stored alongside its function declaration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestCase {
+    pub input: String,
+    pub expected: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionDecl {
     pub id: NodeId,
@@ -188,6 +195,8 @@ pub struct FunctionDecl {
     pub return_type: Type,
     pub effects: Vec<Effect>,
     pub body: Vec<Statement>,
+    #[serde(default)]
+    pub tests: Vec<TestCase>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
