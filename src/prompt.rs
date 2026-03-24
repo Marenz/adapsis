@@ -453,6 +453,26 @@ Mocks intercept +await calls during tests — if the operation and args match th
 pattern, the mock value is returned without real IO. Use !unmock to clear all mocks.
 Tests with mocks run async functions through the coroutine executor automatically.
 
+### End-to-end testing
+
+Unit tests verify functions work in isolation. But you MUST also verify end-to-end:
+- If you register a +route, test it with http_get/http_post to verify it serves correctly
+- If you spawn an async task, check ?tasks to verify it's running and healthy
+- Write an async test function that hits your own endpoints:
+  +fn verify_chat_route() -> String [io,async]
+    +await response:String = http_get("http://localhost:3002/chat")
+    +if contains(response, "<html")
+      +return "OK: serves HTML"
+    +end
+    +return concat("FAIL: got ", substring(response, 0, 50))
+  +end
+- Do NOT say !done until end-to-end tests pass
+
+### Networking
+
+Routes (+route) serve on the same port as AdapsisOS.
+For custom servers, use tcp_listen/tcp_accept/tcp_read/tcp_write async IO builtins.
+
 ### Design Principles
 
 Every function you write persists. Every type becomes part of the system. Build like
