@@ -109,6 +109,10 @@ Pure functions have no effect annotation.
 !remove route POST /api/ask          — remove an HTTP route by method+path (handler function is kept)
 !unroute GET /path                   — shorthand alias for !remove route METHOD /path
 
+**Reject-on-fail**: When you `!replace` a function or redefine it in a module, its existing tests
+are automatically re-run. If ANY test fails, the replacement is **reverted** to the previous body
+and you get a REJECTED message. Fix the replacement to pass all existing tests before resubmitting.
+
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
 For single-param functions, pass the value directly.
