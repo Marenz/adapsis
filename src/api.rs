@@ -2177,7 +2177,11 @@ pub async fn ask_stream(
 
                                 let recent_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
                                 let recent_for_stream = recent_lines.clone();
-                                let full_task = format!("{task}. When done: 1) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 2) Register new builtins in src/builtins.rs. 3) Create clean atomic git commits with descriptive messages for each logical change.");
+                                let had_tool_calls = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                let had_tool_calls_stream = had_tool_calls.clone();
+                                let last_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+                                let last_text_stream = last_text.clone();
+                                let full_task = format!("{task}. IMPORTANT: Do NOT ask for clarification — proceed with your best judgment. When done: 1) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 2) Register new builtins in src/builtins.rs. 3) Create clean atomic git commits with descriptive messages for each logical change.");
                                 let oc_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(3600),
                                     async {
@@ -2231,10 +2235,13 @@ pub async fn ask_stream(
                                                                 eprintln!("[opencode:text] {preview}");
                                                                 log_activity(&config_clone.log_file, "opencode-text", text).await;
                                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("OpenCode: {preview}"), "success": true})).await;
+                                                                let mut lt = last_text_stream.lock().unwrap();
+                                                                lt.push_str(text);
                                                             }
                                                         }
                                                     }
                                                     "tool_call" | "tool_result" => {
+                                                        had_tool_calls_stream.store(true, std::sync::atomic::Ordering::Relaxed);
                                                         let summary = event.get("part")
                                                             .and_then(|p| p.get("name").or(p.get("tool")))
                                                             .and_then(|n| n.as_str())
@@ -2347,6 +2354,25 @@ pub async fn ask_stream(
                                                 }
                                             }
                                         }
+                                    }
+                                }
+
+                                // Detect text-only exit: OpenCode exited successfully but made
+                                // no tool calls.  This usually means it asked for clarification
+                                // or gave up.  Report the text as an error so the Adapsis LLM
+                                // can retry with a better prompt instead of silently succeeding.
+                                if let Ok(Ok(ref status)) = oc_result {
+                                    if status.success() && !had_tool_calls.load(std::sync::atomic::Ordering::Relaxed) {
+                                        let text = last_text.lock().unwrap().clone();
+                                        let preview: String = text.chars().take(500).collect();
+                                        let msg = format!("OpenCode exited without making any changes (text-only response). It may have asked for clarification instead of proceeding. OpenCode said: {preview}");
+                                        eprintln!("[opencode:text-only] {msg}");
+                                        log_activity(&config_clone.log_file, "opencode-text-only", &msg).await;
+                                        has_errors = true;
+                                        feedback_details.push(format!("ERROR: {msg}"));
+                                        let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
+                                        session = config_clone.session.lock().await;
+                                        continue;
                                     }
                                 }
 
