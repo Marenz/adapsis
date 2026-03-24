@@ -217,6 +217,14 @@ pub struct FieldDecl {
     pub ty: Type,
 }
 
+/// A post-execution side-effect check: `+after <target> <matcher> "<value>"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AfterCheck {
+    pub target: String,
+    pub matcher: String,
+    pub value: String,
+}
+
 /// A test case stored alongside its function declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TestCase {
@@ -224,6 +232,12 @@ pub struct TestCase {
     pub expected: String,
     #[serde(default)]
     pub passed: bool,
+    /// Serialized matcher type (e.g. "contains:foo", "starts_with:bar", "AnyOk", "AnyErr", "ErrContaining:msg").
+    #[serde(default)]
+    pub matcher: Option<String>,
+    /// Post-execution side-effect assertions (`+after` lines).
+    #[serde(default)]
+    pub after_checks: Vec<AfterCheck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
