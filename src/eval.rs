@@ -1466,6 +1466,17 @@ fn eval_function_body(
                     if call.callee.starts_with("query_") {
                         set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     }
+                    // Ensure mutation builtins can write to the program AST via thread-local.
+                    let is_mutation_builtin = matches!(call.callee.as_str(),
+                        "mutate" | "fn_remove" | "type_remove" | "module_remove");
+                    if is_mutation_builtin {
+                        // Create a mutable wrapper if not already set
+                        if get_shared_program_mut().is_none() {
+                            set_shared_program_mut(Some(std::sync::Arc::new(
+                                std::sync::RwLock::new(program.clone()),
+                            )));
+                        }
+                    }
                     let result = handle.execute_await(&call.callee, &args)?;
                     env.set(name, result);
                 }
@@ -1540,6 +1551,9 @@ std::thread_local! {
     /// Thread-local Program snapshot for query builtins (query_symbols, query_source, etc.)
     /// that need access to the AST from within coroutine IO dispatch.
     static SHARED_PROGRAM: std::cell::RefCell<Option<std::sync::Arc<crate::ast::Program>>> = std::cell::RefCell::new(None);
+    /// Thread-local mutable Program reference for mutation builtins (mutate, fn_remove, etc.)
+    /// that need write access to the AST from within coroutine IO dispatch.
+    static SHARED_PROGRAM_MUT: std::cell::RefCell<Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>>> = std::cell::RefCell::new(None);
 }
 
 /// Set the thread-local SharedRuntime for +shared variable access.
@@ -1564,6 +1578,18 @@ pub fn set_shared_program(program: Option<std::sync::Arc<crate::ast::Program>>) 
 /// query builtins (query_symbols, query_source, etc.) that need AST access.
 pub fn get_shared_program() -> Option<std::sync::Arc<crate::ast::Program>> {
     SHARED_PROGRAM.with(|s| s.borrow().clone())
+}
+
+/// Set the thread-local mutable Program reference for mutation builtins.
+/// Call this alongside set_shared_runtime before spawn_blocking eval tasks.
+pub fn set_shared_program_mut(program: Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>>) {
+    SHARED_PROGRAM_MUT.with(|s| *s.borrow_mut() = program);
+}
+
+/// Get the thread-local mutable Program reference (if set). Used by coroutine.rs for
+/// mutation builtins (mutate, fn_remove, type_remove, module_remove) that need write access.
+pub fn get_shared_program_mut() -> Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>> {
+    SHARED_PROGRAM_MUT.with(|s| s.borrow().clone())
 }
 
 const MAX_CALL_DEPTH: usize = 256;

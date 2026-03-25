@@ -607,6 +607,39 @@ Example:
 +end
 ```
 
+### Program Mutation IO Builtins
+
+You can modify the program's own structure from within Adapsis code using these async IO operations.
+They allow self-modifying programs that can add, replace, or remove functions, types, and modules at runtime.
+
+- `+await result:String = mutate(code)` — parse and apply Adapsis code mutations. `code` is a String containing valid Adapsis mutations (+fn, +type, !module, etc.). Returns a summary like "Applied 3 mutations" on success, or fails with parse/validation error.
+- `+await result:String = fn_remove("Module.func")` — remove a function by fully-qualified name. Returns "Removed Module.func" on success.
+- `+await result:String = type_remove("Module.MyType")` — remove a type by name. Returns "Removed Module.MyType" on success.
+- `+await result:String = module_remove("Module")` — remove an entire module and all its contents. Returns "Removed module Module" on success.
+
+`mutate` is the most general — it can do everything the others do and more (add functions, define types, create modules). The remove builtins are convenience wrappers.
+
+These require `[io,async]` effects and `+await`. Changes are applied to the live program state.
+
+Example:
+```
++fn add_helper ()->String [io,async]
+  +await result:String = mutate("+fn double (x:Int)->Int\n  +return x * 2\n+end")
+  +return result
++end
+
++fn cleanup (name:String)->String [io,async]
+  +await result:String = fn_remove(name)
+  +return result
++end
+
++fn rebuild_module ()->String [io,async]
+  +await r1:String = module_remove("OldModule")
+  +await r2:String = mutate("!module NewModule\n+fn hello ()->String\n  +return \"hi\"\n+end")
+  +return concat(r1, " -> ", r2)
++end
+```
+
 ### Multi-Session API
 
 AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session
