@@ -906,6 +906,9 @@ fn eval_test_case_with_runtime(
             let forked_rt_for_blocking = forked_rt_clone;
             let eval_result = tokio::task::spawn_blocking(move || {
                 set_shared_runtime(forked_rt_for_blocking);
+                // Set program snapshot so query builtins (symbols_list, source_get,
+                // etc.) work inside test execution.
+                set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 let func = program
                     .get_function(&fn_name)
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
@@ -987,6 +990,9 @@ pub async fn eval_test_case_async(
         // Use a forked RuntimeState for test isolation — shared vars are fresh
         // copies from program defaults, not the live runtime.
         set_shared_runtime(forked_rt);
+        // Set program snapshot so query builtins (symbols_list, source_get,
+        // etc.) work inside async test execution.
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
 
         let func = program
             .get_function(&fn_name)
@@ -1462,8 +1468,13 @@ fn eval_function_body(
                         .map(|a| eval_ast_expr(program, a, env))
                         .collect::<Result<Vec<_>>>()?;
                     // Ensure query builtins can access the program AST via thread-local.
-                    // Only set if a query builtin is being called (avoid cloning otherwise).
-                    if call.callee.starts_with("query_") {
+                    // Check both query_* prefixed names and their aliases (symbols_list,
+                    // source_get, callers_get, callees_get, deps_get, routes_list).
+                    let needs_program_read = call.callee.starts_with("query_")
+                        || matches!(call.callee.as_str(),
+                            "symbols_list" | "source_get" | "callers_get"
+                            | "callees_get" | "deps_get" | "routes_list");
+                    if needs_program_read {
                         set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     }
                     // Ensure mutation builtins can write to the program AST via thread-local.
