@@ -535,6 +535,77 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Marks plan step N (1-based) as failed and returns `Plan: step N failed.`. Takes `(n:Int)`. Fails if the index is out of bounds. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    // Program introspection queries — callable versions of ? query commands
+    Builtin {
+        name: "query_symbols",
+        aliases: &[],
+        short: "list all types and functions (same as ?symbols)",
+        long: "Returns a formatted String listing all types and functions in the current program. Same output as `?symbols`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_symbols_detail",
+        aliases: &[],
+        short: "get details for one symbol (same as ?symbols <name>)",
+        long: "Returns detailed information about a specific symbol (function, type, or module) as a String. Same output as `?symbols <name>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_source",
+        aliases: &[],
+        short: "get reconstructed source code (same as ?source <fn>)",
+        long: "Returns the reconstructed Adapsis source code for a function or type as a String. Same output as `?source <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_callers",
+        aliases: &[],
+        short: "who calls this function (same as ?callers <fn>)",
+        long: "Returns which functions directly call the given function as a String. Same output as `?callers <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_callees",
+        aliases: &[],
+        short: "what this function calls (same as ?callees <fn>)",
+        long: "Returns the direct functions called by the given function as a String. Same output as `?callees <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_deps",
+        aliases: &[],
+        short: "direct dependencies (same as ?deps <fn>)",
+        long: "Returns the direct dependencies of a function as a String. Same output as `?deps <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_deps_all",
+        aliases: &[],
+        short: "full transitive dependency tree (same as ?deps-all <fn>)",
+        long: "Returns the full transitive dependency tree for a function as a String. Same output as `?deps-all <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_routes",
+        aliases: &[],
+        short: "list registered HTTP routes (same as ?routes)",
+        long: "Returns registered HTTP routes as a formatted String. Same output as `?routes`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_tasks",
+        aliases: &[],
+        short: "list spawned async tasks (same as ?tasks)",
+        long: "Returns spawned async tasks and their current wait state as a String. Same output as `?tasks`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_library",
+        aliases: &[],
+        short: "show library status (same as ?library)",
+        long: "Returns persistent module library status as a String, including directory path, loaded modules, and files on disk. Same output as `?library`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).
@@ -1282,5 +1353,83 @@ mod tests {
         assert!(query_names.contains(&"?source"));
         assert!(query_names.contains(&"?deps"));
         assert!(query_names.contains(&"?tasks"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Query IO builtins registration
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn query_io_builtins_registered() {
+        for name in &[
+            "query_symbols",
+            "query_symbols_detail",
+            "query_source",
+            "query_callers",
+            "query_callees",
+            "query_deps",
+            "query_deps_all",
+            "query_routes",
+            "query_tasks",
+            "query_library",
+        ] {
+            assert!(
+                is_io_builtin(name),
+                "query IO builtin '{name}' should be registered"
+            );
+            assert!(
+                is_builtin(name),
+                "query IO builtin '{name}' should also be a builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn query_io_builtins_have_descriptions() {
+        for name in &[
+            "query_symbols",
+            "query_symbols_detail",
+            "query_source",
+            "query_callers",
+            "query_callees",
+            "query_deps",
+            "query_deps_all",
+            "query_routes",
+            "query_tasks",
+            "query_library",
+        ] {
+            let builtin = IO_BUILTINS.iter().find(|b| b.name == *name);
+            assert!(
+                builtin.is_some(),
+                "IO builtin '{name}' should exist in IO_BUILTINS"
+            );
+            let b = builtin.unwrap();
+            assert!(
+                !b.short.is_empty(),
+                "'{name}' should have short description"
+            );
+            assert!(!b.long.is_empty(), "'{name}' should have long description");
+            assert!(
+                b.category == BuiltinCategory::Io,
+                "'{name}' should be Io category"
+            );
+        }
+    }
+
+    #[test]
+    fn format_for_prompt_includes_query_builtins() {
+        let prompt = format_for_prompt();
+        assert!(
+            prompt.contains("query_symbols"),
+            "prompt should mention query_symbols"
+        );
+        assert!(
+            prompt.contains("query_source"),
+            "prompt should mention query_source"
+        );
+        assert!(
+            prompt.contains("query_tasks"),
+            "prompt should mention query_tasks"
+        );
     }
 }

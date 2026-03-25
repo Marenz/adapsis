@@ -1461,6 +1461,11 @@ fn eval_function_body(
                         .iter()
                         .map(|a| eval_ast_expr(program, a, env))
                         .collect::<Result<Vec<_>>>()?;
+                    // Ensure query builtins can access the program AST via thread-local.
+                    // Only set if a query builtin is being called (avoid cloning otherwise).
+                    if call.callee.starts_with("query_") {
+                        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    }
                     let result = handle.execute_await(&call.callee, &args)?;
                     env.set(name, result);
                 }
@@ -1532,6 +1537,9 @@ std::thread_local! {
     /// Thread-local SharedRuntime so newly-created Env instances automatically
     /// have access to +shared variables without explicit plumbing.
     static SHARED_RUNTIME: std::cell::RefCell<Option<crate::session::SharedRuntime>> = std::cell::RefCell::new(None);
+    /// Thread-local Program snapshot for query builtins (query_symbols, query_source, etc.)
+    /// that need access to the AST from within coroutine IO dispatch.
+    static SHARED_PROGRAM: std::cell::RefCell<Option<std::sync::Arc<crate::ast::Program>>> = std::cell::RefCell::new(None);
 }
 
 /// Set the thread-local SharedRuntime for +shared variable access.
@@ -1544,6 +1552,18 @@ pub fn set_shared_runtime(rt: Option<crate::session::SharedRuntime>) {
 /// roadmap builtins that need access to runtime state.
 pub fn get_shared_runtime() -> Option<crate::session::SharedRuntime> {
     SHARED_RUNTIME.with(|s| s.borrow().clone())
+}
+
+/// Set the thread-local Program snapshot for query builtins.
+/// Call this alongside set_shared_runtime before spawn_blocking eval tasks.
+pub fn set_shared_program(program: Option<std::sync::Arc<crate::ast::Program>>) {
+    SHARED_PROGRAM.with(|s| *s.borrow_mut() = program);
+}
+
+/// Get the thread-local Program snapshot (if set). Used by coroutine.rs for
+/// query builtins (query_symbols, query_source, etc.) that need AST access.
+pub fn get_shared_program() -> Option<std::sync::Arc<crate::ast::Program>> {
+    SHARED_PROGRAM.with(|s| s.borrow().clone())
 }
 
 const MAX_CALL_DEPTH: usize = 256;
