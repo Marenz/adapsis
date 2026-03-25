@@ -988,7 +988,15 @@ async fn main() -> Result<()> {
             // continue working on them automatically.
             {
                 let goal = autonomous;
-                let goal_message = if session_has_history {
+                let goal_message = if session_has_history && goal.is_some() {
+                    // Session has history but an explicit goal was given — include it.
+                    eprintln!("[autonomous] session has history, forwarding explicit goal");
+                    format!(
+                        "AdapsisOS was restarted. Your goal:\n\n{}\n\n\
+                         Check !roadmap and ?symbols, then keep working on this goal.",
+                        goal.as_deref().unwrap()
+                    )
+                } else if session_has_history {
                     eprintln!("[autonomous] session has history, using continue message");
                     "AdapsisOS was restarted. Continue where you left off — check !roadmap and ?symbols, then keep working.".to_string()
                 } else if goal.as_deref() == Some("roadmap") {
