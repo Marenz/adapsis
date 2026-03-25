@@ -867,6 +867,38 @@ impl CoroutineHandle {
                 return Ok(Value::String(result));
             }
 
+            // ── library_errors — formatted string of all library errors ──
+            "library_errors" => {
+                let result = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| {
+                        let mut out = String::new();
+                        // Structured load errors (module_name, error_message)
+                        if !state.library_load_errors.is_empty() {
+                            out.push_str(&format!("Load errors ({}):\n", state.library_load_errors.len()));
+                            for (module_name, error) in &state.library_load_errors {
+                                out.push_str(&format!("  {}: {}\n", module_name, error));
+                            }
+                        }
+                        // General errors
+                        if !state.library_errors.is_empty() {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            out.push_str(&format!("Errors this session ({}):\n", state.library_errors.len()));
+                            for e in &state.library_errors {
+                                out.push_str(&format!("  {}\n", e));
+                            }
+                        }
+                        if out.is_empty() {
+                            "No library errors.".to_string()
+                        } else {
+                            out.trim_end().to_string()
+                        }
+                    }))
+                    .unwrap_or_else(|| "No library errors.".to_string());
+                return Ok(Value::String(result));
+            }
+
             // ── library_reload — reload module(s) from disk ──
             "library_reload" => {
                 let name = match args.first() {
@@ -3524,5 +3556,61 @@ mod tests {
         assert!(result.is_ok(), "should succeed with empty name: {result:?}");
         let msg = unwrap_string(result.unwrap());
         assert!(msg.contains("Reloaded"), "should report reloaded: {msg}");
+    }
+
+    // ── library_errors ──
+
+    #[test]
+    fn library_errors_no_errors() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = unwrap_string(handle.execute_await("library_errors", &[]).unwrap());
+        assert_eq!(result, "No library errors.");
+    }
+
+    #[test]
+    fn library_errors_with_load_errors() {
+        let (handle, rt) = setup_roadmap_runtime();
+        // Add some library load errors to the runtime state
+        if let Ok(mut state) = rt.write() {
+            state.library_load_errors = vec![
+                ("BadModule".to_string(), "parse error on line 5".to_string()),
+                ("BrokenMod".to_string(), "no !module declaration found".to_string()),
+            ];
+        }
+        let result = unwrap_string(handle.execute_await("library_errors", &[]).unwrap());
+        assert!(result.contains("Load errors (2):"), "should show load error count: {result}");
+        assert!(result.contains("BadModule: parse error on line 5"), "should show first error: {result}");
+        assert!(result.contains("BrokenMod: no !module declaration found"), "should show second error: {result}");
+    }
+
+    #[test]
+    fn library_errors_with_general_errors() {
+        let (handle, rt) = setup_roadmap_runtime();
+        if let Ok(mut state) = rt.write() {
+            state.library_errors = vec![
+                "failed to persist module `Foo`: disk full".to_string(),
+            ];
+        }
+        let result = unwrap_string(handle.execute_await("library_errors", &[]).unwrap());
+        assert!(result.contains("Errors this session (1):"), "should show session error count: {result}");
+        assert!(result.contains("failed to persist module `Foo`: disk full"), "should show the error: {result}");
+    }
+
+    #[test]
+    fn library_errors_with_both_error_types() {
+        let (handle, rt) = setup_roadmap_runtime();
+        if let Ok(mut state) = rt.write() {
+            state.library_load_errors = vec![
+                ("FailedMod".to_string(), "syntax error".to_string()),
+            ];
+            state.library_errors = vec![
+                "could not read library dir".to_string(),
+            ];
+        }
+        let result = unwrap_string(handle.execute_await("library_errors", &[]).unwrap());
+        assert!(result.contains("Load errors (1):"), "should show load errors: {result}");
+        assert!(result.contains("FailedMod: syntax error"), "should show load error detail: {result}");
+        assert!(result.contains("Errors this session (1):"), "should show session errors: {result}");
+        assert!(result.contains("could not read library dir"), "should show session error detail: {result}");
     }
 }

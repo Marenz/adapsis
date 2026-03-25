@@ -38,6 +38,14 @@ pub struct RuntimeState {
     /// IO mocks mirror for builtin access during eval. Synced with SessionMeta.io_mocks.
     #[serde(skip)]
     pub io_mocks: Vec<IoMock>,
+    /// Library general errors mirror for builtin access during eval.
+    /// Synced from LibraryState.errors when tiers are synced.
+    #[serde(skip)]
+    pub library_errors: Vec<String>,
+    /// Library structured load errors mirror for builtin access during eval.
+    /// Each entry is (module_name, error_message). Synced from LibraryState.load_errors.
+    #[serde(skip)]
+    pub library_load_errors: Vec<(String, String)>,
 }
 
 /// Thread-safe handle to the runtime state.

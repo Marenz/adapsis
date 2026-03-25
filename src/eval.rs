@@ -897,6 +897,8 @@ fn fork_runtime_for_test(
         agent_mailbox: std::collections::HashMap::new(),
         pending_commands: Vec::new(),
         io_mocks: Vec::new(),
+        library_errors: Vec::new(),
+        library_load_errors: Vec::new(),
     };
     Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }

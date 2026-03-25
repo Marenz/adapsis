@@ -831,6 +831,16 @@ pub static IO_BUILTINS: &[Builtin] = &[
                Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    Builtin {
+        name: "library_errors",
+        aliases: &[],
+        short: "get library load/save errors: library_errors() -> String",
+        long: "Returns a formatted string of all library module load/save errors from the current session. \
+               Includes structured load errors (module name + error message) and general session errors. \
+               Returns \"No library errors.\" if no errors have occurred. \
+               Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).
@@ -1602,6 +1612,8 @@ mod tests {
             "query_routes",
             "query_tasks",
             "query_library",
+            "library_reload",
+            "library_errors",
         ] {
             assert!(
                 is_io_builtin(name),
@@ -1627,6 +1639,8 @@ mod tests {
             "query_routes",
             "query_tasks",
             "query_library",
+            "library_reload",
+            "library_errors",
         ] {
             let builtin = IO_BUILTINS.iter().find(|b| b.name == *name);
             assert!(
