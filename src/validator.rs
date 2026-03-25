@@ -1389,3 +1389,355 @@ pub fn program_summary(program: &ast::Program) -> String {
     out.push('\n');
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_effect
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_effect_all_valid() {
+        assert_eq!(convert_effect("io").unwrap(), ast::Effect::Io);
+        assert_eq!(convert_effect("mut").unwrap(), ast::Effect::Mut);
+        assert_eq!(convert_effect("fail").unwrap(), ast::Effect::Fail);
+        assert_eq!(convert_effect("async").unwrap(), ast::Effect::Async);
+        assert_eq!(convert_effect("rand").unwrap(), ast::Effect::Rand);
+        assert_eq!(convert_effect("yield").unwrap(), ast::Effect::Yield);
+        assert_eq!(convert_effect("parallel").unwrap(), ast::Effect::Parallel);
+        assert_eq!(convert_effect("unsafe").unwrap(), ast::Effect::Unsafe);
+    }
+
+    #[test]
+    fn convert_effect_case_insensitive() {
+        assert_eq!(convert_effect("IO").unwrap(), ast::Effect::Io);
+        assert_eq!(convert_effect("Async").unwrap(), ast::Effect::Async);
+    }
+
+    #[test]
+    fn convert_effect_invalid() {
+        assert!(convert_effect("invalid_effect").is_err());
+        assert!(convert_effect("").is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_binary_op
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_binary_op_arithmetic() {
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Add),
+            ast::BinaryOp::Add
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Sub),
+            ast::BinaryOp::Sub
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Mul),
+            ast::BinaryOp::Mul
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Div),
+            ast::BinaryOp::Div
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Mod),
+            ast::BinaryOp::Mod
+        );
+    }
+
+    #[test]
+    fn convert_binary_op_comparison() {
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Gt),
+            ast::BinaryOp::GreaterThan
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Lt),
+            ast::BinaryOp::LessThan
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Gte),
+            ast::BinaryOp::GreaterThanOrEqual
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Lte),
+            ast::BinaryOp::LessThanOrEqual
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Eq),
+            ast::BinaryOp::Equal
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Neq),
+            ast::BinaryOp::NotEqual
+        );
+    }
+
+    #[test]
+    fn convert_binary_op_logic() {
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::And),
+            ast::BinaryOp::And
+        );
+        assert_eq!(convert_binary_op(&parser::BinaryOp::Or), ast::BinaryOp::Or);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_unary_op
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_unary_op_all() {
+        assert_eq!(convert_unary_op(&parser::UnaryOp::Not), ast::UnaryOp::Not);
+        assert_eq!(convert_unary_op(&parser::UnaryOp::Neg), ast::UnaryOp::Neg);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_type
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_type_primitives() {
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Int".into())).unwrap(),
+            ast::Type::Int
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Float".into())).unwrap(),
+            ast::Type::Float
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Bool".into())).unwrap(),
+            ast::Type::Bool
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("String".into())).unwrap(),
+            ast::Type::String
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Byte".into())).unwrap(),
+            ast::Type::Byte
+        );
+    }
+
+    #[test]
+    fn convert_type_user_struct() {
+        let ty = convert_type(&parser::TypeExpr::Named("User".into())).unwrap();
+        assert_eq!(ty, ast::Type::Struct("User".to_string()));
+    }
+
+    #[test]
+    fn convert_type_list() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![parser::TypeExpr::Named("Int".into())],
+        })
+        .unwrap();
+        assert_eq!(ty, ast::Type::List(Box::new(ast::Type::Int)));
+    }
+
+    #[test]
+    fn convert_type_map() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![
+                parser::TypeExpr::Named("String".into()),
+                parser::TypeExpr::Named("Int".into()),
+            ],
+        })
+        .unwrap();
+        assert_eq!(
+            ty,
+            ast::Type::Map(Box::new(ast::Type::String), Box::new(ast::Type::Int))
+        );
+    }
+
+    #[test]
+    fn convert_type_option() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "Option".into(),
+            args: vec![parser::TypeExpr::Named("Int".into())],
+        })
+        .unwrap();
+        assert_eq!(ty, ast::Type::Option(Box::new(ast::Type::Int)));
+    }
+
+    #[test]
+    fn convert_type_result() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "Result".into(),
+            args: vec![parser::TypeExpr::Named("String".into())],
+        })
+        .unwrap();
+        assert_eq!(ty, ast::Type::Result(Box::new(ast::Type::String)));
+    }
+
+    #[test]
+    fn convert_type_nested_generic() {
+        // List<List<Int>>
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![parser::TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![parser::TypeExpr::Named("Int".into())],
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            ty,
+            ast::Type::List(Box::new(ast::Type::List(Box::new(ast::Type::Int))))
+        );
+    }
+
+    #[test]
+    fn convert_type_wrong_arity() {
+        // List with 0 args
+        assert!(convert_type(&parser::TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![],
+        })
+        .is_err());
+
+        // Map with 1 arg
+        assert!(convert_type(&parser::TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![parser::TypeExpr::Named("Int".into())],
+        })
+        .is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // is_builtin_name
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn is_builtin_name_true() {
+        assert!(is_builtin_name("concat"));
+        assert!(is_builtin_name("len"));
+        assert!(is_builtin_name("http_get"));
+    }
+
+    #[test]
+    fn is_builtin_name_false() {
+        assert!(!is_builtin_name("my_custom_fn"));
+        assert!(!is_builtin_name(""));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // apply_and_validate with types and functions
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn apply_struct_type() {
+        let mut program = ast::Program::default();
+        let ops = parser::parse("+type User = id:Int, name:String").unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(
+            result.is_ok(),
+            "adding struct type should succeed: {:?}",
+            result
+        );
+        assert_eq!(program.types.len(), 1);
+        assert_eq!(program.types[0].name(), "User");
+    }
+
+    #[test]
+    fn apply_union_type() {
+        let mut program = ast::Program::default();
+        let ops = parser::parse("+type Color = Red | Green | Blue").unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok());
+        assert_eq!(program.types.len(), 1);
+        assert_eq!(program.types[0].name(), "Color");
+    }
+
+    #[test]
+    fn apply_function() {
+        let mut program = ast::Program::default();
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(
+            result.is_ok(),
+            "adding function should succeed: {:?}",
+            result
+        );
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].name, "add");
+        assert_eq!(program.functions[0].params.len(), 2);
+    }
+
+    #[test]
+    fn apply_function_with_effects() {
+        let mut program = ast::Program::default();
+        let source = "\
++fn fetch (url:String)->String [io,async]
+  +return url
+";
+        let ops = parser::parse(source).unwrap();
+        apply_and_validate(&mut program, &ops[0]).unwrap();
+        assert_eq!(program.functions[0].effects.len(), 2);
+        assert!(program.functions[0].effects.contains(&ast::Effect::Io));
+        assert!(program.functions[0].effects.contains(&ast::Effect::Async));
+    }
+
+    #[test]
+    fn apply_duplicate_function_updates() {
+        let mut program = ast::Program::default();
+        let source1 = "+fn greet ()->String\n  +return \"hello\"\n";
+        let source2 = "+fn greet ()->String\n  +return \"hi\"\n";
+        let ops1 = parser::parse(source1).unwrap();
+        let ops2 = parser::parse(source2).unwrap();
+        apply_and_validate(&mut program, &ops1[0]).unwrap();
+        assert_eq!(program.functions.len(), 1);
+        // Re-adding same function name — validator either replaces or errors
+        let result = apply_and_validate(&mut program, &ops2[0]);
+        // Either it succeeds (replacing) or errors with "duplicate" — both are valid
+        if result.is_ok() {
+            assert_eq!(program.functions.len(), 1);
+        } else {
+            let err = format!("{}", result.unwrap_err());
+            assert!(
+                err.contains("duplicate"),
+                "expected duplicate error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_module_with_function() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Math
++fn add (a:Int, b:Int)->Int
+  +return a + b
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "adding module should succeed: {:?}", result);
+        assert_eq!(program.modules.len(), 1);
+        assert_eq!(program.modules[0].name, "Math");
+        assert_eq!(program.modules[0].functions.len(), 1);
+    }
+
+    #[test]
+    fn apply_remove_function() {
+        let mut program = ast::Program::default();
+        let fn_ops = parser::parse("+fn greet ()->String\n  +return \"hi\"\n").unwrap();
+        apply_and_validate(&mut program, &fn_ops[0]).unwrap();
+        assert_eq!(program.functions.len(), 1);
+
+        let rm_ops = parser::parse("!remove greet").unwrap();
+        let result = apply_and_validate(&mut program, &rm_ops[0]);
+        assert!(result.is_ok());
+        assert_eq!(program.functions.len(), 0);
+    }
+}
