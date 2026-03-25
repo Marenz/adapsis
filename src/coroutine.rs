@@ -762,7 +762,7 @@ impl CoroutineHandle {
             }
             // ── Query operations — access program AST via thread-local ──
             // These reuse the same logic as the ? query commands in typeck.rs.
-            "query_symbols" => {
+            "query_symbols" | "symbols_list" => {
                 let program = crate::eval::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_symbols: program not available (no async context)"))?;
                 let table = crate::typeck::build_symbol_table(&program);
@@ -781,7 +781,7 @@ impl CoroutineHandle {
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
                 return Ok(Value::String(result));
             }
-            "query_source" => {
+            "query_source" | "source_get" => {
                 let name = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => bail!("query_source expects (name:String)"),
@@ -793,7 +793,7 @@ impl CoroutineHandle {
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
                 return Ok(Value::String(result));
             }
-            "query_callers" => {
+            "query_callers" | "callers_get" => {
                 let name = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => bail!("query_callers expects (name:String)"),
@@ -805,7 +805,7 @@ impl CoroutineHandle {
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
                 return Ok(Value::String(result));
             }
-            "query_callees" => {
+            "query_callees" | "callees_get" => {
                 let name = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => bail!("query_callees expects (name:String)"),
@@ -829,7 +829,7 @@ impl CoroutineHandle {
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
                 return Ok(Value::String(result));
             }
-            "query_deps_all" => {
+            "query_deps_all" | "deps_get" => {
                 let name = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => bail!("query_deps_all expects (name:String)"),
@@ -841,7 +841,7 @@ impl CoroutineHandle {
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
                 return Ok(Value::String(result));
             }
-            "query_routes" => {
+            "query_routes" | "routes_list" => {
                 let program = crate::eval::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_routes: program not available"))?;
                 // Get HTTP routes from SharedRuntime

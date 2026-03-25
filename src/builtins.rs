@@ -538,7 +538,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
     // Program introspection queries — callable versions of ? query commands
     Builtin {
         name: "query_symbols",
-        aliases: &[],
+        aliases: &["symbols_list"],
         short: "list all types and functions (same as ?symbols)",
         long: "Returns a formatted String listing all types and functions in the current program. Same output as `?symbols`. Takes no arguments. Requires `+await`.",
         category: BuiltinCategory::Io,
@@ -552,21 +552,21 @@ pub static IO_BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "query_source",
-        aliases: &[],
+        aliases: &["source_get"],
         short: "get reconstructed source code (same as ?source <fn>)",
         long: "Returns the reconstructed Adapsis source code for a function or type as a String. Same output as `?source <fn>`. Takes `(name:String)`. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "query_callers",
-        aliases: &[],
+        aliases: &["callers_get"],
         short: "who calls this function (same as ?callers <fn>)",
         long: "Returns which functions directly call the given function as a String. Same output as `?callers <fn>`. Takes `(name:String)`. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "query_callees",
-        aliases: &[],
+        aliases: &["callees_get"],
         short: "what this function calls (same as ?callees <fn>)",
         long: "Returns the direct functions called by the given function as a String. Same output as `?callees <fn>`. Takes `(name:String)`. Requires `+await`.",
         category: BuiltinCategory::Io,
@@ -580,14 +580,14 @@ pub static IO_BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "query_deps_all",
-        aliases: &[],
+        aliases: &["deps_get"],
         short: "full transitive dependency tree (same as ?deps-all <fn>)",
         long: "Returns the full transitive dependency tree for a function as a String. Same output as `?deps-all <fn>`. Takes `(name:String)`. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {
         name: "query_routes",
-        aliases: &[],
+        aliases: &["routes_list"],
         short: "list registered HTTP routes (same as ?routes)",
         long: "Returns registered HTTP routes as a formatted String. Same output as `?routes`. Takes no arguments. Requires `+await`.",
         category: BuiltinCategory::Io,
@@ -922,7 +922,12 @@ pub fn format_for_prompt() -> String {
     }
     out.push_str("\n### IO Functions (require [io,async] effect, use +await)\n");
     for b in IO_BUILTINS {
-        out.push_str(&format!("  {} — {}\n", b.name, b.short));
+        let aliases = if b.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" (aliases: {})", b.aliases.join(", "))
+        };
+        out.push_str(&format!("  {}{} — {}\n", b.name, aliases, b.short));
         if !b.long.is_empty() {
             for line in b.long.lines() {
                 out.push_str(&format!("    {}\n", line));
@@ -1468,6 +1473,86 @@ mod tests {
         assert!(
             prompt.contains("query_tasks"),
             "prompt should mention query_tasks"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Introspection alias registration
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn introspection_aliases_resolve_as_io_builtins() {
+        for alias in &[
+            "symbols_list",
+            "source_get",
+            "callers_get",
+            "callees_get",
+            "deps_get",
+            "routes_list",
+        ] {
+            assert!(
+                is_io_builtin(alias),
+                "introspection alias '{alias}' should resolve as IO builtin"
+            );
+            assert!(
+                is_builtin(alias),
+                "introspection alias '{alias}' should resolve as builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn introspection_aliases_included_in_all_builtin_names() {
+        let names = all_builtin_names();
+        for alias in &[
+            "symbols_list",
+            "source_get",
+            "callers_get",
+            "callees_get",
+            "deps_get",
+            "routes_list",
+        ] {
+            assert!(
+                names.contains(alias),
+                "all_builtin_names should include introspection alias '{alias}'"
+            );
+        }
+    }
+
+    #[test]
+    fn introspection_alias_not_registered_as_unknown() {
+        // Aliases should NOT be found as primary IO_BUILTINS names —
+        // they are aliases on existing entries
+        for alias in &[
+            "symbols_list",
+            "source_get",
+            "callers_get",
+            "callees_get",
+            "deps_get",
+            "routes_list",
+        ] {
+            let is_primary = IO_BUILTINS.iter().any(|b| b.name == *alias);
+            assert!(
+                !is_primary,
+                "'{alias}' should be an alias, not a primary name"
+            );
+        }
+    }
+
+    #[test]
+    fn format_for_prompt_shows_introspection_aliases() {
+        let prompt = format_for_prompt();
+        assert!(
+            prompt.contains("symbols_list"),
+            "prompt should show symbols_list alias"
+        );
+        assert!(
+            prompt.contains("source_get"),
+            "prompt should show source_get alias"
+        );
+        assert!(
+            prompt.contains("routes_list"),
+            "prompt should show routes_list alias"
         );
     }
 }

@@ -580,14 +580,14 @@ Example:
 You can query the program's own structure from within Adapsis code using these async IO operations.
 They return the same output as the corresponding `?` query commands.
 
-- `+await result:String = query_symbols()` — list all types and functions (same as `?symbols`)
+- `+await result:String = query_symbols()` — list all types and functions (same as `?symbols`). Alias: `symbols_list()`
 - `+await result:String = query_symbols_detail("Module.func")` — details for one symbol (same as `?symbols <name>`)
-- `+await result:String = query_source("Module.func")` — reconstructed source code (same as `?source <fn>`)
-- `+await result:String = query_callers("func")` — who calls this function (same as `?callers <fn>`)
-- `+await result:String = query_callees("func")` — what this function calls (same as `?callees <fn>`)
+- `+await result:String = query_source("Module.func")` — reconstructed source code (same as `?source <fn>`). Alias: `source_get(name)`
+- `+await result:String = query_callers("func")` — who calls this function (same as `?callers <fn>`). Alias: `callers_get(name)`
+- `+await result:String = query_callees("func")` — what this function calls (same as `?callees <fn>`). Alias: `callees_get(name)`
 - `+await result:String = query_deps("func")` — direct dependencies (same as `?deps <fn>`)
-- `+await result:String = query_deps_all("func")` — full transitive dependency tree (same as `?deps-all <fn>`)
-- `+await result:String = query_routes()` — registered HTTP routes (same as `?routes`)
+- `+await result:String = query_deps_all("func")` — full transitive dependency tree (same as `?deps-all <fn>`). Alias: `deps_get(name)`
+- `+await result:String = query_routes()` — registered HTTP routes (same as `?routes`). Alias: `routes_list()`
 - `+await result:String = query_tasks()` — spawned async tasks (same as `?tasks`)
 - `+await result:String = query_library()` — library status (same as `?library`)
 
