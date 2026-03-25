@@ -764,6 +764,28 @@ pub fn eval_test_case_with_mocks(
     Ok(msg)
 }
 
+/// Create a forked RuntimeState for test isolation.
+/// Populates shared_vars from program defaults and includes the given HTTP routes.
+/// Returns a SharedRuntime (Arc<RwLock<RuntimeState>>) suitable for set_shared_runtime.
+fn fork_runtime_for_test(
+    program: &ast::Program,
+    http_routes: &[ast::HttpRoute],
+) -> Option<crate::session::SharedRuntime> {
+    let mut shared_vars = HashMap::new();
+    for module in &program.modules {
+        for sv in &module.shared_vars {
+            let key = format!("{}.{}", module.name, sv.name);
+            let value = eval_expr_standalone(program, &sv.default).unwrap_or(Value::Int(0));
+            shared_vars.insert(key, value);
+        }
+    }
+    let forked = crate::session::RuntimeState {
+        http_routes: http_routes.to_vec(),
+        shared_vars,
+    };
+    Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
+}
+
 /// Run a test case for an async function by spinning up a temporary coroutine
 /// runtime. Mocks are checked first; unmatched IO operations execute for real.
 fn eval_test_case_with_runtime(
@@ -786,14 +808,15 @@ fn eval_test_case_with_runtime(
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
     let routes = http_routes.to_vec();
-    let captured_runtime = SHARED_RUNTIME.with(|rt| rt.borrow().clone());
+    let forked_runtime = fork_runtime_for_test(&program, http_routes);
 
     // Spin up a temporary tokio runtime + coroutine IO loop on a dedicated
     // thread.  This works whether or not the caller is already inside a tokio
     // runtime (nested block_on is not allowed, so we always use a fresh thread).
     std::thread::spawn(move || {
-        // Propagate SharedRuntime to the new thread
-        set_shared_runtime(captured_runtime);
+        // Use a forked RuntimeState for test isolation — shared vars are fresh
+        // copies from program defaults, not the live runtime.
+        set_shared_runtime(forked_runtime);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -894,11 +917,12 @@ pub async fn eval_test_case_async(
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
     let routes = http_routes.to_vec();
-    let captured_rt = SHARED_RUNTIME.with(|rt| rt.borrow().clone());
+    let forked_rt = fork_runtime_for_test(&program, http_routes);
 
     let eval_result = tokio::task::spawn_blocking(move || {
-        // Propagate SharedRuntime to the blocking thread
-        set_shared_runtime(captured_rt);
+        // Use a forked RuntimeState for test isolation — shared vars are fresh
+        // copies from program defaults, not the live runtime.
+        set_shared_runtime(forked_rt);
 
         let func = program
             .get_function(&fn_name)
