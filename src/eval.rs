@@ -21,7 +21,6 @@ pub fn new_jit_cache() -> JitCache {
 #[allow(dead_code)]
 pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
-    StateHandle(std::sync::Arc<std::sync::Mutex<Value>>),
     TaskHandle(crate::coroutine::TaskId),
     Union {
         variant: String,
@@ -84,10 +83,6 @@ impl fmt::Display for Value {
             }
             Value::CoroutineHandle(_) => write!(f, "<coroutine>"),
             Value::TaskHandle(id) => write!(f, "<task:{id}>"),
-            Value::StateHandle(s) => {
-                let val = s.lock().unwrap();
-                write!(f, "<state:{val}>")
-            }
         }
     }
 }
@@ -1841,41 +1836,6 @@ fn eval_builtin_or_user(
                     Ok(Value::String(parts.join(delim)))
                 }
                 _ => bail!("join expects (List, String)"),
-            }
-        }
-        // Shared state operations
-        "state" => {
-            // state(initial_value) → StateHandle
-            if args.len() != 1 {
-                bail!("state(initial_value) expects 1 argument");
-            }
-            Ok(Value::StateHandle(std::sync::Arc::new(
-                std::sync::Mutex::new(args.into_iter().next().unwrap()),
-            )))
-        }
-        "get_state" => {
-            if args.len() != 1 {
-                bail!("get_state(handle) expects 1 argument");
-            }
-            match &args[0] {
-                Value::StateHandle(s) => {
-                    let val = s.lock().unwrap().clone();
-                    Ok(val)
-                }
-                _ => bail!("get_state expects a StateHandle"),
-            }
-        }
-        "set_state" => {
-            if args.len() != 2 {
-                bail!("set_state(handle, value) expects 2 arguments");
-            }
-            match &args[0] {
-                Value::StateHandle(s) => {
-                    let mut guard = s.lock().unwrap();
-                    *guard = args[1].clone();
-                    Ok(Value::Int(0))
-                }
-                _ => bail!("set_state expects (StateHandle, value)"),
             }
         }
         "abs" => {
