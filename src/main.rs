@@ -16,6 +16,7 @@ mod session;
 mod telegram;
 mod typeck;
 mod validator;
+mod vm;
 
 use anyhow::Result;
 use clap::Parser;
