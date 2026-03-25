@@ -19,23 +19,32 @@ pub fn new_jit_cache() -> JitCache {
 }
 
 /// A runtime value during evaluation.
+///
+/// **Performance notes**: String-like fields use `Arc<str>` instead of `String`
+/// so that cloning a `Value` is a cheap reference-count bump rather than a heap
+/// allocation + memcpy.  `List` uses `Arc<Vec<Value>>` and `Struct` uses
+/// `Arc<HashMap<Arc<str>, Value>>` for the same reason — compound values are
+/// read far more often than they are mutated.
+///
+/// `Arc` (rather than `Rc`) is required because `Value`s are sent across thread
+/// boundaries via `tokio::task::spawn_blocking` in the async evaluation paths.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
     TaskHandle(crate::coroutine::TaskId),
     Union {
-        variant: String,
+        variant: Arc<str>,
         payload: Vec<Value>,
     },
     Int(i64),
     Float(f64),
     Bool(bool),
-    String(String),
-    Struct(String, HashMap<String, Value>),
-    List(Vec<Value>),
+    String(Arc<str>),
+    Struct(Arc<str>, Arc<HashMap<Arc<str>, Value>>),
+    List(Arc<Vec<Value>>),
     Ok(Box<Value>),
-    Err(String),
+    Err(Arc<str>),
     None,
 }
 
@@ -123,7 +132,7 @@ impl Value {
                         .all(|(k, v)| f2.get(k).is_some_and(|v2| v.matches(v2)))
             }
             (Value::List(a), Value::List(b)) => {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.matches(y))
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.matches(y))
             }
             (
                 Value::Union {
@@ -539,7 +548,7 @@ fn input_to_vm_args(input: &parser::Expr, func: &ast::FunctionDecl) -> Result<Ve
         Value::Struct(_, ref fields) => {
             let mut args = Vec::new();
             for param in &func.params {
-                if let Some(val) = fields.get(&param.name) {
+                if let Some(val) = fields.get(param.name.as_str()) {
                     args.push(val.clone());
                 } else {
                     bail!("missing argument for parameter `{}`", param.name);
@@ -722,19 +731,22 @@ pub fn bind_input_to_params(
             // Single struct-typed param — pass the whole struct
             env.set(&func.params[0].name, input.clone());
             // Also expose fields directly for field access (e.g., input.name)
-            for (k, v) in fields {
-                env.set(k, v.clone());
+            for (k, v) in fields.iter() {
+                env.set(k.as_ref(), v.clone());
             }
         }
         (Value::Struct(_, fields), _) => {
             // Multi-param function with struct input (key=value pairs)
             // First, check if all fields directly match param names
-            let all_match = func.params.iter().all(|p| fields.contains_key(&p.name));
+            let all_match = func
+                .params
+                .iter()
+                .all(|p| fields.contains_key(p.name.as_str()));
 
             if all_match {
                 // Direct match: a=3 b=4 for (a:Int, b:Int)
                 for param in &func.params {
-                    if let Some(val) = fields.get(&param.name) {
+                    if let Some(val) = fields.get(param.name.as_str()) {
                         env.set(&param.name, val.clone());
                     }
                 }
@@ -743,7 +755,7 @@ pub fn bind_input_to_params(
                 let is_positional = fields.keys().any(|k| k.starts_with('_') && k[1..].parse::<usize>().is_ok());
                 if is_positional && fields.len() == func.params.len() {
                     for (i, param) in func.params.iter().enumerate() {
-                        if let Some(val) = fields.get(&format!("_{i}")) {
+                        if let Some(val) = fields.get(format!("_{i}").as_str()) {
                             env.set(&param.name, val.clone());
                         }
                     }
@@ -755,7 +767,7 @@ pub fn bind_input_to_params(
 
                     for param in &func.params {
                         // Check if this param matches a field directly
-                        if let Some(val) = fields.get(&param.name) {
+                        if let Some(val) = fields.get(param.name.as_str()) {
                             env.set(&param.name, val.clone());
                             used_fields.insert(&param.name);
                             continue;
@@ -767,8 +779,8 @@ pub fn bind_input_to_params(
                                 // Collect input fields that match this struct's fields
                                 let mut struct_fields = HashMap::new();
                                 for (tf_name, _) in &type_fields {
-                                    if let Some(val) = fields.get(tf_name) {
-                                        struct_fields.insert(tf_name.clone(), val.clone());
+                                    if let Some(val) = fields.get(tf_name.as_str()) {
+                                        struct_fields.insert(Arc::from(tf_name.as_str()), val.clone());
                                         // tf_name borrows from type_fields which is
                                         // block-scoped, so use as_str() for the
                                         // longer-lived HashSet via param.name above;
@@ -778,7 +790,10 @@ pub fn bind_input_to_params(
                                     }
                                 }
                                 if !struct_fields.is_empty() {
-                                    let struct_val = Value::Struct(type_name.clone(), struct_fields);
+                                    let struct_val = Value::Struct(
+                                        Arc::from(type_name.as_str()),
+                                        Arc::new(struct_fields),
+                                    );
                                     env.set(&param.name, struct_val);
                                 }
                             }
@@ -838,7 +853,7 @@ fn match_single_pattern(
                 ast::Literal::Int(n) => Value::Int(*n),
                 ast::Literal::Float(f) => Value::Float(*f),
                 ast::Literal::Bool(b) => Value::Bool(*b),
-                ast::Literal::String(s) => Value::String(s.clone()),
+                ast::Literal::String(s) => Value::String(Arc::from(s.as_str())),
             };
             Ok(value.matches(&expected))
         }
@@ -851,7 +866,7 @@ fn match_single_pattern(
                 payload,
             } = value
             {
-                if v == variant {
+                if v.as_ref() == variant.as_str() {
                     match_nested_patterns(program, sub_patterns, payload, env)
                 } else {
                     Ok(false)
@@ -1180,7 +1195,7 @@ fn check_test_result(
         Err(err) => {
             // Check failures produce Err with the label
             let err_str = err.to_string();
-            Value::Err(err_str)
+            Value::Err(err_str.into())
         }
     };
 
@@ -1190,9 +1205,9 @@ fn check_test_result(
         // content when the value is a String or Ok(String), avoiding the
         // Display quotes that wrap String values.
         let raw_text = match &actual {
-            Value::String(s) => s.clone(),
+                    Value::String(s) => s.to_string(),
             Value::Ok(inner) => match inner.as_ref() {
-                Value::String(s) => s.clone(),
+                Value::String(s) => s.to_string(),
                 other => format!("{other}"),
             },
             other => format!("{other}"),
@@ -1366,7 +1381,7 @@ fn eval_function_body(
                         }
                         Err(e) => {
                             if let Some(binding) = binding {
-                                env.set(&binding.name, Value::Err(e.to_string()));
+                                env.set(&binding.name, Value::Err(e.to_string().into()));
                             }
                         }
                     }
@@ -1422,7 +1437,7 @@ fn eval_function_body(
                 let iter_val = eval_ast_expr(program, iterator, env)?;
                 match iter_val {
                     Value::List(items) => {
-                        for item in items {
+                        for item in items.iter().cloned() {
                             env.push_scope();
                             env.set(&binding.name, item);
                             let result = eval_function_body(program, each_body, env);
@@ -1451,7 +1466,7 @@ fn eval_function_body(
                     Value::Union { variant, payload } => {
                         let mut matched = false;
                         for arm in arms {
-                            if arm.variant == *variant {
+                            if arm.variant == variant.as_ref() {
                                 env.push_scope();
                                 // Exact variant match — bind payload values
                                 for (i, binding) in arm.bindings.iter().enumerate() {
@@ -1498,7 +1513,10 @@ fn eval_function_body(
                     }
                     // Treat Ok/Err as union variants for pattern matching
                     Value::Ok(inner) => {
-                        let as_union = Value::Union { variant: "Ok".to_string(), payload: vec![inner.as_ref().clone()] };
+                        let as_union = Value::Union {
+                            variant: Arc::from("Ok"),
+                            payload: vec![inner.as_ref().clone()],
+                        };
                         let mut matched = false;
                         for arm in arms {
                             if arm.variant == "Ok" {
@@ -1528,7 +1546,10 @@ fn eval_function_body(
                         if !matched { bail!("+match: no arm matched Ok"); }
                     }
                     Value::Err(msg) => {
-                        let as_union = Value::Union { variant: "Err".to_string(), payload: vec![Value::String(msg.clone())] };
+                        let as_union = Value::Union {
+                            variant: Arc::from("Err"),
+                            payload: vec![Value::String(msg.clone())],
+                        };
                         let mut matched = false;
                         for arm in arms {
                             if arm.variant == "Err" {
@@ -1805,7 +1826,7 @@ pub fn eval_builtin_or_user(
     // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
     if is_union_variant(program, callee) {
         return Ok(Value::Union {
-            variant: callee.to_string(),
+            variant: Arc::from(callee),
             payload: args,
         });
     }
@@ -1823,10 +1844,10 @@ pub fn eval_builtin_or_user(
             if args.len() == 1 {
                 match &args[0] {
                     Value::String(s) => Ok(Value::Err(s.clone())),
-                    other => Ok(Value::Err(format!("{other}"))),
+                    other => Ok(Value::Err(format!("{other}").into())),
                 }
             } else {
-                Ok(Value::Err("unknown".to_string()))
+                Ok(Value::Err("unknown".into()))
             }
         }
         "Some" => {
@@ -1856,7 +1877,7 @@ pub fn eval_builtin_or_user(
                 match arg {
                     Value::String(s) => {
                         total_len += s.len();
-                        parts.push(std::borrow::Cow::Borrowed(s.as_str()));
+                        parts.push(std::borrow::Cow::Borrowed(s.as_ref()));
                     }
                     other => {
                         let formatted = format!("{other}");
@@ -1869,13 +1890,13 @@ pub fn eval_builtin_or_user(
             for part in &parts {
                 result.push_str(part);
             }
-            Ok(Value::String(result))
+            Ok(Value::String(result.into()))
         }
         "to_string" | "str" => {
             if args.len() != 1 {
                 bail!("to_string() expects 1 argument");
             }
-            Ok(Value::String(format!("{}", args[0])))
+            Ok(Value::String(format!("{}", args[0]).into()))
         }
         "char_at" => {
             if args.len() != 2 {
@@ -1885,7 +1906,7 @@ pub fn eval_builtin_or_user(
                 (Value::String(s), Value::Int(i)) => {
                     let i = *i as usize;
                     if i < s.len() {
-                        Ok(Value::String(s[i..i + 1].to_string()))
+                        Ok(Value::String(s[i..i + 1].into()))
                     } else {
                         bail!("char_at: index {i} out of bounds (len {})", s.len())
                     }
@@ -1902,7 +1923,7 @@ pub fn eval_builtin_or_user(
                     let start = *start as usize;
                     let end = (*end as usize).min(s.len());
                     if start <= end && start <= s.len() {
-                        Ok(Value::String(s[start..end].to_string()))
+                        Ok(Value::String(s[start..end].into()))
                     } else {
                         bail!(
                             "substring: invalid range {}..{} (len {})",
@@ -1921,7 +1942,7 @@ pub fn eval_builtin_or_user(
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(prefix)) => {
-                    Ok(Value::Bool(s.starts_with(prefix.as_str())))
+                    Ok(Value::Bool(s.starts_with(prefix.as_ref())))
                 }
                 _ => bail!("starts_with expects (String, String)"),
             }
@@ -1932,7 +1953,7 @@ pub fn eval_builtin_or_user(
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(suffix)) => {
-                    Ok(Value::Bool(s.ends_with(suffix.as_str())))
+                    Ok(Value::Bool(s.ends_with(suffix.as_ref())))
                 }
                 _ => bail!("ends_with expects (String, String)"),
             }
@@ -1942,7 +1963,7 @@ pub fn eval_builtin_or_user(
                 bail!("contains(s, substr) expects 2 arguments");
             }
             match (&args[0], &args[1]) {
-                (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_str()))),
+                (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_ref()))),
                 _ => bail!("contains expects (String, String)"),
             }
         }
@@ -1966,7 +1987,7 @@ pub fn eval_builtin_or_user(
                 (Value::String(pattern), Value::String(replacement), Value::String(text)) => {
                     match regex::Regex::new(pattern) {
                         Ok(re) => Ok(Value::String(
-                            re.replace_all(text, replacement.as_str()).into_owned(),
+                            re.replace_all(text, replacement.as_ref()).into_owned().into(),
                         )),
                         Err(e) => bail!("regex_replace: invalid pattern '{}': {}", pattern, e),
                     }
@@ -1979,7 +2000,7 @@ pub fn eval_builtin_or_user(
                 bail!("index_of(s, substr) expects 2 arguments");
             }
             match (&args[0], &args[1]) {
-                (Value::String(s), Value::String(sub)) => match s.find(sub.as_str()) {
+                (Value::String(s), Value::String(sub)) => match s.find(sub.as_ref()) {
                     Some(i) => Ok(Value::Int(i as i64)),
                     None => Ok(Value::Int(-1)),
                 },
@@ -1993,10 +2014,10 @@ pub fn eval_builtin_or_user(
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(delim)) => {
                     let parts: Vec<Value> = s
-                        .split(delim.as_str())
-                        .map(|p| Value::String(p.to_string()))
+                        .split(delim.as_ref())
+                        .map(|p| Value::String(p.into()))
                         .collect();
-                    Ok(Value::List(parts))
+                    Ok(Value::List(Arc::new(parts)))
                 }
                 _ => bail!("split expects (String, String)"),
             }
@@ -2006,7 +2027,7 @@ pub fn eval_builtin_or_user(
                 bail!("trim(s) expects 1 argument");
             }
             match &args[0] {
-                Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                Value::String(s) => Ok(Value::String(s.trim().into())),
                 _ => bail!("trim expects String"),
             }
         }
@@ -2035,20 +2056,20 @@ pub fn eval_builtin_or_user(
                     }
                     // Return the value as a string, stripping quotes from string values
                     match current {
-                        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+                        serde_json::Value::String(s) => Ok(Value::String(s.clone().into())),
                         serde_json::Value::Number(n) => {
                             if let Some(i) = n.as_i64() {
                                 Ok(Value::Int(i))
                             } else if let Some(f) = n.as_f64() {
                                 Ok(Value::Float(f))
                             } else {
-                                Ok(Value::String(n.to_string()))
+                                Ok(Value::String(n.to_string().into()))
                             }
                         }
                         serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
-                        serde_json::Value::Null => Ok(Value::String("null".to_string())),
+                        serde_json::Value::Null => Ok(Value::String("null".into())),
                         // Arrays and objects are returned as JSON strings
-                        other => Ok(Value::String(other.to_string())),
+                        other => Ok(Value::String(other.to_string().into())),
                     }
                 }
                 _ => bail!("json_get expects (String, String)"),
@@ -2087,7 +2108,7 @@ pub fn eval_builtin_or_user(
                             c => escaped.push(c),
                         }
                     }
-                    Ok(Value::String(escaped))
+                    Ok(Value::String(escaped.into()))
                 }
                 _ => bail!("json_escape expects String"),
             }
@@ -2100,7 +2121,7 @@ pub fn eval_builtin_or_user(
                 Value::String(s) => {
                     use base64::Engine;
                     let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
-                    Ok(Value::String(encoded))
+                    Ok(Value::String(encoded.into()))
                 }
                 _ => bail!("base64_encode expects String"),
             }
@@ -2108,7 +2129,7 @@ pub fn eval_builtin_or_user(
         // List operations
         "list" => {
             // list() creates empty list, list(a, b, c) creates list with items
-            Ok(Value::List(args))
+            Ok(Value::List(Arc::new(args)))
         }
         "push" => {
             if args.len() != 2 {
@@ -2119,9 +2140,10 @@ pub fn eval_builtin_or_user(
             let list_val = drain.next().unwrap();
             let item = drain.next().unwrap();
             match list_val {
-                Value::List(mut items) => {
-                    items.push(item);
-                    Ok(Value::List(items))
+                Value::List(items) => {
+                    let mut vec = Arc::try_unwrap(items).unwrap_or_else(|arc| (*arc).clone());
+                    vec.push(item);
+                    Ok(Value::List(Arc::new(vec)))
                 }
                 _ => bail!("push expects (List, value)"),
             }
@@ -2149,7 +2171,7 @@ pub fn eval_builtin_or_user(
             match (&args[0], &args[1]) {
                 (Value::List(items), Value::String(delim)) => {
                     let parts: Vec<String> = items.iter().map(|v| format!("{v}")).collect();
-                    Ok(Value::String(parts.join(delim)))
+                    Ok(Value::String(parts.join(delim).into()))
                 }
                 _ => bail!("join expects (List, String)"),
             }
@@ -2317,7 +2339,7 @@ pub fn eval_builtin_or_user(
                 bail!("to_hex(n) expects 1 argument");
             }
             match &args[0] {
-                Value::Int(n) => Ok(Value::String(format!("{:08x}", *n as u32))),
+                Value::Int(n) => Ok(Value::String(format!("{:08x}", *n as u32).into())),
                 _ => bail!("to_hex expects Int"),
             }
         }
@@ -2341,7 +2363,7 @@ pub fn eval_builtin_or_user(
                 bail!("from_char_code(n) expects 1 argument");
             }
             match &args[0] {
-                Value::Int(n) => Ok(Value::String(String::from(*n as u8 as char))),
+                Value::Int(n) => Ok(Value::String(Arc::from(String::from(*n as u8 as char)))),
                 _ => bail!("from_char_code expects Int"),
             }
         }
@@ -2395,7 +2417,7 @@ pub fn eval_builtin_or_user(
                 // Check if it's a union variant constructor
                 if is_union_variant(program, callee) {
                     return Ok(Value::Union {
-                        variant: callee.to_string(),
+                        variant: Arc::from(callee),
                         payload: args,
                     });
                 }
@@ -2426,7 +2448,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             ast::Literal::Int(v) => Ok(Value::Int(*v)),
             ast::Literal::Float(v) => Ok(Value::Float(*v)),
             ast::Literal::Bool(v) => Ok(Value::Bool(*v)),
-            ast::Literal::String(v) => Ok(Value::String(v.clone())),
+            ast::Literal::String(v) => Ok(Value::String(Arc::from(v.as_str()))),
         },
         ast::Expr::Identifier(name) => {
             match name.as_str() {
@@ -2439,7 +2461,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                     } else if is_union_variant(program, name) {
                         // No-payload union variant
                         Ok(Value::Union {
-                            variant: name.clone(),
+                            variant: Arc::from(name.as_str()),
                             payload: vec![],
                         })
                     } else {
@@ -2452,7 +2474,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             let base_val = eval_ast_expr(program, base, env)?;
             match &base_val {
                 Value::Struct(_, fields) => fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .ok_or_else(|| anyhow!("field `{field}` not found on {base_val}")),
                 Value::Ok(inner) => {
@@ -2465,7 +2487,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                             // Transparent field access on Ok values
                             match inner.as_ref() {
                                 Value::Struct(_, fields) => fields
-                                    .get(field)
+                                    .get(field.as_str())
                                     .cloned()
                                     .ok_or_else(|| anyhow!("field `{field}` not found")),
                                 _ => bail!("cannot access field `{field}` on {base_val}"),
@@ -2548,9 +2570,9 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_ast_expr(program, &f.value, env)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(Arc::from(f.name.as_str()), val);
             }
-            Ok(Value::Struct(ty.clone(), field_map))
+            Ok(Value::Struct(Arc::from(ty.as_str()), Arc::new(field_map)))
         }
     }
 }
@@ -2655,7 +2677,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             // Check if this is a user-defined union variant first
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
-                    variant: name.clone(),
+                    variant: Arc::from(name.as_str()),
                     payload: vec![],
                 });
             }
@@ -2689,7 +2711,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Value::Union {
-                    variant: name,
+                    variant: Arc::from(name),
                     payload,
                 });
             }
@@ -2737,9 +2759,9 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_with_program(&f.value, program)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(Arc::from(f.name.as_str()), val);
             }
-            Ok(Value::Struct(String::new(), field_map))
+            Ok(Value::Struct(Arc::from(""), Arc::new(field_map)))
         }
         // Unary expressions need program access for their inner expression
         parser::Expr::Unary { op, expr: inner } => {
@@ -2795,7 +2817,7 @@ fn eval_parser_expr_with_env(
             }
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
-                    variant: name.clone(),
+                    variant: Arc::from(name.as_str()),
                     payload: vec![],
                 });
             }
@@ -2818,7 +2840,7 @@ fn eval_parser_expr_with_env(
                     .map(|a| eval_parser_expr_with_env(a, program, env))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Value::Union {
-                    variant: name,
+                    variant: Arc::from(name),
                     payload,
                 });
             }
@@ -2851,9 +2873,9 @@ fn eval_parser_expr_with_env(
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_with_env(&f.value, program, env)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(Arc::from(f.name.as_str()), val);
             }
-            Ok(Value::Struct(String::new(), field_map))
+            Ok(Value::Struct(Arc::from(""), Arc::new(field_map)))
         }
         parser::Expr::Unary { op, expr: inner } => {
             let val = eval_parser_expr_with_env(inner, program, env)?;
@@ -2895,7 +2917,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
         parser::Expr::Int(v) => Ok(Value::Int(*v)),
         parser::Expr::Float(v) => Ok(Value::Float(*v)),
         parser::Expr::Bool(v) => Ok(Value::Bool(*v)),
-        parser::Expr::String(v) => Ok(Value::String(v.clone())),
+        parser::Expr::String(v) => Ok(Value::String(Arc::from(v.as_str()))),
         parser::Expr::Ident(name) => {
             match name.as_str() {
                 "true" => Ok(Value::Bool(true)),
@@ -2908,16 +2930,16 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         match name.as_str() {
                             "Ok" => Ok(Value::Ok(Box::new(Value::None))),
                             "None" => Ok(Value::Union {
-                                variant: "None".to_string(),
+                                variant: Arc::from("None"),
                                 payload: vec![],
                             }),
                             _ => Ok(Value::Union {
-                                variant: name.clone(),
+                                variant: Arc::from(name.as_str()),
                                 payload: vec![],
                             }),
                         }
                     } else {
-                        Ok(Value::Err(name.clone()))
+                        Ok(Value::Err(Arc::from(name.as_str())))
                     }
                 }
             }
@@ -2926,9 +2948,9 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_standalone(&f.value)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(Arc::from(f.name.as_str()), val);
             }
-            Ok(Value::Struct(String::new(), field_map))
+            Ok(Value::Struct(Arc::from(""), Arc::new(field_map)))
         }
         parser::Expr::Call { callee, args } => {
             // Handle Ok(...) and Err(...) constructors
@@ -2945,14 +2967,14 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                 "Err" => {
                     if args.len() == 1 {
                         match &args[0] {
-                            parser::Expr::Ident(label) => Ok(Value::Err(label.clone())),
+                            parser::Expr::Ident(label) => Ok(Value::Err(Arc::from(label.as_str()))),
                             other => {
                                 let val = eval_parser_expr_standalone(other)?;
-                                Ok(Value::Err(format!("{val}")))
+                                Ok(Value::Err(format!("{val}").into()))
                             }
                         }
                     } else {
-                        Ok(Value::Err("unknown".to_string()))
+                        Ok(Value::Err("unknown".into()))
                     }
                 }
                 "list" => {
@@ -2960,7 +2982,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         .iter()
                         .map(eval_parser_expr_standalone)
                         .collect::<Result<Vec<_>>>()?;
-                    Ok(Value::List(items))
+                    Ok(Value::List(Arc::new(items)))
                 }
                 _ => {
                     // Treat as union variant constructor
@@ -2969,7 +2991,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         .map(eval_parser_expr_standalone)
                         .collect::<Result<Vec<_>>>()?;
                     Ok(Value::Union {
-                        variant: name,
+                        variant: Arc::from(name),
                         payload,
                     })
                 }
@@ -2978,7 +3000,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
         parser::Expr::FieldAccess { base, field } => {
             // For test expectations like result.name — just create a path identifier
             let base_name = parser_callee_name(base);
-            Ok(Value::Err(format!("{base_name}.{field}")))
+            Ok(Value::Err(format!("{base_name}.{field}").into()))
         }
         parser::Expr::Unary { op, expr } => {
             let val = eval_parser_expr_standalone(expr)?;
@@ -3081,7 +3103,7 @@ fn trace_body(
                             result: format!("ERROR: {e}"),
                             status: TraceStatus::Fail,
                         });
-                        return Some(Value::Err(e.to_string()));
+                        return Some(Value::Err(e.to_string().into()));
                     }
                 }
             }
@@ -3109,7 +3131,7 @@ fn trace_body(
                         result: format!("ERROR: {e}"),
                         status: TraceStatus::Fail,
                     });
-                    return Some(Value::Err(e.to_string()));
+                        return Some(Value::Err(e.to_string().into()));
                 }
             },
             ast::StatementKind::Check {
@@ -3130,7 +3152,7 @@ fn trace_body(
                         },
                     });
                     if !is_true {
-                        return Some(Value::Err(on_fail.clone()));
+                        return Some(Value::Err(Arc::from(on_fail.as_str())));
                     }
                 }
                 Err(e) => {
@@ -3140,7 +3162,7 @@ fn trace_body(
                         result: format!("ERROR: {e}"),
                         status: TraceStatus::Fail,
                     });
-                    return Some(Value::Err(e.to_string()));
+                        return Some(Value::Err(e.to_string().into()));
                 }
             },
             ast::StatementKind::Return { value } => match eval_ast_expr(program, value, env) {
@@ -3160,7 +3182,7 @@ fn trace_body(
                         result: format!("ERROR: {e}"),
                         status: TraceStatus::Fail,
                     });
-                    return Some(Value::Err(e.to_string()));
+                    return Some(Value::Err(e.to_string().into()));
                 }
             },
             _ => {
@@ -3809,7 +3831,7 @@ mod tests {
     #[test]
     fn test_value_display_utf8_string() {
         // Verify Value::String Display preserves multi-byte UTF-8
-        let val = Value::String("café ☕ 日本語".to_string());
+        let val = Value::String("café ☕ 日本語".into());
         let displayed = format!("{val}");
         assert_eq!(displayed, r#""café ☕ 日本語""#, "Value display should preserve UTF-8");
     }
@@ -4264,7 +4286,7 @@ mod tests {
         // Struct should contain the fields
         match val {
             Value::Struct(_, fields) => {
-                assert!(matches!(fields.get("name"), Some(Value::String(s)) if s == "alice"), "expected name=alice");
+                assert!(matches!(fields.get("name"), Some(Value::String(s)) if &**s == "alice"), "expected name=alice");
                 assert!(matches!(fields.get("age"), Some(Value::Int(25))), "expected age=25");
             }
             _ => panic!("expected struct, got {val}"),
@@ -4508,7 +4530,7 @@ mod tests {
         let result = eval_builtin_or_user(
             &program,
             "println",
-            vec![Value::String("hello".to_string())],
+            vec![Value::String("hello".into())],
             &mut env,
         );
         // With mock, println should succeed (mocked response)
@@ -5830,7 +5852,7 @@ mod tests {
         let p = ast::Program::default();
         let val = eval_expr_val(&p, r#"Err("not found")"#);
         match val {
-            Value::Err(msg) => assert_eq!(msg, "\"not found\""),
+            Value::Err(msg) => assert_eq!(&*msg, "\"not found\""),
             _ => panic!("expected Err, got {val}"),
         }
     }
@@ -6618,7 +6640,7 @@ mod tests {
         let mut env = Env::new();
         env.set("x", Value::Int(1));
         env.set("__internal", Value::Int(999));
-        env.set("y", Value::String("hello".to_string()));
+        env.set("y", Value::String("hello".into()));
         let bindings = env.snapshot_bindings();
         assert_eq!(bindings.len(), 2, "should exclude __internal");
         // Bindings are sorted by name
@@ -6633,13 +6655,13 @@ mod tests {
         env.set("a", Value::Int(1));
         env.set("b", Value::Float(2.5));
         env.set("c", Value::Bool(true));
-        env.set("d", Value::String("hello".to_string()));
+        env.set("d", Value::String("hello".into()));
         env.set("e", Value::None);
 
         assert!(matches!(env.get("a").unwrap(), Value::Int(1)));
         assert!(matches!(env.get("b").unwrap(), Value::Float(f) if (*f - 2.5).abs() < f64::EPSILON));
         assert!(matches!(env.get("c").unwrap(), Value::Bool(true)));
-        assert!(matches!(env.get("d").unwrap(), Value::String(s) if s == "hello"));
+        assert!(matches!(env.get("d").unwrap(), Value::String(s) if &**s == "hello"));
         assert!(matches!(env.get("e").unwrap(), Value::None));
     }
 
@@ -6888,7 +6910,7 @@ mod tests {
         // push with wrong number of args should error
         let p = ast::Program::default();
         let mut env = Env::new();
-        let result = eval_builtin_or_user(&p, "push", vec![Value::List(vec![])], &mut env);
+        let result = eval_builtin_or_user(&p, "push", vec![Value::List(Arc::new(vec![]))], &mut env);
         assert!(result.is_err(), "push with 1 arg should error");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("expects 2 arguments"), "error should mention arg count: {msg}");
@@ -6990,9 +7012,9 @@ mod tests {
         // Names not in the pre-seeded interner should still work (interned on demand)
         let interner = StringInterner::new(); // empty interner
         let mut env = Env::new_with_interner(&interner);
-        env.set("dynamic_var", Value::String("hello".to_string()));
+        env.set("dynamic_var", Value::String("hello".into()));
 
-        assert!(matches!(env.get("dynamic_var"), Ok(Value::String(s)) if s == "hello"));
+        assert!(matches!(env.get("dynamic_var"), Ok(Value::String(s)) if &**s == "hello"));
     }
 
     #[test]
@@ -7053,5 +7075,237 @@ mod tests {
         let (fn_name, case) = &cases[0];
         let result = eval_test_case(&program, fn_name, case);
         assert!(result.is_ok(), "user function call with interned env should work: {:?}", result);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Arc-based Value optimisation tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn value_string_clone_is_cheap_arc_bump() {
+        // Cloning a Value::String should share the same Arc allocation
+        let v1 = Value::String(Arc::from("hello world"));
+        let v2 = v1.clone();
+        // Both should point to the same underlying str (same Arc)
+        match (&v1, &v2) {
+            (Value::String(a), Value::String(b)) => {
+                assert!(Arc::ptr_eq(a, b), "clone should share the Arc, not allocate a new string");
+            }
+            _ => panic!("expected String variants"),
+        }
+    }
+
+    #[test]
+    fn value_err_clone_is_cheap_arc_bump() {
+        let v1 = Value::Err(Arc::from("some error"));
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::Err(a), Value::Err(b)) => {
+                assert!(Arc::ptr_eq(a, b), "Err clone should share Arc");
+            }
+            _ => panic!("expected Err variants"),
+        }
+    }
+
+    #[test]
+    fn value_list_clone_shares_arc() {
+        let items = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+        let v1 = Value::List(Arc::new(items));
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::List(a), Value::List(b)) => {
+                assert!(Arc::ptr_eq(a, b), "List clone should share the Arc<Vec<Value>>");
+            }
+            _ => panic!("expected List variants"),
+        }
+    }
+
+    #[test]
+    fn value_struct_clone_shares_arc() {
+        let mut fields = HashMap::new();
+        fields.insert(Arc::from("x"), Value::Int(10));
+        fields.insert(Arc::from("y"), Value::Int(20));
+        let v1 = Value::Struct(Arc::from("Point"), Arc::new(fields));
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::Struct(n1, f1), Value::Struct(n2, f2)) => {
+                assert!(Arc::ptr_eq(n1, n2), "Struct name Arc should be shared");
+                assert!(Arc::ptr_eq(f1, f2), "Struct fields Arc should be shared");
+            }
+            _ => panic!("expected Struct variants"),
+        }
+    }
+
+    #[test]
+    fn value_union_variant_clone_shares_arc() {
+        let v1 = Value::Union {
+            variant: Arc::from("Some"),
+            payload: vec![Value::Int(42)],
+        };
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::Union { variant: a, .. }, Value::Union { variant: b, .. }) => {
+                assert!(Arc::ptr_eq(a, b), "Union variant name should share Arc");
+            }
+            _ => panic!("expected Union variants"),
+        }
+    }
+
+    #[test]
+    fn value_string_display_correct() {
+        let v = Value::String(Arc::from("hello"));
+        assert_eq!(format!("{v}"), r#""hello""#);
+    }
+
+    #[test]
+    fn value_err_display_correct() {
+        let v = Value::Err(Arc::from("fail"));
+        assert_eq!(format!("{v}"), "Err(fail)");
+    }
+
+    #[test]
+    fn value_struct_field_lookup_with_arc_keys() {
+        // Ensure struct field access works with Arc<str> keys
+        let source = "\
++type Point = x:Int, y:Int
+
++fn get_x (p:Point) -> Int
+  +return p.x
+
+!test get_x
+  +with x=10 y=20 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "struct field access with Arc keys should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_list_operations_with_arc_wrapper() {
+        // push, get, len should all work through Arc<Vec<Value>>
+        let source = "\
++fn list_ops ()->Int
+  +let items:List<Int> = list(1, 2, 3)
+  +let items2:List<Int> = push(items, 4)
+  +return len(items2)
++end
+
+!test list_ops
+  +with -> expect 4
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "list operations through Arc<Vec> should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_string_builtin_ops_through_arc() {
+        // String builtins (concat, len, split, trim, etc.) should work with Arc<str>
+        let source = "\
++fn string_ops (s:String) -> String
+  +let trimmed:String = trim(s)
+  +let upper:String = concat(trimmed, \"!\")
+  +return upper
+
+!test string_ops
+  +with s=\"  hello  \" -> expect \"hello!\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "string builtins through Arc<str> should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_matches_equality_with_arc() {
+        // Value::matches() should work correctly with Arc<str> internals
+        let a = Value::String(Arc::from("hello"));
+        let b = Value::String(Arc::from("hello"));
+        let c = Value::String(Arc::from("world"));
+        assert!(a.matches(&b), "same content Arc<str> should match");
+        assert!(!a.matches(&c), "different content should not match");
+
+        // Err matching
+        let ea = Value::Err(Arc::from("fail"));
+        let eb = Value::Err(Arc::from("fail"));
+        let ec = Value::Err(Arc::from("other"));
+        assert!(ea.matches(&eb));
+        assert!(!ea.matches(&ec));
+
+        // Struct matching
+        let mut f1 = HashMap::new();
+        f1.insert(Arc::from("x"), Value::Int(1));
+        let mut f2 = HashMap::new();
+        f2.insert(Arc::from("x"), Value::Int(1));
+        let s1 = Value::Struct(Arc::from("P"), Arc::new(f1));
+        let s2 = Value::Struct(Arc::from("P"), Arc::new(f2));
+        assert!(s1.matches(&s2));
+
+        // List matching
+        let l1 = Value::List(Arc::new(vec![Value::Int(1), Value::Int(2)]));
+        let l2 = Value::List(Arc::new(vec![Value::Int(1), Value::Int(2)]));
+        let l3 = Value::List(Arc::new(vec![Value::Int(1), Value::Int(3)]));
+        assert!(l1.matches(&l2));
+        assert!(!l1.matches(&l3));
+    }
+
+    #[test]
+    fn value_is_truthy_with_arc_string() {
+        assert!(Value::String(Arc::from("x")).is_truthy());
+        assert!(!Value::String(Arc::from("")).is_truthy());
+    }
+
+    #[test]
+    fn value_match_pattern_with_arc_union() {
+        // +match on union variants should work correctly with Arc<str> variant names
+        let source = "\
++type Color = Red | Green | Blue
+
++fn color_name (c:Color)->String
+  +match c
+  +case Red
+    +return \"red\"
+  +case Green
+    +return \"green\"
+  +case Blue
+    +return \"blue\"
+  +end
++end
+
+!test color_name
+  +with c=Red -> expect \"red\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "union match with Arc variant names should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_each_loop_with_arc_list() {
+        // +each over a List should work with Arc<Vec<Value>> wrapper
+        let source = "\
++fn sum_list (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = total + item
+  +end
+  +return total
++end
+
+!test sum_list
+  +with items=list(1, 2, 3) -> expect 6
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "+each with Arc<Vec> should work: {:?}", result);
     }
 }

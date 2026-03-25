@@ -613,11 +613,11 @@ impl CoroutineHandle {
                         }
                     }))
                     .unwrap_or_else(|| "Roadmap is empty.".to_string());
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "roadmap_add" => {
                 let desc = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => bail!("roadmap_add expects (description:String)"),
                 };
@@ -632,7 +632,7 @@ impl CoroutineHandle {
                         });
                     }
                 }
-                return Ok(Value::String(desc));
+                return Ok(Value::String(desc.into()));
             }
             "roadmap_done" => {
                 let n = match args.first() {
@@ -657,7 +657,7 @@ impl CoroutineHandle {
                                 }
                             })
                     })?;
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
 
             // ── Plan operations — handled locally, no IO channel needed ──
@@ -680,11 +680,11 @@ impl CoroutineHandle {
                         }
                     }))
                     .unwrap_or_else(|| "No plan set.".to_string());
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "plan_set" => {
                 let steps_str = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => bail!("plan_set expects (steps:String)"),
                 };
@@ -708,7 +708,7 @@ impl CoroutineHandle {
                             .collect();
                     }
                 }
-                return Ok(Value::String(format!("Plan set with {count} steps.")));
+                return Ok(Value::String(format!("Plan set with {count} steps.").into()));
             }
             "plan_done" => {
                 let n = match args.first() {
@@ -733,7 +733,7 @@ impl CoroutineHandle {
                                 }
                             })
                     })?;
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "plan_fail" => {
                 let n = match args.first() {
@@ -758,7 +758,7 @@ impl CoroutineHandle {
                                 }
                             })
                     })?;
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             // ── Query operations — access program AST via thread-local ──
             // These reuse the same logic as the ? query commands in typeck.rs.
@@ -767,11 +767,11 @@ impl CoroutineHandle {
                     .ok_or_else(|| anyhow::anyhow!("query_symbols: program not available (no async context)"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let result = crate::typeck::handle_query(&program, &table, "?symbols", &[]);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_symbols_detail" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("query_symbols_detail expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -779,11 +779,11 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?symbols {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_source" | "source_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("query_source expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -791,11 +791,11 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?source {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_callers" | "callers_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("query_callers expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -803,11 +803,11 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?callers {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_callees" | "callees_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("query_callees expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -815,11 +815,11 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?callees {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_deps" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("query_deps expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -827,11 +827,11 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?deps {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_deps_all" | "deps_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("query_deps_all expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -839,7 +839,7 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?deps-all {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_routes" | "routes_list" => {
                 let program = crate::eval::get_shared_program()
@@ -850,7 +850,7 @@ impl CoroutineHandle {
                     .unwrap_or_default();
                 let table = crate::typeck::build_symbol_table(&program);
                 let result = crate::typeck::handle_query(&program, &table, "?routes", &routes);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_tasks" => {
                 let result = if let Some(reg) = &self.task_registry {
@@ -858,13 +858,13 @@ impl CoroutineHandle {
                 } else {
                     "No task registry (not in async context).".to_string()
                 };
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "query_library" => {
                 let program = crate::eval::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_library: program not available"))?;
                 let result = crate::library::query_library(&program, None);
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
 
             // ── library_errors — formatted string of all library errors ──
@@ -896,13 +896,13 @@ impl CoroutineHandle {
                         }
                     }))
                     .unwrap_or_else(|| "No library errors.".to_string());
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
 
             // ── library_reload — reload module(s) from disk ──
             "library_reload" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => String::new(),
                 };
@@ -914,13 +914,13 @@ impl CoroutineHandle {
                 let result = crate::library::reload_module(&mut program, &name)?;
                 // Update the read-only snapshot so query builtins see the changes
                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
 
             // ── Mutation operations — write to program AST via thread-local ──
             "mutate" => {
                 let code = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => bail!("mutate expects (code:String)"),
                 };
@@ -963,11 +963,11 @@ impl CoroutineHandle {
                 } else {
                     format!("Applied {applied} mutations")
                 };
-                return Ok(Value::String(summary));
+                return Ok(Value::String(summary.into()));
             }
             "fn_remove" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("fn_remove expects (name:String)"),
                 };
                 let program_lock = crate::eval::get_shared_program_mut()
@@ -983,7 +983,7 @@ impl CoroutineHandle {
                         if m.functions.len() < before {
                             program.rebuild_function_index();
                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                            return Ok(Value::String(format!("Removed {name}")));
+                            return Ok(Value::String(format!("Removed {name}").into()));
                         }
                         bail!("fn_remove: function `{fn_name}` not found in module `{mod_name}`");
                     }
@@ -994,13 +994,13 @@ impl CoroutineHandle {
                     program.functions.remove(pos);
                     program.rebuild_function_index();
                     crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                    return Ok(Value::String(format!("Removed {name}")));
+                    return Ok(Value::String(format!("Removed {name}").into()));
                 }
                 bail!("fn_remove: function `{name}` not found");
             }
             "type_remove" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("type_remove expects (name:String)"),
                 };
                 let program_lock = crate::eval::get_shared_program_mut()
@@ -1015,7 +1015,7 @@ impl CoroutineHandle {
                         m.types.retain(|t| t.name() != type_name);
                         if m.types.len() < before {
                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                            return Ok(Value::String(format!("Removed {name}")));
+                            return Ok(Value::String(format!("Removed {name}").into()));
                         }
                         bail!("type_remove: type `{type_name}` not found in module `{mod_name}`");
                     }
@@ -1026,13 +1026,13 @@ impl CoroutineHandle {
                 if let Some(pos) = program.types.iter().position(|t| t.name() == name_str) {
                     program.types.remove(pos);
                     crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                    return Ok(Value::String(format!("Removed {name}")));
+                    return Ok(Value::String(format!("Removed {name}").into()));
                 }
                 bail!("type_remove: type `{name}` not found");
             }
             "module_remove" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("module_remove expects (name:String)"),
                 };
                 let program_lock = crate::eval::get_shared_program_mut()
@@ -1044,7 +1044,7 @@ impl CoroutineHandle {
                     program.modules.remove(pos);
                     program.rebuild_function_index();
                     crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                    return Ok(Value::String(format!("Removed module {name}")));
+                    return Ok(Value::String(format!("Removed module {name}").into()));
                 }
                 bail!("module_remove: module `{name}` not found");
             }
@@ -1052,12 +1052,12 @@ impl CoroutineHandle {
             // ── move_symbols — programmatic !move ──
             "move_symbols" => {
                 let symbols_str = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => bail!("move_symbols expects (symbols:String, target_module:String)"),
                 };
                 let target_module = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => bail!("move_symbols expects (symbols:String, target_module:String)"),
                 };
@@ -1084,17 +1084,17 @@ impl CoroutineHandle {
                 let result = crate::validator::apply_move(&mut program, &names, &target_module)?;
                 // Update read-only snapshot
                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
 
             // ── trace_run — programmatic !trace ──
             "trace_run" => {
                 let fn_name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("trace_run expects (fn_name:String, args:String)"),
                 };
                 let args_str = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => String::new(),
                 };
@@ -1113,21 +1113,24 @@ impl CoroutineHandle {
                     .map(|s| format!("{s}"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Ok(Value::String(if output.is_empty() {
-                    format!("Trace of {fn_name}: (no steps)")
-                } else {
-                    format!("Trace of {fn_name}:\n{output}")
-                }));
+                return Ok(Value::String(
+                    if output.is_empty() {
+                        format!("Trace of {fn_name}: (no steps)")
+                    } else {
+                        format!("Trace of {fn_name}:\n{output}")
+                    }
+                    .into(),
+                ));
             }
 
             // ── msg_send — programmatic !msg ──
             "msg_send" => {
                 let target = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("msg_send expects (target:String, message:String)"),
                 };
                 let message = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     Some(other) => format!("{other}"),
                     None => bail!("msg_send expects (target:String, message:String)"),
                 };
@@ -1154,13 +1157,13 @@ impl CoroutineHandle {
                     .or_default()
                     .push(msg);
 
-                return Ok(Value::String(format!("Message sent to '{target}'")));
+                return Ok(Value::String(format!("Message sent to '{target}'").into()));
             }
 
             // ── watch_start — programmatic !watch ──
             "watch_start" => {
                 let fn_name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("watch_start expects (fn_name:String, interval_ms:Int)"),
                 };
                 let interval_ms = match args.get(1) {
@@ -1188,21 +1191,21 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("watch_start: could not access runtime"))?
                     .pending_commands.push(cmd);
 
-                return Ok(Value::String(format!("Watching {fn_name} every {interval_ms}ms (queued)")));
+                return Ok(Value::String(format!("Watching {fn_name} every {interval_ms}ms (queued)").into()));
             }
 
             // ── agent_spawn — programmatic !agent ──
             "agent_spawn" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
                 };
                 let scope = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
                 };
                 let task = match args.get(2) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
                 };
                 if name.trim().is_empty() {
@@ -1220,7 +1223,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("agent_spawn: could not access runtime"))?
                     .pending_commands.push(cmd);
 
-                return Ok(Value::String(format!("Agent '{name}' spawned (scope: {scope})")));
+                return Ok(Value::String(format!("Agent '{name}' spawned (scope: {scope})").into()));
             }
 
             // ── route_list — list registered HTTP routes ──
@@ -1229,27 +1232,27 @@ impl CoroutineHandle {
                     .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
                     .unwrap_or_default();
                 if routes.is_empty() {
-                    return Ok(Value::String("No routes registered.".to_string()));
+                    return Ok(Value::String("No routes registered.".into()));
                 }
                 let mut out = String::new();
                 for r in &routes {
                     out.push_str(&format!("{} {} -> `{}`\n", r.method, r.path, r.handler_fn));
                 }
-                return Ok(Value::String(out.trim_end().to_string()));
+                return Ok(Value::String(out.trim_end().to_string().into()));
             }
 
             // ── route_add — register an HTTP route ──
             "route_add" => {
                 let method = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("route_add expects (method:String, path:String, handler:String)"),
                 };
                 let path = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("route_add expects (method:String, path:String, handler:String)"),
                 };
                 let handler = match args.get(2) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("route_add expects (method:String, path:String, handler:String)"),
                 };
                 let method_upper = method.to_uppercase();
@@ -1269,24 +1272,24 @@ impl CoroutineHandle {
                 {
                     let old_fn = existing.handler_fn.clone();
                     existing.handler_fn = handler.clone();
-                    return Ok(Value::String(format!("updated route {method_upper} {path} -> `{handler}` (was `{old_fn}`)")));
+                    return Ok(Value::String(format!("updated route {method_upper} {path} -> `{handler}` (was `{old_fn}`)").into()));
                 }
                 state.http_routes.push(crate::ast::HttpRoute {
                     method: method_upper.clone(),
                     path: path.clone(),
                     handler_fn: handler.clone(),
                 });
-                return Ok(Value::String(format!("added route {method_upper} {path} -> `{handler}`")));
+                return Ok(Value::String(format!("added route {method_upper} {path} -> `{handler}`").into()));
             }
 
             // ── route_remove — remove an HTTP route by method+path ──
             "route_remove" => {
                 let method = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("route_remove expects (method:String, path:String)"),
                 };
                 let path = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("route_remove expects (method:String, path:String)"),
                 };
                 let method_upper = method.to_uppercase();
@@ -1308,7 +1311,7 @@ impl CoroutineHandle {
                     return Ok(Value::String(format!(
                         "removed route {} {} (was -> `{}`)",
                         method_upper, path, removed_handler.unwrap_or_default()
-                    )));
+                    ).into()));
                 }
                 bail!("route_remove: no route found for {method_upper} {path}");
             }
@@ -1320,7 +1323,7 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("undo: could not access runtime"))?
                     .pending_commands.push("!undo".to_string());
-                return Ok(Value::String("Undo queued — will revert last mutation".to_string()));
+                return Ok(Value::String("Undo queued — will revert last mutation".into()));
             }
 
             // ── sandbox_enter — enter sandbox mode ──
@@ -1330,7 +1333,7 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_enter: could not access runtime"))?
                     .pending_commands.push("!sandbox enter".to_string());
-                return Ok(Value::String("Sandbox enter queued — mutations will be isolated".to_string()));
+                return Ok(Value::String("Sandbox enter queued — mutations will be isolated".into()));
             }
 
             // ── sandbox_merge — merge sandbox changes ──
@@ -1340,7 +1343,7 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_merge: could not access runtime"))?
                     .pending_commands.push("!sandbox merge".to_string());
-                return Ok(Value::String("Sandbox merge queued — changes will be kept".to_string()));
+                return Ok(Value::String("Sandbox merge queued — changes will be kept".into()));
             }
 
             // ── sandbox_discard — discard sandbox changes ──
@@ -1350,21 +1353,21 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_discard: could not access runtime"))?
                     .pending_commands.push("!sandbox discard".to_string());
-                return Ok(Value::String("Sandbox discard queued — changes will be reverted".to_string()));
+                return Ok(Value::String("Sandbox discard queued — changes will be reverted".into()));
             }
 
             // ── mock_set — register an IO mock response ──
             "mock_set" => {
                 let operation = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
                 };
                 let pattern = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
                 };
                 let response = match args.get(2) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
                 };
                 if operation.trim().is_empty() {
@@ -1381,8 +1384,13 @@ impl CoroutineHandle {
                         response: response.clone(),
                     });
                 let pattern_display = if patterns.is_empty() { "*".to_string() } else { patterns.join(" ") };
-                return Ok(Value::String(format!("mock: {operation} {pattern_display} -> \"{}\"",
-                    response.chars().take(50).collect::<String>())));
+                return Ok(Value::String(
+                    format!(
+                        "mock: {operation} {pattern_display} -> \"{}\"",
+                        response.chars().take(50).collect::<String>()
+                    )
+                    .into(),
+                ));
             }
 
             // ── mock_clear — clear all IO mocks ──
@@ -1396,13 +1404,13 @@ impl CoroutineHandle {
                     state.io_mocks.clear();
                     count
                 };
-                return Ok(Value::String(format!("cleared {count} mocks")));
+                return Ok(Value::String(format!("cleared {count} mocks").into()));
             }
 
             // ── module_create — create/switch to a module ──
             "module_create" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("module_create expects (name:String)"),
                 };
                 if name.trim().is_empty() {
@@ -1418,7 +1426,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("module_create: could not acquire program write lock"))?;
                 // Check if module already exists
                 if program.modules.iter().any(|m| m.name == name) {
-                    return Ok(Value::String(format!("module '{name}' already exists")));
+                    return Ok(Value::String(format!("module '{name}' already exists").into()));
                 }
                 // Create empty module
                 let code = format!("!module {name}");
@@ -1429,13 +1437,13 @@ impl CoroutineHandle {
                         .map_err(|e| anyhow::anyhow!("module_create: {e}"))?;
                 }
                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::String(format!("created module '{name}'")));
+                return Ok(Value::String(format!("created module '{name}'").into()));
             }
 
             // ── test_run — run stored tests for a function ──
             "test_run" => {
                 let fn_name = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("test_run expects (fn_name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -1444,7 +1452,7 @@ impl CoroutineHandle {
                     .ok_or_else(|| anyhow::anyhow!("test_run: function `{fn_name}` not found"))?;
                 let ast_cases = func.tests.clone();
                 if ast_cases.is_empty() {
-                    return Ok(Value::String(format!("no stored tests for `{fn_name}`")));
+                    return Ok(Value::String(format!("no stored tests for `{fn_name}`").into()));
                 }
                 // Reconstruct test source from stored AST test cases
                 let bare = fn_name.rsplit('.').next().unwrap_or(&fn_name);
@@ -1476,17 +1484,17 @@ impl CoroutineHandle {
                         }
                     }
                 }
-                return Ok(Value::String(results.join("\n")));
+                return Ok(Value::String(results.join("\n").into()));
             }
 
             // ── fn_replace — replace a statement in a function ──
             "fn_replace" => {
                 let target = match args.first() {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("fn_replace expects (target:String, new_code:String)"),
                 };
                 let new_code = match args.get(1) {
-                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::String(s)) => s.to_string(),
                     _ => bail!("fn_replace expects (target:String, new_code:String)"),
                 };
                 if target.trim().is_empty() {
@@ -1511,7 +1519,7 @@ impl CoroutineHandle {
                     }
                 }
                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::String(result_msg));
+                return Ok(Value::String(result_msg.into()));
             }
 
             _ => {} // fall through to mock/IO dispatch
@@ -1529,7 +1537,7 @@ impl CoroutineHandle {
                 // Single-pattern mocks match against the joined arg string (backward compat).
                 if mock.patterns.len() == 1 {
                     if arg_str.contains(&mock.patterns[0]) {
-                        return Ok(Value::String(mock.response.clone()));
+                        return Ok(Value::String(mock.response.clone().into()));
                     }
                 } else {
                     // Multi-pattern: each pattern must match the corresponding arg
@@ -1541,7 +1549,7 @@ impl CoroutineHandle {
                             continue 'mock_loop;
                         }
                     }
-                    return Ok(Value::String(mock.response.clone()));
+                    return Ok(Value::String(mock.response.clone().into()));
                 }
             }
             // No mock matched — for mock-only handles, return an error
@@ -1591,7 +1599,7 @@ impl CoroutineHandle {
                     IoRequest::TcpRead { conn, reply: tx },
                     rx,
                 )?;
-                return Ok(Value::String(data));
+                return Ok(Value::String(data.into()));
             }
             "tcp_write" => {
                 let conn = match &args[0] {
@@ -1599,7 +1607,7 @@ impl CoroutineHandle {
                     _ => bail!("tcp_write expects handle"),
                 };
                 let data = match &args[1] {
-                    Value::String(s) => s.clone(),
+                    Value::String(s) => s.to_string(),
                     other => format!("{other}"),
                 };
                 let (tx, rx) = oneshot::channel();
@@ -1625,7 +1633,7 @@ impl CoroutineHandle {
             }
             "tcp_connect" => {
                 let host = match &args[0] {
-                    Value::String(s) => s.clone(),
+                    Value::String(s) => s.to_string(),
                     _ => bail!("tcp_connect expects String host"),
                 };
                 let port = match &args[1] {
@@ -1642,20 +1650,20 @@ impl CoroutineHandle {
             }
             "read_line" | "stdin_read_line" => {
                 let prompt = if args.is_empty() { String::new() } else {
-                    match &args[0] { Value::String(s) => s.clone(), other => format!("{other}") }
+                    match &args[0] { Value::String(s) => s.to_string(), other => format!("{other}") }
                 };
                 let (tx, rx) = oneshot::channel();
                 let line = self.send_and_wait(WaitReason::StdinRead, IoRequest::StdinReadLine { prompt, reply: tx }, rx)?;
-                return Ok(Value::String(line));
+                return Ok(Value::String(line.into()));
             }
             "print" => {
-                let text = match &args[0] { Value::String(s) => s.clone(), other => format!("{other}") };
+                let text = match &args[0] { Value::String(s) => s.to_string(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::Running, IoRequest::Print { text, newline: false, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
             }
             "println" => {
-                let text = match &args[0] { Value::String(s) => s.clone(), other => format!("{other}") };
+                let text = match &args[0] { Value::String(s) => s.to_string(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::Running, IoRequest::Print { text, newline: true, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
@@ -1667,74 +1675,74 @@ impl CoroutineHandle {
                 return Ok(Value::Int(0));
             }
             "file_read" | "read_file" => {
-                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_read expects String path") };
+                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("file_read expects String path") };
                 let (tx, rx) = oneshot::channel();
                 let contents = self.send_and_wait(WaitReason::FileRead(path.clone()), IoRequest::FileRead { path, reply: tx }, rx)?;
-                return Ok(Value::String(contents));
+                return Ok(Value::String(contents.into()));
             }
             "file_write" | "write_file" => {
-                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_write expects String path") };
-                let data = match &args[1] { Value::String(s) => s.clone(), other => format!("{other}") };
+                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("file_write expects String path") };
+                let data = match &args[1] { Value::String(s) => s.to_string(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::FileWrite(path.clone()), IoRequest::FileWrite { path, data, reply: tx }, rx)?;
-                return Ok(Value::String("OK".to_string()));
+                return Ok(Value::String("OK".into()));
             }
             "file_exists" => {
-                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("file_exists expects String path") };
+                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("file_exists expects String path") };
                 let (tx, rx) = oneshot::channel();
                 let exists = self.send_and_wait(WaitReason::Running, IoRequest::FileExists { path, reply: tx }, rx)?;
                 return Ok(Value::Bool(exists));
             }
             "list_dir" => {
-                let path = match &args[0] { Value::String(s) => s.clone(), _ => bail!("list_dir expects String path") };
+                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("list_dir expects String path") };
                 let (tx, rx) = oneshot::channel();
                 let names = self.send_and_wait(WaitReason::Running, IoRequest::ListDir { path, reply: tx }, rx)?;
-                return Ok(Value::List(names.into_iter().map(Value::String).collect()));
+                return Ok(Value::List(Arc::new(names.into_iter().map(|name| Value::String(name.into())).collect())));
             }
             "shell_exec" | "exec" => {
-                let command = match &args[0] { Value::String(s) => s.clone(), _ => bail!("shell_exec expects String command") };
+                let command = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("shell_exec expects String command") };
                 let (tx, rx) = oneshot::channel();
                 let (stdout, stderr, code) = self.send_and_wait(
                     WaitReason::ShellExec(command.chars().take(40).collect()),
                     IoRequest::ShellExec { command, reply: tx }, rx,
                 )?;
-                if code == 0 { return Ok(Value::String(stdout)); }
-                else { return Ok(Value::String(format!("EXIT {code}: {stderr}"))); }
+                if code == 0 { return Ok(Value::String(stdout.into())); }
+                else { return Ok(Value::String(format!("EXIT {code}: {stderr}").into())); }
             }
             "self_restart" | "restart" => {
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::Running, IoRequest::SelfRestart { reply: tx }, rx)?;
-                return Ok(Value::String("restarting...".to_string()));
+                return Ok(Value::String("restarting...".into()));
             }
             "http_get" => {
-                let url = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("http_get expects (url:String)") };
+                let url = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("http_get expects (url:String)") };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::HttpGet(url.clone()), IoRequest::HttpGet { url, reply: tx }, rx)?;
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "http_post" => {
-                let url = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
-                let body = match args.get(1) { Some(Value::String(s)) => s.clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
-                let content_type = match args.get(2) { Some(Value::String(s)) => s.clone(), _ => "application/json".to_string() };
+                let url = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
+                let body = match args.get(1) { Some(Value::String(s)) => s.to_string(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
+                let content_type = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/json".to_string() };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPost { url, body, content_type, reply: tx }, rx)?;
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "llm_call" => {
-                let system = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
-                let prompt = match args.get(1) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
-                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.clone()), _ => None });
+                let system = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
+                let prompt = match args.get(1) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
+                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.to_string()), _ => None });
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::LlmCall, IoRequest::LlmCall { model, system, prompt, reply: tx }, rx)?;
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             "llm_agent" => {
-                let system = match args.get(0) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
-                let task = match args.get(1) { Some(Value::String(s)) => s.clone(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
-                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.clone()), _ => None });
+                let system = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
+                let task = match args.get(1) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
+                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.to_string()), _ => None });
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::LlmAgent, IoRequest::LlmAgent { model, system, task, reply: tx }, rx)?;
-                return Ok(Value::String(result));
+                return Ok(Value::String(result.into()));
             }
             _ => bail!("unknown await operation: {op}"),
         }
@@ -1762,7 +1770,7 @@ mod tests {
 
     fn unwrap_string(v: Value) -> String {
         match v {
-            Value::String(s) => s,
+            Value::String(s) => s.to_string(),
             other => panic!("expected String, got {other}"),
         }
     }
