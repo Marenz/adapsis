@@ -86,6 +86,26 @@ pub enum Operation {
     Done,
     /// Check inbox: ?inbox [agent_name]
     Query(String),
+    /// Shared variable declaration: +shared name:Type = default_expr
+    SharedVar(SharedVarDecl),
+    /// Sandbox mode: !sandbox [enter|merge|discard|status]
+    Sandbox(SandboxAction),
+}
+
+#[derive(Debug, Clone)]
+pub enum SandboxAction {
+    Enter,
+    Merge,
+    Discard,
+    Status,
+}
+
+/// A shared variable declaration at the parser level.
+#[derive(Debug, Clone)]
+pub struct SharedVarDecl {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub default: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +168,8 @@ pub struct WhileDecl {
 pub struct EvalMutation {
     pub function_name: String,
     pub input: Expr,
+    /// When set, evaluate this expression directly instead of calling function_name.
+    pub inline_expr: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -500,8 +522,11 @@ impl<'a> Parser<'a> {
                     self.index += 1; // Skip optional +end (backward compat)
                     break;
                 }
-                // Only +fn, +type belong inside a module — everything else is top-level
-                if !next.text.starts_with("+fn") && !next.text.starts_with("+type") {
+                // Only +fn, +type, +shared belong inside a module — everything else is top-level
+                if !next.text.starts_with("+fn")
+                    && !next.text.starts_with("+type")
+                    && !next.text.starts_with("+shared")
+                {
                     break;
                 }
                 body.push(self.parse_operation(next.indent)?);
@@ -598,6 +623,29 @@ impl<'a> Parser<'a> {
             let decl = parse_binding_decl(line.number, rest.trim(), false)?;
             self.index += 1;
             return Ok(Operation::Let(decl));
+        }
+
+        if let Some(rest) = text.strip_prefix("+shared") {
+            // Format: +shared name:Type = default_expr
+            let rest = rest.trim();
+            let (name_type, expr_text) = rest.split_once('=').ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected `name:Type = expr` in +shared",
+                    line.number
+                )
+            })?;
+            let name_type = name_type.trim();
+            let (name, type_text) = name_type
+                .split_once(':')
+                .ok_or_else(|| anyhow!("line {}: expected `name:Type` in +shared", line.number))?;
+            let ty = parse_type(line.number, type_text.trim())?;
+            let default = parse_expr(line.number, expr_text.trim())?;
+            self.index += 1;
+            return Ok(Operation::SharedVar(SharedVarDecl {
+                name: name.trim().to_string(),
+                ty,
+                default,
+            }));
         }
 
         if let Some(rest) = text.strip_prefix("+set") {
@@ -1044,6 +1092,19 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Unmock);
         }
 
+        if let Some(rest) = text.strip_prefix("!sandbox") {
+            let sub = rest.trim();
+            let action = match sub {
+                "merge" => SandboxAction::Merge,
+                "discard" => SandboxAction::Discard,
+                "status" => SandboxAction::Status,
+                "" | "enter" => SandboxAction::Enter,
+                other => bail!("line {}: unknown sandbox action `{other}`, expected enter/merge/discard/status", line.number),
+            };
+            self.index += 1;
+            return Ok(Operation::Sandbox(action));
+        }
+
         if let Some(rest) = text.strip_prefix("!mock") {
             // !mock http_get "https://..." -> "response"
             let rest = rest.trim();
@@ -1137,7 +1198,26 @@ impl<'a> Parser<'a> {
 
         if let Some(rest) = text.strip_prefix("!eval") {
             let rest = rest.trim();
-            // Parse: !eval function_name arg1 arg2  OR  !eval function_name key=val key=val
+
+            // First, try to parse the entire argument as an inline expression.
+            // This handles cases like: !eval 1 + 2, !eval concat("a", "b"), !eval len("hello")
+            // We accept it as inline if it parses as a complete expression AND is not
+            // a bare identifier (which would be the existing "!eval func_name" syntax).
+            if !rest.is_empty() {
+                if let Ok(expr) = parse_expr(line.number, rest) {
+                    let is_bare_ident = matches!(&expr, Expr::Ident(_));
+                    if !is_bare_ident {
+                        self.index += 1;
+                        return Ok(Operation::Eval(EvalMutation {
+                            function_name: String::new(),
+                            input: Expr::StructLiteral(vec![]),
+                            inline_expr: Some(expr),
+                        }));
+                    }
+                }
+            }
+
+            // Fall back to current behavior: function_name + arguments
             let (fn_name, input_text) = rest.split_once(' ').unwrap_or((rest, ""));
             let input = if input_text.trim().is_empty() {
                 Expr::StructLiteral(vec![])
@@ -1148,6 +1228,7 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Eval(EvalMutation {
                 function_name: fn_name.to_string(),
                 input,
+                inline_expr: None,
             }));
         }
 
@@ -1711,6 +1792,11 @@ fn parse_expr(line: usize, input: &str) -> Result<Expr> {
         );
     }
     Ok(expr)
+}
+
+/// Public wrapper for `parse_expr` — used by the API to parse inline `!eval` expressions.
+pub fn parse_expr_pub(line: usize, input: &str) -> Result<Expr> {
+    parse_expr(line, input)
 }
 
 #[derive(Clone, Debug)]
@@ -2767,4 +2853,2646 @@ fn parse_mock_string(line: usize, input: &str) -> Result<(String, &str)> {
         }
     }
     bail!("line {line}: unterminated string in !mock")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Helper: parse single operation ───────────────────────────────────
+
+    fn parse_one(source: &str) -> Operation {
+        let ops = parse(source).expect("parse failed");
+        assert_eq!(ops.len(), 1, "expected 1 operation, got {}", ops.len());
+        ops.into_iter().next().unwrap()
+    }
+
+    fn parse_ops(source: &str) -> Vec<Operation> {
+        parse(source).expect("parse failed")
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 1. Expression parsing (via parse_expr_pub)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn expr_int_literal() {
+        let e = parse_expr_pub(0, "42").unwrap();
+        assert!(matches!(e, Expr::Int(42)));
+    }
+
+    #[test]
+    fn expr_negative_int() {
+        let e = parse_expr_pub(0, "-7").unwrap();
+        match e {
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => {
+                assert!(matches!(*expr, Expr::Int(7)));
+            }
+            _ => panic!("expected Unary(Neg, Int(7)), got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_float_literal() {
+        let e = parse_expr_pub(0, "3.14").unwrap();
+        match e {
+            Expr::Float(f) => assert!((f - 3.14).abs() < 1e-10),
+            _ => panic!("expected Float, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_bool_true() {
+        let e = parse_expr_pub(0, "true").unwrap();
+        assert!(matches!(e, Expr::Bool(true)));
+    }
+
+    #[test]
+    fn expr_bool_false() {
+        let e = parse_expr_pub(0, "false").unwrap();
+        assert!(matches!(e, Expr::Bool(false)));
+    }
+
+    #[test]
+    fn expr_string_literal() {
+        let e = parse_expr_pub(0, r#""hello world""#).unwrap();
+        match e {
+            Expr::String(s) => assert_eq!(s, "hello world"),
+            _ => panic!("expected String, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_string_with_escapes() {
+        let e = parse_expr_pub(0, r#""line1\nline2\ttab\\slash\"quote""#).unwrap();
+        match e {
+            Expr::String(s) => assert_eq!(s, "line1\nline2\ttab\\slash\"quote"),
+            _ => panic!("expected String with escapes, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_ident() {
+        let e = parse_expr_pub(0, "my_var").unwrap();
+        match e {
+            Expr::Ident(name) => assert_eq!(name, "my_var"),
+            _ => panic!("expected Ident, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_add() {
+        let e = parse_expr_pub(0, "2 + 3").unwrap();
+        match e {
+            Expr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => {
+                assert!(matches!(*left, Expr::Int(2)));
+                assert!(matches!(*right, Expr::Int(3)));
+            }
+            _ => panic!("expected Binary Add, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_sub() {
+        let e = parse_expr_pub(0, "10 - 4").unwrap();
+        match e {
+            Expr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                assert!(matches!(*left, Expr::Int(10)));
+                assert!(matches!(*right, Expr::Int(4)));
+            }
+            _ => panic!("expected Binary Sub, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_mul_add_precedence() {
+        // 1 * 2 + 3 should be (1*2) + 3
+        let e = parse_expr_pub(0, "1 * 2 + 3").unwrap();
+        match e {
+            Expr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => {
+                assert!(matches!(*right, Expr::Int(3)));
+                match *left {
+                    Expr::Binary {
+                        op: BinaryOp::Mul,
+                        left: l2,
+                        right: r2,
+                    } => {
+                        assert!(matches!(*l2, Expr::Int(1)));
+                        assert!(matches!(*r2, Expr::Int(2)));
+                    }
+                    _ => panic!("expected Mul on left of Add"),
+                }
+            }
+            _ => panic!("expected Add at top, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_div_and_mod() {
+        let e = parse_expr_pub(0, "10 / 3").unwrap();
+        assert!(matches!(
+            e,
+            Expr::Binary {
+                op: BinaryOp::Div,
+                ..
+            }
+        ));
+
+        let e = parse_expr_pub(0, "10 % 3").unwrap();
+        assert!(matches!(
+            e,
+            Expr::Binary {
+                op: BinaryOp::Mod,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn expr_comparison_operators() {
+        assert!(matches!(
+            parse_expr_pub(0, "a >= b").unwrap(),
+            Expr::Binary {
+                op: BinaryOp::Gte,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_expr_pub(0, "a <= b").unwrap(),
+            Expr::Binary {
+                op: BinaryOp::Lte,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_expr_pub(0, "a == b").unwrap(),
+            Expr::Binary {
+                op: BinaryOp::Eq,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_expr_pub(0, "a != b").unwrap(),
+            Expr::Binary {
+                op: BinaryOp::Neq,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_expr_pub(0, "a > b").unwrap(),
+            Expr::Binary {
+                op: BinaryOp::Gt,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_expr_pub(0, "a < b").unwrap(),
+            Expr::Binary {
+                op: BinaryOp::Lt,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn expr_and_or() {
+        let e = parse_expr_pub(0, "x AND y").unwrap();
+        assert!(matches!(
+            e,
+            Expr::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
+
+        let e = parse_expr_pub(0, "x OR y").unwrap();
+        assert!(matches!(
+            e,
+            Expr::Binary {
+                op: BinaryOp::Or,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn expr_not() {
+        let e = parse_expr_pub(0, "NOT x").unwrap();
+        match e {
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr,
+            } => {
+                assert!(matches!(*expr, Expr::Ident(ref n) if n == "x"));
+            }
+            _ => panic!("expected NOT unary, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_and_or_precedence() {
+        // x OR y AND z  →  x OR (y AND z) because AND binds tighter
+        let e = parse_expr_pub(0, "x OR y AND z").unwrap();
+        match e {
+            Expr::Binary {
+                op: BinaryOp::Or,
+                left,
+                right,
+            } => {
+                assert!(matches!(*left, Expr::Ident(ref n) if n == "x"));
+                assert!(matches!(
+                    *right,
+                    Expr::Binary {
+                        op: BinaryOp::And,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected OR at top, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_function_call_no_args() {
+        let e = parse_expr_pub(0, "foo()").unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Ident(ref n) if n == "foo"));
+                assert!(args.is_empty());
+            }
+            _ => panic!("expected Call, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_function_call_one_arg() {
+        let e = parse_expr_pub(0, "len(x)").unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Ident(ref n) if n == "len"));
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0], Expr::Ident(ref n) if n == "x"));
+            }
+            _ => panic!("expected Call, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_function_call_multi_args() {
+        let e = parse_expr_pub(0, r#"concat("a", "b", "c")"#).unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Ident(ref n) if n == "concat"));
+                assert_eq!(args.len(), 3);
+                assert!(matches!(&args[0], Expr::String(s) if s == "a"));
+                assert!(matches!(&args[1], Expr::String(s) if s == "b"));
+                assert!(matches!(&args[2], Expr::String(s) if s == "c"));
+            }
+            _ => panic!("expected Call, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_nested_function_calls() {
+        let e = parse_expr_pub(0, r#"len(concat("a", "b"))"#).unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Ident(ref n) if n == "len"));
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0], Expr::Call { .. }));
+            }
+            _ => panic!("expected nested Call, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_field_access() {
+        let e = parse_expr_pub(0, "user.name").unwrap();
+        match e {
+            Expr::FieldAccess { base, field } => {
+                assert!(matches!(*base, Expr::Ident(ref n) if n == "user"));
+                assert_eq!(field, "name");
+            }
+            _ => panic!("expected FieldAccess, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_chained_field_access() {
+        let e = parse_expr_pub(0, "a.b.c").unwrap();
+        match e {
+            Expr::FieldAccess { base, field } => {
+                assert_eq!(field, "c");
+                match *base {
+                    Expr::FieldAccess {
+                        base: inner,
+                        field: f2,
+                    } => {
+                        assert_eq!(f2, "b");
+                        assert!(matches!(*inner, Expr::Ident(ref n) if n == "a"));
+                    }
+                    _ => panic!("expected nested FieldAccess"),
+                }
+            }
+            _ => panic!("expected FieldAccess, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_method_call_on_field() {
+        // user.name.len() — field access + call
+        let e = parse_expr_pub(0, "user.name.len()").unwrap();
+        // Should be Call { callee: FieldAccess { FieldAccess { user, name }, len }, args: [] }
+        // Actually: the Pratt parser sees user.name first as FieldAccess, then .len as another FieldAccess,
+        // then () as a Call on that.
+        match e {
+            Expr::Call { callee, args } => {
+                assert!(args.is_empty());
+                match *callee {
+                    Expr::FieldAccess { field, .. } => assert_eq!(field, "len"),
+                    _ => panic!("expected FieldAccess inside Call"),
+                }
+            }
+            _ => panic!("expected Call, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_struct_literal() {
+        let e = parse_expr_pub(0, r#"{name: "alice", age: 25}"#).unwrap();
+        match e {
+            Expr::StructLiteral(fields) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "name");
+                assert!(matches!(&fields[0].value, Expr::String(s) if s == "alice"));
+                assert_eq!(fields[1].name, "age");
+                assert!(matches!(fields[1].value, Expr::Int(25)));
+            }
+            _ => panic!("expected StructLiteral, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_list_call() {
+        let e = parse_expr_pub(0, "list(1, 2, 3)").unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Ident(ref n) if n == "list"));
+                assert_eq!(args.len(), 3);
+                assert!(matches!(args[0], Expr::Int(1)));
+                assert!(matches!(args[1], Expr::Int(2)));
+                assert!(matches!(args[2], Expr::Int(3)));
+            }
+            _ => panic!("expected Call(list, ...), got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_parenthesized() {
+        // (1 + 2) * 3
+        let e = parse_expr_pub(0, "(1 + 2) * 3").unwrap();
+        match e {
+            Expr::Binary {
+                op: BinaryOp::Mul,
+                left,
+                right,
+            } => {
+                assert!(matches!(*right, Expr::Int(3)));
+                assert!(matches!(
+                    *left,
+                    Expr::Binary {
+                        op: BinaryOp::Add,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected Mul at top, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_cast() {
+        let e = parse_expr_pub(0, "x as Float").unwrap();
+        match e {
+            Expr::Cast { expr, ty } => {
+                assert!(matches!(*expr, Expr::Ident(ref n) if n == "x"));
+                assert!(matches!(ty, TypeExpr::Named(ref n) if n == "Float"));
+            }
+            _ => panic!("expected Cast, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_complex_compound() {
+        // a + b * c >= d AND NOT e
+        let e = parse_expr_pub(0, "a + b * c >= d AND NOT e").unwrap();
+        // Should be AND at top
+        assert!(matches!(
+            e,
+            Expr::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn expr_parse_error_incomplete() {
+        assert!(parse_expr_pub(0, "1 +").is_err());
+    }
+
+    #[test]
+    fn expr_parse_error_trailing_tokens() {
+        assert!(parse_expr_pub(0, "1 2").is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 2. Statement parsing (via parse(), within a function body)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn stmt_let() {
+        let op = parse_one("+let x:Int = 42");
+        match op {
+            Operation::Let(decl) => {
+                assert_eq!(decl.name, "x");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "Int"));
+                assert!(matches!(decl.expr, Expr::Int(42)));
+            }
+            _ => panic!("expected Let, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_let_with_expr() {
+        let op = parse_one("+let msg:String = concat(a, b)");
+        match op {
+            Operation::Let(decl) => {
+                assert_eq!(decl.name, "msg");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "String"));
+                assert!(matches!(decl.expr, Expr::Call { .. }));
+            }
+            _ => panic!("expected Let with call, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_set() {
+        let op = parse_one("+set count = count + 1");
+        match op {
+            Operation::Set(decl) => {
+                assert_eq!(decl.name, "count");
+                assert!(matches!(
+                    decl.expr,
+                    Expr::Binary {
+                        op: BinaryOp::Add,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected Set, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_call() {
+        let op = parse_one("+call result:String = validate(input)");
+        match op {
+            Operation::Call(decl) => {
+                assert_eq!(decl.name, "result");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "String"));
+                assert!(matches!(decl.expr, Expr::Call { .. }));
+            }
+            _ => panic!("expected Call, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_check() {
+        let op = parse_one("+check positive x > 0 ~err_negative");
+        match op {
+            Operation::Check(decl) => {
+                assert_eq!(decl.name, "positive");
+                assert!(matches!(
+                    decl.expr,
+                    Expr::Binary {
+                        op: BinaryOp::Gt,
+                        ..
+                    }
+                ));
+                assert_eq!(decl.err_label, "err_negative");
+            }
+            _ => panic!("expected Check, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_return() {
+        let op = parse_one("+return 42");
+        match op {
+            Operation::Return(decl) => {
+                assert!(matches!(decl.expr, Expr::Int(42)));
+            }
+            _ => panic!("expected Return, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_return_expr() {
+        let op = parse_one(r#"+return concat("hello", " ", "world")"#);
+        match op {
+            Operation::Return(decl) => {
+                assert!(matches!(decl.expr, Expr::Call { .. }));
+            }
+            _ => panic!("expected Return, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_await() {
+        let op = parse_one("+await data:String = http_get(url)");
+        match op {
+            Operation::Await(decl) => {
+                assert_eq!(decl.name, "data");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "String"));
+                assert!(matches!(decl.call, Expr::Call { .. }));
+            }
+            _ => panic!("expected Await, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_spawn() {
+        let op = parse_one("+spawn poll_loop()");
+        match op {
+            Operation::Spawn(decl) => {
+                assert!(matches!(decl.call, Expr::Call { .. }));
+            }
+            _ => panic!("expected Spawn, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_if_then_end() {
+        let source = "\
++if x > 0
+  +return x
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::If(decl) => {
+                assert!(matches!(
+                    decl.condition,
+                    Expr::Binary {
+                        op: BinaryOp::Gt,
+                        ..
+                    }
+                ));
+                assert_eq!(decl.then_body.len(), 1);
+                assert!(matches!(decl.then_body[0], Operation::Return(_)));
+                assert!(decl.elif_branches.is_empty());
+                assert!(decl.else_body.is_empty());
+            }
+            _ => panic!("expected If, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_if_elif_else_end() {
+        let source = "\
++if x > 0
+  +return \"positive\"
++elif x == 0
+  +return \"zero\"
++else
+  +return \"negative\"
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::If(decl) => {
+                assert_eq!(decl.then_body.len(), 1);
+                assert_eq!(decl.elif_branches.len(), 1);
+                assert_eq!(decl.elif_branches[0].1.len(), 1);
+                assert_eq!(decl.else_body.len(), 1);
+            }
+            _ => panic!("expected If with elif/else, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_while_end() {
+        let source = "\
++while i < 10
+  +set i = i + 1
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::While(decl) => {
+                assert!(matches!(
+                    decl.condition,
+                    Expr::Binary {
+                        op: BinaryOp::Lt,
+                        ..
+                    }
+                ));
+                assert_eq!(decl.body.len(), 1);
+                assert!(matches!(decl.body[0], Operation::Set(_)));
+            }
+            _ => panic!("expected While, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_match_case_end() {
+        let source = "\
++match result
++case Ok(value)
+  +return value
++case Err(msg)
+  +return msg
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Match(decl) => {
+                assert!(matches!(decl.expr, Expr::Ident(ref n) if n == "result"));
+                assert_eq!(decl.arms.len(), 2);
+                assert_eq!(decl.arms[0].variant, "Ok");
+                assert_eq!(decl.arms[0].bindings, vec!["value"]);
+                assert_eq!(decl.arms[1].variant, "Err");
+                assert_eq!(decl.arms[1].bindings, vec!["msg"]);
+            }
+            _ => panic!("expected Match, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_match_wildcard() {
+        let source = "\
++match x
++case Some(v)
+  +return v
++case _
+  +return 0
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Match(decl) => {
+                assert_eq!(decl.arms.len(), 2);
+                assert_eq!(decl.arms[1].variant, "_");
+            }
+            _ => panic!("expected Match with wildcard, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_each_end() {
+        let source = "\
++each items item:String
+  +call r:String = process(item)
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Each(decl) => {
+                assert!(matches!(decl.collection, Expr::Ident(ref n) if n == "items"));
+                assert_eq!(decl.item, "item");
+                assert!(matches!(decl.item_type, TypeExpr::Named(ref n) if n == "String"));
+                assert_eq!(decl.body.len(), 1);
+            }
+            _ => panic!("expected Each, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 3. Function parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fn_pure_no_params() {
+        let source = "\
++fn greet ()->String
+  +return \"hello\"
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.name, "greet");
+                assert!(decl.params.is_empty());
+                assert!(matches!(decl.return_type, TypeExpr::Named(ref n) if n == "String"));
+                assert!(decl.effects.is_empty());
+                assert_eq!(decl.body.len(), 1);
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_with_params() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.name, "add");
+                assert_eq!(decl.params.len(), 2);
+                assert_eq!(decl.params[0].name, "a");
+                assert!(matches!(decl.params[0].ty, TypeExpr::Named(ref n) if n == "Int"));
+                assert_eq!(decl.params[1].name, "b");
+                assert!(matches!(decl.params[1].ty, TypeExpr::Named(ref n) if n == "Int"));
+                assert!(matches!(decl.return_type, TypeExpr::Named(ref n) if n == "Int"));
+                assert!(decl.effects.is_empty());
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_with_effects() {
+        let source = "\
++fn fetch (url:String)->String [io,async]
+  +await data:String = http_get(url)
+  +return data
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.name, "fetch");
+                assert_eq!(decl.effects.len(), 2);
+                assert!(decl.effects.contains(&"io".to_string()));
+                assert!(decl.effects.contains(&"async".to_string()));
+            }
+            _ => panic!("expected Function with effects, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_result_return_type() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.name, "validate");
+                match &decl.return_type {
+                    TypeExpr::Generic { name, args } => {
+                        assert_eq!(name, "Result");
+                        assert_eq!(args.len(), 1);
+                        assert!(matches!(&args[0], TypeExpr::Named(n) if n == "Int"));
+                    }
+                    _ => panic!("expected Result<Int>, got {:?}", decl.return_type),
+                }
+                assert_eq!(decl.effects, vec!["fail"]);
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_list_return_type() {
+        let source = "\
++fn get_items ()->List<String>
+  +return list()
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => match &decl.return_type {
+                TypeExpr::Generic { name, args } => {
+                    assert_eq!(name, "List");
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(&args[0], TypeExpr::Named(n) if n == "String"));
+                }
+                _ => panic!("expected List<String>, got {:?}", decl.return_type),
+            },
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_empty_body() {
+        // Functions with no body statements (just the +end)
+        let source = "\
++fn noop ()->Int
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.name, "noop");
+                assert!(decl.body.is_empty());
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_body_without_explicit_end() {
+        // When +end is omitted, the body ends at dedent / next top-level item.
+        // In standalone parse, the function body includes all indented lines.
+        let source = "\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.name, "double");
+                assert_eq!(decl.body.len(), 2);
+                assert!(matches!(decl.body[0], Operation::Let(_)));
+                assert!(matches!(decl.body[1], Operation::Return(_)));
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn fn_multiple_effects() {
+        let source = "\
++fn do_stuff ()->String [io,async,fail,mut]
+  +return \"done\"
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects.len(), 4);
+                assert!(decl.effects.contains(&"io".to_string()));
+                assert!(decl.effects.contains(&"async".to_string()));
+                assert!(decl.effects.contains(&"fail".to_string()));
+                assert!(decl.effects.contains(&"mut".to_string()));
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 4. Type parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn type_struct() {
+        let op = parse_one("+type User = id:Int, name:String");
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "User");
+                match decl.body {
+                    TypeBody::Struct(fields) => {
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].name, "id");
+                        assert!(matches!(fields[0].ty, TypeExpr::Named(ref n) if n == "Int"));
+                        assert_eq!(fields[1].name, "name");
+                        assert!(matches!(fields[1].ty, TypeExpr::Named(ref n) if n == "String"));
+                    }
+                    _ => panic!("expected struct TypeBody"),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn type_union_variants() {
+        let op = parse_one("+type Color = Red | Green | Blue");
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Color");
+                match decl.body {
+                    TypeBody::Union(variants) => {
+                        assert_eq!(variants.len(), 3);
+                        assert_eq!(variants[0].name, "Red");
+                        assert!(variants[0].payload.is_empty());
+                        assert_eq!(variants[1].name, "Green");
+                        assert_eq!(variants[2].name, "Blue");
+                    }
+                    _ => panic!("expected union TypeBody"),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn type_union_with_payload() {
+        let op = parse_one("+type Shape = Circle(Float) | Rect(Float, Float) | Point");
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Shape");
+                match decl.body {
+                    TypeBody::Union(variants) => {
+                        assert_eq!(variants.len(), 3);
+                        assert_eq!(variants[0].name, "Circle");
+                        assert_eq!(variants[0].payload.len(), 1);
+                        assert_eq!(variants[1].name, "Rect");
+                        assert_eq!(variants[1].payload.len(), 2);
+                        assert_eq!(variants[2].name, "Point");
+                        assert!(variants[2].payload.is_empty());
+                    }
+                    _ => panic!("expected union TypeBody"),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn type_recursive() {
+        let op = parse_one("+type Expr = Literal(Int) | Add(Expr, Expr) | Mul(Expr, Expr)");
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Expr");
+                match decl.body {
+                    TypeBody::Union(variants) => {
+                        assert_eq!(variants.len(), 3);
+                        assert_eq!(variants[0].name, "Literal");
+                        assert_eq!(variants[1].name, "Add");
+                        assert_eq!(variants[1].payload.len(), 2);
+                        // Both payload types should be Named("Expr") — recursive
+                        assert!(
+                            matches!(&variants[1].payload[0], TypeExpr::Named(n) if n == "Expr")
+                        );
+                        assert!(
+                            matches!(&variants[1].payload[1], TypeExpr::Named(n) if n == "Expr")
+                        );
+                    }
+                    _ => panic!("expected union TypeBody"),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn type_struct_with_generic_field() {
+        let op = parse_one("+type State = items:List<String>, count:Int");
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "State");
+                match decl.body {
+                    TypeBody::Struct(fields) => {
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].name, "items");
+                        match &fields[0].ty {
+                            TypeExpr::Generic { name, args } => {
+                                assert_eq!(name, "List");
+                                assert_eq!(args.len(), 1);
+                            }
+                            _ => panic!("expected List<String> generic"),
+                        }
+                    }
+                    _ => panic!("expected struct TypeBody"),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 5. Module parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_with_function() {
+        let source = "\
+!module MyModule
++fn greet ()->String
+  +return \"hello\"
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Module(decl) => {
+                assert_eq!(decl.name, "MyModule");
+                assert_eq!(decl.body.len(), 1);
+                assert!(matches!(decl.body[0], Operation::Function(_)));
+            }
+            _ => panic!("expected Module, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_with_type_and_function() {
+        let source = "\
+!module Users
++type User = id:Int, name:String
++fn create (name:String)->User
+  +let u:User = {id: 1, name: name}
+  +return u
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Module(decl) => {
+                assert_eq!(decl.name, "Users");
+                assert_eq!(decl.body.len(), 2);
+                assert!(matches!(decl.body[0], Operation::Type(_)));
+                assert!(matches!(decl.body[1], Operation::Function(_)));
+            }
+            _ => panic!("expected Module, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_stops_at_next_module() {
+        let source = "\
+!module A
++fn a_fn ()->Int
+  +return 1
+
+!module B
++fn b_fn ()->Int
+  +return 2
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "A");
+                assert_eq!(m.body.len(), 1);
+            }
+            _ => panic!("expected Module A"),
+        }
+        match &ops[1] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "B");
+                assert_eq!(m.body.len(), 1);
+            }
+            _ => panic!("expected Module B"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 6. Route parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn route_post() {
+        let op = parse_one(r#"+route POST "/webhook/telegram" -> handle_telegram"#);
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "POST");
+                assert_eq!(path, "/webhook/telegram");
+                assert_eq!(handler_fn, "handle_telegram");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_get() {
+        let op = parse_one(r#"+route GET "/health" -> health_check"#);
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/health");
+                assert_eq!(handler_fn, "health_check");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 7. Test / Eval / Mock / Command parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_block_simple() {
+        let source = "\
+!test double
+  +with 5 -> expect 10
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.function_name, "double");
+                assert_eq!(test.cases.len(), 1);
+                assert!(matches!(test.cases[0].input, Expr::Int(5)));
+                assert!(matches!(test.cases[0].expected, Expr::Int(10)));
+            }
+            _ => panic!("expected Test, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn test_block_key_value() {
+        let source = "\
+!test add
+  +with a=3 b=4 -> expect 7
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.function_name, "add");
+                assert_eq!(test.cases.len(), 1);
+                match &test.cases[0].input {
+                    Expr::StructLiteral(fields) => {
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].name, "a");
+                        assert_eq!(fields[1].name, "b");
+                    }
+                    _ => panic!("expected struct literal input"),
+                }
+            }
+            _ => panic!("expected Test, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn test_block_multiple_cases() {
+        let source = "\
+!test validate
+  +with name=\"alice\" age=25 -> expect Ok
+  +with name=\"\" age=25 -> expect Err
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.function_name, "validate");
+                assert_eq!(test.cases.len(), 2);
+            }
+            _ => panic!("expected Test, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn test_with_matcher() {
+        let source = "\
+!test fetch
+  +with url=\"http://example.com\" -> expect contains(\"hello\")
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.cases.len(), 1);
+                assert!(test.cases[0].matcher.is_some());
+                match &test.cases[0].matcher {
+                    Some(TestMatcher::Contains(s)) => assert_eq!(s, "hello"),
+                    _ => panic!("expected Contains matcher"),
+                }
+            }
+            _ => panic!("expected Test, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_function_name() {
+        let op = parse_one("!eval my_func");
+        match op {
+            Operation::Eval(ev) => {
+                assert_eq!(ev.function_name, "my_func");
+                assert!(ev.inline_expr.is_none());
+            }
+            _ => panic!("expected Eval, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_inline_expression() {
+        let op = parse_one("!eval 1 + 2");
+        match op {
+            Operation::Eval(ev) => {
+                assert!(ev.inline_expr.is_some());
+                assert!(matches!(
+                    ev.inline_expr.as_ref().unwrap(),
+                    Expr::Binary {
+                        op: BinaryOp::Add,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected Eval, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_function_with_args() {
+        let op = parse_one("!eval add a=3 b=4");
+        match op {
+            Operation::Eval(ev) => {
+                assert_eq!(ev.function_name, "add");
+                assert!(ev.inline_expr.is_none());
+            }
+            _ => panic!("expected Eval, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn mock_operation() {
+        let op = parse_one(r#"!mock http_get "http://example.com" -> "hello""#);
+        match op {
+            Operation::Mock {
+                operation,
+                patterns,
+                response,
+            } => {
+                assert_eq!(operation, "http_get");
+                assert_eq!(patterns, vec!["http://example.com"]);
+                assert_eq!(response, "hello");
+            }
+            _ => panic!("expected Mock, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn query_passthrough() {
+        let op = parse_one("?symbols");
+        match op {
+            Operation::Query(q) => assert_eq!(q, "?symbols"),
+            _ => panic!("expected Query, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_operation() {
+        let op = parse_one("!remove MyModule.my_func");
+        match op {
+            Operation::Remove(target) => assert_eq!(target, "MyModule.my_func"),
+            _ => panic!("expected Remove, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn done_operation() {
+        let op = parse_one("!done");
+        assert!(matches!(op, Operation::Done));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 8. Edge cases
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn comments_are_skipped() {
+        let source = "\
+// This is a comment
++let x:Int = 42
+# Another comment style
++let y:Int = 7
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(&ops[0], Operation::Let(d) if d.name == "x"));
+        assert!(matches!(&ops[1], Operation::Let(d) if d.name == "y"));
+    }
+
+    #[test]
+    fn empty_source() {
+        let ops = parse("").unwrap();
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn blank_lines_skipped() {
+        let source = "\n\n+let x:Int = 1\n\n\n";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn nested_if_in_function() {
+        let source = "\
++fn classify (x:Int)->String
+  +if x > 0
+    +if x > 100
+      +return \"big\"
+    +else
+      +return \"small\"
+    +end
+  +else
+    +return \"negative\"
+  +end
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.body.len(), 1);
+                match &decl.body[0] {
+                    Operation::If(outer) => {
+                        assert_eq!(outer.then_body.len(), 1);
+                        assert!(matches!(outer.then_body[0], Operation::If(_)));
+                        assert_eq!(outer.else_body.len(), 1);
+                    }
+                    _ => panic!("expected nested If"),
+                }
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn while_in_function() {
+        let source = "\
++fn count_to (n:Int)->Int [mut]
+  +let i:Int = 0
+  +while i < n
+    +set i = i + 1
+  +end
+  +return i
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.body.len(), 3); // let, while, return
+                assert!(matches!(decl.body[1], Operation::While(_)));
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn each_in_function() {
+        let source = "\
++fn process_all (items:List<String>)->Int
+  +let count:Int = 0
+  +each items item:String
+    +set count = count + 1
+  +end
+  +return count
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.body.len(), 3); // let, each, return
+                assert!(matches!(decl.body[1], Operation::Each(_)));
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn match_in_function() {
+        let source = "\
++fn eval_expr (e:Expr)->Int
+  +match e
+  +case Literal(val)
+    +return val
+  +case Add(left, right)
+    +let l:Int = eval_expr(left)
+    +let r:Int = eval_expr(right)
+    +return l + r
+  +end
++end";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.body.len(), 1); // just the match
+                match &decl.body[0] {
+                    Operation::Match(m) => {
+                        assert_eq!(m.arms.len(), 2);
+                        assert_eq!(m.arms[0].variant, "Literal");
+                        assert_eq!(m.arms[0].bindings, vec!["val"]);
+                        assert_eq!(m.arms[1].variant, "Add");
+                        assert_eq!(m.arms[1].bindings, vec!["left", "right"]);
+                        assert_eq!(m.arms[1].body.len(), 3); // let, let, return
+                    }
+                    _ => panic!("expected Match"),
+                }
+            }
+            _ => panic!("expected Function, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn multiline_type_continuation() {
+        // Type declarations can span multiple lines (continuation line joined with comma)
+        let source = "\
++type Config = host:String, port:Int
+  timeout:Int, debug:Bool
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Config");
+                match decl.body {
+                    TypeBody::Struct(fields) => {
+                        assert_eq!(fields.len(), 4);
+                        assert_eq!(fields[0].name, "host");
+                        assert_eq!(fields[1].name, "port");
+                        assert_eq!(fields[2].name, "timeout");
+                        assert_eq!(fields[3].name, "debug");
+                    }
+                    _ => panic!("expected struct TypeBody"),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_var_declaration() {
+        let op = parse_one("+shared count:Int = 0");
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "count");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "Int"));
+                assert!(matches!(decl.default, Expr::Int(0)));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn move_operation() {
+        let op = parse_one("!move add subtract Math");
+        match op {
+            Operation::Move {
+                function_names,
+                target_module,
+            } => {
+                assert_eq!(function_names, vec!["add", "subtract"]);
+                assert_eq!(target_module, "Math");
+            }
+            _ => panic!("expected Move, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_mutation() {
+        let source = "\
+!replace my_func.s1
+  +check positive x > 0 ~err_neg
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Replace(r) => {
+                assert_eq!(r.target, "my_func.s1");
+                assert_eq!(r.body.len(), 1);
+                assert!(matches!(r.body[0], Operation::Check(_)));
+            }
+            _ => panic!("expected Replace, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn code_fences_stripped() {
+        // Code fences (```) should be ignored by the parser
+        let source = "```\n+let x:Int = 1\n```";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], Operation::Let(d) if d.name == "x"));
+    }
+
+    #[test]
+    fn full_program_multiple_ops() {
+        let source = "\
++type User = id:Int, name:String
+
++fn create_user (name:String)->User
+  +let u:User = {id: 1, name: name}
+  +return u
+
+!test create_user
+  +with name=\"alice\" -> expect {id: 1, name: \"alice\"}
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 3);
+        assert!(matches!(&ops[0], Operation::Type(_)));
+        assert!(matches!(&ops[1], Operation::Function(_)));
+        assert!(matches!(&ops[2], Operation::Test(_)));
+    }
+
+    // ── parse_test_input tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_input_empty() {
+        let e = parse_test_input(0, "").unwrap();
+        assert!(matches!(e, Expr::StructLiteral(ref f) if f.is_empty()));
+    }
+
+    #[test]
+    fn test_input_key_value() {
+        let e = parse_test_input(0, "a=3 b=4").unwrap();
+        match e {
+            Expr::StructLiteral(fields) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "a");
+                assert_eq!(fields[1].name, "b");
+            }
+            _ => panic!("expected StructLiteral, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_input_single_expr() {
+        let e = parse_test_input(0, "42").unwrap();
+        assert!(matches!(e, Expr::Int(42)));
+    }
+
+    #[test]
+    fn test_input_string() {
+        let e = parse_test_input(0, r#""hello""#).unwrap();
+        assert!(matches!(e, Expr::String(ref s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_input_function_call() {
+        let e = parse_test_input(0, r#"concat("a", "b")"#).unwrap();
+        assert!(matches!(e, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn test_input_positional_multiple() {
+        // Multiple space-separated values become positional _0, _1, ...
+        let e = parse_test_input(0, r#""hello" "world""#).unwrap();
+        match e {
+            Expr::StructLiteral(fields) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "_0");
+                assert_eq!(fields[1].name, "_1");
+            }
+            _ => panic!("expected positional StructLiteral, got {e:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 9. Module parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_empty() {
+        // Module with no body (next line is a non-module operation)
+        let source = "\
+!module Empty
+!eval greet
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Empty");
+                assert!(m.body.is_empty());
+            }
+            _ => panic!("expected Module"),
+        }
+        assert!(matches!(&ops[1], Operation::Eval(_)));
+    }
+
+    #[test]
+    fn module_with_shared_var() {
+        let source = "\
+!module Counter
++shared count:Int = 0
++fn increment ()->Int
+  +set count = count + 1
+  +return count
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Counter");
+                // +shared and +fn should NOT both be in body unless +shared is recognized
+                // Actually +shared is recognized inside modules (see parser code line 516-520)
+                // But the check is: !next.text.starts_with("+fn") && !starts_with("+type") && !starts_with("+shared")
+                // So +shared IS collected. Let's verify:
+                assert_eq!(m.body.len(), 2);
+                assert!(matches!(&m.body[0], Operation::SharedVar(_)));
+                assert!(matches!(&m.body[1], Operation::Function(_)));
+            }
+            _ => panic!("expected Module, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_with_multiple_types_and_functions() {
+        let source = "\
+!module Data
++type Point = x:Int, y:Int
++type Color = Red | Green | Blue
++fn origin ()->Point
+  +return {x: 0, y: 0}
++fn default_color ()->Color
+  +return Red
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Data");
+                assert_eq!(m.body.len(), 4);
+                assert!(matches!(&m.body[0], Operation::Type(_)));
+                assert!(matches!(&m.body[1], Operation::Type(_)));
+                assert!(matches!(&m.body[2], Operation::Function(_)));
+                assert!(matches!(&m.body[3], Operation::Function(_)));
+            }
+            _ => panic!("expected Module, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_qualified_function_call_expr() {
+        // Module.func(x) parses as Call { callee: FieldAccess { Ident("Module"), "func" }, args }
+        let e = parse_expr_pub(0, "Math.add(1, 2)").unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert_eq!(args.len(), 2);
+                match *callee {
+                    Expr::FieldAccess { base, field } => {
+                        assert!(matches!(*base, Expr::Ident(ref n) if n == "Math"));
+                        assert_eq!(field, "add");
+                    }
+                    _ => panic!("expected FieldAccess in callee"),
+                }
+            }
+            _ => panic!("expected Call, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn module_qualified_call_in_statement() {
+        let op = parse_one("+call result:Int = Math.add(a, b)");
+        match op {
+            Operation::Call(decl) => {
+                assert_eq!(decl.name, "result");
+                match decl.expr {
+                    Expr::Call { callee, args } => {
+                        assert_eq!(args.len(), 2);
+                        assert!(matches!(*callee, Expr::FieldAccess { .. }));
+                    }
+                    _ => panic!("expected Call expr"),
+                }
+            }
+            _ => panic!("expected Call op, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_qualified_in_let() {
+        let op = parse_one("+let p:Point = Geometry.origin()");
+        match op {
+            Operation::Let(decl) => {
+                assert_eq!(decl.name, "p");
+                match decl.expr {
+                    Expr::Call { callee, .. } => match *callee {
+                        Expr::FieldAccess { base, field } => {
+                            assert!(matches!(*base, Expr::Ident(ref n) if n == "Geometry"));
+                            assert_eq!(field, "origin");
+                        }
+                        _ => panic!("expected FieldAccess in callee"),
+                    },
+                    _ => panic!("expected Call expr"),
+                }
+            }
+            _ => panic!("expected Let, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 10. Route parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn route_put() {
+        let op = parse_one(r#"+route PUT "/api/users" -> update_user"#);
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "PUT");
+                assert_eq!(path, "/api/users");
+                assert_eq!(handler_fn, "update_user");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_delete() {
+        let op = parse_one(r#"+route DELETE "/api/users" -> delete_user"#);
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "DELETE");
+                assert_eq!(path, "/api/users");
+                assert_eq!(handler_fn, "delete_user");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_method_lowercased_gets_uppercased() {
+        let op = parse_one(r#"+route get "/health" -> health"#);
+        match op {
+            Operation::Route { method, .. } => {
+                assert_eq!(method, "GET");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_unquoted_path() {
+        // Paths can be unquoted too
+        let op = parse_one("+route GET /api/status -> get_status");
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/api/status");
+                assert_eq!(handler_fn, "get_status");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_with_complex_path() {
+        let op = parse_one(r#"+route POST "/webhook/telegram/v2" -> handle_v2"#);
+        match op {
+            Operation::Route {
+                path, handler_fn, ..
+            } => {
+                assert_eq!(path, "/webhook/telegram/v2");
+                assert_eq!(handler_fn, "handle_v2");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 11. Shared variable parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn shared_string_default() {
+        let op = parse_one(r#"+shared label:String = "default""#);
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "label");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "String"));
+                assert!(matches!(decl.default, Expr::String(ref s) if s == "default"));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_bool_default() {
+        let op = parse_one("+shared running:Bool = false");
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "running");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "Bool"));
+                assert!(matches!(decl.default, Expr::Bool(false)));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_with_generic_type() {
+        let op = parse_one("+shared items:List<String> = list()");
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "items");
+                match &decl.ty {
+                    TypeExpr::Generic { name, args } => {
+                        assert_eq!(name, "List");
+                        assert_eq!(args.len(), 1);
+                    }
+                    _ => panic!("expected Generic type"),
+                }
+                assert!(matches!(decl.default, Expr::Call { .. }));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_with_struct_literal_default() {
+        let op = parse_one(r#"+shared config:Config = {host: "localhost", port: 8080}"#);
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "config");
+                assert!(matches!(decl.default, Expr::StructLiteral(_)));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 12. Edit operations parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn replace_with_multiple_statements() {
+        let source = "\
+!replace validate.s1
+  +check age input.age >= 0 AND input.age <= 150 ~err_age_range
+  +check name len(input.name) > 0 ~err_empty_name
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Replace(r) => {
+                assert_eq!(r.target, "validate.s1");
+                assert_eq!(r.body.len(), 2);
+                assert!(matches!(r.body[0], Operation::Check(_)));
+                assert!(matches!(r.body[1], Operation::Check(_)));
+            }
+            _ => panic!("expected Replace, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_with_let_and_return() {
+        let source = "\
+!replace my_func.s2
+  +let result:Int = x * 2 + 1
+  +return result
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Replace(r) => {
+                assert_eq!(r.target, "my_func.s2");
+                assert_eq!(r.body.len(), 2);
+                assert!(matches!(r.body[0], Operation::Let(_)));
+                assert!(matches!(r.body[1], Operation::Return(_)));
+            }
+            _ => panic!("expected Replace, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_module() {
+        let op = parse_one("!remove MyModule");
+        match op {
+            Operation::Remove(target) => assert_eq!(target, "MyModule"),
+            _ => panic!("expected Remove, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_type() {
+        let op = parse_one("!remove UserType");
+        match op {
+            Operation::Remove(target) => assert_eq!(target, "UserType"),
+            _ => panic!("expected Remove, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_route() {
+        let op = parse_one("!remove route POST /api/ask");
+        match op {
+            Operation::RemoveRoute { method, path } => {
+                assert_eq!(method, "POST");
+                assert_eq!(path, "/api/ask");
+            }
+            _ => panic!("expected RemoveRoute, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_route_lowercased_method() {
+        let op = parse_one("!remove route get /health");
+        match op {
+            Operation::RemoveRoute { method, path } => {
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/health");
+            }
+            _ => panic!("expected RemoveRoute, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn unroute_shorthand() {
+        let op = parse_one("!unroute GET /api/status");
+        match op {
+            Operation::RemoveRoute { method, path } => {
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/api/status");
+            }
+            _ => panic!("expected RemoveRoute, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn move_single_function() {
+        let op = parse_one("!move validate Utils");
+        match op {
+            Operation::Move {
+                function_names,
+                target_module,
+            } => {
+                assert_eq!(function_names, vec!["validate"]);
+                assert_eq!(target_module, "Utils");
+            }
+            _ => panic!("expected Move, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn move_multiple_functions() {
+        let op = parse_one("!move add subtract multiply Math");
+        match op {
+            Operation::Move {
+                function_names,
+                target_module,
+            } => {
+                assert_eq!(function_names, vec!["add", "subtract", "multiply"]);
+                assert_eq!(target_module, "Math");
+            }
+            _ => panic!("expected Move, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 13. Multi-line type definitions (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn multiline_type_three_lines() {
+        let source = "\
++type Config = host:String
+  port:Int
+  debug:Bool
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Config");
+                match decl.body {
+                    TypeBody::Struct(fields) => {
+                        assert_eq!(fields.len(), 3);
+                        assert_eq!(fields[0].name, "host");
+                        assert_eq!(fields[1].name, "port");
+                        assert_eq!(fields[2].name, "debug");
+                    }
+                    _ => panic!("expected Struct, got {:?}", decl.body),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn multiline_type_stops_at_blank_line() {
+        let source = "\
++type Point = x:Int
+  y:Int
+
++fn origin ()->Point
+  +return {x: 0, y: 0}
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Point");
+                match &decl.body {
+                    TypeBody::Struct(fields) => assert_eq!(fields.len(), 2),
+                    _ => panic!("expected Struct"),
+                }
+            }
+            _ => panic!("expected Type"),
+        }
+        assert!(matches!(&ops[1], Operation::Function(_)));
+    }
+
+    #[test]
+    fn multiline_type_stops_at_plus_operation() {
+        let source = "\
++type State = count:Int
+  name:String
++fn reset ()->State
+  +return {count: 0, name: \"none\"}
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::Type(decl) => match &decl.body {
+                TypeBody::Struct(fields) => assert_eq!(fields.len(), 2),
+                _ => panic!("expected Struct"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn multiline_type_with_leading_comma_stripped() {
+        // Continuation lines that start with comma get the comma stripped
+        let source = "\
++type Config = host:String
+  , port:Int
+  , debug:Bool
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Struct(fields) => {
+                    assert_eq!(fields.len(), 3);
+                    assert_eq!(fields[0].name, "host");
+                    assert_eq!(fields[1].name, "port");
+                    assert_eq!(fields[2].name, "debug");
+                }
+                _ => panic!("expected Struct"),
+            },
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 14. Union types with various payload counts
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn union_zero_payload_only() {
+        let op = parse_one("+type Direction = North | South | East | West");
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 4);
+                    for v in &variants {
+                        assert!(v.payload.is_empty(), "{} should have no payload", v.name);
+                    }
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn union_mixed_payload_counts() {
+        let op = parse_one(
+            "+type Value = Null | Bool(Bool) | Pair(String, Int) | Triple(Int, Int, Int)",
+        );
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 4);
+                    assert_eq!(variants[0].name, "Null");
+                    assert_eq!(variants[0].payload.len(), 0);
+                    assert_eq!(variants[1].name, "Bool");
+                    assert_eq!(variants[1].payload.len(), 1);
+                    assert_eq!(variants[2].name, "Pair");
+                    assert_eq!(variants[2].payload.len(), 2);
+                    assert_eq!(variants[3].name, "Triple");
+                    assert_eq!(variants[3].payload.len(), 3);
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn union_with_generic_payload() {
+        let op = parse_one("+type Container = Empty | Single(String) | Many(List<String>)");
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 3);
+                    assert_eq!(variants[2].name, "Many");
+                    assert_eq!(variants[2].payload.len(), 1);
+                    match &variants[2].payload[0] {
+                        TypeExpr::Generic { name, args } => {
+                            assert_eq!(name, "List");
+                            assert_eq!(args.len(), 1);
+                        }
+                        _ => panic!("expected Generic payload"),
+                    }
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn union_single_variant_needs_pipe() {
+        // A single variant requires | to distinguish from struct syntax
+        // Wrap(Int) without | is not valid union syntax
+        let op = parse_one("+type Wrapper = Wrap(Int) | None");
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 2);
+                    assert_eq!(variants[0].name, "Wrap");
+                    assert_eq!(variants[0].payload.len(), 1);
+                    assert_eq!(variants[1].name, "None");
+                    assert!(variants[1].payload.is_empty());
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 15. Effect combinations
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fn_single_effect_io() {
+        let source = "\
++fn read_file (path:String)->String [io]
+  +return path
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects, vec!["io"]);
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_single_effect_fail() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check pos x > 0 ~err
+  +return x
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects, vec!["fail"]);
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_io_async_combination() {
+        let source = "\
++fn fetch (url:String)->String [io,async]
+  +await data:String = http_get(url)
+  +return data
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects.len(), 2);
+                assert!(decl.effects.contains(&"io".to_string()));
+                assert!(decl.effects.contains(&"async".to_string()));
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_io_async_fail_combination() {
+        let source = "\
++fn safe_fetch (url:String)->Result<String> [io,async,fail]
+  +check valid len(url) > 0 ~err_empty
+  +await data:String = http_get(url)
+  +return data
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects.len(), 3);
+                assert!(decl.effects.contains(&"io".to_string()));
+                assert!(decl.effects.contains(&"async".to_string()));
+                assert!(decl.effects.contains(&"fail".to_string()));
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_all_common_effects() {
+        let source = "\
++fn do_everything ()->String [io,async,fail,mut,rand]
+  +return \"done\"
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects.len(), 5);
+                for eff in &["io", "async", "fail", "mut", "rand"] {
+                    assert!(
+                        decl.effects.contains(&eff.to_string()),
+                        "missing effect: {eff}"
+                    );
+                }
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 16. Plan and Roadmap parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn plan_show() {
+        let op = parse_one("!plan");
+        assert!(matches!(op, Operation::Plan(PlanAction::Show)));
+    }
+
+    #[test]
+    fn plan_set_with_continuation_lines() {
+        let source = "\
+!plan set
+Define types
+Write functions
+Add tests
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Plan(PlanAction::Set(steps)) => {
+                assert_eq!(steps.len(), 3);
+                assert_eq!(steps[0], "Define types");
+                assert_eq!(steps[1], "Write functions");
+                assert_eq!(steps[2], "Add tests");
+            }
+            _ => panic!("expected Plan Set, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_set_strips_numbering() {
+        let source = "\
+!plan set
+1. First step
+2. Second step
+3. Third step
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Plan(PlanAction::Set(steps)) => {
+                assert_eq!(steps.len(), 3);
+                assert_eq!(steps[0], "First step");
+                assert_eq!(steps[1], "Second step");
+                assert_eq!(steps[2], "Third step");
+            }
+            _ => panic!("expected Plan Set, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_done() {
+        let op = parse_one("!plan done 2");
+        match op {
+            Operation::Plan(PlanAction::Progress(n)) => assert_eq!(n, 2),
+            _ => panic!("expected Plan Progress, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_fail() {
+        let op = parse_one("!plan fail 3");
+        match op {
+            Operation::Plan(PlanAction::Fail(n)) => assert_eq!(n, 3),
+            _ => panic!("expected Plan Fail, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn roadmap_show() {
+        let op = parse_one("!roadmap");
+        assert!(matches!(op, Operation::Roadmap(RoadmapAction::Show)));
+
+        let op = parse_one("!roadmap show");
+        assert!(matches!(op, Operation::Roadmap(RoadmapAction::Show)));
+    }
+
+    #[test]
+    fn roadmap_add() {
+        let op = parse_one("!roadmap add Implement user authentication");
+        match op {
+            Operation::Roadmap(RoadmapAction::Add(desc)) => {
+                assert_eq!(desc, "Implement user authentication");
+            }
+            _ => panic!("expected Roadmap Add, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn roadmap_done() {
+        let op = parse_one("!roadmap done 1");
+        match op {
+            Operation::Roadmap(RoadmapAction::Done(n)) => assert_eq!(n, 1),
+            _ => panic!("expected Roadmap Done, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn roadmap_remove() {
+        let op = parse_one("!roadmap remove 2");
+        match op {
+            Operation::Roadmap(RoadmapAction::Remove(n)) => assert_eq!(n, 2),
+            _ => panic!("expected Roadmap Remove, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 17. Agent parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn agent_basic() {
+        let op = parse_one("!agent test write tests for all functions");
+        match op {
+            Operation::Agent { name, scope, task } => {
+                assert_eq!(name, "test");
+                assert_eq!(scope, "full"); // default scope
+                assert_eq!(task, "write tests for all functions");
+            }
+            _ => panic!("expected Agent, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_with_bare_scope() {
+        let op = parse_one("!agent refactor --scope read-only reorganize code");
+        match op {
+            Operation::Agent { name, scope, task } => {
+                assert_eq!(name, "refactor");
+                assert_eq!(scope, "read-only");
+                assert_eq!(task, "reorganize code");
+            }
+            _ => panic!("expected Agent, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_with_quoted_scope() {
+        let op = parse_one(r#"!agent crypto --scope "module Crypto" rewrite encryption"#);
+        match op {
+            Operation::Agent { name, scope, task } => {
+                assert_eq!(name, "crypto");
+                assert_eq!(scope, "module Crypto");
+                assert_eq!(task, "rewrite encryption");
+            }
+            _ => panic!("expected Agent, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 18. Error recovery — parser produces clear error messages
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn error_module_missing_name() {
+        let err = parse("!module").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("expected module name"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_replace_missing_target() {
+        let err = parse("!replace\n  +return 1\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("expected replace target"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_remove_missing_target() {
+        let err = parse("!remove").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("!remove requires a target"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_remove_route_missing_path() {
+        let err = parse("!remove route POST").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("!remove route requires METHOD and path"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_move_needs_at_least_two_args() {
+        let err = parse("!move validate").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("!move function_name(s) ModuleName"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_route_missing_arrow() {
+        let err = parse(r#"+route POST "/api/test""#).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("->"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_route_missing_handler() {
+        let err = parse(r#"+route POST "/api/test" ->"#).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("handler function name"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_shared_missing_equals() {
+        let err = parse("+shared count:Int").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("name:Type = expr"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_shared_missing_type() {
+        let err = parse("+shared count = 0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("name:Type"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_unroute_missing_path() {
+        let err = parse("!unroute GET").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("!unroute requires METHOD and path"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_test_missing_function_name() {
+        let err = parse("!test\n  +with 1 -> expect 2\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("function name"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_expr_incomplete_binary() {
+        let err = parse_expr_pub(0, "1 +");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn error_expr_unmatched_paren() {
+        let err = parse_expr_pub(0, "(1 + 2");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn error_expr_empty_input() {
+        let err = parse_expr_pub(0, "");
+        assert!(err.is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 19. Miscellaneous edge cases
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn opencode_command() {
+        let op = parse_one("!opencode Add a new builtin for file reading");
+        match op {
+            Operation::OpenCode(desc) => {
+                assert_eq!(desc.trim(), "Add a new builtin for file reading");
+            }
+            _ => panic!("expected OpenCode, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn unmock_command() {
+        let op = parse_one("!unmock");
+        assert!(matches!(op, Operation::Unmock));
+    }
+
+    #[test]
+    fn undo_command() {
+        let op = parse_one("!undo");
+        assert!(matches!(op, Operation::Undo));
+    }
+
+    #[test]
+    fn message_command() {
+        let op = parse_one("!msg worker Start processing the queue");
+        match op {
+            Operation::Message { to, content } => {
+                assert_eq!(to, "worker");
+                assert_eq!(content, "Start processing the queue");
+            }
+            _ => panic!("expected Message, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn mock_with_multiple_patterns() {
+        let op = parse_one(r#"!mock http_get "http://a.com" "http://b.com" -> "response""#);
+        match op {
+            Operation::Mock {
+                operation,
+                patterns,
+                response,
+            } => {
+                assert_eq!(operation, "http_get");
+                assert_eq!(patterns.len(), 2);
+                assert_eq!(patterns[0], "http://a.com");
+                assert_eq!(patterns[1], "http://b.com");
+                assert_eq!(response, "response");
+            }
+            _ => panic!("expected Mock, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn query_source() {
+        let op = parse_one("?source MyModule.my_func");
+        match op {
+            Operation::Query(q) => assert_eq!(q, "?source MyModule.my_func"),
+            _ => panic!("expected Query, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn query_deps() {
+        let op = parse_one("?deps");
+        match op {
+            Operation::Query(q) => assert_eq!(q, "?deps"),
+            _ => panic!("expected Query, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn test_with_after_assertion() {
+        let source = "\
+!test setup
+  +with -> expect contains(\"ready\")
+  +after routes contains \"/chat\"
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.cases.len(), 1);
+                assert_eq!(test.cases[0].after_checks.len(), 1);
+                assert_eq!(test.cases[0].after_checks[0].target, "routes");
+                assert_eq!(test.cases[0].after_checks[0].matcher, "contains");
+                assert_eq!(test.cases[0].after_checks[0].value, "/chat");
+            }
+            _ => panic!("expected Test, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn test_starts_with_matcher_parse() {
+        let source = "\
+!test greet
+  +with name=\"alice\" -> expect starts_with(\"Hello\")
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.cases.len(), 1);
+                match &test.cases[0].matcher {
+                    Some(TestMatcher::StartsWith(s)) => assert_eq!(s, "Hello"),
+                    _ => panic!("expected StartsWith matcher"),
+                }
+            }
+            _ => panic!("expected Test"),
+        }
+    }
+
+    #[test]
+    fn test_err_matcher_parse() {
+        let source = "\
+!test validate
+  +with x=-1 -> expect Err(\"negative\")
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.cases.len(), 1);
+                match &test.cases[0].matcher {
+                    Some(TestMatcher::ErrContaining(s)) => assert_eq!(s, "negative"),
+                    _ => panic!(
+                        "expected ErrContaining matcher, got {:?}",
+                        test.cases[0].matcher
+                    ),
+                }
+            }
+            _ => panic!("expected Test"),
+        }
+    }
 }

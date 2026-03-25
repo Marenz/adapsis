@@ -16,6 +16,7 @@ mod session;
 mod telegram;
 mod typeck;
 mod validator;
+mod vm;
 
 use anyhow::Result;
 use clap::Parser;
@@ -419,16 +420,24 @@ async fn main() -> Result<()> {
                         }
                     }
                     parser::Operation::Eval(ev) => {
-                        match eval::eval_compiled_or_interpreted(
-                            &program,
-                            &ev.function_name,
-                            &ev.input,
-                        ) {
-                            Ok((result, compiled)) => {
-                                let tag = if compiled { " [compiled]" } else { "" };
-                                println!("  eval {}(...) = {result}{tag}", ev.function_name);
+                        if let Some(ref expr) = ev.inline_expr {
+                            // Inline expression: evaluate directly
+                            match eval::eval_inline_expr(&program, expr) {
+                                Ok(val) => println!("  = {val}"),
+                                Err(e) => eprintln!("  EVAL ERROR: {e}"),
                             }
-                            Err(e) => eprintln!("  EVAL ERROR: {e}"),
+                        } else {
+                            match eval::eval_compiled_or_interpreted(
+                                &program,
+                                &ev.function_name,
+                                &ev.input,
+                            ) {
+                                Ok((result, compiled)) => {
+                                    let tag = if compiled { " [compiled]" } else { "" };
+                                    println!("  eval {}(...) = {result}{tag}", ev.function_name);
+                                }
+                                Err(e) => eprintln!("  EVAL ERROR: {e}"),
+                            }
                         }
                     }
                     parser::Operation::Query(query) => {
@@ -438,7 +447,7 @@ async fn main() -> Result<()> {
                             api::format_inspect_task(&Some(task_registry.clone()), &Some(snapshot_registry.clone()), tid)
                         } else {
                             let table = typeck::build_symbol_table(&program);
-                            typeck::handle_query(&program, &table, query)
+                            typeck::handle_query(&program, &table, query, &[])
                         };
                         println!("\n--- Query: {query} ---\n{response}");
                     }
@@ -452,7 +461,7 @@ async fn main() -> Result<()> {
                 if let parser::Operation::Test(test) = test_op {
                     println!("\n--- Testing {} ---", test.function_name);
                     for (i, case) in test.cases.iter().enumerate() {
-                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks) {
+                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
                             Ok(msg) => println!("  PASS [{i}]: {msg}"),
                             Err(e) => eprintln!("  FAIL [{i}]: {e}"),
                         }
@@ -699,8 +708,8 @@ async fn main() -> Result<()> {
                 let s = session::Session::load(session_path)?;
                 println!(
                     "Loaded: revision {}, {} mutations",
-                    s.revision,
-                    s.mutations.len()
+                    s.meta.revision,
+                    s.meta.mutations.len()
                 );
                 s
             } else {
@@ -716,7 +725,9 @@ async fn main() -> Result<()> {
             if !lib_state.loaded_modules.is_empty() {
                 sess.program.rebuild_function_index();
             }
-            sess.library_state = Some(lib_state);
+            sess.meta.library_state = Some(lib_state);
+            sess.init_shared_vars();
+            let initial_runtime = sess.runtime.clone();
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
@@ -819,7 +830,7 @@ async fn main() -> Result<()> {
             if !exe_str.contains(resolved_git_dir) {
                 eprintln!("WARNING: AdapsisOS binary ({}) is not inside the opencode git dir ({}).", exe_str, resolved_git_dir);
                 eprintln!("  !opencode self-restart will not pick up rebuilt binaries.");
-                eprintln!("  Run from: {}/target/release/forge", resolved_git_dir);
+                eprintln!("  Run from: {}/target/release/adapsis", resolved_git_dir);
             }
 
             // Self-trigger channel: events feed back into the AI
@@ -857,6 +868,7 @@ async fn main() -> Result<()> {
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
+                runtime: std::sync::Arc::new(std::sync::RwLock::new(initial_runtime)),
             };
 
             let app = axum::Router::new()
@@ -927,11 +939,11 @@ async fn main() -> Result<()> {
                     // Add event as tool message — AI decides whether to act
                     let messages = {
                         let mut session = trigger_session.lock().await;
-                        session.chat_messages.push(crate::session::ChatMessage {
+                        session.meta.chat_messages.push(crate::session::ChatMessage {
                             role: "tool".to_string(),
                             content: event_message.clone(),
                         });
-                        session.chat_messages.iter().map(|m| match m.role.as_str() {
+                        session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
                             "system" => llm::ChatMessage::system(m.content.clone()),
                             "assistant" => llm::ChatMessage::assistant(&m.content),
                             _ => llm::ChatMessage::user(m.content.clone()),
@@ -964,7 +976,7 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                 }
-                                session.chat_messages.push(crate::session::ChatMessage {
+                                session.meta.chat_messages.push(crate::session::ChatMessage {
                                     role: "assistant".to_string(),
                                     content: format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()),
                                 });
@@ -979,7 +991,7 @@ async fn main() -> Result<()> {
 
             // Autonomous mode: inject goal as the first message after startup
             // Skip if session already has chat history (e.g. after !opencode restart)
-            let session_has_history = shared_session.lock().await.chat_messages.len() > 1;
+            let session_has_history = shared_session.lock().await.meta.chat_messages.len() > 1;
             // Autonomous loop: always runs. If --autonomous is given, use it as the
             // initial goal. Otherwise, check the roadmap — if there are undone items,
             // continue working on them automatically.
@@ -1225,12 +1237,27 @@ async fn main() -> Result<()> {
         }
         Command::Eval { expr, api } => {
             let parts = expr.join(" ");
-            let (func, input) = parts.split_once(' ').unwrap_or((&parts, ""));
+            // Try parsing as inline expression first; if it succeeds and isn't
+            // a bare identifier (which is the existing func-name syntax), send
+            // it as an inline expression.
+            let is_inline = if let Ok(parsed) = parser::parse_expr_pub(0, &parts) {
+                !matches!(parsed, parser::Expr::Ident(_))
+            } else {
+                false
+            };
             let client = reqwest::Client::new();
-            let resp: serde_json::Value = client
-                .post(format!("{api}/api/eval"))
-                .json(&serde_json::json!({ "function": func, "input": input }))
-                .send().await?.json().await?;
+            let resp: serde_json::Value = if is_inline {
+                client
+                    .post(format!("{api}/api/eval"))
+                    .json(&serde_json::json!({ "function": "", "expression": parts }))
+                    .send().await?.json().await?
+            } else {
+                let (func, input) = parts.split_once(' ').unwrap_or((&parts, ""));
+                client
+                    .post(format!("{api}/api/eval"))
+                    .json(&serde_json::json!({ "function": func, "input": input }))
+                    .send().await?.json().await?
+            };
             let result = resp.get("result").and_then(|r| r.as_str()).unwrap_or("(none)");
             let success = resp.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
             let compiled = resp.get("compiled").and_then(|c| c.as_bool()).unwrap_or(false);
