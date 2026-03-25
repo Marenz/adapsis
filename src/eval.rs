@@ -908,12 +908,12 @@ fn eval_test_case_with_runtime(
                 let mut env = Env::new();
                 env.populate_shared_from_program(&program);
 
-                // Create handle: mocks checked first, unmatched ops use real IO.
-                let handle = if mocks.is_empty() {
-                    crate::coroutine::CoroutineHandle::new(io_sender)
-                } else {
-                    crate::coroutine::CoroutineHandle::new_mock_with_sender(mocks, io_sender)
-                };
+                // Tests always use mock-only handles.  Unmocked IO operations
+                // fail with "no mock for ..." instead of executing real IO,
+                // which would deadlock when the test calls back into the same
+                // server (e.g. http_get to /api/status while the session lock
+                // is held).
+                let handle = crate::coroutine::CoroutineHandle::new_mock(mocks);
                 env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
                 bind_input_to_params(&program, func, &input, &mut env);
@@ -948,7 +948,7 @@ pub async fn eval_test_case_async(
     function_name: &str,
     case: &parser::TestCase,
     mocks: &[crate::session::IoMock],
-    io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+    _io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
     http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
     let func = program
@@ -990,13 +990,9 @@ pub async fn eval_test_case_async(
         let mut env = Env::new();
         env.populate_shared_from_program(&program);
 
-        // Create handle: mocks are checked first, unmatched ops fall through
-        // to real IO via the sender.
-        let handle = if mocks.is_empty() {
-            crate::coroutine::CoroutineHandle::new(io_sender)
-        } else {
-            crate::coroutine::CoroutineHandle::new_mock_with_sender(mocks, io_sender)
-        };
+        // Tests always use mock-only handles — see comment in
+        // eval_test_case_with_runtime for rationale.
+        let handle = crate::coroutine::CoroutineHandle::new_mock(mocks);
         env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
         bind_input_to_params(&program, func, &input, &mut env);
@@ -2984,9 +2980,9 @@ mod tests {
     }
 
     #[test]
-    fn test_async_function_without_mock_runs_real_io() {
-        // An async function tested without mocks should spin up a temporary
-        // coroutine runtime and execute IO operations for real.
+    fn test_async_function_without_mock_errors_on_unmocked_io() {
+        // Tests always use mock-only handles to prevent deadlocks from
+        // self-referential HTTP calls.  Unmocked IO should fail, not execute.
         let source = "\
 +fn delayed_value ()->String [async]
   +await _:String = sleep(1)
@@ -3001,9 +2997,11 @@ mod tests {
         let cases = extract_test_cases(test_source);
         let (fn_name, case) = &cases[0];
 
-        // No mocks — should execute sleep(1ms) for real and return "done"
+        // No mocks — should fail with "no mock for sleep" instead of running real IO
         let result = eval_test_case(&program, fn_name, case);
-        assert!(result.is_ok(), "async test without mocks should run real IO: {:?}", result);
+        assert!(result.is_err(), "async test without mocks should error: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no mock"), "error should mention missing mock: {err}");
     }
 
     #[test]
