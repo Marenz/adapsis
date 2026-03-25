@@ -539,8 +539,12 @@ async fn main() -> Result<()> {
 
             // Spawn the main evaluator on a blocking thread
             let program_clone = program.clone();
+            let program_mut = eval::make_shared_program_mut(&program);
+            let program_mut_clone = program_mut.clone();
             let func_clone = func.clone();
             let eval_task = tokio::task::spawn_blocking(move || {
+                eval::set_shared_program(Some(std::sync::Arc::new(program_clone.clone())));
+                eval::set_shared_program_mut(Some(program_mut_clone));
                 let func_decl = program_clone.get_function(&func_clone)
                     .ok_or_else(|| anyhow::anyhow!("function `{func_clone}` not found"))?;
 
@@ -579,6 +583,8 @@ async fn main() -> Result<()> {
                             let registry = task_registry_for_spawn.clone();
                             let snap_reg = snap_registry_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
+                                eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
+                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
                                 let func_decl = match prog.get_function(&function_name) {
                                     Some(f) => f,
                                     None => {
@@ -788,6 +794,7 @@ async fn main() -> Result<()> {
                                 let program = session.program.clone();
                                 drop(session);
                                 eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&program)));
 
                                 let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new();
