@@ -2524,7 +2524,20 @@ pub async fn ask_stream(
                                                         }
                                                     }
                                                     _ => {
-                                                        eprintln!("[opencode:event] {event_type}");
+                                                        // Extract a short summary for non-text/tool events
+                                                        let detail = event.get("part")
+                                                            .and_then(|p| {
+                                                                p.get("name").or(p.get("tool")).or(p.get("status"))
+                                                                    .and_then(|v| v.as_str())
+                                                                    .map(|s| s.to_string())
+                                                            })
+                                                            .or_else(|| event.get("error").and_then(|e| e.as_str()).map(|s| s.chars().take(100).collect()))
+                                                            .unwrap_or_default();
+                                                        if detail.is_empty() {
+                                                            eprintln!("[opencode:event] {event_type}");
+                                                        } else {
+                                                            eprintln!("[opencode:event] {event_type}: {detail}");
+                                                        }
                                                     }
                                                 }
                                             }
