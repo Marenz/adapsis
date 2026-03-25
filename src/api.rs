@@ -52,6 +52,17 @@ impl AppConfig {
             rt.roadmap = session.meta.roadmap.clone();
             rt.agent_mailbox = session.meta.agent_mailbox.clone();
             rt.io_mocks = session.meta.io_mocks.clone();
+            // Sync library errors from LibraryState into RuntimeState
+            if let Some(ref lib_state) = session.meta.library_state {
+                if let Ok(errs) = lib_state.errors.lock() {
+                    rt.library_errors = errs.clone();
+                }
+                if let Ok(load_errs) = lib_state.load_errors.lock() {
+                    rt.library_load_errors = load_errs.iter()
+                        .map(|le| (le.module_name.clone(), le.error.clone()))
+                        .collect();
+                }
+            }
         }
     }
 
