@@ -408,13 +408,9 @@ pub fn eval_compiled_or_interpreted_cached(
     }
 
     // Try bytecode VM (middle tier — more complete than JIT, faster than tree-walk)
-    // Skip for async/io functions since the VM can't handle IO directly.
-    let has_async = func.effects.iter().any(|e|
-        matches!(e, ast::Effect::Io | ast::Effect::Async));
-    if !has_async {
-        if let Ok(result) = try_vm_execute(program, func, input) {
-            return Ok((result, false));
-        }
+    // For async functions, the VM will hit AwaitIo and fall through to the interpreter.
+    if let Ok(result) = try_vm_execute(program, func, input) {
+        return Ok((result, false));
     }
 
     // Fall back to interpreter
@@ -433,13 +429,14 @@ fn try_vm_execute(
     let vm_args = input_to_vm_args(input, func)?;
 
     // Compile to bytecode
-    let compiled = crate::vm::compile_function(func, program)?;
+    let compiled = vm::compile_function(func, program)?;
 
-    // Execute
-    match crate::vm::execute(&compiled, vm_args, program)? {
-        crate::vm::VmResult::Done(val) => Ok(format!("{val}")),
-        crate::vm::VmResult::Await { .. } => bail!("VM: function requires async IO"),
-    }
+    // Execute with IO support — if the function hits AwaitIo, bail to
+    // let the tree-walker handle it (it has proper coroutine support).
+    let result = vm::execute_with_io(&compiled, vm_args, program, &|op_name, _args| {
+        bail!("VM: sync path cannot perform async IO ({op_name})")
+    })?;
+    Ok(format!("{result}"))
 }
 
 /// Convert a parser expression to a Vec<Value> suitable for VM execution.
@@ -2835,7 +2832,7 @@ fn trace_body(
 /// Try to execute a function via the bytecode VM.
 /// Returns `Some(Ok(val))` on success, `None` if the VM can't handle it
 /// (compilation error or async suspension), allowing the tree-walker to
-/// take over as fallback.
+/// take over as fallback. Optionally accepts a CoroutineHandle for async IO.
 pub fn try_vm_eval(
     func: &ast::FunctionDecl,
     args: &[Value],
@@ -2845,10 +2842,30 @@ pub fn try_vm_eval(
         Ok(c) => c,
         Err(_) => return None, // VM can't compile → fall back
     };
-    match vm::execute(&compiled, args.to_vec(), program) {
-        Ok(vm::VmResult::Done(val)) => Some(Ok(val)),
-        Ok(vm::VmResult::Await { .. }) => None, // async → fall back
-        Err(_) => None, // execution error → fall back
+    // Use execute_with_io — for sync callers, IO operations cause fallback
+    match vm::execute_with_io(&compiled, args.to_vec(), program, &|op, _| {
+        bail!("VM: async IO ({op}) not available in sync context")
+    }) {
+        Ok(val) => Some(Ok(val)),
+        Err(_) => None, // any error → fall back
+    }
+}
+
+/// Try to execute a function via the bytecode VM with async IO support.
+/// The io_handler performs IO operations when the VM suspends.
+pub fn try_vm_eval_async(
+    func: &ast::FunctionDecl,
+    args: &[Value],
+    program: &ast::Program,
+    io_handler: &dyn Fn(&str, &[Value]) -> Result<Value>,
+) -> Option<Result<Value>> {
+    let compiled = match vm::compile_function(func, program) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    match vm::execute_with_io(&compiled, args.to_vec(), program, io_handler) {
+        Ok(val) => Some(Ok(val)),
+        Err(_) => None,
     }
 }
 
