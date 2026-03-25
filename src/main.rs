@@ -980,11 +980,15 @@ async fn main() -> Result<()> {
             // Autonomous mode: inject goal as the first message after startup
             // Skip if session already has chat history (e.g. after !opencode restart)
             let session_has_history = shared_session.lock().await.chat_messages.len() > 1;
-            if let Some(goal) = autonomous {
+            // Autonomous loop: always runs. If --autonomous is given, use it as the
+            // initial goal. Otherwise, check the roadmap — if there are undone items,
+            // continue working on them automatically.
+            {
+                let goal = autonomous;
                 let goal_message = if session_has_history {
                     eprintln!("[autonomous] session has history, using continue message");
                     "AdapsisOS was restarted. Continue where you left off — check !roadmap and ?symbols, then keep working.".to_string()
-                } else if goal == "roadmap" {
+                } else if goal.as_deref() == Some("roadmap") {
                     // Read the current priority from ROADMAP.md
                     let roadmap_path = format!("{}/ROADMAP.md", project_dir);
                     match std::fs::read_to_string(&roadmap_path) {
@@ -998,13 +1002,16 @@ async fn main() -> Result<()> {
                         ),
                         Err(_) => "You are running in autonomous mode. Check !roadmap for tasks. If empty, identify improvements and !roadmap add them. Then start working.".to_string(),
                     }
-                } else {
+                } else if let Some(ref goal) = goal {
                     format!(
                         "You are running in autonomous mode. Your goal:\n\n{}\n\n\
                          Create a plan, then start building. Use !opencode when you need Rust-level changes. \
                          Keep going until the goal is complete or you get stuck and need user input.",
                         goal
                     )
+                } else {
+                    // No explicit goal — check roadmap
+                    "Check !roadmap for undone items. If there are any, pick the first one, create a !plan, and start working. If empty, idle.".to_string()
                 };
 
                 eprintln!("[autonomous] injecting goal: {}...", goal_message.chars().take(100).collect::<String>());

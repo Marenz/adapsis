@@ -219,12 +219,15 @@ impl OpenAiBackend {
         let mut in_thinking = false;
         let mut stdout = io::stdout();
 
+        let chunk_timeout = Duration::from_secs(120); // 2 min max silence between chunks
         let mut response = response;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to read streaming response chunk: {error}"))))?
-        {
+        loop {
+            let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => break, // stream ended
+                Ok(Err(error)) => return Err(anyhow!(LlmError::Streaming(format!("failed to read streaming response chunk: {error}")))),
+                Err(_) => return Err(anyhow!(LlmError::Streaming("streaming response stalled (no data for 120s)".to_string()))),
+            };
             raw_buf.extend_from_slice(&chunk);
 
             // Convert as much valid UTF-8 as possible from the front of
