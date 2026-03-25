@@ -1102,6 +1102,212 @@ fn build_plan_context(plan: &[crate::session::PlanStep]) -> (String, bool) {
     (format!("\nCurrent plan:\n{steps}\n"), all_done)
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Operation dispatch helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Result of processing a single operation or a batch of operations.
+struct OperationResult {
+    feedback: Vec<String>,
+    has_errors: bool,
+    tests_passed: usize,
+    tests_failed: usize,
+    /// Signals the main loop should stop after this iteration.
+    accepted_done: bool,
+}
+
+impl OperationResult {
+    fn new() -> Self {
+        Self {
+            feedback: Vec::new(),
+            has_errors: false,
+            tests_passed: 0,
+            tests_failed: 0,
+            accepted_done: false,
+        }
+    }
+
+    fn ok(&mut self, msg: impl Into<String>) {
+        self.feedback.push(format!("OK: {}", msg.into()));
+    }
+
+    fn pass(&mut self, msg: impl Into<String>) {
+        self.tests_passed += 1;
+        self.feedback.push(format!("PASS: {}", msg.into()));
+    }
+
+    fn fail(&mut self, msg: impl Into<String>) {
+        self.tests_failed += 1;
+        self.has_errors = true;
+        self.feedback.push(format!("FAIL: {}", msg.into()));
+    }
+
+    fn error(&mut self, msg: impl Into<String>) {
+        self.has_errors = true;
+        self.feedback.push(format!("ERROR: {}", msg.into()));
+    }
+
+    fn info(&mut self, msg: impl Into<String>) {
+        self.feedback.push(msg.into());
+    }
+}
+
+/// Process a `!plan` operation.
+async fn process_plan(
+    action: &crate::parser::PlanAction,
+    meta: &mut crate::session::SessionMeta,
+    tx: &EventSender,
+    result: &mut OperationResult,
+) {
+    match action {
+        crate::parser::PlanAction::Set(steps) => {
+            meta.plan = steps
+                .iter()
+                .map(|s| crate::session::PlanStep {
+                    description: s.clone(),
+                    status: crate::session::PlanStatus::Pending,
+                })
+                .collect();
+            let plan_json: Vec<serde_json::Value> = meta
+                .plan
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "description": s.description,
+                        "status": format!("{:?}", s.status).to_lowercase()
+                    })
+                })
+                .collect();
+            let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
+            result.ok(format!("Plan: {} steps", steps.len()));
+            let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Plan: {} steps", steps.len()), "success": true})).await;
+        }
+        crate::parser::PlanAction::Progress(n) => {
+            if let Some(step) = meta.plan.get_mut(n.saturating_sub(1)) {
+                step.status = crate::session::PlanStatus::Done;
+                let plan_json: Vec<serde_json::Value> = meta
+                    .plan
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "description": s.description,
+                            "status": format!("{:?}", s.status).to_lowercase()
+                        })
+                    })
+                    .collect();
+                let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
+                result.ok(format!("Step {n} done"));
+                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Step {n} done"), "success": true})).await;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Process a `?query` operation.
+async fn process_query(
+    query: &str,
+    session: &crate::session::Session,
+    config: &AppConfig,
+    tx: &EventSender,
+    result: &mut OperationResult,
+) {
+    let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
+        let msgs = session.peek_messages("main");
+        if msgs.is_empty() {
+            "No messages.".to_string()
+        } else {
+            msgs.iter()
+                .map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    } else if query.trim() == "?tasks" {
+        format_tasks(&config.task_registry)
+    } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+        format_inspect_task(&config.task_registry, &config.snapshot_registry, tid)
+    } else if query.trim() == "?library" {
+        crate::library::query_library(&session.program, session.meta.library_state.as_ref())
+    } else {
+        let table = crate::typeck::build_symbol_table(&session.program);
+        crate::typeck::handle_query(
+            &session.program,
+            &table,
+            query,
+            &session.runtime.http_routes,
+        )
+    };
+    result.info(format!("{query}:\n{response}"));
+    let _ = tx.send(serde_json::json!({"type": "query", "query": query, "response": response})).await;
+}
+
+/// Process `!done` — checks for untested functions and signals completion.
+async fn process_done(
+    session: &crate::session::Session,
+    iteration: usize,
+    tx: &EventSender,
+    result: &mut OperationResult,
+) -> bool {
+    if session.program.require_modules {
+        let untested: Vec<String> = session
+            .program
+            .modules
+            .iter()
+            .flat_map(|m| {
+                m.functions.iter().filter_map(|f| {
+                    let qname = format!("{}.{}", m.name, f.name);
+                    if f.body.len() > 2 && !session.is_function_tested(&qname) {
+                        Some(qname)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        if !untested.is_empty() {
+            let challenge = format!(
+                "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
+                untested.len(),
+                untested.join(", ")
+            );
+            tx.log("done-rejected", &challenge).await;
+            result.error(challenge);
+            return false; // not accepted
+        }
+    }
+    tx.log("done", &format!("AI said !done at iteration {}", iteration + 1)).await;
+    result.accepted_done = true;
+    true // accepted
+}
+
+/// Process `!mock` — register an IO mock.
+fn process_mock(
+    operation: &str,
+    patterns: &[String],
+    response: &str,
+    meta: &mut crate::session::SessionMeta,
+    result: &mut OperationResult,
+) {
+    let pattern_display = patterns
+        .iter()
+        .map(|p| format!("\"{p}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    meta.io_mocks.push(crate::session::IoMock {
+        operation: operation.to_string(),
+        patterns: patterns.to_vec(),
+        response: response.to_string(),
+    });
+    result.ok(format!("mock: {operation} {pattern_display}"));
+}
+
+/// Process `!unmock` — clear all IO mocks.
+fn process_unmock(meta: &mut crate::session::SessionMeta, result: &mut OperationResult) {
+    let count = meta.io_mocks.len();
+    meta.io_mocks.clear();
+    result.ok(format!("cleared {count} mocks"));
+}
+
 pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
@@ -2108,11 +2314,7 @@ pub async fn ask_stream(
 
             // Apply code
             let mut session = config_clone.session.lock().await;
-            let mut has_errors = false;
-            let mut feedback_details: Vec<String> = Vec::new();
-            let mut train_tests_passed: usize = 0;
-            let mut train_tests_failed: usize = 0;
-            let mut accepted_done = false;
+            let mut op_result = OperationResult::new();
 
             match crate::parser::parse(&code) {
                 Ok(ops) => {
@@ -2129,32 +2331,10 @@ pub async fn ask_stream(
                         session.program.rebuild_function_index();
                     }
 
-                    // Handle plan, undo
+                    // Handle plan
                     for op in &ops {
                         if let crate::parser::Operation::Plan(action) = op {
-                            match action {
-                                crate::parser::PlanAction::Set(steps) => {
-                                    session.meta.plan = steps.iter().map(|s| crate::session::PlanStep {
-                                        description: s.clone(), status: crate::session::PlanStatus::Pending,
-                                    }).collect();
-                                    let plan_json: Vec<serde_json::Value> = session.meta.plan.iter().map(|s| {
-                                        serde_json::json!({"description": s.description, "status": format!("{:?}", s.status).to_lowercase()})
-                                    }).collect();
-                                    let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
-                                    let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Plan: {} steps", steps.len()), "success": true})).await;
-                                }
-                                crate::parser::PlanAction::Progress(n) => {
-                                    if let Some(step) = session.meta.plan.get_mut(n.saturating_sub(1)) {
-                                        step.status = crate::session::PlanStatus::Done;
-                                        let plan_json: Vec<serde_json::Value> = session.meta.plan.iter().map(|s| {
-                                            serde_json::json!({"description": s.description, "status": format!("{:?}", s.status).to_lowercase()})
-                                        }).collect();
-                                        let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
-                                        let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Step {n} done"), "success": true})).await;
-                                    }
-                                }
-                                _ => {}
-                            }
+                            process_plan(action, &mut session.meta, &tx, &mut op_result).await;
                         }
                     }
 
@@ -2172,14 +2352,16 @@ pub async fn ask_stream(
                             Ok(res) => {
                                 config_clone.sync_tiers_from_session(&session).await;
                                 for (msg, ok) in &res {
-                                    if !*ok { has_errors = true; }
-                                    feedback_details.push(format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}));
+                                    if *ok {
+                                        op_result.ok(msg);
+                                    } else {
+                                        op_result.error(msg);
+                                    }
                                     let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": ok})).await;
                                 }
                             }
                             Err(e) => {
-                                has_errors = true;
-                                feedback_details.push(format!("ERROR: {e}"));
+                                op_result.error(format!("{e}"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("{e}"), "success": false})).await;
                             }
                         }
@@ -2221,15 +2403,12 @@ pub async fn ask_stream(
                                     };
                                     match case_result {
                                         Ok(msg) => {
-                                            train_tests_passed += 1;
-                                            feedback_details.push(format!("PASS: {msg}"));
+                                            op_result.pass(&msg);
                                             let _ = tx.send(serde_json::json!({"type": "test", "pass": true, "message": msg})).await;
                                         }
                                         Err(e) => {
                                             all_passed = false;
-                                            has_errors = true;
-                                            train_tests_failed += 1;
-                                            feedback_details.push(format!("FAIL: {e}"));
+                                            op_result.fail(format!("{e}"));
                                             let _ = tx.send(serde_json::json!({"type": "test", "pass": false, "message": format!("{e}")})).await;
                                         }
                                     }
@@ -2244,13 +2423,12 @@ pub async fn ask_stream(
                                     match crate::eval::eval_inline_expr(&session.program, expr) {
                                         Ok(val) => {
                                             let msg = format!("{val}");
-                                            feedback_details.push(format!("= {msg}"));
+                                            op_result.info(format!("= {msg}"));
                                             let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": "(inline)", "success": true})).await;
                                         }
                                         Err(e) => {
-                                            has_errors = true;
                                             let msg = format!("eval error: {e}");
-                                            feedback_details.push(format!("ERROR: {msg}"));
+                                            op_result.error(&msg);
                                             let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": "(inline)", "success": false})).await;
                                         }
                                     }
@@ -2261,9 +2439,8 @@ pub async fn ask_stream(
                                 if session.program.require_modules {
                                     if let Some(func) = session.program.get_function(&ev.function_name) {
                                         if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
-                                            has_errors = true;
                                             let msg = format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len());
-                                            feedback_details.push(format!("ERROR: {msg}"));
+                                            op_result.error(&msg);
                                             let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": ev.function_name, "success": false})).await;
                                             continue;
                                         }
@@ -2294,51 +2471,36 @@ pub async fn ask_stream(
                                         }).await;
                                         let (msg, success) = match &eval_result {
                                             Ok(Ok(val)) => (format!("{val}"), true),
-                                            Ok(Err(e)) => { has_errors = true; (format!("error: {e}"), false) }
-                                            Err(e) => { has_errors = true; (format!("task error: {e}"), false) }
+                                            Ok(Err(e)) => (format!("error: {e}"), false),
+                                            Err(e) => (format!("task error: {e}"), false),
                                         };
-                                        feedback_details.push(format!("eval {}() = {}{}", ev.function_name, msg, if success {""} else {" [FAILED]"}));
+                                        if success {
+                                            op_result.info(format!("eval {}() = {msg}", ev.function_name));
+                                        } else {
+                                            op_result.error(format!("eval {}() = {msg} [FAILED]", ev.function_name));
+                                        }
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": ev.function_name, "success": success})).await;
                                         session = config_clone.session.lock().await;
                                     } else {
-                                        has_errors = true;
-                                        feedback_details.push(format!("eval {}() = async not available [FAILED]", ev.function_name));
+                                        op_result.error(format!("eval {}() = async not available [FAILED]", ev.function_name));
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": "async not available", "function": ev.function_name, "success": false})).await;
                                     }
                                 } else {
                                     match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config_clone.jit_cache), session.meta.revision) {
                                         Ok((result, compiled)) => {
                                             let tag = if compiled { " [compiled]" } else { "" };
-                                            feedback_details.push(format!("eval {}() = {result}{tag}", ev.function_name));
+                                            op_result.info(format!("eval {}() = {result}{tag}", ev.function_name));
                                             let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("{result}{tag}"), "function": ev.function_name})).await;
                                         }
                                         Err(e) => {
-                                            has_errors = true;
-                                            feedback_details.push(format!("eval {}() error: {e} [FAILED]", ev.function_name));
+                                            op_result.error(format!("eval {}() error: {e} [FAILED]", ev.function_name));
                                             let _ = tx.send(serde_json::json!({"type": "eval", "result": format!("error: {e}"), "function": ev.function_name})).await;
                                         }
                                     }
                                 }
                             }
                             crate::parser::Operation::Query(query) => {
-                                let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
-                                    let msgs = session.peek_messages("main");
-                                    if msgs.is_empty() {
-                                        "No messages.".to_string()
-                                    } else {
-                                        msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n")
-                                    }
-                                } else if query.trim() == "?tasks" {
-                                    format_tasks(&config_clone.task_registry)
-                                } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
-                                    format_inspect_task(&config_clone.task_registry, &config_clone.snapshot_registry, tid)
-                                } else if query.trim() == "?library" {
-                                    crate::library::query_library(&session.program, session.meta.library_state.as_ref())
-                                } else {
-                                    let table = crate::typeck::build_symbol_table(&session.program);
-                                    crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
-                                };
-                                let _ = tx.send(serde_json::json!({"type": "query", "query": query, "response": response})).await;
+                                process_query(query, &session, &config_clone, &tx, &mut op_result).await;
                             }
                             // Top-level statements: execute immediately
                             crate::parser::Operation::Call(_)
@@ -2353,12 +2515,10 @@ pub async fn ask_stream(
                             | crate::parser::Operation::Check(_)
                             | crate::parser::Operation::Branch(_)
                             | crate::parser::Operation::Return(_) => {
-                                // Convert to AST statement and execute
                                 match crate::validator::convert_statement_op(op) {
                                     Ok(stmt) => {
                                         let mut env = crate::eval::Env::new();
                                         env.populate_shared_from_program(&session.program);
-                                        // Propagate coroutine handle if available
                                         if let Some(sender) = &config_clone.io_sender {
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
                                                 crate::coroutine::CoroutineHandle::new(sender.clone())
@@ -2372,73 +2532,46 @@ pub async fn ask_stream(
                                         match result {
                                             Ok(Ok(val)) => {
                                                 let msg = format!("executed: {val}");
-                                                feedback_details.push(format!("OK: {msg}"));
+                                                op_result.ok(&msg);
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": true})).await;
                                             }
                                             Ok(Err(e)) => {
-                                                has_errors = true;
-                                                feedback_details.push(format!("ERROR: {e}"));
+                                                op_result.error(format!("{e}"));
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("{e}"), "success": false})).await;
                                             }
                                             Err(e) => {
-                                                has_errors = true;
-                                                feedback_details.push(format!("ERROR: task error: {e}"));
+                                                op_result.error(format!("task error: {e}"));
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("task error: {e}"), "success": false})).await;
                                             }
                                         }
                                         session = config_clone.session.lock().await;
                                     }
                                     Err(e) => {
-                                        has_errors = true;
-                                        feedback_details.push(format!("ERROR: statement error: {e}"));
+                                        op_result.error(format!("statement error: {e}"));
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": format!("statement error: {e}"), "success": false})).await;
                                     }
                                 }
                             }
                             crate::parser::Operation::Done => {
-                                // Check for untested functions before accepting
-                                if session.program.require_modules {
-                                    let untested: Vec<String> = session.program.modules.iter().flat_map(|m| {
-                                        m.functions.iter().filter_map(|f| {
-                                            let qname = format!("{}.{}", m.name, f.name);
-                                            if f.body.len() > 2 && !session.is_function_tested(&qname) {
-                                                Some(qname)
-                                            } else { None }
-                                        })
-                                    }).collect();
-                                    if !untested.is_empty() {
-                                        let challenge = format!(
-                                            "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
-                                            untested.len(), untested.join(", ")
-                                        );
-                                        tx.log("done-rejected", &challenge).await;
-                                        feedback_details.push(format!("ERROR: {challenge}"));
-                                        has_errors = true;
-                                        continue;
-                                    }
+                                let accepted = process_done(&session, iteration, &tx, &mut op_result).await;
+                                if !accepted {
+                                    continue; // untested functions — keep going
                                 }
-                                tx.log("done", &format!("AI said !done at iteration {}", iteration + 1)).await;
-                                accepted_done = true;
-                                break;
+                                break; // accepted done
                             }
                             crate::parser::Operation::Mock { operation, patterns, response } => {
+                                process_mock(operation, patterns, response, &mut session.meta, &mut op_result);
                                 let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                                session.meta.io_mocks.push(crate::session::IoMock {
-                                    operation: operation.clone(), patterns: patterns.clone(), response: response.clone(),
-                                });
-                                feedback_details.push(format!("mock: {operation} {pattern_display}"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} {pattern_display}"), "success": true})).await;
                             }
                             crate::parser::Operation::Unmock => {
                                 let count = session.meta.io_mocks.len();
-                                session.meta.io_mocks.clear();
-                                feedback_details.push(format!("cleared {count} mocks"));
+                                process_unmock(&mut session.meta, &mut op_result);
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("cleared {count} mocks"), "success": true})).await;
                             }
                             crate::parser::Operation::Message { to, content } => {
-                                eprintln!("[web:msg] → {to}: {content}");
-                                session.send_agent_message("main", &to, &content);
-                                feedback_details.push(format!("Message sent to '{to}'"));
+                                session.send_agent_message("main", to, content);
+                                op_result.ok(format!("Message sent to '{to}'"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Message sent to '{to}'"), "success": true})).await;
                             }
                             crate::parser::Operation::OpenCode(task) => {
@@ -2519,8 +2652,7 @@ pub async fn ask_stream(
                                                         let msg = format!("[opencode] IDLE TIMEOUT: no output on stdout or stderr for {}s — killing OpenCode process", elapsed.as_secs());
                                                         eprintln!("{msg}");
                                                         log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
-                                                        has_errors = true;
-                                                        feedback_details.push(format!("ERROR: {msg}"));
+                                                        op_result.error(&msg);
                                                         // Kill entire process group to clean up opencode subprocesses
                                                         if let Some(pid) = child.id() {
                                                             unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
@@ -2672,9 +2804,8 @@ pub async fn ask_stream(
                                             match retry_result {
                                                 Ok(Ok(s)) if s.success() => {} // fall through to success handling
                                                 _ => {
-                                                    has_errors = true;
                                                     let ctx = recent_lines.lock().unwrap().join("\n");
-                                                    feedback_details.push(format!("ERROR: OpenCode retry failed\n{ctx}"));
+                                                    op_result.error(format!("OpenCode retry failed\n{ctx}"));
                                                     session = config_clone.session.lock().await;
                                                     continue;
                                                 }
@@ -2709,8 +2840,7 @@ pub async fn ask_stream(
                                             let msg = format!("OpenCode exited without making any file changes. It may have asked for clarification instead of proceeding. OpenCode said: {preview}");
                                             eprintln!("[opencode:no-changes] {msg}");
                                             log_activity(&config_clone.log_file, "opencode-no-changes", &msg).await;
-                                            has_errors = true;
-                                            feedback_details.push(format!("ERROR: {msg}"));
+                                            op_result.error(&msg);
                                             let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                             session = config_clone.session.lock().await;
                                             continue;
@@ -2753,45 +2883,39 @@ pub async fn ask_stream(
                                                 let msg = format!("RESTART FAILED: exec::execvp returned: {err}. The new binary is built but NOT running. Manual restart required.");
                                                 eprintln!("[opencode] {msg}");
                                                 log_activity(&config_clone.log_file, "opencode-restart-FAILED", &msg).await;
-                                                feedback_details.push(format!("ERROR: {msg}"));
-                                                has_errors = true;
+                                                op_result.error(&msg);
                                             }
                                             Ok(b) => {
-                                                has_errors = true;
                                                 let stderr = String::from_utf8_lossy(&b.stderr);
                                                 let msg = format!("OpenCode done but cargo build failed:\n{stderr}");
-                                                feedback_details.push(format!("ERROR: {msg}"));
+                                                op_result.error(&msg);
                                                 log_activity(&config_clone.log_file, "opencode-build-fail", &msg).await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                             }
                                             Err(e) => {
-                                                has_errors = true;
-                                                feedback_details.push(format!("ERROR: build error: {e}"));
+                                                op_result.error(format!("build error: {e}"));
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("build error: {e}"), "success": false})).await;
                                             }
                                         }
                                     }
                                     Ok(Ok(status)) => {
-                                        has_errors = true;
                                         let context = recent_lines.lock().unwrap().join("\n");
                                         let msg = format!("OpenCode exited with status: {status}\nLast output:\n{context}");
-                                        feedback_details.push(format!("ERROR: {msg}"));
+                                        op_result.error(&msg);
                                         log_activity(&config_clone.log_file, "opencode-fail", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
                                     Ok(Err(e)) => {
-                                        has_errors = true;
                                         let context = recent_lines.lock().unwrap().join("\n");
                                         let msg = format!("OpenCode error: {e}\nLast output:\n{context}");
-                                        feedback_details.push(format!("ERROR: {msg}"));
+                                        op_result.error(&msg);
                                         log_activity(&config_clone.log_file, "opencode-error", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
                                     Err(_) => {
-                                        has_errors = true;
                                         let context = recent_lines.lock().unwrap().join("\n");
                                         let msg = format!("OpenCode timed out (30 min limit)\nLast output:\n{context}");
-                                        feedback_details.push(format!("ERROR: {msg}"));
+                                        op_result.error(&msg);
                                         log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
@@ -2803,7 +2927,6 @@ pub async fn ask_stream(
                     }
                 }
                 Err(e) => {
-                    has_errors = true;
                     // Extract line number from error and show surrounding code context
                     let err_str = format!("{e}");
                     let context = if let Some(rest) = err_str.strip_prefix("line ") {
@@ -2819,7 +2942,7 @@ pub async fn ask_stream(
                         } else { String::new() }
                     } else { String::new() };
                     let msg = format!("Parse error: {e}{context}");
-                    feedback_details.push(format!("ERROR: {msg}"));
+                    op_result.error(&msg);
                     let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                 }
             }
@@ -2847,7 +2970,7 @@ pub async fn ask_stream(
                                 let table = crate::typeck::build_symbol_table(&session.program);
                                 crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
                             };
-                            feedback_details.push(format!("{query}:\n{response}"));
+                            op_result.info(format!("{query}:\n{response}"));
                         }
                     }
                 }
@@ -2857,7 +2980,7 @@ pub async fn ask_stream(
                     let inbox_text = inbox.iter()
                         .map(|m| format!("[from {}] {}", m.from, m.content))
                         .collect::<Vec<_>>().join("\n");
-                    feedback_details.push(format!("Agent messages:\n{inbox_text}"));
+                    op_result.info(format!("Agent messages:\n{inbox_text}"));
                     let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Messages from agents: {}", inbox.len()), "success": true})).await;
                 }
 
@@ -2876,7 +2999,7 @@ pub async fn ask_stream(
                         fns
                     };
                     if !all_fns.is_empty() {
-                        feedback_details.push(format!(
+                        op_result.info(format!(
                             "Untested functions (blocked from !eval): {}",
                             all_fns.join(", ")
                         ));
@@ -2920,6 +3043,10 @@ pub async fn ask_stream(
                 }
             };
 
+            let feedback_details = &op_result.feedback;
+            let has_errors = op_result.has_errors;
+            let accepted_done = op_result.accepted_done;
+
             if has_errors {
                 let errors: Vec<&str> = feedback_details.iter()
                     .filter(|d| d.starts_with("ERROR:") || d.starts_with("FAIL:") || d.contains("[FAILED]"))
@@ -2930,7 +3057,7 @@ pub async fn ask_stream(
                     plan_summary
                 );
                 tx.log("feedback", &format!("Errors found ({} issues), retrying...\n{feedback}", errors.len())).await;
-                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, true, train_tests_passed, train_tests_failed).await;
+                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, feedback_details, true, op_result.tests_passed, op_result.tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
@@ -2941,7 +3068,7 @@ pub async fn ask_stream(
                 };
                 let feedback = format!("{}{}", results_section, plan_summary);
                 tx.log("feedback", &feedback).await;
-                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, false, train_tests_passed, train_tests_failed).await;
+                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, feedback_details, true, op_result.tests_passed, op_result.tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
                 if accepted_done { break; }
