@@ -155,14 +155,23 @@ pub struct Env {
     /// These remain String-keyed since they use compound module-qualified names
     /// and are accessed far less frequently than local variables.
     shared_cache: HashMap<String, Value>,
+    /// Local string interner — eliminates thread-local + RefCell overhead on every
+    /// variable set/get. Seeded from `Program::interner` when available so that all
+    /// name→id lookups on the hot path are guaranteed cache hits.
+    /// Wrapped in `RefCell` so that `&self` methods (like `get`) can still intern
+    /// previously-unseen names without requiring `&mut self`.
+    interner: std::cell::RefCell<StringInterner>,
 }
 
 impl Env {
     pub fn new() -> Self {
+        // Seed from the thread-local interner so existing interned ids stay consistent
+        let interner = STRING_INTERNER.with(|si| si.borrow().clone());
         let mut env = Self {
             scopes: vec![HashMap::new()],
             shared_runtime: None,
             shared_cache: HashMap::new(),
+            interner: std::cell::RefCell::new(interner),
         };
         // Auto-pick up thread-local SharedRuntime if set
         SHARED_RUNTIME.with(|rt| {
@@ -173,23 +182,50 @@ impl Env {
         env
     }
 
-    /// Intern a variable name string into the thread-local interner,
-    /// returning its compact u32 id for use as a scope key.
+    /// Create an Env seeded with a pre-populated interner from a Program.
+    /// This is the fast path: the Program's interner already contains all names
+    /// in the AST, so every `intern_name()` call during evaluation is a cache hit
+    /// (HashMap lookup returns existing id, no allocation).
+    pub fn new_with_interner(interner: &StringInterner) -> Self {
+        let mut env = Self {
+            scopes: vec![HashMap::new()],
+            shared_runtime: None,
+            shared_cache: HashMap::new(),
+            interner: std::cell::RefCell::new(interner.clone()),
+        };
+        // Auto-pick up thread-local SharedRuntime if set
+        SHARED_RUNTIME.with(|rt| {
+            if let Some(rt) = rt.borrow().as_ref() {
+                env.set_runtime(rt.clone());
+            }
+        });
+        env
+    }
+
+    /// Intern a variable name string, returning its compact u32 id for use as
+    /// a scope key. Uses the env-local interner (no thread-local indirection).
+    /// Fast path: try read-only probe first (no write lock) since the interner
+    /// is pre-seeded with all AST names. Only falls back to borrow_mut() for
+    /// truly new names (rare at runtime).
     #[inline]
-    fn intern_name(name: &str) -> InternedId {
-        STRING_INTERNER.with(|si| si.borrow_mut().intern(name))
+    fn intern_name(&self, name: &str) -> InternedId {
+        // Fast path: read-only probe — avoids RefCell write lock overhead
+        if let Some(id) = self.interner.borrow().get(name) {
+            return id;
+        }
+        // Slow path: name not yet interned (rare when seeded from Program)
+        self.interner.borrow_mut().intern(name)
     }
 
     /// Resolve an interned id back to its string. Used for error messages
     /// and debug display.
     #[inline]
-    fn resolve_name(id: InternedId) -> String {
-        STRING_INTERNER.with(|si| {
-            si.borrow()
-                .resolve(id)
-                .unwrap_or("<unknown>")
-                .to_string()
-        })
+    fn resolve_name(&self, id: InternedId) -> String {
+        self.interner
+            .borrow()
+            .resolve(id)
+            .unwrap_or("<unknown>")
+            .to_string()
     }
 
     /// Attach shared runtime state for +shared variable access.
@@ -233,7 +269,17 @@ impl Env {
     /// Define a new variable in the current (top) scope.
     /// Used by `+let` and parameter binding.
     pub fn set(&mut self, name: &str, value: Value) {
-        let id = Self::intern_name(name);
+        let id = self.intern_name(name);
+        self.scopes
+            .last_mut()
+            .expect("scope stack empty")
+            .insert(id, value);
+    }
+
+    /// Define a variable in the current scope using a pre-interned id.
+    /// This is the fast path — no string→id conversion needed.
+    #[inline]
+    pub fn set_id(&mut self, id: InternedId, value: Value) {
         self.scopes
             .last_mut()
             .expect("scope stack empty")
@@ -245,7 +291,7 @@ impl Env {
     /// shared vars (keyed by "Module.name"). If still not found, insert into
     /// the top scope (same as `set`). Used by `+set`.
     fn set_existing(&mut self, name: &str, value: Value) {
-        let id = Self::intern_name(name);
+        let id = self.intern_name(name);
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(&id) {
                 scope.insert(id, value);
@@ -279,7 +325,7 @@ impl Env {
     /// Look up a variable by walking scopes from top to bottom.
     /// Falls back to shared vars cache (keyed by "Module.name") if not found locally.
     fn get(&self, name: &str) -> Result<&Value> {
-        let id = Self::intern_name(name);
+        let id = self.intern_name(name);
         for scope in self.scopes.iter().rev() {
             if let Some(val) = scope.get(&id) {
                 return Ok(val);
@@ -301,9 +347,20 @@ impl Env {
         Err(anyhow!("undefined variable `{name}`"))
     }
 
+    /// Look up a variable using a pre-interned id. Fast path — no string interning.
+    #[inline]
+    fn get_id(&self, id: InternedId) -> Option<&Value> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(val) = scope.get(&id) {
+                return Some(val);
+            }
+        }
+        None
+    }
+
     /// Raw lookup (returns Option) — used for special variables like __coroutine_handle.
     fn get_raw(&self, name: &str) -> Option<&Value> {
-        let id = Self::intern_name(name);
+        let id = self.intern_name(name);
         for scope in self.scopes.iter().rev() {
             if let Some(val) = scope.get(&id) {
                 return Some(val);
@@ -321,7 +378,7 @@ impl Env {
         // Walk from top (innermost) to bottom (outermost) so shadowed names are skipped.
         for scope in self.scopes.iter().rev() {
             for (id, val) in scope {
-                let name = Self::resolve_name(*id);
+                let name = self.resolve_name(*id);
                 if name.starts_with("__") {
                     continue;
                 }
@@ -535,7 +592,7 @@ pub fn eval_call_with_input(
     // Try user-defined function first
     if let Some(func) = program.get_function(function_name) {
         let input_val = eval_parser_expr_standalone(input)?;
-        let mut env = Env::new();
+        let mut env = Env::new_with_interner(&program.interner);
         bind_input_to_params(program, func, &input_val, &mut env);
 
         let returns_result = matches!(&func.return_type, ast::Type::Result(_));
@@ -575,7 +632,7 @@ pub fn eval_call_with_input(
                 }
             }
         };
-        let mut env = Env::new();
+        let mut env = Env::new_with_interner(&program.interner);
         let call = ast::CallExpr {
             callee: function_name.to_string(),
             args: vec![], // not used — we call eval_call_inner directly
@@ -606,7 +663,7 @@ pub fn eval_inline_expr_with_io(
     io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
 ) -> Result<Value> {
     let handle = crate::coroutine::CoroutineHandle::new(io_sender);
-    let mut env = Env::new();
+    let mut env = Env::new_with_interner(&program.interner);
     env.populate_shared_from_program(program);
     env.set("__coroutine_handle", Value::CoroutineHandle(handle));
     eval_parser_expr_with_env(expr, program, &mut env)
@@ -740,29 +797,11 @@ pub fn bind_input_to_params(
     }
 }
 
-/// Check if a name is a union variant constructor.
+/// Check if a name is a union variant. Uses the pre-built HashSet on Program
+/// for O(1) lookup instead of scanning all type declarations.
+#[inline]
 fn is_union_variant(program: &ast::Program, name: &str) -> bool {
-    for td in &program.types {
-        if let ast::TypeDecl::TaggedUnion(u) = td {
-            for variant in &u.variants {
-                if variant.name == name {
-                    return true;
-                }
-            }
-        }
-    }
-    for module in &program.modules {
-        for td in &module.types {
-            if let ast::TypeDecl::TaggedUnion(u) = td {
-                for variant in &u.variants {
-                    if variant.name == name {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    program.is_union_variant(name)
 }
 
 /// Check if nested patterns match the payload values, binding variables on success.
@@ -890,7 +929,7 @@ pub fn eval_test_case_with_mocks(
     let input = eval_parser_expr_with_program(&case.input, program)?;
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
-    let mut env = Env::new();
+    let mut env = Env::new_with_interner(&program.interner);
     env.populate_shared_from_program(program);
     bind_input_to_params(program, func, &input, &mut env);
 
@@ -1004,7 +1043,7 @@ fn eval_test_case_with_runtime(
                     .get_function(&fn_name)
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
-                let mut env = Env::new();
+                let mut env = Env::new_with_interner(&program.interner);
                 env.populate_shared_from_program(&program);
 
                 // Tests always use mock-only handles.  Unmocked IO operations
@@ -1089,7 +1128,7 @@ pub async fn eval_test_case_async(
             .get_function(&fn_name)
             .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
-        let mut env = Env::new();
+        let mut env = Env::new_with_interner(&program.interner);
         env.populate_shared_from_program(&program);
 
         // Tests always use mock-only handles — see comment in
@@ -1268,7 +1307,7 @@ pub fn eval_function_body_pub(
 /// Evaluate an AST expression in isolation (no function context).
 /// Used for evaluating +shared variable default values like `0`, `""`, `true`.
 pub fn eval_expr_standalone(program: &ast::Program, expr: &ast::Expr) -> Result<Value> {
-    let mut env = Env::new();
+    let mut env = Env::new_with_interner(&program.interner);
     eval_ast_expr(program, expr, &mut env)
 }
 
@@ -2339,7 +2378,7 @@ pub fn eval_builtin_or_user(
         _ => {
             // Try to find the function in the program and call it
             if let Some(func) = program.get_function(callee) {
-                let mut call_env = Env::new();
+                let mut call_env = Env::new_with_interner(&program.interner);
                 for (param, arg) in func.params.iter().zip(args) {
                     call_env.set(&param.name, arg);
                 }
@@ -2634,7 +2673,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                             func.effects
                         );
                     }
-                    let mut env = Env::new();
+                    let mut env = Env::new_with_interner(&program.interner);
                     return eval_function_body(program, &func.body, &mut env);
                 }
             }
@@ -2671,7 +2710,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new();
+                let mut env = Env::new_with_interner(&program.interner);
                 for (param, arg) in func.params.iter().zip(eval_args) {
                     env.set(&param.name, arg);
                 }
@@ -2687,7 +2726,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new();
+                let mut env = Env::new_with_interner(&program.interner);
                 return eval_builtin_or_user(program, &name, eval_args, &mut env);
             }
             // Fall through to standalone (handles union constructors, Ok, Err)
@@ -2762,7 +2801,7 @@ fn eval_parser_expr_with_env(
             }
             if let Some(func) = program.get_function(name) {
                 if func.params.is_empty() {
-                    let mut call_env = Env::new();
+                    let mut call_env = Env::new_with_interner(&program.interner);
                     if let Some(handle) = env.get_raw("__coroutine_handle") {
                         call_env.set("__coroutine_handle", handle.clone());
                     }
@@ -2788,7 +2827,7 @@ fn eval_parser_expr_with_env(
                     .iter()
                     .map(|a| eval_parser_expr_with_env(a, program, env))
                     .collect::<Result<Vec<_>>>()?;
-                let mut call_env = Env::new();
+                let mut call_env = Env::new_with_interner(&program.interner);
                 for (param, arg) in func.params.iter().zip(eval_args) {
                     call_env.set(&param.name, arg);
                 }
@@ -3008,7 +3047,7 @@ pub fn trace_function(
         .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     let input_val = eval_parser_expr_standalone(input)?;
-    let mut env = Env::new();
+    let mut env = Env::new_with_interner(&program.interner);
     bind_input_to_params(program, func, &input_val, &mut env);
 
     let mut steps = vec![];
@@ -6655,9 +6694,10 @@ mod tests {
     #[test]
     fn test_intern_name_consistency() {
         // Verify that the intern_name helper returns consistent ids
-        let id1 = Env::intern_name("test_var");
-        let id2 = Env::intern_name("test_var");
-        let id3 = Env::intern_name("other_var");
+        let env = Env::new();
+        let id1 = env.intern_name("test_var");
+        let id2 = env.intern_name("test_var");
+        let id3 = env.intern_name("other_var");
         assert_eq!(id1, id2, "same string should get same id");
         assert_ne!(id1, id3, "different strings should get different ids");
     }
@@ -6665,9 +6705,129 @@ mod tests {
     #[test]
     fn test_resolve_name_roundtrip() {
         // Verify that intern → resolve roundtrips correctly
-        let id = Env::intern_name("roundtrip_test");
-        let resolved = Env::resolve_name(id);
+        let env = Env::new();
+        let id = env.intern_name("roundtrip_test");
+        let resolved = env.resolve_name(id);
         assert_eq!(resolved, "roundtrip_test");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Program interner + Env::new_with_interner tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_program_intern_all_names() {
+        // Verify that rebuild_function_index populates the program interner
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +return sum
+";
+        let mut program = build_program(source);
+        // rebuild_function_index is called by build_program, so the interner
+        // should already contain all names.
+        assert!(program.interner.get("add").is_some(), "function name should be interned");
+        assert!(program.interner.get("a").is_some(), "param 'a' should be interned");
+        assert!(program.interner.get("b").is_some(), "param 'b' should be interned");
+        assert!(program.interner.get("sum").is_some(), "local var 'sum' should be interned");
+        // Well-known names should also be interned
+        assert!(program.interner.get("__coroutine_handle").is_some());
+        assert!(program.interner.get("true").is_some());
+        assert!(program.interner.get("false").is_some());
+    }
+
+    #[test]
+    fn test_env_new_with_interner_seeded() {
+        // Env created with new_with_interner should have the same interned ids
+        // as the program's interner
+        let source = "\
++fn greet (name:String)->String
+  +return name
+";
+        let program = build_program(source);
+        let env = Env::new_with_interner(&program.interner);
+
+        // The env's interner should know about the program's names
+        let id_from_program = program.interner.get("name").unwrap();
+        let id_from_env = env.intern_name("name");
+        assert_eq!(id_from_program, id_from_env, "interned ids should match between program and env");
+    }
+
+    #[test]
+    fn test_env_set_id_get_id() {
+        // Verify that set_id and get_id work correctly as fast-path methods
+        let mut env = Env::new();
+        let id = env.intern_name("fast_var");
+        env.set_id(id, Value::Int(99));
+        let val = env.get_id(id);
+        assert!(val.is_some(), "get_id should find the value");
+        assert!(matches!(val.unwrap(), Value::Int(99)));
+    }
+
+    #[test]
+    fn test_env_set_id_scope_isolation() {
+        // Values set via set_id in inner scope should not be visible after pop
+        let mut env = Env::new();
+        let id = env.intern_name("scoped_var");
+        env.push_scope();
+        env.set_id(id, Value::Int(42));
+        assert!(env.get_id(id).is_some());
+        env.pop_scope();
+        assert!(env.get_id(id).is_none(), "value should not be visible after scope pop");
+    }
+
+    #[test]
+    fn test_env_get_id_not_found() {
+        // get_id should return None for unknown ids
+        let env = Env::new();
+        assert!(env.get_id(99999).is_none());
+    }
+
+    #[test]
+    fn test_program_interner_with_modules() {
+        // Verify that module names, module function names, and shared vars are interned
+        let source = "\
+!module Math
+
++fn square (n:Int)->Int
+  +return n * n
+";
+        let program = build_program(source);
+        assert!(program.interner.get("Math").is_some(), "module name should be interned");
+        assert!(program.interner.get("square").is_some(), "module function name should be interned");
+        assert!(program.interner.get("n").is_some(), "param 'n' should be interned");
+    }
+
+    #[test]
+    fn test_interner_eval_function_with_program_interner() {
+        // End-to-end: evaluate a function using Env seeded from program's interner
+        let source = "\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+
+!test double
+  +with x=5 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "eval with program interner should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_interner_consistency_across_envs() {
+        // Two Envs seeded from the same program interner should produce
+        // the same interned ids, allowing values to be portable between them
+        let source = "+fn identity (v:Int)->Int\n  +return v\n";
+        let program = build_program(source);
+        let env1 = Env::new_with_interner(&program.interner);
+        let env2 = Env::new_with_interner(&program.interner);
+        let id1 = env1.intern_name("v");
+        let id2 = env2.intern_name("v");
+        assert_eq!(id1, id2, "same interner seed should produce same ids");
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -6798,5 +6958,100 @@ mod tests {
         let mut program = ast::Program::default();
         program.rebuild_function_index();
         assert!(program.get_function("NonExistent.func").is_none());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Name interning optimization tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn env_new_with_interner_seeds_names() {
+        // When Env is created with a pre-populated interner, variable lookups
+        // for pre-interned names should use cache hits (no new allocations).
+        let mut interner = StringInterner::new();
+        let id_x = interner.intern("x");
+        let id_y = interner.intern("y");
+
+        let mut env = Env::new_with_interner(&interner);
+        env.set("x", Value::Int(42));
+        env.set("y", Value::Int(99));
+
+        // Look up by name — should hit the pre-interned cache
+        assert!(matches!(env.get("x"), Ok(Value::Int(42))));
+        assert!(matches!(env.get("y"), Ok(Value::Int(99))));
+
+        // Look up by pre-interned id — fast path
+        assert!(matches!(env.get_id(id_x), Some(Value::Int(42))));
+        assert!(matches!(env.get_id(id_y), Some(Value::Int(99))));
+    }
+
+    #[test]
+    fn env_new_with_interner_handles_unknown_names() {
+        // Names not in the pre-seeded interner should still work (interned on demand)
+        let interner = StringInterner::new(); // empty interner
+        let mut env = Env::new_with_interner(&interner);
+        env.set("dynamic_var", Value::String("hello".to_string()));
+
+        assert!(matches!(env.get("dynamic_var"), Ok(Value::String(s)) if s == "hello"));
+    }
+
+    #[test]
+    fn env_undefined_variable_returns_error() {
+        let env = Env::new();
+        let result = env.get("nonexistent");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("undefined variable"),
+            "error should mention 'undefined variable', got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn env_set_id_and_get_id_roundtrip() {
+        let mut interner = StringInterner::new();
+        let id = interner.intern("counter");
+        let mut env = Env::new_with_interner(&interner);
+
+        env.set_id(id, Value::Int(0));
+        assert!(matches!(env.get_id(id), Some(Value::Int(0))));
+
+        // Update via set_id
+        env.set_id(id, Value::Int(1));
+        assert!(matches!(env.get_id(id), Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn union_variant_hashset_used_in_eval() {
+        // Verify that is_union_variant uses the HashSet-based lookup
+        let source = "\
++type Color = Red | Green | Blue
++fn get_color () -> Color
+  +return Red
+";
+        let program = build_program(source);
+        // The HashSet should contain the variants after rebuild
+        assert!(program.is_union_variant("Red"));
+        assert!(program.is_union_variant("Green"));
+        assert!(program.is_union_variant("Blue"));
+        assert!(!program.is_union_variant("Yellow"));
+    }
+
+    #[test]
+    fn user_function_call_uses_interned_env() {
+        // When a user function is called via eval_builtin_or_user, the child Env
+        // should be seeded with the program's interner for fast param lookups.
+        let source = "\
++fn double (n:Int) -> Int
+  +return n + n
+
+!test double
+  +with n=5 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "user function call with interned env should work: {:?}", result);
     }
 }

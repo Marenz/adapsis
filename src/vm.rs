@@ -898,7 +898,7 @@ fn run_loop(
                 }
                 call_args.reverse();
 
-                let mut env = crate::eval::Env::new();
+                let mut env = crate::eval::Env::new_with_interner(&program.interner);
                 let result =
                     crate::eval::eval_builtin_or_user(program, &name, call_args, &mut env)?;
                 state.stack.push(result);
