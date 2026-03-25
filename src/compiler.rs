@@ -1221,3 +1221,635 @@ fn is_float_expr(expr: &ast::Expr) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    fn make_param(name: &str, ty: ast::Type) -> ast::Param {
+        ast::Param {
+            id: String::new(),
+            name: name.to_string(),
+            ty,
+        }
+    }
+
+    fn make_stmt(kind: ast::StatementKind) -> ast::Statement {
+        ast::Statement {
+            id: "s1".to_string(),
+            kind,
+        }
+    }
+
+    fn make_fn(
+        name: &str,
+        params: Vec<ast::Param>,
+        ret: ast::Type,
+        effects: Vec<ast::Effect>,
+        body: Vec<ast::Statement>,
+    ) -> ast::FunctionDecl {
+        ast::FunctionDecl {
+            id: String::new(),
+            name: name.to_string(),
+            params,
+            return_type: ret,
+            effects,
+            body,
+            tests: vec![],
+        }
+    }
+
+    /// Build a simple "return a + b" body.
+    fn add_body() -> Vec<ast::Statement> {
+        vec![make_stmt(ast::StatementKind::Return {
+            value: ast::Expr::Binary {
+                left: Box::new(ast::Expr::Identifier("a".to_string())),
+                op: ast::BinaryOp::Add,
+                right: Box::new(ast::Expr::Identifier("b".to_string())),
+            },
+        })]
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 1. is_compilable_function
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn compilable_int_to_int() {
+        let func = make_fn(
+            "add",
+            vec![
+                make_param("a", ast::Type::Int),
+                make_param("b", ast::Type::Int),
+            ],
+            ast::Type::Int,
+            vec![],
+            add_body(),
+        );
+        assert!(is_compilable_function(&func));
+    }
+
+    #[test]
+    fn compilable_float_params() {
+        let func = make_fn(
+            "add_f",
+            vec![
+                make_param("a", ast::Type::Float),
+                make_param("b", ast::Type::Float),
+            ],
+            ast::Type::Float,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Binary {
+                    left: Box::new(ast::Expr::Identifier("a".to_string())),
+                    op: ast::BinaryOp::Add,
+                    right: Box::new(ast::Expr::Identifier("b".to_string())),
+                },
+            })],
+        );
+        assert!(is_compilable_function(&func));
+    }
+
+    #[test]
+    fn compilable_bool_return() {
+        let func = make_fn(
+            "is_pos",
+            vec![make_param("x", ast::Type::Int)],
+            ast::Type::Bool,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Binary {
+                    left: Box::new(ast::Expr::Identifier("x".to_string())),
+                    op: ast::BinaryOp::GreaterThan,
+                    right: Box::new(ast::Expr::Literal(ast::Literal::Int(0))),
+                },
+            })],
+        );
+        assert!(is_compilable_function(&func));
+    }
+
+    #[test]
+    fn compilable_string_param() {
+        // String params are compilable (compiled as ptr+len pair)
+        let func = make_fn(
+            "identity",
+            vec![make_param("s", ast::Type::String)],
+            ast::Type::String,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Identifier("s".to_string()),
+            })],
+        );
+        assert!(is_compilable_function(&func));
+    }
+
+    #[test]
+    fn not_compilable_list_param() {
+        let func = make_fn(
+            "sum",
+            vec![make_param(
+                "items",
+                ast::Type::List(Box::new(ast::Type::Int)),
+            )],
+            ast::Type::Int,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Literal(ast::Literal::Int(0)),
+            })],
+        );
+        assert!(!is_compilable_function(&func));
+    }
+
+    #[test]
+    fn not_compilable_map_return() {
+        let func = make_fn(
+            "make_map",
+            vec![],
+            ast::Type::Map(Box::new(ast::Type::String), Box::new(ast::Type::Int)),
+            vec![],
+            vec![],
+        );
+        assert!(!is_compilable_function(&func));
+    }
+
+    #[test]
+    fn not_compilable_option_param() {
+        let func = make_fn(
+            "unwrap",
+            vec![make_param("x", ast::Type::Option(Box::new(ast::Type::Int)))],
+            ast::Type::Int,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Literal(ast::Literal::Int(0)),
+            })],
+        );
+        assert!(!is_compilable_function(&func));
+    }
+
+    #[test]
+    fn compilable_result_return() {
+        // Result<Int> is compilable (unwraps to inner type)
+        let func = make_fn(
+            "validate",
+            vec![make_param("x", ast::Type::Int)],
+            ast::Type::Result(Box::new(ast::Type::Int)),
+            vec![ast::Effect::Fail],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Identifier("x".to_string()),
+            })],
+        );
+        assert!(is_compilable_function(&func));
+    }
+
+    #[test]
+    fn not_compilable_each_in_body() {
+        // Each loops are not compilable
+        let func = make_fn(
+            "sum",
+            vec![make_param("x", ast::Type::Int)],
+            ast::Type::Int,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Each {
+                iterator: ast::Expr::Identifier("items".to_string()),
+                binding: ast::Binding {
+                    name: "item".to_string(),
+                    ty: ast::Type::Int,
+                },
+                body: vec![],
+            })],
+        );
+        assert!(!is_compilable_function(&func));
+    }
+
+    #[test]
+    fn not_compilable_await_in_body() {
+        let func = make_fn(
+            "fetch",
+            vec![],
+            ast::Type::String,
+            vec![ast::Effect::Io, ast::Effect::Async],
+            vec![make_stmt(ast::StatementKind::Await {
+                name: "data".to_string(),
+                ty: ast::Type::String,
+                call: ast::CallExpr {
+                    callee: "http_get".to_string(),
+                    args: vec![],
+                },
+            })],
+        );
+        assert!(!is_compilable_function(&func));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 2. is_compilable_type
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn compilable_types() {
+        assert!(is_compilable_type(&ast::Type::Int));
+        assert!(is_compilable_type(&ast::Type::Float));
+        assert!(is_compilable_type(&ast::Type::Bool));
+        assert!(is_compilable_type(&ast::Type::Byte));
+        assert!(is_compilable_type(&ast::Type::String));
+        assert!(is_compilable_type(&ast::Type::Struct("Point".to_string())));
+        assert!(is_compilable_type(&ast::Type::Result(Box::new(
+            ast::Type::Int
+        ))));
+    }
+
+    #[test]
+    fn not_compilable_types() {
+        assert!(!is_compilable_type(&ast::Type::List(Box::new(
+            ast::Type::Int
+        ))));
+        assert!(!is_compilable_type(&ast::Type::Map(
+            Box::new(ast::Type::String),
+            Box::new(ast::Type::Int)
+        )));
+        assert!(!is_compilable_type(&ast::Type::Option(Box::new(
+            ast::Type::Int
+        ))));
+        assert!(!is_compilable_type(&ast::Type::Set(Box::new(
+            ast::Type::Int
+        ))));
+        assert!(!is_compilable_type(&ast::Type::TaggedUnion(
+            "Color".to_string()
+        )));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 3. is_compilable_body / is_compilable_expr
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn compilable_expr_literal() {
+        assert!(is_compilable_expr(&ast::Expr::Literal(ast::Literal::Int(
+            42
+        ))));
+        assert!(is_compilable_expr(&ast::Expr::Literal(
+            ast::Literal::Float(3.14)
+        )));
+        assert!(is_compilable_expr(&ast::Expr::Literal(ast::Literal::Bool(
+            true
+        ))));
+        assert!(is_compilable_expr(&ast::Expr::Literal(
+            ast::Literal::String("hello".to_string())
+        )));
+    }
+
+    #[test]
+    fn compilable_expr_identifier() {
+        assert!(is_compilable_expr(&ast::Expr::Identifier("x".to_string())));
+    }
+
+    #[test]
+    fn compilable_expr_binary() {
+        let expr = ast::Expr::Binary {
+            left: Box::new(ast::Expr::Identifier("a".to_string())),
+            op: ast::BinaryOp::Mul,
+            right: Box::new(ast::Expr::Literal(ast::Literal::Int(2))),
+        };
+        assert!(is_compilable_expr(&expr));
+    }
+
+    #[test]
+    fn compilable_expr_nested_binary() {
+        // (a + b) * (c - d)
+        let expr = ast::Expr::Binary {
+            left: Box::new(ast::Expr::Binary {
+                left: Box::new(ast::Expr::Identifier("a".to_string())),
+                op: ast::BinaryOp::Add,
+                right: Box::new(ast::Expr::Identifier("b".to_string())),
+            }),
+            op: ast::BinaryOp::Mul,
+            right: Box::new(ast::Expr::Binary {
+                left: Box::new(ast::Expr::Identifier("c".to_string())),
+                op: ast::BinaryOp::Sub,
+                right: Box::new(ast::Expr::Identifier("d".to_string())),
+            }),
+        };
+        assert!(is_compilable_expr(&expr));
+    }
+
+    #[test]
+    fn compilable_expr_unary() {
+        let expr = ast::Expr::Unary {
+            op: ast::UnaryOp::Neg,
+            expr: Box::new(ast::Expr::Identifier("x".to_string())),
+        };
+        assert!(is_compilable_expr(&expr));
+    }
+
+    #[test]
+    fn compilable_expr_call() {
+        let expr = ast::Expr::Call(ast::CallExpr {
+            callee: "double".to_string(),
+            args: vec![ast::Expr::Identifier("x".to_string())],
+        });
+        assert!(is_compilable_expr(&expr));
+    }
+
+    #[test]
+    fn compilable_expr_field_access() {
+        let expr = ast::Expr::FieldAccess {
+            base: Box::new(ast::Expr::Identifier("point".to_string())),
+            field: "x".to_string(),
+        };
+        assert!(is_compilable_expr(&expr));
+    }
+
+    #[test]
+    fn compilable_body_let_return() {
+        let body = vec![
+            make_stmt(ast::StatementKind::Let {
+                name: "result".to_string(),
+                ty: ast::Type::Int,
+                value: ast::Expr::Binary {
+                    left: Box::new(ast::Expr::Identifier("x".to_string())),
+                    op: ast::BinaryOp::Mul,
+                    right: Box::new(ast::Expr::Literal(ast::Literal::Int(2))),
+                },
+            }),
+            make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Identifier("result".to_string()),
+            }),
+        ];
+        assert!(is_compilable_body(&body));
+    }
+
+    #[test]
+    fn compilable_body_with_branch() {
+        let body = vec![make_stmt(ast::StatementKind::Branch {
+            condition: ast::Expr::Binary {
+                left: Box::new(ast::Expr::Identifier("x".to_string())),
+                op: ast::BinaryOp::GreaterThan,
+                right: Box::new(ast::Expr::Literal(ast::Literal::Int(0))),
+            },
+            then_body: vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Identifier("x".to_string()),
+            })],
+            else_body: vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Literal(ast::Literal::Int(0)),
+            })],
+        })];
+        assert!(is_compilable_body(&body));
+    }
+
+    #[test]
+    fn compilable_body_with_while() {
+        let body = vec![make_stmt(ast::StatementKind::While {
+            condition: ast::Expr::Binary {
+                left: Box::new(ast::Expr::Identifier("i".to_string())),
+                op: ast::BinaryOp::LessThan,
+                right: Box::new(ast::Expr::Literal(ast::Literal::Int(10))),
+            },
+            body: vec![make_stmt(ast::StatementKind::Set {
+                name: "i".to_string(),
+                value: ast::Expr::Binary {
+                    left: Box::new(ast::Expr::Identifier("i".to_string())),
+                    op: ast::BinaryOp::Add,
+                    right: Box::new(ast::Expr::Literal(ast::Literal::Int(1))),
+                },
+            })],
+        })];
+        assert!(is_compilable_body(&body));
+    }
+
+    #[test]
+    fn not_compilable_body_with_spawn() {
+        let body = vec![make_stmt(ast::StatementKind::Spawn {
+            call: ast::CallExpr {
+                callee: "bg".to_string(),
+                args: vec![],
+            },
+            binding: None,
+        })];
+        assert!(!is_compilable_body(&body));
+    }
+
+    #[test]
+    fn not_compilable_body_with_yield() {
+        let body = vec![make_stmt(ast::StatementKind::Yield {
+            value: ast::Expr::Literal(ast::Literal::Int(1)),
+        })];
+        assert!(!is_compilable_body(&body));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 4. is_fully_compilable
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fully_compilable_simple_program() {
+        let mut program = ast::Program::default();
+        program.functions.push(Arc::new(make_fn(
+            "add",
+            vec![
+                make_param("a", ast::Type::Int),
+                make_param("b", ast::Type::Int),
+            ],
+            ast::Type::Int,
+            vec![],
+            add_body(),
+        )));
+        assert!(is_fully_compilable(&program));
+    }
+
+    #[test]
+    fn not_fully_compilable_with_list_function() {
+        let mut program = ast::Program::default();
+        program.functions.push(Arc::new(make_fn(
+            "add",
+            vec![
+                make_param("a", ast::Type::Int),
+                make_param("b", ast::Type::Int),
+            ],
+            ast::Type::Int,
+            vec![],
+            add_body(),
+        )));
+        program.functions.push(Arc::new(make_fn(
+            "sum",
+            vec![make_param(
+                "items",
+                ast::Type::List(Box::new(ast::Type::Int)),
+            )],
+            ast::Type::Int,
+            vec![],
+            vec![],
+        )));
+        assert!(!is_fully_compilable(&program));
+    }
+
+    #[test]
+    fn fully_compilable_empty_program() {
+        let program = ast::Program::default();
+        assert!(is_fully_compilable(&program));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 5. compile + call_i64 integration test
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn compile_and_call_add() {
+        let mut program = ast::Program::default();
+        program.functions.push(Arc::new(make_fn(
+            "add",
+            vec![
+                make_param("a", ast::Type::Int),
+                make_param("b", ast::Type::Int),
+            ],
+            ast::Type::Int,
+            vec![],
+            add_body(),
+        )));
+
+        let mut compiled = compile(&program).expect("compilation failed");
+        let result = compiled.call_i64("add", &[3, 4]).expect("call failed");
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn compile_and_call_multiply() {
+        let mut program = ast::Program::default();
+        program.functions.push(Arc::new(make_fn(
+            "mul",
+            vec![
+                make_param("a", ast::Type::Int),
+                make_param("b", ast::Type::Int),
+            ],
+            ast::Type::Int,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Binary {
+                    left: Box::new(ast::Expr::Identifier("a".to_string())),
+                    op: ast::BinaryOp::Mul,
+                    right: Box::new(ast::Expr::Identifier("b".to_string())),
+                },
+            })],
+        )));
+
+        let mut compiled = compile(&program).expect("compilation failed");
+        assert_eq!(compiled.call_i64("mul", &[5, 6]).unwrap(), 30);
+    }
+
+    #[test]
+    fn compile_and_call_with_constant() {
+        let mut program = ast::Program::default();
+        program.functions.push(Arc::new(make_fn(
+            "answer",
+            vec![],
+            ast::Type::Int,
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::Literal(ast::Literal::Int(42)),
+            })],
+        )));
+
+        let mut compiled = compile(&program).expect("compilation failed");
+        assert_eq!(compiled.call_i64("answer", &[]).unwrap(), 42);
+    }
+
+    #[test]
+    fn compile_call_missing_function() {
+        let mut program = ast::Program::default();
+        program.functions.push(Arc::new(make_fn(
+            "add",
+            vec![
+                make_param("a", ast::Type::Int),
+                make_param("b", ast::Type::Int),
+            ],
+            ast::Type::Int,
+            vec![],
+            add_body(),
+        )));
+        let mut compiled = compile(&program).unwrap();
+        let result = compiled.call_i64("nonexistent", &[1, 2]);
+        assert!(result.is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 6. forge_type_to_cranelift
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn type_mapping_int() {
+        assert_eq!(
+            forge_type_to_cranelift(&ast::Type::Int).unwrap(),
+            types::I64
+        );
+    }
+
+    #[test]
+    fn type_mapping_float() {
+        assert_eq!(
+            forge_type_to_cranelift(&ast::Type::Float).unwrap(),
+            types::F64
+        );
+    }
+
+    #[test]
+    fn type_mapping_bool() {
+        assert_eq!(
+            forge_type_to_cranelift(&ast::Type::Bool).unwrap(),
+            types::I8
+        );
+    }
+
+    #[test]
+    fn type_mapping_byte() {
+        assert_eq!(
+            forge_type_to_cranelift(&ast::Type::Byte).unwrap(),
+            types::I8
+        );
+    }
+
+    #[test]
+    fn type_mapping_string() {
+        // String maps to I64 (ptr half)
+        assert_eq!(
+            forge_type_to_cranelift(&ast::Type::String).unwrap(),
+            types::I64
+        );
+    }
+
+    #[test]
+    fn type_mapping_result_int() {
+        // Result<Int> unwraps to the inner type
+        assert_eq!(
+            forge_type_to_cranelift(&ast::Type::Result(Box::new(ast::Type::Int))).unwrap(),
+            types::I64
+        );
+    }
+
+    #[test]
+    fn type_mapping_list_unsupported() {
+        assert!(forge_type_to_cranelift(&ast::Type::List(Box::new(ast::Type::Int))).is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 7. is_string_type
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn is_string_type_true() {
+        assert!(is_string_type(&ast::Type::String));
+        assert!(is_string_type(&ast::Type::Result(Box::new(
+            ast::Type::String
+        ))));
+    }
+
+    #[test]
+    fn is_string_type_false() {
+        assert!(!is_string_type(&ast::Type::Int));
+        assert!(!is_string_type(&ast::Type::Float));
+        assert!(!is_string_type(&ast::Type::Bool));
+        assert!(!is_string_type(&ast::Type::Result(Box::new(
+            ast::Type::Int
+        ))));
+    }
+}
