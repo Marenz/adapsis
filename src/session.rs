@@ -17,6 +17,7 @@ use crate::validator;
 
 /// Runtime infrastructure state (Tier 2) — shared across async tasks via Arc<RwLock>.
 /// Holds HTTP routes and shared variables, separate from the AST program state.
+/// TODO(#9): Per-resource locks (each shared var gets its own Arc<RwLock<Value>>).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeState {
     pub http_routes: Vec<crate::ast::HttpRoute>,

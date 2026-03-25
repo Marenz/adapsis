@@ -856,8 +856,22 @@ async fn main() -> Result<()> {
                 Some(std::sync::Arc::new(tokio::sync::Mutex::new(f)))
             };
 
+            // Build the three independent tiers from the loaded session.
+            // These are the new lock-discipline tiers; `shared_session` remains
+            // temporarily as a compatibility shim for handlers not yet migrated.
+            let tier1_program = {
+                let s = shared_session.lock().await;
+                std::sync::Arc::new(tokio::sync::RwLock::new(s.program.clone()))
+            };
+            let tier3_meta = {
+                let s = shared_session.lock().await;
+                std::sync::Arc::new(tokio::sync::Mutex::new(s.meta.clone()))
+            };
+
             let config = api::AppConfig {
                 session: shared_session.clone(),
+                program: tier1_program,
+                meta: tier3_meta,
                 llm_url: url.clone(),
                 llm_model: model.clone(),
                 llm_api_key: api_key.clone(),
@@ -877,6 +891,11 @@ async fn main() -> Result<()> {
                 runtime: shared_runtime.clone(),
                 sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             };
+
+            // Clone tier handles before config is moved into the router
+            let save_program = config.program.clone();
+            let save_meta = config.meta.clone();
+            let save_runtime = config.runtime.clone();
 
             let app = axum::Router::new()
                 .route(
@@ -920,12 +939,23 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            // Auto-save session periodically
+            // Auto-save session periodically.
+            // Sync tier state into the session shim before saving so that
+            // changes made through the tier locks are persisted.
             let save_session = shared_session.clone();
             let save_path = session.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    // Sync tiers → session shim
+                    {
+                        let mut session = save_session.lock().await;
+                        session.program = save_program.read().await.clone();
+                        session.meta = save_meta.lock().await.clone();
+                        if let Ok(rt) = save_runtime.read() {
+                            session.runtime = rt.clone();
+                        }
+                    }
                     let session = save_session.lock().await;
                     if let Err(e) = session.save(std::path::Path::new(&save_path)) {
                         eprintln!("auto-save failed: {e}");
