@@ -51,6 +51,7 @@ impl AppConfig {
             rt.http_routes = session.runtime.http_routes.clone();
             rt.roadmap = session.meta.roadmap.clone();
             rt.agent_mailbox = session.meta.agent_mailbox.clone();
+            rt.io_mocks = session.meta.io_mocks.clone();
         }
     }
 
@@ -61,6 +62,7 @@ impl AppConfig {
             session.meta.roadmap = rt.roadmap.clone();
             session.runtime.shared_vars = rt.shared_vars.clone();
             session.meta.agent_mailbox = rt.agent_mailbox.clone();
+            session.meta.io_mocks = rt.io_mocks.clone();
         }
     }
 }
