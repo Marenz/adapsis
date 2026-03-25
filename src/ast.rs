@@ -29,6 +29,9 @@ pub struct Program {
     /// Maps function name → index in `functions` Vec. Derived index, not serialized.
     #[serde(skip)]
     fn_index: HashMap<String, usize>,
+    /// Maps module name → index in `modules` Vec. Derived index, not serialized.
+    #[serde(skip)]
+    module_index: HashMap<String, usize>,
     /// When true, reject top-level functions — must be inside a module. Set in AdapsisOS mode.
     #[serde(default)]
     pub require_modules: bool,
@@ -43,29 +46,37 @@ impl PartialEq for Program {
 }
 
 impl Program {
-    /// Rebuild the function name → index lookup table. Call after any mutation
-    /// to `self.functions`.
+    /// Rebuild all function name → index lookup tables. Call after any mutation
+    /// to `self.functions` or `self.modules`.
     pub fn rebuild_function_index(&mut self) {
         self.fn_index.clear();
         for (i, f) in self.functions.iter().enumerate() {
             self.fn_index.insert(f.name.clone(), i);
         }
+        // Rebuild module name index and per-module function indices
+        self.module_index.clear();
+        for (i, module) in self.modules.iter_mut().enumerate() {
+            self.module_index.insert(module.name.clone(), i);
+            module.rebuild_function_index();
+        }
     }
 
     pub fn get_function(&self, name: &str) -> Option<&FunctionDecl> {
-        // Module-qualified lookup: "Module.func"
+        // Module-qualified lookup: "Module.func" — use module_index for O(1) module lookup
         if let Some((module_name, function_name)) = name.split_once('.') {
+            if !self.module_index.is_empty() {
+                return self
+                    .module_index
+                    .get(module_name)
+                    .and_then(|&idx| self.modules.get(idx))
+                    .and_then(|module| module.get_function(function_name));
+            }
+            // Fallback: linear scan if module index not built
             return self
                 .modules
                 .iter()
                 .find(|module| module.name == module_name)
-                .and_then(|module| {
-                    module
-                        .functions
-                        .iter()
-                        .find(|function| function.name == function_name)
-                        .map(|f| f.as_ref())
-                });
+                .and_then(|module| module.get_function(function_name));
         }
 
         // Use index for O(1) lookup on top-level functions
@@ -80,29 +91,29 @@ impl Program {
         }
 
         // Search inside modules for unqualified name
-        self.modules.iter().find_map(|module| {
-            module
-                .functions
-                .iter()
-                .find(|function| function.name == name)
-                .map(|f| f.as_ref())
-        })
+        self.modules
+            .iter()
+            .find_map(|module| module.get_function(name))
     }
 
     pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionDecl> {
-        // Module-qualified lookup: "Module.func"
+        // Module-qualified lookup: "Module.func" — use module_index for O(1) module lookup
         if let Some((module_name, function_name)) = name.split_once('.') {
+            if !self.module_index.is_empty() {
+                if let Some(&idx) = self.module_index.get(module_name) {
+                    return self
+                        .modules
+                        .get_mut(idx)
+                        .and_then(|module| module.get_function_mut(function_name));
+                }
+                return None;
+            }
+            // Fallback: linear scan if module index not built
             return self
                 .modules
                 .iter_mut()
                 .find(|module| module.name == module_name)
-                .and_then(|module| {
-                    module
-                        .functions
-                        .iter_mut()
-                        .find(|function| function.name == function_name)
-                        .map(|f| Arc::make_mut(f))
-                });
+                .and_then(|module| module.get_function_mut(function_name));
         }
 
         // Use index for O(1) lookup on top-level functions
@@ -119,13 +130,9 @@ impl Program {
         }
 
         // Search inside modules for unqualified name
-        self.modules.iter_mut().find_map(|module| {
-            module
-                .functions
-                .iter_mut()
-                .find(|function| function.name == name)
-                .map(|f| Arc::make_mut(f))
-        })
+        self.modules
+            .iter_mut()
+            .find_map(|module| module.get_function_mut(name))
     }
 }
 
@@ -170,7 +177,7 @@ pub struct SharedVarDecl {
     pub default: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
     pub id: NodeId,
     pub name: Identifier,
@@ -179,6 +186,65 @@ pub struct Module {
     pub modules: Vec<Module>,
     #[serde(default)]
     pub shared_vars: Vec<SharedVarDecl>,
+    /// Maps function name → index in this module's `functions` Vec.
+    /// Derived index, not serialized. Public so validators can construct Module literals.
+    #[serde(skip)]
+    pub fn_index: HashMap<String, usize>,
+}
+
+impl PartialEq for Module {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.types == other.types
+            && self.functions == other.functions
+            && self.modules == other.modules
+            && self.shared_vars == other.shared_vars
+    }
+}
+
+impl Module {
+    /// Rebuild the per-module function name → index lookup table.
+    pub fn rebuild_function_index(&mut self) {
+        self.fn_index.clear();
+        for (i, f) in self.functions.iter().enumerate() {
+            self.fn_index.insert(f.name.clone(), i);
+        }
+        // Recurse into sub-modules
+        for sub in &mut self.modules {
+            sub.rebuild_function_index();
+        }
+    }
+
+    /// O(1) function lookup within this module using the index.
+    /// Falls back to linear scan if the index hasn't been built.
+    pub fn get_function(&self, name: &str) -> Option<&FunctionDecl> {
+        if !self.fn_index.is_empty() {
+            if let Some(&idx) = self.fn_index.get(name) {
+                return self.functions.get(idx).map(|f| f.as_ref());
+            }
+            return None;
+        }
+        // Fallback: linear scan if index not yet built
+        self.functions
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.as_ref())
+    }
+
+    /// O(1) mutable function lookup within this module using the index.
+    pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionDecl> {
+        if !self.fn_index.is_empty() {
+            if let Some(&idx) = self.fn_index.get(name) {
+                return self.functions.get_mut(idx).map(|f| Arc::make_mut(f));
+            }
+            return None;
+        }
+        self.functions
+            .iter_mut()
+            .find(|f| f.name == name)
+            .map(|f| Arc::make_mut(f))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -521,6 +587,7 @@ mod tests {
             functions,
             modules: vec![],
             shared_vars: vec![],
+            fn_index: HashMap::new(),
         }
     }
 
@@ -580,12 +647,24 @@ mod tests {
     }
 
     #[test]
-    fn get_function_qualified_wrong_module() {
+    fn module_get_function_mut_with_index() {
         let mut program = Program::default();
         program
             .modules
             .push(make_module("Math", vec![make_fn("add", Type::Int)]));
-        assert!(program.get_function("Utils.add").is_none());
+        program.rebuild_function_index();
+
+        // Mutable lookup via index
+        let func = program.get_function_mut("Math.add");
+        assert!(
+            func.is_some(),
+            "mutable qualified lookup should work with index"
+        );
+        func.unwrap().name = "add_v2".to_string();
+
+        // Rebuild index after mutation so the new name is discoverable
+        program.rebuild_function_index();
+        assert!(program.get_function("Math.add_v2").is_some());
     }
 
     #[test]
@@ -1623,5 +1702,64 @@ mod tests {
         assert_eq!(tc.input, "x=5");
         assert!(!tc.passed);
         assert!(tc.matcher.is_none());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Module index and per-module fn_index tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_index_enables_fast_qualified_lookup() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        program
+            .modules
+            .push(make_module("Strings", vec![make_fn("trim", Type::String)]));
+        program.rebuild_function_index();
+
+        // Qualified lookup should use module_index + per-module fn_index
+        let func = program.get_function("Math.add");
+        assert!(func.is_some(), "Math.add should be found via module index");
+        assert_eq!(func.unwrap().name, "add");
+
+        let func = program.get_function("Strings.trim");
+        assert!(
+            func.is_some(),
+            "Strings.trim should be found via module index"
+        );
+        assert_eq!(func.unwrap().name, "trim");
+    }
+
+    #[test]
+    fn module_index_qualified_not_found() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        program.rebuild_function_index();
+
+        // Non-existent module
+        assert!(program.get_function("NonExistent.add").is_none());
+        // Non-existent function in existing module
+        assert!(program.get_function("Math.subtract").is_none());
+    }
+
+    #[test]
+    fn module_fn_index_rebuild() {
+        let mut program = Program::default();
+        program.modules.push(make_module(
+            "Mod",
+            vec![make_fn("alpha", Type::Int), make_fn("beta", Type::String)],
+        ));
+        program.rebuild_function_index();
+
+        // Both functions should be findable
+        assert!(program.get_function("Mod.alpha").is_some());
+        assert!(program.get_function("Mod.beta").is_some());
+
+        // Verify per-module fn_index is populated
+        assert!(!program.modules[0].fn_index.is_empty());
     }
 }
