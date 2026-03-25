@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Result};
+use std::collections::HashMap;
 
 use crate::ast;
 use crate::parser;
@@ -209,6 +210,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
+            fn_index: HashMap::new(),
         });
     }
     let mod_idx = existing_idx.unwrap_or(program.modules.len() - 1);
@@ -1145,6 +1147,7 @@ pub fn apply_move(
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
+            fn_index: HashMap::new(),
         });
     }
     let target = program
