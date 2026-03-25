@@ -1803,12 +1803,27 @@ pub fn eval_builtin_or_user(
             }
         }
         "concat" => {
-            let mut result = String::new();
+            // Pre-calculate total length to avoid repeated reallocations.
+            // For non-String values we format them into a small buffer first
+            // so we can measure before the final allocation.
+            let mut parts: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(args.len());
+            let mut total_len = 0usize;
             for arg in &args {
                 match arg {
-                    Value::String(s) => result.push_str(s),
-                    other => result.push_str(&format!("{other}")),
+                    Value::String(s) => {
+                        total_len += s.len();
+                        parts.push(std::borrow::Cow::Borrowed(s.as_str()));
+                    }
+                    other => {
+                        let formatted = format!("{other}");
+                        total_len += formatted.len();
+                        parts.push(std::borrow::Cow::Owned(formatted));
+                    }
                 }
+            }
+            let mut result = String::with_capacity(total_len);
+            for part in &parts {
+                result.push_str(part);
             }
             Ok(Value::String(result))
         }
@@ -2055,11 +2070,14 @@ pub fn eval_builtin_or_user(
             if args.len() != 2 {
                 bail!("push(list, item) expects 2 arguments");
             }
-            match &args[0] {
-                Value::List(items) => {
-                    let mut new_items = items.clone();
-                    new_items.push(args[1].clone());
-                    Ok(Value::List(new_items))
+            // Move args out to avoid cloning the list — args is owned Vec<Value>.
+            let mut drain = args.into_iter();
+            let list_val = drain.next().unwrap();
+            let item = drain.next().unwrap();
+            match list_val {
+                Value::List(mut items) => {
+                    items.push(item);
+                    Ok(Value::List(items))
                 }
                 _ => bail!("push expects (List, value)"),
             }
@@ -6645,5 +6663,135 @@ mod tests {
         let id = Env::intern_name("roundtrip_test");
         let resolved = Env::resolve_name(id);
         assert_eq!(resolved, "roundtrip_test");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Performance optimization tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_concat_prealloc_strings() {
+        // concat with multiple string arguments should produce correct result
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"concat("hello", " ", "world")"#), r#""hello world""#);
+    }
+
+    #[test]
+    fn test_concat_prealloc_mixed_types() {
+        // concat with mixed types (string, int, bool) should format correctly
+        let p = ast::Program::default();
+        let result = eval_expr_str(&p, r#"concat("count: ", 42)"#);
+        assert_eq!(result, r#""count: 42""#);
+    }
+
+    #[test]
+    fn test_concat_empty_args() {
+        // concat with no arguments should return empty string
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"concat()"#), r#""""#);
+    }
+
+    #[test]
+    fn test_concat_single_arg() {
+        // concat with a single argument
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"concat("solo")"#), r#""solo""#);
+    }
+
+    #[test]
+    fn test_push_returns_extended_list() {
+        // push should return a new list with the item appended
+        let source = "\
++fn test_push ()->Int
+  +let xs:List<Int> = list(1, 2, 3)
+  +let ys:List<Int> = push(xs, 4)
+  +return len(ys)
+
+!test test_push
+  +with -> expect 4
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "push should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_push_error_wrong_args() {
+        // push with wrong number of args should error
+        let p = ast::Program::default();
+        let mut env = Env::new();
+        let result = eval_builtin_or_user(&p, "push", vec![Value::List(vec![])], &mut env);
+        assert!(result.is_err(), "push with 1 arg should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("expects 2 arguments"), "error should mention arg count: {msg}");
+    }
+
+    #[test]
+    fn test_push_error_not_list() {
+        // push on a non-list should error
+        let p = ast::Program::default();
+        let mut env = Env::new();
+        let result = eval_builtin_or_user(
+            &p,
+            "push",
+            vec![Value::Int(42), Value::Int(1)],
+            &mut env,
+        );
+        assert!(result.is_err(), "push on non-list should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("push expects"), "error should mention push: {msg}");
+    }
+
+    #[test]
+    fn test_push_preserves_original_list_semantics() {
+        // In Adapsis, push returns a new list; verify the function semantics
+        // work correctly in a loop accumulation pattern
+        let source = "\
++fn accumulate (n:Int)->Int
+  +let result:List<Int> = list()
+  +let i:Int = 0
+  +while i < n
+    +set result = push(result, i)
+    +set i = i + 1
+  +end
+  +return len(result)
+
+!test accumulate
+  +with n=4 -> expect 4
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "accumulate with push should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_module_function_lookup_with_index() {
+        // Module-qualified function lookup should work after rebuild_function_index
+        let source = "\
+!module Math
++fn add (a:Int, b:Int)->Int
+  +return a + b
+
+!test Math.add
+  +with a=3 b=4 -> expect 7
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "module function lookup should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_module_function_lookup_not_found() {
+        // Looking up a non-existent module function should return None
+        let mut program = ast::Program::default();
+        program.rebuild_function_index();
+        assert!(program.get_function("NonExistent.func").is_none());
     }
 }
