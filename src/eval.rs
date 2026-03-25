@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use crate::ast;
 use crate::compiler::CompiledProgram;
 use crate::parser;
+use crate::vm;
 
 /// Cache for JIT-compiled programs, keyed by session revision.
 /// When the revision matches, the compiled module is reused instead of recompiling.
@@ -2829,6 +2830,29 @@ fn trace_body(
         }
     }
     None
+}
+
+/// Env-var-gated VM execution bridge.
+/// When `ADAPSIS_VM=1` is set, attempts to compile and execute the given
+/// function via the bytecode VM. Returns `None` to fall back to the
+/// tree-walker if the env var is not set or execution fails.
+pub fn try_vm_execute_envgated(
+    func: &ast::FunctionDecl,
+    args: &[Value],
+    program: &ast::Program,
+) -> Option<Result<Value>> {
+    if std::env::var("ADAPSIS_VM").ok().as_deref() != Some("1") {
+        return None;
+    }
+    let compiled = match vm::compile_function(func, program) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+    match vm::execute(&compiled, args.to_vec(), program) {
+        Ok(vm::VmResult::Done(val)) => Some(Ok(val)),
+        Ok(vm::VmResult::Await { .. }) => None, // fall back for async
+        Err(e) => Some(Err(e)),
+    }
 }
 
 #[cfg(test)]
