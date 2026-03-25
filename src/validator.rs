@@ -88,6 +88,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::OpenCode(_) => Ok("opencode (handled by orchestrator)".to_string()),
         parser::Operation::Message { .. } => Ok("message (handled by orchestrator)".to_string()),
         parser::Operation::Done => Ok("done (handled by orchestrator)".to_string()),
+        parser::Operation::Sandbox(_) => Ok("sandbox (handled by session)".to_string()),
         parser::Operation::Roadmap(_) => Ok("roadmap (handled by session)".to_string()),
         parser::Operation::Remove(target) => {
             if let Some((mod_name, item_name)) = target.split_once('.') {

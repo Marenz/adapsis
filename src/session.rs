@@ -130,6 +130,14 @@ impl SessionMeta {
     }
 }
 
+/// Snapshot of program + runtime state saved when entering a sandbox.
+#[derive(Debug, Clone)]
+pub struct SandboxState {
+    pub original_program: ast::Program,
+    pub original_runtime: RuntimeState,
+    pub entered_at_revision: usize,
+}
+
 /// A Forge session — program state + runtime + metadata.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -141,6 +149,9 @@ pub struct Session {
     /// Session metadata: mutation log, history, conversation, mocks, etc.
     #[serde(flatten)]
     pub meta: SessionMeta,
+    /// Sandbox state — present when in sandbox mode. Not persisted.
+    #[serde(skip)]
+    pub sandbox: Option<SandboxState>,
 }
 
 /// A long-term roadmap item.
@@ -380,6 +391,7 @@ impl Session {
             program: ast::Program::default(),
             runtime: RuntimeState::default(),
             meta: SessionMeta::new(),
+            sandbox: None,
         }
     }
 
@@ -476,6 +488,51 @@ impl Session {
     /// Find a route by method and path.
     pub fn find_route(&self, method: &str, path: &str) -> Option<&ast::HttpRoute> {
         self.runtime.http_routes.iter().find(|r| r.method == method && r.path == path)
+    }
+
+    /// Handle a sandbox action (enter, merge, discard, status).
+    fn handle_sandbox(&mut self, action: &parser::SandboxAction) -> (String, bool) {
+        match action {
+            parser::SandboxAction::Enter => {
+                if self.sandbox.is_some() {
+                    return ("already in sandbox mode — use !sandbox merge or !sandbox discard first".to_string(), false);
+                }
+                self.sandbox = Some(SandboxState {
+                    original_program: self.program.clone(),
+                    original_runtime: self.runtime.clone(),
+                    entered_at_revision: self.meta.revision,
+                });
+                ("entered sandbox mode — mutations are isolated. Use !sandbox merge to keep changes or !sandbox discard to revert.".to_string(), true)
+            }
+            parser::SandboxAction::Merge => {
+                if self.sandbox.is_none() {
+                    return ("not in sandbox mode".to_string(), false);
+                }
+                let sandbox = self.sandbox.take().unwrap();
+                let changes = self.meta.revision.saturating_sub(sandbox.entered_at_revision);
+                (format!("sandbox merged — {changes} mutation(s) kept"), true)
+            }
+            parser::SandboxAction::Discard => {
+                if self.sandbox.is_none() {
+                    return ("not in sandbox mode".to_string(), false);
+                }
+                let sandbox = self.sandbox.take().unwrap();
+                let discarded = self.meta.revision.saturating_sub(sandbox.entered_at_revision);
+                self.program = sandbox.original_program;
+                self.runtime = sandbox.original_runtime;
+                self.meta.revision = sandbox.entered_at_revision;
+                self.program.rebuild_function_index();
+                (format!("sandbox discarded — reverted {discarded} mutation(s)"), true)
+            }
+            parser::SandboxAction::Status => {
+                if let Some(ref sandbox) = self.sandbox {
+                    let changes = self.meta.revision.saturating_sub(sandbox.entered_at_revision);
+                    (format!("in sandbox mode (entered at revision {}, {changes} mutations since)", sandbox.entered_at_revision), true)
+                } else {
+                    ("not in sandbox mode".to_string(), true)
+                }
+            }
+        }
     }
 
     /// Initialize shared variables from module declarations.
@@ -839,6 +896,10 @@ impl Session {
                         Err(e) => results.push((format!("{e}"), false)),
                     }
                 }
+                parser::Operation::Sandbox(action) => {
+                    let msg = self.handle_sandbox(action);
+                    results.push(msg);
+                }
                 _ => {
                     any_definition = true;
                     let pre_backups = self.backup_affected_bodies(op);
@@ -1061,6 +1122,10 @@ impl Session {
                         Ok(msg) => results.push((msg, true)),
                         Err(e) => results.push((format!("{e}"), false)),
                     }
+                }
+                parser::Operation::Sandbox(action) => {
+                    let msg = self.handle_sandbox(action);
+                    results.push(msg);
                 }
                 _ => {
                     any_definition = true;

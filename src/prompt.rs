@@ -515,6 +515,16 @@ Mocks intercept +await calls during tests — if the operation and args match th
 pattern, the mock value is returned without real IO. Use !unmock to clear all mocks.
 Tests with mocks run async functions through the coroutine executor automatically.
 
+### Sandbox Mode
+Use `!sandbox` to experiment safely without affecting the main program:
+```
+!sandbox              — enter sandbox (snapshot current state)
+!sandbox status       — check if sandbox is active
+... make changes, test them ...
+!sandbox merge        — keep changes (commit to session)
+!sandbox discard      — revert all sandbox changes
+```
+
 ### End-to-end testing
 
 Unit tests verify individual functions. You MUST also verify the whole system works:
