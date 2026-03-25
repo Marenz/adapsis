@@ -26,6 +26,20 @@ use crate::validator;
 
 pub type SharedSession = Arc<Mutex<Session>>;
 
+/// Copy roadmap from session metadata into SharedRuntime so IO builtins can access it.
+fn sync_roadmap_to_runtime(session: &Session, runtime: &crate::session::SharedRuntime) {
+    if let Ok(mut rt) = runtime.write() {
+        rt.roadmap = session.meta.roadmap.clone();
+    }
+}
+
+/// Copy roadmap from SharedRuntime back into session metadata after eval.
+fn sync_roadmap_from_runtime(session: &mut Session, runtime: &crate::session::SharedRuntime) {
+    if let Ok(rt) = runtime.read() {
+        session.meta.roadmap = rt.roadmap.clone();
+    }
+}
+
 /// Thread-safe session manager: maps session IDs to independent Program instances.
 /// The "main" session uses the existing `session` field in AppConfig; additional
 /// sessions are stored here with isolated Program state.
@@ -141,6 +155,7 @@ pub async fn eval_fn(
 ) -> Json<EvalResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
     let mut session = config.session.lock().await;
+    sync_roadmap_to_runtime(&session, &config.runtime);
 
     // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
     if let Some(ref expr_str) = req.expression {
@@ -244,6 +259,12 @@ pub async fn eval_fn(
                 eval::eval_function_body_pub(&program, &func.body, &mut env)
             }).await;
 
+            // Sync roadmap back after async eval
+            {
+                let mut s = config.session.lock().await;
+                sync_roadmap_from_runtime(&mut s, &config.runtime);
+            }
+
             return match eval_result {
                 Ok(Ok(val)) => Json(EvalResponse {
                     result: format!("{val}"),
@@ -266,7 +287,7 @@ pub async fn eval_fn(
 
     match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
         Ok((result, compiled)) => {
-            // re-acquire session for recording (we may have dropped it above for async)
+            sync_roadmap_from_runtime(&mut session, &config.runtime);
             session.record_eval(&ev.function_name, &req.input, &result);
             Json(EvalResponse {
                 result,
@@ -275,6 +296,7 @@ pub async fn eval_fn(
             })
         }
         Err(e) => {
+            sync_roadmap_from_runtime(&mut session, &config.runtime);
             Json(EvalResponse {
                 result: format!("{e}"),
                 success: false,
@@ -1942,6 +1964,7 @@ pub async fn ask_stream(
 
             // Apply code
             let mut session = config_clone.session.lock().await;
+            sync_roadmap_to_runtime(&session, &config_clone.runtime);
             let mut has_errors = false;
             let mut feedback_details: Vec<String> = Vec::new();
             let mut train_tests_passed: usize = 0;
@@ -2617,6 +2640,7 @@ pub async fn ask_stream(
                 }
             }
 
+            sync_roadmap_from_runtime(&mut session, &config_clone.runtime);
             drop(session);
 
             // Build detailed feedback with ALL results so the AI can see them

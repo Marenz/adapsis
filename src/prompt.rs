@@ -538,6 +538,24 @@ Unit tests verify individual functions. You MUST also verify the whole system wo
 Routes (+route) serve on the same port as AdapsisOS.
 For custom servers, use tcp_listen/tcp_accept/tcp_read/tcp_write async IO builtins.
 
+### Roadmap IO Builtins
+
+You can manage the roadmap programmatically from Adapsis functions using these async IO operations:
+
+- `+await items:String = roadmap_list()` — returns the current roadmap as a formatted string
+- `+await result:String = roadmap_add("Build feature X")` — adds an item, returns the description
+- `+await result:String = roadmap_done(1)` — marks item #1 as done, returns confirmation
+
+These require `[io,async]` effects and `+await`. They operate on the same roadmap as the `!roadmap` command.
+
+Example:
+```
++fn check_roadmap ()->String [io,async]
+  +await items:String = roadmap_list()
+  +return items
++end
+```
+
 ### Multi-Session API
 
 AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session
