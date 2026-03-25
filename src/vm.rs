@@ -5,8 +5,15 @@
 //! The VM reads functions via `Arc<FunctionDecl>` and executes them using
 //! a stack-based bytecode interpreter, replacing the tree-walking evaluator
 //! for hot paths.
+//!
+//! Function and builtin names in bytecode opcodes (`Call`, `CallBuiltin`,
+//! `AwaitIo`) are interned to compact `u32` identifiers at compile time
+//! (issue #29). This replaces `HashMap<String, …>` lookups in the hot
+//! dispatch loop with `HashMap<u32, …>` — eliminating string hashing and
+//! comparison on every function call.
 
 use crate::eval::Value;
+use crate::intern::{InternedId, StringInterner};
 
 /// A single bytecode instruction.
 #[derive(Debug, Clone)]
@@ -66,14 +73,16 @@ pub enum Op {
     Negate,
 
     // ── Function calls ───────────────────────────────────────────────
-    /// Call a user-defined function by name. Pops `arg_count` values from
-    /// the stack as arguments (right-to-left). Pushes the return value.
-    Call(String, usize),
-    /// Call a builtin function by name with `arg_count` arguments.
-    CallBuiltin(String, usize),
-    /// Await an async IO operation by name with `arg_count` arguments.
+    /// Call a user-defined function by interned name id. Pops `arg_count`
+    /// values from the stack as arguments (right-to-left). Pushes the
+    /// return value. The `InternedId` is resolved via the `CompiledFunction`'s
+    /// name table at execution time when needed (cache miss, error messages).
+    Call(InternedId, usize),
+    /// Call a builtin function by interned name id with `arg_count` arguments.
+    CallBuiltin(InternedId, usize),
+    /// Await an async IO operation by interned name id with `arg_count` arguments.
     /// Requires a coroutine handle in the environment.
-    AwaitIo(String, usize),
+    AwaitIo(InternedId, usize),
 
     // ── Control flow ─────────────────────────────────────────────────
     /// Return from the current function. Pops the return value from
@@ -161,6 +170,10 @@ pub struct CompiledFunction {
     pub param_names: Vec<String>,
     /// All local variable names in slot order (for debug/inspect).
     pub local_names: Vec<String>,
+    /// Name interner mapping function/builtin/IO names used in bytecode
+    /// opcodes (`Call`, `CallBuiltin`, `AwaitIo`) to compact `u32` ids.
+    /// Shared across all functions compiled in the same session.
+    pub interner: StringInterner,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -198,6 +211,7 @@ pub fn compile_function(
         local_count: compiler.local_count,
         param_names: func.params.iter().map(|p| p.name.clone()).collect(),
         local_names: compiler.local_names.clone(),
+        interner: compiler.interner,
     })
 }
 
@@ -208,6 +222,9 @@ struct Compiler<'a> {
     local_names: Vec<String>,
     local_count: usize,
     program: &'a ast::Program,
+    /// Name interner for function/builtin/IO names in bytecode opcodes.
+    /// Seeded from `Program::interner` so AST names are already interned.
+    interner: StringInterner,
 }
 
 impl<'a> Compiler<'a> {
@@ -218,7 +235,13 @@ impl<'a> Compiler<'a> {
             local_names: Vec::new(),
             local_count: 0,
             program,
+            interner: program.interner.clone(),
         }
+    }
+
+    /// Intern a name (function, builtin, IO operation) and return its compact id.
+    fn intern(&mut self, name: &str) -> InternedId {
+        self.interner.intern(name)
     }
 
     fn emit(&mut self, op: Op) {
@@ -374,7 +397,8 @@ impl<'a> Compiler<'a> {
 
                 // let __len = len(__list)
                 self.emit(Op::LoadLocal(list_slot));
-                self.emit(Op::CallBuiltin("len".to_string(), 1));
+                let len_id = self.intern("len");
+                self.emit(Op::CallBuiltin(len_id, 1));
                 let len_slot = self.alloc_local("__each_len");
                 self.emit(Op::StoreLocal(len_slot));
 
@@ -389,7 +413,8 @@ impl<'a> Compiler<'a> {
                 // let <binding> = get(__list, __idx)
                 self.emit(Op::LoadLocal(list_slot));
                 self.emit(Op::LoadLocal(idx_slot));
-                self.emit(Op::CallBuiltin("get".to_string(), 2));
+                let get_id = self.intern("get");
+                self.emit(Op::CallBuiltin(get_id, 2));
                 let item_slot = self.alloc_local(&binding.name);
                 self.emit(Op::StoreLocal(item_slot));
 
@@ -459,7 +484,8 @@ impl<'a> Compiler<'a> {
                 for arg in &call.args {
                     self.compile_expr(arg)?;
                 }
-                self.emit(Op::AwaitIo(call.callee.clone(), call.args.len()));
+                let io_id = self.intern(&call.callee);
+                self.emit(Op::AwaitIo(io_id, call.args.len()));
                 let slot = self.alloc_local(name);
                 self.emit(Op::StoreLocal(slot));
             }
@@ -612,10 +638,12 @@ impl<'a> Compiler<'a> {
 
         // Check if it's a user-defined function or a builtin
         if self.program.get_function(callee).is_some() {
-            self.emit(Op::Call(callee.clone(), argc));
+            let id = self.intern(callee);
+            self.emit(Op::Call(id, argc));
         } else {
             // Treat as builtin (includes builtins + union constructors)
-            self.emit(Op::CallBuiltin(callee.clone(), argc));
+            let id = self.intern(callee);
+            self.emit(Op::CallBuiltin(id, argc));
         }
         Ok(())
     }
@@ -645,8 +673,9 @@ pub enum VmResult {
 /// For synchronous functions, returns `VmResult::Done(value)`.
 /// For functions that hit an `AwaitIo` instruction, returns `VmResult::Await`
 /// with the suspended state so the caller can perform IO and resume.
-/// Compilation cache: avoids recompiling the same function on every call.
-pub type CompileCache = std::collections::HashMap<String, CompiledFunction>;
+/// Compilation cache: keyed by interned `u32` name ids instead of `String`
+/// to avoid string hashing on every call dispatch (issue #29).
+pub type CompileCache = std::collections::HashMap<InternedId, CompiledFunction>;
 
 pub fn execute(
     compiled: &CompiledFunction,
@@ -654,7 +683,8 @@ pub fn execute(
     program: &ast::Program,
 ) -> Result<VmResult> {
     let mut cache = CompileCache::new();
-    cache.insert(compiled.name.clone(), compiled.clone());
+    let name_id = compiled.interner.get(&compiled.name).unwrap_or(0);
+    cache.insert(name_id, compiled.clone());
     execute_cached(compiled, args, program, &mut cache)
 }
 
@@ -680,7 +710,8 @@ fn execute_cached(
         }
     }
 
-    run_loop(state, program, cache)
+    let mut interner = compiled.interner.clone();
+    run_loop(state, program, cache, &mut interner)
 }
 
 /// Resume a suspended VM after an async IO operation completes.
@@ -688,7 +719,8 @@ fn execute_cached(
 pub fn resume(mut vm_state: VmState, io_result: Value, program: &ast::Program) -> Result<VmResult> {
     vm_state.stack.push(io_result);
     let mut cache = CompileCache::new();
-    run_loop(vm_state, program, &mut cache)
+    let mut interner = program.interner.clone();
+    run_loop(vm_state, program, &mut cache, &mut interner)
 }
 
 /// Execute a compiled function with async IO support.
@@ -701,7 +733,9 @@ pub fn execute_with_io(
     io_handler: &dyn Fn(&str, &[Value]) -> Result<Value>,
 ) -> Result<Value> {
     let mut cache = CompileCache::new();
-    cache.insert(compiled.name.clone(), compiled.clone());
+    let name_id = compiled.interner.get(&compiled.name).unwrap_or(0);
+    cache.insert(name_id, compiled.clone());
+    let mut interner = compiled.interner.clone();
     let mut result = execute_cached(compiled, args, program, &mut cache)?;
     loop {
         match result {
@@ -714,7 +748,7 @@ pub fn execute_with_io(
                 let io_result = io_handler(&op_name, &args)?;
                 let mut vm_state = vm_state;
                 vm_state.stack.push(io_result);
-                result = run_loop(vm_state, program, &mut cache)?;
+                result = run_loop(vm_state, program, &mut cache, &mut interner)?;
             }
         }
     }
@@ -725,6 +759,7 @@ fn run_loop(
     mut state: VmState,
     program: &ast::Program,
     cache: &mut CompileCache,
+    interner: &mut StringInterner,
 ) -> Result<VmResult> {
     loop {
         if state.ip >= state.bytecode.len() {
@@ -850,25 +885,29 @@ fn run_loop(
             }
 
             // ── Function calls ───────────────────────────────────────
-            Op::Call(name, argc) => {
+            Op::Call(name_id, argc) => {
                 let argc = *argc;
-                // Clone name only when needed for cache insertion
-                let name = name.clone();
+                let name_id = *name_id;
                 let mut call_args = Vec::with_capacity(argc);
                 for _ in 0..argc {
                     call_args.push(pop_stack(&mut state.stack)?);
                 }
                 call_args.reverse(); // arguments were pushed left-to-right
 
-                // Compile callee (cached — only compiles once per function)
-                if !cache.contains_key(&name) {
+                // Compile callee (cached — only compiles once per function).
+                // Cache is keyed by InternedId (u32) — no string hashing.
+                if !cache.contains_key(&name_id) {
+                    let name_str = interner
+                        .resolve(name_id)
+                        .ok_or_else(|| anyhow::anyhow!("vm: unknown interned id {name_id}"))?
+                        .to_string();
                     let func = program
-                        .get_function(&name)
-                        .ok_or_else(|| anyhow::anyhow!("vm: function `{name}` not found"))?;
+                        .get_function(&name_str)
+                        .ok_or_else(|| anyhow::anyhow!("vm: function `{name_str}` not found"))?;
                     let compiled = compile_function(func, program)?;
-                    cache.insert(name.clone(), compiled);
+                    cache.insert(name_id, compiled);
                 }
-                let callee = cache.get(&name).unwrap();
+                let callee = cache.get(&name_id).unwrap();
 
                 // Save current frame
                 let locals_base = state.locals.len();
@@ -889,28 +928,41 @@ fn run_loop(
                 }
                 state.ip = 0;
             }
-            Op::CallBuiltin(name, argc) => {
+            Op::CallBuiltin(name_id, argc) => {
                 let argc = *argc;
-                let name = name.clone();
+                let name_id = *name_id;
                 let mut call_args = Vec::with_capacity(argc);
                 for _ in 0..argc {
                     call_args.push(pop_stack(&mut state.stack)?);
                 }
                 call_args.reverse();
 
+                // Resolve the interned id to a string for the builtin dispatcher.
+                // This string resolve is cheap (Vec index) and only happens once
+                // per CallBuiltin execution — the builtin itself dominates cost.
+                let name_str = interner
+                    .resolve(name_id)
+                    .ok_or_else(|| anyhow::anyhow!("vm: unknown interned id {name_id}"))?;
                 let mut env = crate::eval::Env::new_with_interner(&program.interner);
                 let result =
-                    crate::eval::eval_builtin_or_user(program, &name, call_args, &mut env)?;
+                    crate::eval::eval_builtin_or_user(program, name_str, call_args, &mut env)?;
                 state.stack.push(result);
             }
-            Op::AwaitIo(op_name, argc) => {
+            Op::AwaitIo(name_id, argc) => {
                 let argc = *argc;
-                let op_name = op_name.clone();
+                let name_id = *name_id;
                 let mut io_args = Vec::with_capacity(argc);
                 for _ in 0..argc {
                     io_args.push(pop_stack(&mut state.stack)?);
                 }
                 io_args.reverse();
+
+                // Resolve interned id to string for the await result.
+                // This only happens once per IO suspension, not in a hot loop.
+                let op_name = interner
+                    .resolve(name_id)
+                    .ok_or_else(|| anyhow::anyhow!("vm: unknown interned id {name_id}"))?
+                    .to_string();
 
                 // Suspend execution — caller must perform IO and resume
                 return Ok(VmResult::Await {
@@ -1281,12 +1333,16 @@ mod tests {
         );
 
         assert_eq!(compiled.name, "greet");
-        // concat is a builtin — should emit CallBuiltin
+        // concat is a builtin — should emit CallBuiltin with interned id
+        let concat_id = compiled
+            .interner
+            .get("concat")
+            .expect("concat should be interned");
         let has_call_builtin = compiled
             .bytecode
             .iter()
-            .any(|op| matches!(op, Op::CallBuiltin(name, 2) if name == "concat"));
-        assert!(has_call_builtin, "should emit CallBuiltin(\"concat\", 2)");
+            .any(|op| matches!(op, Op::CallBuiltin(id, 2) if *id == concat_id));
+        assert!(has_call_builtin, "should emit CallBuiltin(concat_id, 2)");
     }
 
     #[test]
@@ -1305,15 +1361,19 @@ mod tests {
         );
 
         assert_eq!(compiled.name, "quadruple");
-        // double is a user function — should emit Call, not CallBuiltin
+        // double is a user function — should emit Call with interned id, not CallBuiltin
+        let double_id = compiled
+            .interner
+            .get("double")
+            .expect("double should be interned");
         let call_count = compiled
             .bytecode
             .iter()
-            .filter(|op| matches!(op, Op::Call(name, 1) if name == "double"))
+            .filter(|op| matches!(op, Op::Call(id, 1) if *id == double_id))
             .count();
         assert_eq!(
             call_count, 2,
-            "should have 2 Call(\"double\", 1) instructions"
+            "should have 2 Call(double_id, 1) instructions"
         );
     }
 
@@ -1377,14 +1437,22 @@ mod tests {
 
         assert_eq!(compiled.name, "sum_list");
         // Each compiles to: store list, init idx, call len, loop with get + body
+        let len_id = compiled
+            .interner
+            .get("len")
+            .expect("len should be interned");
+        let get_id = compiled
+            .interner
+            .get("get")
+            .expect("get should be interned");
         let has_len_call = compiled
             .bytecode
             .iter()
-            .any(|op| matches!(op, Op::CallBuiltin(name, 1) if name == "len"));
+            .any(|op| matches!(op, Op::CallBuiltin(id, 1) if *id == len_id));
         let has_get_call = compiled
             .bytecode
             .iter()
-            .any(|op| matches!(op, Op::CallBuiltin(name, 2) if name == "get"));
+            .any(|op| matches!(op, Op::CallBuiltin(id, 2) if *id == get_id));
         assert!(has_len_call, "should call builtin len for loop bound");
         assert!(has_get_call, "should call builtin get for element access");
     }
@@ -1400,11 +1468,15 @@ mod tests {
             "fetch",
         );
 
+        let http_get_id = compiled
+            .interner
+            .get("http_get")
+            .expect("http_get should be interned");
         let has_await = compiled
             .bytecode
             .iter()
-            .any(|op| matches!(op, Op::AwaitIo(name, 1) if name == "http_get"));
-        assert!(has_await, "should emit AwaitIo(\"http_get\", 1)");
+            .any(|op| matches!(op, Op::AwaitIo(id, 1) if *id == http_get_id));
+        assert!(has_await, "should emit AwaitIo(http_get_id, 1)");
     }
 
     #[test]
@@ -1815,6 +1887,181 @@ mod tests {
         match result {
             VmResult::Done(Value::String(s)) => assert_eq!(s, "foo bar"),
             other => panic!("expected Done(String), got {:?}", other),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Name interning tests (issue #29)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn interned_call_opcode_uses_u32_not_string() {
+        // Verify that Call opcodes use InternedId (u32) instead of String.
+        let compiled = compile_from_source(
+            "\
++fn helper (x:Int)->Int
+  +return x + 1
+
++fn main ()->Int
+  +call r:Int = helper(5)
+  +return r
+",
+            "main",
+        );
+        let helper_id = compiled
+            .interner
+            .get("helper")
+            .expect("helper should be interned");
+        let has_call = compiled
+            .bytecode
+            .iter()
+            .any(|op| matches!(op, Op::Call(id, 1) if *id == helper_id));
+        assert!(
+            has_call,
+            "Call opcode should use interned u32 id, not String"
+        );
+        // The interner should be able to resolve the id back to the name
+        assert_eq!(compiled.interner.resolve(helper_id), Some("helper"));
+    }
+
+    #[test]
+    fn interned_ids_consistent_across_callees() {
+        // When the VM compiles a callee on cache miss, the interned IDs
+        // should be consistent (same name → same ID) because both the
+        // caller and callee are compiled from the same Program::interner.
+        let program = build_program(
+            "\
++fn leaf (x:Int)->Int
+  +return x * 3
+
++fn middle (x:Int)->Int
+  +call r:Int = leaf(x)
+  +return r
+
++fn top ()->Int
+  +call r:Int = middle(7)
+  +return r
+",
+        );
+        let top_fn = program.get_function("top").unwrap();
+        let compiled_top = compile_function(top_fn, &program).unwrap();
+
+        let middle_fn = program.get_function("middle").unwrap();
+        let compiled_middle = compile_function(middle_fn, &program).unwrap();
+
+        // Both should intern "leaf" to the same ID since they share
+        // the same Program::interner as seed
+        let leaf_id_top = compiled_top.interner.get("leaf");
+        let leaf_id_middle = compiled_middle.interner.get("leaf");
+        assert_eq!(
+            leaf_id_top, leaf_id_middle,
+            "same name should get same interned ID across compiled functions"
+        );
+
+        // Execute top — should correctly call middle → leaf via interned dispatch
+        let result = execute(&compiled_top, vec![], &program).unwrap();
+        match result {
+            VmResult::Done(Value::Int(21)) => {} // 7 * 3
+            other => panic!("expected Done(Int(21)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compile_cache_keyed_by_u32() {
+        // Verify that CompileCache uses u32 keys, not String keys.
+        // This is a compile-time type check — if it compiles, the types are correct.
+        let mut cache: CompileCache = CompileCache::new();
+        let program = build_program(
+            "\
++fn foo ()->Int
+  +return 42
+",
+        );
+        let func = program.get_function("foo").unwrap();
+        let compiled = compile_function(func, &program).unwrap();
+        let foo_id: InternedId = compiled.interner.get("foo").unwrap();
+        cache.insert(foo_id, compiled);
+
+        // Lookup by u32 — should find the cached function
+        assert!(cache.contains_key(&foo_id));
+        assert_eq!(cache.get(&foo_id).unwrap().name, "foo");
+    }
+
+    #[test]
+    fn interned_builtin_resolve_for_error_messages() {
+        // When a CallBuiltin references an unknown builtin, the error message
+        // should include the resolved name (not just the numeric ID).
+        let program = build_program(
+            "\
++fn bad_call ()->Int
+  +call r:Int = nonexistent_builtin(1)
+  +return r
+",
+        );
+        let func = program.get_function("bad_call").unwrap();
+        let compiled = compile_function(func, &program).unwrap();
+        let result = execute(&compiled, vec![Value::Int(1)], &program);
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                // The error should mention the function name, not a raw numeric ID
+                assert!(
+                    msg.contains("nonexistent_builtin"),
+                    "error should contain function name, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected error for undefined builtin"),
+        }
+    }
+
+    #[test]
+    fn recursive_function_with_interned_call() {
+        // Recursive calls should work correctly with interned name dispatch.
+        // The function calls itself — the interned ID for the recursive call
+        // must match the ID used to cache the compiled function.
+        let val = exec_fn(
+            "\
++fn fib (n:Int)->Int
+  +if n <= 1
+    +return n
+  +else
+    +return fib(n - 1) + fib(n - 2)
+  +end
+",
+            "fib",
+            vec![Value::Int(10)],
+        );
+        assert!(
+            matches!(val, Value::Int(55)),
+            "fib(10) should be 55, got {val}"
+        );
+    }
+
+    #[test]
+    fn await_io_resolves_interned_name_for_suspension() {
+        // When the VM suspends for AwaitIo, the op_name in VmResult::Await
+        // should be the resolved string name, not a numeric ID.
+        let program = build_program(
+            "\
++fn fetch_data (url:String)->String [io,async]
+  +await result:String = http_get(url)
+  +return result
+",
+        );
+        let func = program.get_function("fetch_data").unwrap();
+        let compiled = compile_function(func, &program).unwrap();
+        let result = execute(
+            &compiled,
+            vec![Value::String("http://example.com".into())],
+            &program,
+        )
+        .unwrap();
+        match result {
+            VmResult::Await { op_name, args, .. } => {
+                assert_eq!(op_name, "http_get", "op_name should be resolved string");
+                assert_eq!(args.len(), 1);
+            }
+            VmResult::Done(_) => panic!("expected Await, got Done"),
         }
     }
 }
