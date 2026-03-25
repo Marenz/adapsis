@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::ast;
 use crate::compiler::CompiledProgram;
+use crate::intern::{InternedId, StringInterner};
 use crate::parser;
 use crate::vm;
 
@@ -140,14 +141,19 @@ impl Value {
 }
 
 /// Evaluation environment with a scope stack.
-/// Each scope is a HashMap of variable bindings. `+let` defines into the
-/// top scope, `+set` mutates the nearest scope that already contains the
-/// variable, and lookups walk the stack from top to bottom.
+/// Each scope is a HashMap of variable bindings keyed by interned `u32` ids.
+/// `+let` defines into the top scope, `+set` mutates the nearest scope that
+/// already contains the variable, and lookups walk the stack from top to bottom.
+///
+/// Variable names are interned via a thread-local `StringInterner` so that
+/// lookups use fast `u32` hashing/comparison instead of string operations.
 pub struct Env {
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<HashMap<InternedId, Value>>,
     /// Shared runtime state for +shared variable access.
     shared_runtime: Option<crate::session::SharedRuntime>,
     /// Local cache of shared vars (key = "Module.name") for borrow-friendly reads.
+    /// These remain String-keyed since they use compound module-qualified names
+    /// and are accessed far less frequently than local variables.
     shared_cache: HashMap<String, Value>,
 }
 
@@ -165,6 +171,25 @@ impl Env {
             }
         });
         env
+    }
+
+    /// Intern a variable name string into the thread-local interner,
+    /// returning its compact u32 id for use as a scope key.
+    #[inline]
+    fn intern_name(name: &str) -> InternedId {
+        STRING_INTERNER.with(|si| si.borrow_mut().intern(name))
+    }
+
+    /// Resolve an interned id back to its string. Used for error messages
+    /// and debug display.
+    #[inline]
+    fn resolve_name(id: InternedId) -> String {
+        STRING_INTERNER.with(|si| {
+            si.borrow()
+                .resolve(id)
+                .unwrap_or("<unknown>")
+                .to_string()
+        })
     }
 
     /// Attach shared runtime state for +shared variable access.
@@ -208,10 +233,11 @@ impl Env {
     /// Define a new variable in the current (top) scope.
     /// Used by `+let` and parameter binding.
     pub fn set(&mut self, name: &str, value: Value) {
+        let id = Self::intern_name(name);
         self.scopes
             .last_mut()
             .expect("scope stack empty")
-            .insert(name.to_string(), value);
+            .insert(id, value);
     }
 
     /// Mutate an existing variable: walk scopes top-to-bottom, update the
@@ -219,9 +245,10 @@ impl Env {
     /// shared vars (keyed by "Module.name"). If still not found, insert into
     /// the top scope (same as `set`). Used by `+set`.
     fn set_existing(&mut self, name: &str, value: Value) {
+        let id = Self::intern_name(name);
         for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                scope.insert(name.to_string(), value);
+            if scope.contains_key(&id) {
+                scope.insert(id, value);
                 return;
             }
         }
@@ -252,8 +279,9 @@ impl Env {
     /// Look up a variable by walking scopes from top to bottom.
     /// Falls back to shared vars cache (keyed by "Module.name") if not found locally.
     fn get(&self, name: &str) -> Result<&Value> {
+        let id = Self::intern_name(name);
         for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.get(name) {
+            if let Some(val) = scope.get(&id) {
                 return Ok(val);
             }
         }
@@ -275,8 +303,9 @@ impl Env {
 
     /// Raw lookup (returns Option) — used for special variables like __coroutine_handle.
     fn get_raw(&self, name: &str) -> Option<&Value> {
+        let id = Self::intern_name(name);
         for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.get(name) {
+            if let Some(val) = scope.get(&id) {
                 return Some(val);
             }
         }
@@ -291,12 +320,13 @@ impl Env {
         let mut result = Vec::new();
         // Walk from top (innermost) to bottom (outermost) so shadowed names are skipped.
         for scope in self.scopes.iter().rev() {
-            for (name, val) in scope {
+            for (id, val) in scope {
+                let name = Self::resolve_name(*id);
                 if name.starts_with("__") {
                     continue;
                 }
-                if seen.insert(name.clone()) {
-                    result.push((name.clone(), format!("{val}")));
+                if seen.insert(*id) {
+                    result.push((name, format!("{val}")));
                 }
             }
         }
@@ -1623,6 +1653,9 @@ std::thread_local! {
     /// Thread-local mutable Program reference for mutation builtins (mutate, fn_remove, etc.)
     /// that need write access to the AST from within coroutine IO dispatch.
     static SHARED_PROGRAM_MUT: std::cell::RefCell<Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>>> = std::cell::RefCell::new(None);
+    /// Thread-local string interner for variable name interning.
+    /// Env uses this to convert string names to u32 ids for fast scope lookups.
+    static STRING_INTERNER: std::cell::RefCell<StringInterner> = std::cell::RefCell::new(StringInterner::new());
 }
 
 /// Set the thread-local SharedRuntime for +shared variable access.
@@ -6458,5 +6491,159 @@ mod tests {
         // Clean up
         set_shared_program(None);
         set_shared_program_mut(None);
+    }
+
+    // ── String interning tests ────────────────────────────────────────
+
+    #[test]
+    fn test_env_interned_set_get() {
+        // Basic: set a variable and get it back via the interned Env
+        let mut env = Env::new();
+        env.set("x", Value::Int(42));
+        let val = env.get("x").unwrap();
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_env_interned_scope_shadowing() {
+        // Inner scope shadows outer scope; after pop, outer is visible again
+        let mut env = Env::new();
+        env.set("x", Value::Int(1));
+        env.push_scope();
+        env.set("x", Value::Int(2));
+        assert!(matches!(env.get("x").unwrap(), Value::Int(2)));
+        env.pop_scope();
+        assert!(matches!(env.get("x").unwrap(), Value::Int(1)));
+    }
+
+    #[test]
+    fn test_env_interned_undefined_variable() {
+        // Looking up a variable that doesn't exist should return an error
+        let env = Env::new();
+        let result = env.get("nonexistent");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined variable"), "expected undefined variable error, got: {msg}");
+    }
+
+    #[test]
+    fn test_env_interned_set_existing() {
+        // set_existing should update the variable in the outer scope
+        let mut env = Env::new();
+        env.set("counter", Value::Int(0));
+        env.push_scope();
+        // set_existing walks scopes to find "counter" in the outer scope
+        env.set_existing("counter", Value::Int(10));
+        // Inner scope doesn't have "counter", so get() finds outer scope's updated value
+        assert!(matches!(env.get("counter").unwrap(), Value::Int(10)));
+        env.pop_scope();
+        // After pop, the outer scope should have the updated value
+        assert!(matches!(env.get("counter").unwrap(), Value::Int(10)));
+    }
+
+    #[test]
+    fn test_env_interned_get_raw() {
+        // get_raw returns None for missing variables instead of an error
+        let mut env = Env::new();
+        assert!(env.get_raw("missing").is_none());
+        env.set("present", Value::Bool(true));
+        assert!(env.get_raw("present").is_some());
+    }
+
+    #[test]
+    fn test_env_interned_snapshot_bindings() {
+        // snapshot_bindings should return name-value pairs, excluding __ prefixed
+        let mut env = Env::new();
+        env.set("x", Value::Int(1));
+        env.set("__internal", Value::Int(999));
+        env.set("y", Value::String("hello".to_string()));
+        let bindings = env.snapshot_bindings();
+        assert_eq!(bindings.len(), 2, "should exclude __internal");
+        // Bindings are sorted by name
+        assert_eq!(bindings[0].0, "x");
+        assert_eq!(bindings[1].0, "y");
+    }
+
+    #[test]
+    fn test_env_interned_multiple_variables() {
+        // Verify multiple variables with different types work correctly
+        let mut env = Env::new();
+        env.set("a", Value::Int(1));
+        env.set("b", Value::Float(2.5));
+        env.set("c", Value::Bool(true));
+        env.set("d", Value::String("hello".to_string()));
+        env.set("e", Value::None);
+
+        assert!(matches!(env.get("a").unwrap(), Value::Int(1)));
+        assert!(matches!(env.get("b").unwrap(), Value::Float(f) if (*f - 2.5).abs() < f64::EPSILON));
+        assert!(matches!(env.get("c").unwrap(), Value::Bool(true)));
+        assert!(matches!(env.get("d").unwrap(), Value::String(s) if s == "hello"));
+        assert!(matches!(env.get("e").unwrap(), Value::None));
+    }
+
+    #[test]
+    fn test_interned_eval_function_with_variables() {
+        // End-to-end: evaluate a function that uses local variables
+        let source = "\
++fn compute (x:Int, y:Int)->Int
+  +let a:Int = x + 1
+  +let b:Int = y * 2
+  +let result:Int = a + b
+  +return result
+
+!test compute
+  +with x=3 y=4 -> expect 12
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "interned eval should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_interned_eval_nested_scopes() {
+        // Test that nested scopes (if/each/while blocks) work with interning
+        let source = "\
++fn nested (x:Int)->Int
+  +let result:Int = 0
+  +if x > 0
+    +let inner:Int = x + 10
+    +set result = inner
+  +end
+  +return result
+
+!test nested
+  +with x=5 -> expect 15
+  +with x=0 -> expect 0
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 2);
+
+        for (fn_name, case) in &cases {
+            let result = eval_test_case(&program, fn_name, case);
+            assert!(result.is_ok(), "nested scope test should pass: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_intern_name_consistency() {
+        // Verify that the intern_name helper returns consistent ids
+        let id1 = Env::intern_name("test_var");
+        let id2 = Env::intern_name("test_var");
+        let id3 = Env::intern_name("other_var");
+        assert_eq!(id1, id2, "same string should get same id");
+        assert_ne!(id1, id3, "different strings should get different ids");
+    }
+
+    #[test]
+    fn test_resolve_name_roundtrip() {
+        // Verify that intern → resolve roundtrips correctly
+        let id = Env::intern_name("roundtrip_test");
+        let resolved = Env::resolve_name(id);
+        assert_eq!(resolved, "roundtrip_test");
     }
 }
