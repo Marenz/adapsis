@@ -867,22 +867,34 @@ pub struct AskResponse {
 /// Channel wrapper that sends events to the broadcast channel (and optionally an mpsc
 /// response channel used by the SSE streaming endpoint).  Both `/api/ask` and
 /// `/api/ask-stream` use this so events always appear on `/api/events`.
+///
+/// The `log` method is the preferred single entry-point for emitting events: it
+/// sends to the broadcast channel, the per-request mpsc (if present), writes to
+/// the structured log file, and prints a short preview to stderr — all in one
+/// call, replacing the previous pattern of separate `tx.send()` + `log_activity()`
+/// + `eprintln!()` calls.
 struct EventSender {
     tx: Option<tokio::sync::mpsc::Sender<serde_json::Value>>,
     broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
+    log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 }
 
 impl EventSender {
     /// Broadcast-only sender (used by plain `/api/ask`).
     fn broadcast_only(broadcast: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
-        Self { tx: None, broadcast }
+        Self { tx: None, broadcast, log_file: None }
     }
 
     /// Broadcast + per-request mpsc sender (used by `/api/ask-stream`).
-    fn with_mpsc(tx: tokio::sync::mpsc::Sender<serde_json::Value>, broadcast: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
-        Self { tx: Some(tx), broadcast }
+    fn with_mpsc(
+        tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+        broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
+        log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    ) -> Self {
+        Self { tx: Some(tx), broadcast, log_file }
     }
 
+    /// Send a raw event value to broadcast + mpsc.
     async fn send(&self, event: serde_json::Value) {
         let _ = self.broadcast.send(event.clone());
         if let Some(tx) = &self.tx {
@@ -892,14 +904,51 @@ impl EventSender {
             tokio::task::yield_now().await;
         }
     }
+
+    /// Unified logging: broadcast event + write to log file + stderr preview.
+    ///
+    /// This replaces the separate `tx.send()` / `log_activity()` / `eprintln!()`
+    /// pattern.  `event` is a short tag (e.g. "iter", "code", "feedback") and
+    /// `detail` is the full text.  The method also constructs an appropriate
+    /// broadcast JSON payload.
+    async fn log(&self, event: &str, detail: &str) {
+        // 1. Write to structured log file
+        write_log_file(&self.log_file, event, detail).await;
+
+        // 2. Stderr: short preview
+        let preview: String = detail.chars().take(200).collect();
+        eprintln!("[{event}] {preview}");
+
+        // 3. Broadcast (+ mpsc if present) — build a JSON event
+        let json = match event {
+            "iter" => serde_json::json!({"type": "iteration", "detail": detail}),
+            "code" => serde_json::json!({"type": "code", "code": detail}),
+            "think" => serde_json::json!({"type": "thinking", "text": detail}),
+            "feedback" => serde_json::json!({"type": "feedback", "message": detail}),
+            "ai-text" => serde_json::json!({"type": "text", "text": detail}),
+            "user" => serde_json::json!({"type": "user", "text": detail}),
+            "done" => serde_json::json!({"type": "done", "detail": detail}),
+            "done-rejected" => serde_json::json!({"type": "result", "message": detail, "success": false}),
+            "llm-error" => serde_json::json!({"type": "error", "message": detail}),
+            _ => serde_json::json!({"type": event, "detail": detail}),
+        };
+        self.send(json).await;
+    }
 }
 
-async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>, event: &str, detail: &str) {
+/// Write a structured entry to the log file (if configured).
+/// Shared by both `log_activity` and `EventSender::log`.
+async fn write_log_file(
+    log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    event: &str,
+    detail: &str,
+) {
     if let Some(f) = log_file {
         use tokio::io::AsyncWriteExt;
-        // Human-readable timestamp
         let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let h = (secs / 3600) % 24;
         let m = (secs / 60) % 60;
         let s = secs % 60;
@@ -923,6 +972,17 @@ async fn log_activity(log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio:
         let _ = f.write_all(line.as_bytes()).await;
         let _ = f.flush().await;
     }
+}
+
+/// Legacy standalone logging function — kept during migration so existing code
+/// that doesn't yet have an `EventSender` can still log.
+/// New code should prefer `EventSender::log()`.
+async fn log_activity(
+    log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    event: &str,
+    detail: &str,
+) {
+    write_log_file(log_file, event, detail).await;
     // Stderr: short preview
     let preview: String = detail.chars().take(200).collect();
     eprintln!("[{event}] {preview}");
@@ -1909,7 +1969,7 @@ pub async fn ask_stream(
     let config_clone = config.clone();
     tokio::spawn(async move {
         crate::eval::set_shared_runtime(Some(config_clone.runtime.clone()));
-        let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone());
+        let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone(), config_clone.log_file.clone());
         let llm = crate::llm::LlmClient::new_with_model_and_key(
             &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
         );
