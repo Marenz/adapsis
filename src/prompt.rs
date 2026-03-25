@@ -772,7 +772,7 @@ This library is shared across all git worktrees and sessions.
   Steps are auto-numbered. Do NOT number them yourself.
 - Keep working step by step until the task is FULLY done, then respond with !done.
 - If you need to ask the user a question, respond with text only (no <code> block).
-- For IO builtins, write a minimal [io,async] function and `!eval` it.
+- IO builtins work directly in `!eval` inline expressions: `!eval shell_exec("ls")`
 - Prefer builtins over shell_exec. Examples:
   Instead of: +await r:String = shell_exec("curl http://localhost:3002/api/status")
   Use:        +await r:String = http_get("http://localhost:3002/api/status")

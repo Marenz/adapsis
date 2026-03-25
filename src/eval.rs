@@ -566,6 +566,57 @@ pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<V
     eval_parser_expr_with_program(expr, program)
 }
 
+/// Evaluate an inline expression with IO support via a coroutine handle.
+/// When the expression contains IO builtin calls (shell_exec, http_get, etc.),
+/// they are executed through the coroutine runtime automatically.
+/// Must be called from within a `spawn_blocking` context (not a tokio async task).
+pub fn eval_inline_expr_with_io(
+    program: &ast::Program,
+    expr: &parser::Expr,
+    io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+) -> Result<Value> {
+    let handle = crate::coroutine::CoroutineHandle::new(io_sender);
+    let mut env = Env::new();
+    env.populate_shared_from_program(program);
+    env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    eval_parser_expr_with_env(expr, program, &mut env)
+}
+
+/// Check if a parser expression contains any IO builtin calls.
+/// Used to determine if inline `!eval` needs async execution.
+pub fn expr_contains_io_builtin(expr: &parser::Expr) -> bool {
+    match expr {
+        parser::Expr::Call { callee, args } => {
+            let name = parser_callee_name(callee);
+            if crate::builtins::is_io_builtin(&name) {
+                return true;
+            }
+            // Check if any argument sub-expressions contain IO builtins
+            args.iter().any(expr_contains_io_builtin)
+        }
+        parser::Expr::Binary { left, right, .. } => {
+            expr_contains_io_builtin(left) || expr_contains_io_builtin(right)
+        }
+        parser::Expr::Unary { expr: inner, .. } => {
+            expr_contains_io_builtin(inner)
+        }
+        parser::Expr::FieldAccess { base, .. } => {
+            expr_contains_io_builtin(base)
+        }
+        parser::Expr::StructLiteral(fields) => {
+            fields.iter().any(|f| expr_contains_io_builtin(&f.value))
+        }
+        parser::Expr::Cast { expr: inner, .. } => {
+            expr_contains_io_builtin(inner)
+        }
+        parser::Expr::Int(_)
+        | parser::Expr::Float(_)
+        | parser::Expr::Bool(_)
+        | parser::Expr::String(_)
+        | parser::Expr::Ident(_) => false,
+    }
+}
+
 /// Evaluate a test case against a function in the program.
 /// Bind test input values to function parameters.
 /// Handles three cases:
@@ -2235,8 +2286,12 @@ pub fn eval_builtin_or_user(
                         payload: args,
                     });
                 }
-                // Check if it's an IO builtin called without +await
+                // Check if it's an IO builtin — execute via coroutine handle if available
                 if crate::builtins::is_io_builtin(callee) {
+                    if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+                        let handle = handle.clone();
+                        return handle.execute_await(callee, &args);
+                    }
                     bail!(
                         "`{callee}` is an async IO operation, use: +await result:String = {callee}({})",
                         args.iter().enumerate().map(|(i, _)| format!("arg{i}")).collect::<Vec<_>>().join(", ")
@@ -2607,6 +2662,117 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             eval_binary_op(&l, &ast_op, &r)
         }
         // Everything else delegates to standalone
+        _ => eval_parser_expr_standalone(expr),
+    }
+}
+
+/// Like `eval_parser_expr_with_program`, but threads an environment through
+/// so that `__coroutine_handle` is available to IO builtin calls.
+/// Used by `eval_inline_expr_with_io` for `!eval shell_exec(...)` etc.
+fn eval_parser_expr_with_env(
+    expr: &parser::Expr,
+    program: &ast::Program,
+    env: &mut Env,
+) -> Result<Value> {
+    match expr {
+        parser::Expr::Ident(name) => {
+            // Check env first (for variables bound by the caller)
+            if let Ok(val) = env.get(name) {
+                return Ok(val.clone());
+            }
+            if is_union_variant(program, name) {
+                return Ok(Value::Union {
+                    variant: name.clone(),
+                    payload: vec![],
+                });
+            }
+            if let Some(func) = program.get_function(name) {
+                if func.params.is_empty() {
+                    let mut call_env = Env::new();
+                    if let Some(handle) = env.get_raw("__coroutine_handle") {
+                        call_env.set("__coroutine_handle", handle.clone());
+                    }
+                    return eval_function_body(program, &func.body, &mut call_env);
+                }
+            }
+            eval_parser_expr_standalone(expr)
+        }
+        parser::Expr::Call { callee, args } => {
+            let name = parser_callee_name(callee);
+            if is_union_variant(program, &name) {
+                let payload = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_env(a, program, env))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(Value::Union {
+                    variant: name,
+                    payload,
+                });
+            }
+            if let Some(func) = program.get_function(&name) {
+                let eval_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_env(a, program, env))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut call_env = Env::new();
+                for (param, arg) in func.params.iter().zip(eval_args) {
+                    call_env.set(&param.name, arg);
+                }
+                if let Some(handle) = env.get_raw("__coroutine_handle") {
+                    call_env.set("__coroutine_handle", handle.clone());
+                }
+                return eval_function_body(program, &func.body, &mut call_env);
+            }
+            if crate::builtins::is_builtin(&name)
+                && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+            {
+                let eval_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_env(a, program, env))
+                    .collect::<Result<Vec<_>>>()?;
+                return eval_builtin_or_user(program, &name, eval_args, env);
+            }
+            eval_parser_expr_standalone(expr)
+        }
+        parser::Expr::StructLiteral(fields) => {
+            let mut field_map = HashMap::new();
+            for f in fields {
+                let val = eval_parser_expr_with_env(&f.value, program, env)?;
+                field_map.insert(f.name.clone(), val);
+            }
+            Ok(Value::Struct(String::new(), field_map))
+        }
+        parser::Expr::Unary { op, expr: inner } => {
+            let val = eval_parser_expr_with_env(inner, program, env)?;
+            match op {
+                parser::UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
+                parser::UnaryOp::Neg => match val {
+                    Value::Int(n) => Ok(Value::Int(-n)),
+                    Value::Float(n) => Ok(Value::Float(-n)),
+                    _ => bail!("cannot negate {val}"),
+                },
+            }
+        }
+        parser::Expr::Binary { left, op, right } => {
+            let l = eval_parser_expr_with_env(left, program, env)?;
+            let r = eval_parser_expr_with_env(right, program, env)?;
+            let ast_op = match op {
+                parser::BinaryOp::Add => ast::BinaryOp::Add,
+                parser::BinaryOp::Sub => ast::BinaryOp::Sub,
+                parser::BinaryOp::Mul => ast::BinaryOp::Mul,
+                parser::BinaryOp::Div => ast::BinaryOp::Div,
+                parser::BinaryOp::Mod => ast::BinaryOp::Mod,
+                parser::BinaryOp::Eq => ast::BinaryOp::Equal,
+                parser::BinaryOp::Neq => ast::BinaryOp::NotEqual,
+                parser::BinaryOp::Gt => ast::BinaryOp::GreaterThan,
+                parser::BinaryOp::Lt => ast::BinaryOp::LessThan,
+                parser::BinaryOp::Gte => ast::BinaryOp::GreaterThanOrEqual,
+                parser::BinaryOp::Lte => ast::BinaryOp::LessThanOrEqual,
+                parser::BinaryOp::And => ast::BinaryOp::And,
+                parser::BinaryOp::Or => ast::BinaryOp::Or,
+            };
+            eval_binary_op(&l, &ast_op, &r)
+        }
         _ => eval_parser_expr_standalone(expr),
     }
 }
@@ -4063,6 +4229,177 @@ mod tests {
         let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
         assert!(result.is_ok(), "func with args: {:?}", result);
         assert_eq!(result.unwrap().0, "7");
+    }
+
+    // ── expr_contains_io_builtin detection ─────────────────────────────
+
+    #[test]
+    fn test_expr_contains_io_builtin_detects_direct_call() {
+        // shell_exec("echo hello") should be detected as IO
+        let source = r#"!eval shell_exec("echo hello")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "shell_exec should be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_detects_nested_call() {
+        // concat("result: ", shell_exec("echo hi")) — IO in args
+        let source = r#"!eval concat("result: ", shell_exec("echo hi"))"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "nested shell_exec in concat args should be detected"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_false_for_sync() {
+        // concat("a", "b") is NOT an IO builtin
+        let source = r#"!eval concat("a", "b")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            !expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "concat should NOT be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_false_for_arithmetic() {
+        let source = "!eval 1 + 2";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            !expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "arithmetic should NOT be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_detects_http_get() {
+        let source = r#"!eval http_get("http://example.com")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "http_get should be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_eval_inline_io_without_handle_still_errors() {
+        // When no coroutine handle is available, IO builtins should still error
+        let program = ast::Program::default();
+        let source = r#"!eval shell_exec("echo hello")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_err(), "IO builtin without handle should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("async IO operation"),
+            "error should mention async IO: {err}"
+        );
+    }
+
+    #[test]
+    fn test_eval_inline_io_with_coroutine_handle_via_mock() {
+        // When a coroutine handle IS available (via eval_inline_expr_with_io),
+        // IO builtins should execute through it.
+        // We use a full tokio runtime + coroutine Runtime to test this end-to-end.
+        let program = ast::Program::default();
+        let source = r#"!eval println("test message")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let expr = ev.inline_expr.unwrap();
+
+        // Spin up a real tokio runtime with coroutine IO loop
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let (runtime, mut io_rx) = crate::coroutine::Runtime::new();
+                let runtime = std::sync::Arc::new(runtime);
+                let io_sender = runtime.io_sender();
+
+                // Spawn IO loop to handle requests (same pattern as eval_test_case_with_mocks)
+                let rt_handle = runtime.clone();
+                let io_loop = tokio::spawn(async move {
+                    while let Some(request) = io_rx.recv().await {
+                        let rt = rt_handle.clone();
+                        tokio::spawn(async move {
+                            rt.handle_io(request).await;
+                        });
+                    }
+                });
+
+                let eval_result = tokio::task::spawn_blocking(move || {
+                    eval_inline_expr_with_io(&program, &expr, io_sender)
+                }).await.unwrap();
+
+                // Shut down the IO loop
+                io_loop.abort();
+
+                eval_result
+            })
+        }).join().unwrap();
+
+        // println returns "" (empty string) on success
+        assert!(result.is_ok(), "println via IO handle should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_eval_inline_io_builtin_in_user_function_context() {
+        // eval_builtin_or_user should execute IO builtins when __coroutine_handle
+        // is present in the env, rather than rejecting them
+        let program = ast::Program::default();
+        let mut env = Env::new();
+
+        // Create a mock coroutine handle (will error on actual IO, but won't
+        // give the "is an async IO operation" rejection)
+        let handle = crate::coroutine::CoroutineHandle::new_mock(vec![
+            crate::session::IoMock {
+                operation: "println".to_string(),
+                patterns: vec![],
+                response: "".to_string(),
+            },
+        ]);
+        env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+
+        let result = eval_builtin_or_user(
+            &program,
+            "println",
+            vec![Value::String("hello".to_string())],
+            &mut env,
+        );
+        // With mock, println should succeed (mocked response)
+        assert!(result.is_ok(), "IO builtin with coroutine handle should not reject: {:?}", result);
     }
 
     // ── Side-effect checks for function calls in test params ──────────
