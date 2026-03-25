@@ -23,6 +23,12 @@ pub struct RuntimeState {
     pub http_routes: Vec<crate::ast::HttpRoute>,
     #[serde(skip)]
     pub shared_vars: HashMap<String, crate::eval::Value>,
+    /// Roadmap mirror for builtin access during eval. Synced with SessionMeta.roadmap.
+    #[serde(skip)]
+    pub roadmap: Vec<RoadmapItem>,
+    /// Plan mirror for builtin access during eval. Synced with SessionMeta.plan.
+    #[serde(skip)]
+    pub plan: Vec<PlanStep>,
 }
 
 /// Thread-safe handle to the runtime state.
@@ -1352,7 +1358,7 @@ impl Session {
     }
 
     fn handle_roadmap(&mut self, action: &parser::RoadmapAction) -> (String, bool) {
-        match action {
+        let result = match action {
             parser::RoadmapAction::Show => {
                 let items = self.meta.roadmap.iter().enumerate().map(|(i, item)| {
                     format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
@@ -1376,7 +1382,10 @@ impl Session {
                     (format!("Roadmap: removed \"{}\".", removed.description), true)
                 } else { (format!("Roadmap: #{n} not found."), false) }
             }
-        }
+        };
+        // Keep runtime copy in sync so roadmap builtins see the same data.
+        self.runtime.roadmap = self.meta.roadmap.clone();
+        result
     }
 }
 
@@ -1829,5 +1838,42 @@ mod tests {
         let mut session = Session::new();
         let (_, ok) = session.handle_sandbox(&parser::SandboxAction::Discard);
         assert!(!ok, "discard without enter should fail");
+    }
+
+    #[test]
+    fn runtime_state_default_has_empty_plan() {
+        let state = RuntimeState::default();
+        assert!(state.plan.is_empty(), "default plan should be empty");
+    }
+
+    #[test]
+    fn runtime_state_plan_field_round_trips_in_memory() {
+        let mut state = RuntimeState::default();
+        state.plan.push(PlanStep {
+            description: "step one".to_string(),
+            status: PlanStatus::Pending,
+        });
+        state.plan.push(PlanStep {
+            description: "step two".to_string(),
+            status: PlanStatus::Done,
+        });
+        assert_eq!(state.plan.len(), 2);
+        assert_eq!(state.plan[0].description, "step one");
+        assert_eq!(state.plan[1].status, PlanStatus::Done);
+    }
+
+    #[test]
+    fn runtime_state_plan_skipped_in_serialization() {
+        let mut state = RuntimeState::default();
+        state.plan.push(PlanStep {
+            description: "should not serialize".to_string(),
+            status: PlanStatus::InProgress,
+        });
+        // Serialize — plan is #[serde(skip)] so it should not appear in JSON
+        let json = serde_json::to_string(&state).expect("serialize");
+        assert!(!json.contains("should not serialize"), "plan field should be skipped during serialization");
+        // Deserialize — plan should default to empty
+        let deserialized: RuntimeState = serde_json::from_str(&json).expect("deserialize");
+        assert!(deserialized.plan.is_empty(), "deserialized plan should be empty (skipped)");
     }
 }

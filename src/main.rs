@@ -727,7 +727,10 @@ async fn main() -> Result<()> {
             }
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
+            sess.runtime.roadmap = sess.meta.roadmap.clone();
             let initial_runtime = sess.runtime.clone();
+            let shared_runtime: crate::session::SharedRuntime =
+                std::sync::Arc::new(std::sync::RwLock::new(initial_runtime));
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
@@ -746,6 +749,7 @@ async fn main() -> Result<()> {
             let snap_registry_for_spawn2 = runtime.snapshot_registry.clone();
             let io_sender_for_spawn = runtime.io_sender();
             let shared_session_for_spawn = shared_session.clone();
+            let shared_runtime_for_spawn = shared_runtime.clone();
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
@@ -765,7 +769,9 @@ async fn main() -> Result<()> {
                             let registry = task_registry_for_spawn.clone();
                             let snap_reg = snap_registry_for_spawn2.clone();
                             let session_ref = shared_session_for_spawn.clone();
+                            let runtime_for_blocking = shared_runtime_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
+                                eval::set_shared_runtime(Some(runtime_for_blocking));
                                 let session = session_ref.blocking_lock();
                                 let func_decl = match session.program.get_function(&function_name) {
                                     Some(f) => f.clone(),
@@ -882,7 +888,7 @@ async fn main() -> Result<()> {
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
-                runtime: std::sync::Arc::new(std::sync::RwLock::new(initial_runtime)),
+                runtime: shared_runtime.clone(),
                 sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             };
 

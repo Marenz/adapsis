@@ -96,6 +96,7 @@ web/
 !module Name          — switch module context (all +fn/+type after go here)
 !plan set / done N    — task planning
 !roadmap add/done/show — persistent long-term roadmap
++await roadmap_list/roadmap_add/roadmap_done — programmatic roadmap IO builtins
 !mock op "pattern" -> "response"  — IO mocking for tests
 !unmock               — clear mocks
 !test Module.fn       — run tests (blocks !eval if untested)
