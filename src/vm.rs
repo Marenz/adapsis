@@ -732,25 +732,30 @@ fn run_loop(
             return Ok(VmResult::Done(Value::None));
         }
 
-        let op = state.bytecode[state.ip].clone();
+        // Borrow the op by reference instead of cloning — avoids heap allocations
+        // for String-carrying variants (PushString, Call, CallBuiltin, etc.) on
+        // every instruction dispatch. Only clone the data we actually need to move.
+        let ip = state.ip;
         state.ip += 1;
 
-        match op {
+        match &state.bytecode[ip] {
             // ── Literals ─────────────────────────────────────────────
-            Op::PushInt(n) => state.stack.push(Value::Int(n)),
-            Op::PushFloat(f) => state.stack.push(Value::Float(f)),
-            Op::PushBool(b) => state.stack.push(Value::Bool(b)),
-            Op::PushString(s) => state.stack.push(Value::String(s)),
+            Op::PushInt(n) => state.stack.push(Value::Int(*n)),
+            Op::PushFloat(f) => state.stack.push(Value::Float(*f)),
+            Op::PushBool(b) => state.stack.push(Value::Bool(*b)),
+            Op::PushString(s) => state.stack.push(Value::String(s.clone())),
             Op::PushUnit => state.stack.push(Value::None),
 
             // ── Locals ───────────────────────────────────────────────
             Op::LoadLocal(slot) => {
+                let slot = *slot;
                 let base = state.call_stack.last().map(|f| f.locals_base).unwrap_or(0);
                 let idx = base + slot;
                 let val = state.locals.get(idx).cloned().unwrap_or(Value::None);
                 state.stack.push(val);
             }
             Op::StoreLocal(slot) => {
+                let slot = *slot;
                 let base = state.call_stack.last().map(|f| f.locals_base).unwrap_or(0);
                 let idx = base + slot;
                 let val = pop_stack(&mut state.stack)?;
@@ -846,6 +851,9 @@ fn run_loop(
 
             // ── Function calls ───────────────────────────────────────
             Op::Call(name, argc) => {
+                let argc = *argc;
+                // Clone name only when needed for cache insertion
+                let name = name.clone();
                 let mut call_args = Vec::with_capacity(argc);
                 for _ in 0..argc {
                     call_args.push(pop_stack(&mut state.stack)?);
@@ -882,6 +890,8 @@ fn run_loop(
                 state.ip = 0;
             }
             Op::CallBuiltin(name, argc) => {
+                let argc = *argc;
+                let name = name.clone();
                 let mut call_args = Vec::with_capacity(argc);
                 for _ in 0..argc {
                     call_args.push(pop_stack(&mut state.stack)?);
@@ -894,6 +904,8 @@ fn run_loop(
                 state.stack.push(result);
             }
             Op::AwaitIo(op_name, argc) => {
+                let argc = *argc;
+                let op_name = op_name.clone();
                 let mut io_args = Vec::with_capacity(argc);
                 for _ in 0..argc {
                     io_args.push(pop_stack(&mut state.stack)?);
@@ -922,15 +934,17 @@ fn run_loop(
                 state.stack.push(val);
             }
             Op::Jump(target) => {
-                state.ip = target;
+                state.ip = *target;
             }
             Op::BranchIf(target) => {
+                let target = *target;
                 let cond = pop_bool(&mut state.stack)?;
                 if cond {
                     state.ip = target;
                 }
             }
             Op::BranchIfNot(target) => {
+                let target = *target;
                 let cond = pop_bool(&mut state.stack)?;
                 if !cond {
                     state.ip = target;
@@ -951,7 +965,7 @@ fn run_loop(
             }
 
             // ── Struct / composite ───────────────────────────────────
-            Op::MakeStruct(ref field_names) => {
+            Op::MakeStruct(field_names) => {
                 let mut fields = HashMap::new();
                 for name in field_names.iter().rev() {
                     let val = pop_stack(&mut state.stack)?;
@@ -959,12 +973,13 @@ fn run_loop(
                 }
                 state.stack.push(Value::Struct(String::new(), fields));
             }
-            Op::GetField(ref field) => {
+            Op::GetField(field) => {
+                let field = field.clone();
                 let val = pop_stack(&mut state.stack)?;
                 match val {
                     Value::Struct(_, ref map) => {
                         let field_val = map
-                            .get(field)
+                            .get(&field)
                             .ok_or_else(|| anyhow::anyhow!("field `{field}` not found on struct"))?
                             .clone();
                         state.stack.push(field_val);
@@ -973,6 +988,7 @@ fn run_loop(
                 }
             }
             Op::MakeList(count) => {
+                let count = *count;
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
                     items.push(pop_stack(&mut state.stack)?);
@@ -1003,18 +1019,21 @@ fn run_loop(
             }
 
             // ── Union / variant ops ──────────────────────────────────
-            Op::PushVariant(ref variant_name, count) => {
+            Op::PushVariant(variant_name, count) => {
+                let count = *count;
+                let variant_name = variant_name.clone();
                 let mut payload = Vec::with_capacity(count);
                 for _ in 0..count {
                     payload.push(pop_stack(&mut state.stack)?);
                 }
                 payload.reverse();
                 state.stack.push(Value::Union {
-                    variant: variant_name.clone(),
+                    variant: variant_name,
                     payload,
                 });
             }
-            Op::MatchVariant(ref variant_name, binding_count) => {
+            Op::MatchVariant(variant_name, binding_count) => {
+                let binding_count = *binding_count;
                 let val = pop_stack(&mut state.stack)?;
                 match val {
                     Value::Union {
@@ -1747,6 +1766,55 @@ mod tests {
                 assert_eq!(args.len(), 1);
             }
             VmResult::Done(_) => panic!("expected Await, got Done"),
+        }
+    }
+
+    #[test]
+    fn exec_string_return() {
+        // Test that PushString works correctly with borrow-based dispatch
+        let program = build_program(
+            "\
++fn greet (name:String)->String
+  +return concat(\"hello \", name)
+",
+        );
+        let func = program.get_function("greet").unwrap();
+        let compiled = compile_function(func, &program).unwrap();
+        let result = execute(
+            &compiled,
+            vec![Value::String("world".to_string())],
+            &program,
+        )
+        .unwrap();
+        match result {
+            VmResult::Done(Value::String(s)) => assert_eq!(s, "hello world"),
+            other => panic!("expected Done(String), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn exec_concat_builtin_via_vm() {
+        // Test concat builtin called via VM's CallBuiltin path
+        let program = build_program(
+            "\
++fn build_msg (a:String, b:String)->String
+  +return concat(a, \" \", b)
+",
+        );
+        let func = program.get_function("build_msg").unwrap();
+        let compiled = compile_function(func, &program).unwrap();
+        let result = execute(
+            &compiled,
+            vec![
+                Value::String("foo".to_string()),
+                Value::String("bar".to_string()),
+            ],
+            &program,
+        )
+        .unwrap();
+        match result {
+            VmResult::Done(Value::String(s)) => assert_eq!(s, "foo bar"),
+            other => panic!("expected Done(String), got {:?}", other),
         }
     }
 }
