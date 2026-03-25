@@ -5147,4 +5147,383 @@ mod tests {
         let result = eval_inline_expr(&p, &expr);
         assert!(result.is_err(), "expected error for invalid to_int");
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Missing builtins: bit_not, left_rotate, to_hex, u32_wrap, sqrt
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_bit_not() {
+        let p = ast::Program::default();
+        // bit_not(0) = -1 (all bits flipped in two's complement)
+        assert_eq!(eval_expr_str(&p, "bit_not(0)"), "-1");
+        // bit_not(-1) = 0
+        assert_eq!(eval_expr_str(&p, "bit_not(-1)"), "0");
+    }
+
+    #[test]
+    fn builtin_left_rotate() {
+        let p = ast::Program::default();
+        // 1 rotated left by 4 = 16 (32-bit rotation)
+        assert_eq!(eval_expr_str(&p, "left_rotate(1, 4)"), "16");
+        // rotl alias works too
+        assert_eq!(eval_expr_str(&p, "rotl(1, 4)"), "16");
+    }
+
+    #[test]
+    fn builtin_to_hex() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "to_hex(255)"), r#""000000ff""#);
+        assert_eq!(eval_expr_str(&p, "to_hex(0)"), r#""00000000""#);
+    }
+
+    #[test]
+    fn builtin_u32_wrap() {
+        let p = ast::Program::default();
+        // Large value wraps to 32-bit unsigned
+        assert_eq!(eval_expr_str(&p, "u32_wrap(256)"), "256");
+        // Negative wraps around
+        let val = eval_expr_val(&p, "u32_wrap(-1)");
+        match val {
+            Value::Int(n) => assert_eq!(n, 4294967295), // u32::MAX
+            _ => panic!("expected Int, got {val}"),
+        }
+    }
+
+    #[test]
+    fn builtin_sqrt() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, "sqrt(25)");
+        match val {
+            Value::Float(f) => assert!((f - 5.0).abs() < 1e-10),
+            _ => panic!("expected Float, got {val}"),
+        }
+        let val = eval_expr_val(&p, "sqrt(2.0)");
+        match val {
+            Value::Float(f) => assert!((f - 1.41421356).abs() < 1e-5),
+            _ => panic!("expected Float, got {val}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Ok/Err/Some constructors
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn constructor_ok() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, "Ok(42)");
+        match val {
+            Value::Ok(inner) => {
+                assert!(matches!(*inner, Value::Int(42)));
+            }
+            _ => panic!("expected Ok(42), got {val}"),
+        }
+    }
+
+    #[test]
+    fn constructor_err() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, r#"Err("not found")"#);
+        match val {
+            Value::Err(msg) => assert_eq!(msg, "\"not found\""),
+            _ => panic!("expected Err, got {val}"),
+        }
+    }
+
+    #[test]
+    fn constructor_some() {
+        let p = ast::Program::default();
+        // Some(5) via parser expression path creates a Union variant
+        let val = eval_expr_val(&p, "Some(5)");
+        // The parser expr path treats Some as a generic union constructor
+        let display = format!("{val}");
+        assert!(display.contains("5"), "expected Some containing 5, got {display}");
+    }
+
+    #[test]
+    fn constructor_ok_no_args() {
+        let p = ast::Program::default();
+        // Ok() with no args wraps None
+        let val = eval_expr_val(&p, "Ok()");
+        assert!(matches!(val, Value::Ok(ref inner) if matches!(**inner, Value::None)),
+            "expected Ok(None), got {val}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // regex_match and regex_replace
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_regex_match() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"regex_match("^[0-9]+$", "12345")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"regex_match("^[0-9]+$", "abc")"#), "false");
+        assert_eq!(eval_expr_str(&p, r#"regex_match("[a-z]+", "Hello World")"#), "true");
+    }
+
+    #[test]
+    fn builtin_regex_replace() {
+        let p = ast::Program::default();
+        assert_eq!(
+            eval_expr_str(&p, r#"regex_replace("[0-9]+", "NUM", "foo123bar456")"#),
+            r#""fooNUMbarNUM""#
+        );
+        assert_eq!(
+            eval_expr_str(&p, r#"regex_replace("\\s+", "-", "hello   world")"#),
+            r#""hello-world""#
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Result/Option pattern matching
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn match_on_result_ok() {
+        let source = "\
++fn unwrap_or_default (r:Result<Int>)->Int
+  +match r
+  +case Ok(val)
+    +return val
+  +case Err(msg)
+    +return 0
+  +end
+";
+        // Pass Ok(42)
+        assert_eq!(eval_fn_result(source, "unwrap_or_default", "Ok(42)"), "42");
+    }
+
+    #[test]
+    fn match_on_result_err() {
+        let source = "\
++fn unwrap_or_default (r:Result<Int>)->Int
+  +match r
+  +case Ok(val)
+    +return val
+  +case Err(msg)
+    +return 0
+  +end
+";
+        // Pass Err("fail")
+        assert_eq!(eval_fn_result(source, "unwrap_or_default", r#"Err("fail")"#), "0");
+    }
+
+    #[test]
+    fn match_on_option_some_none() {
+        let source = "\
++type Maybe = Just(Int) | Nothing
+
++fn get_or_zero (m:Maybe)->Int
+  +match m
+  +case Just(val)
+    +return val
+  +case Nothing
+    +return 0
+  +end
+";
+        assert_eq!(eval_fn_result(source, "get_or_zero", "Just(99)"), "99");
+        assert_eq!(eval_fn_result(source, "get_or_zero", "Nothing"), "0");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Effect checking — pure function cannot call IO
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn pure_function_rejects_io_call() {
+        // A pure function (no effects) calling an IO builtin produces an error
+        // result (the function returns an Err value, not a hard crash)
+        let result = eval_fn_result("\
++fn bad ()->String
+  +return http_get(\"http://example.com\")
+", "bad", "");
+        // The eval catches the IO-without-await error and returns it
+        assert!(result.contains("async IO operation") || result.contains("http_get"),
+            "expected IO rejection message, got: {result}");
+    }
+
+    #[test]
+    fn fail_effect_wraps_result() {
+        // [fail] functions wrap their return in Ok on success, Err on check failure
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+";
+        let result = eval_fn_result(source, "validate", "10");
+        assert!(result.starts_with("Ok("), "expected Ok wrapping, got: {result}");
+        let result = eval_fn_result(source, "validate", "-1");
+        assert!(result.starts_with("Err("), "expected Err wrapping, got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Each loop over lists
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn each_loop_accumulate() {
+        let source = "\
++fn sum_list (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = total + item
+  +end
+  +return total
+";
+        assert_eq!(eval_fn_result(source, "sum_list", "list(1, 2, 3, 4, 5)"), "15");
+    }
+
+    #[test]
+    fn each_loop_transform() {
+        let source = "\
++fn double_all (items:List<Int>)->List<Int>
+  +let result:List<Int> = list()
+  +each items item:Int
+    +set result = push(result, item * 2)
+  +end
+  +return result
+";
+        assert_eq!(eval_fn_result(source, "double_all", "list(1, 2, 3)"), "[2, 4, 6]");
+    }
+
+    #[test]
+    fn each_loop_empty_list() {
+        let source = "\
++fn sum_list (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = total + item
+  +end
+  +return total
+";
+        assert_eq!(eval_fn_result(source, "sum_list", "list()"), "0");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // While loop with early return
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn while_loop_factorial() {
+        let source = "\
++fn factorial (n:Int)->Int
+  +let result:Int = 1
+  +let i:Int = 1
+  +while i <= n
+    +set result = result * i
+    +set i = i + 1
+  +end
+  +return result
+";
+        assert_eq!(eval_fn_result(source, "factorial", "5"), "120");
+        assert_eq!(eval_fn_result(source, "factorial", "0"), "1");
+        assert_eq!(eval_fn_result(source, "factorial", "1"), "1");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // If/elif/else chains (additional cases)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn if_multiple_elif() {
+        let source = "\
++fn grade (score:Int)->String
+  +if score >= 90
+    +return \"A\"
+  +elif score >= 80
+    +return \"B\"
+  +elif score >= 70
+    +return \"C\"
+  +elif score >= 60
+    +return \"D\"
+  +else
+    +return \"F\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "grade", "95"), "\"A\"");
+        assert_eq!(eval_fn_result(source, "grade", "85"), "\"B\"");
+        assert_eq!(eval_fn_result(source, "grade", "75"), "\"C\"");
+        assert_eq!(eval_fn_result(source, "grade", "65"), "\"D\"");
+        assert_eq!(eval_fn_result(source, "grade", "50"), "\"F\"");
+    }
+
+    #[test]
+    fn if_with_complex_condition() {
+        let source = "\
++fn in_range (x:Int)->Bool
+  +if x >= 10 AND x <= 20
+    +return true
+  +else
+    +return false
+  +end
+";
+        assert_eq!(eval_fn_result(source, "in_range", "15"), "true");
+        assert_eq!(eval_fn_result(source, "in_range", "5"), "false");
+        assert_eq!(eval_fn_result(source, "in_range", "25"), "false");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Check statement (additional edge cases)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_with_compound_condition() {
+        let source = "\
++fn validate_range (x:Int)->Result<Int> [fail]
+  +check in_range x >= 0 AND x <= 100 ~err_out_of_range
+  +return x
+";
+        assert_eq!(eval_fn_result(source, "validate_range", "50"), "Ok(50)");
+        let result = eval_fn_result(source, "validate_range", "-1");
+        assert!(result.contains("err_out_of_range"), "expected err_out_of_range, got: {result}");
+        let result = eval_fn_result(source, "validate_range", "200");
+        assert!(result.contains("err_out_of_range"), "expected err_out_of_range, got: {result}");
+    }
+
+    #[test]
+    fn check_multiple_sequential() {
+        // Multiple checks, each with different error labels
+        let source = "\
++fn validate_user (name:String, age:Int)->Result<String> [fail]
+  +check has_name len(name) > 0 ~err_empty_name
+  +check valid_age age >= 0 AND age <= 150 ~err_bad_age
+  +return concat(name, \" is valid\")
+";
+        assert_eq!(
+            eval_fn_result(source, "validate_user", r#"name="alice" age=25"#),
+            r#"Ok("alice is valid")"#
+        );
+        let result = eval_fn_result(source, "validate_user", r#"name="" age=25"#);
+        assert!(result.contains("err_empty_name"), "got: {result}");
+        let result = eval_fn_result(source, "validate_user", r#"name="bob" age=-5"#);
+        assert!(result.contains("err_bad_age"), "got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Match with nested variant bindings
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn match_nested_variant_bindings() {
+        let source = "\
++type Tree = Leaf(Int) | Node(Tree, Tree)
+
++fn tree_sum (t:Tree)->Int
+  +match t
+  +case Leaf(val)
+    +return val
+  +case Node(left, right)
+    +let l:Int = tree_sum(left)
+    +let r:Int = tree_sum(right)
+    +return l + r
+  +end
+";
+        // Leaf(5) = 5
+        assert_eq!(eval_fn_result(source, "tree_sum", "Leaf(5)"), "5");
+        // Node(Leaf(3), Leaf(7)) = 10
+        assert_eq!(eval_fn_result(source, "tree_sum", "Node(Leaf(3), Leaf(7))"), "10");
+        // Node(Node(Leaf(1), Leaf(2)), Leaf(3)) = 6
+        assert_eq!(eval_fn_result(source, "tree_sum", "Node(Node(Leaf(1), Leaf(2)), Leaf(3))"), "6");
+    }
 }
