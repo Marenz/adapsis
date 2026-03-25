@@ -5510,4 +5510,149 @@ mod tests {
         // Node(Node(Leaf(1), Leaf(2)), Leaf(3)) = 6
         assert_eq!(eval_fn_result(source, "tree_sum", "Node(Node(Leaf(1), Leaf(2)), Leaf(3))"), "6");
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: fork_runtime_for_test isolation
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fork_runtime_creates_isolated_shared_vars() {
+        let source = "\
+!module Counter
++shared count:Int = 0
++fn get_count ()->Int
+  +return count
+";
+        let program = build_program(source);
+        let routes = vec![];
+        let forked = fork_runtime_for_test(&program, &routes);
+        assert!(forked.is_some());
+        let rt = forked.unwrap();
+        let state = rt.read().unwrap();
+        // Should have Counter.count initialized to 0
+        assert_eq!(
+            state.shared_vars.get("Counter.count").map(|v| format!("{v}")),
+            Some("0".to_string()),
+            "forked runtime should have Counter.count=0"
+        );
+    }
+
+    #[test]
+    fn fork_runtime_mutation_does_not_affect_original() {
+        let source = "\
+!module State
++shared value:Int = 10
++fn get ()->Int
+  +return value
+";
+        let program = build_program(source);
+        let routes = vec![];
+
+        let forked1 = fork_runtime_for_test(&program, &routes).unwrap();
+        let forked2 = fork_runtime_for_test(&program, &routes).unwrap();
+
+        // Mutate forked1
+        {
+            let mut state = forked1.write().unwrap();
+            state.shared_vars.insert("State.value".to_string(), Value::Int(99));
+        }
+
+        // forked2 should still have original value
+        {
+            let state = forked2.read().unwrap();
+            assert!(matches!(
+                state.shared_vars.get("State.value"),
+                Some(Value::Int(10))
+            ), "forked2 should be unaffected by forked1 mutation");
+        }
+    }
+
+    #[test]
+    fn fork_runtime_includes_http_routes() {
+        let program = ast::Program::default();
+        let routes = vec![ast::HttpRoute {
+            method: "POST".to_string(),
+            path: "/webhook".to_string(),
+            handler_fn: "handle".to_string(),
+        }];
+        let forked = fork_runtime_for_test(&program, &routes).unwrap();
+        let state = forked.read().unwrap();
+        assert_eq!(state.http_routes.len(), 1);
+        assert_eq!(state.http_routes[0].path, "/webhook");
+    }
+
+    #[test]
+    fn fork_runtime_empty_program_no_shared_vars() {
+        let program = ast::Program::default();
+        let forked = fork_runtime_for_test(&program, &[]).unwrap();
+        let state = forked.read().unwrap();
+        assert!(state.shared_vars.is_empty());
+        assert!(state.http_routes.is_empty());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: +shared variable behavior
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn shared_var_populated_in_env() {
+        let source = "\
+!module Config
++shared debug:Bool = false
++shared max_retries:Int = 3
++fn get_retries ()->Int
+  +return max_retries
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+        // Should have both shared vars in the cache
+        assert!(matches!(
+            env.shared_cache.get("Config.debug"),
+            Some(Value::Bool(false))
+        ));
+        assert!(matches!(
+            env.shared_cache.get("Config.max_retries"),
+            Some(Value::Int(3))
+        ));
+    }
+
+    #[test]
+    fn shared_var_accessible_via_qualified_name() {
+        // Shared vars are stored as "Module.name" keys
+        let source = "\
+!module App
++shared counter:Int = 42
++fn get ()->Int
+  +return 0
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+        // Direct cache lookup with qualified key
+        assert!(matches!(
+            env.shared_cache.get("App.counter"),
+            Some(Value::Int(42))
+        ));
+    }
+
+    #[test]
+    fn shared_var_multiple_modules() {
+        let source = "\
+!module A
++shared x:Int = 1
++fn get_x ()->Int
+  +return x
+
+!module B
++shared y:Int = 2
++fn get_y ()->Int
+  +return y
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+        assert!(matches!(env.shared_cache.get("A.x"), Some(Value::Int(1))));
+        assert!(matches!(env.shared_cache.get("B.y"), Some(Value::Int(2))));
+    }
 }
