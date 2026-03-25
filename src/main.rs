@@ -869,6 +869,7 @@ async fn main() -> Result<()> {
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
                 runtime: std::sync::Arc::new(std::sync::RwLock::new(initial_runtime)),
+                sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             };
 
             let app = axum::Router::new()
