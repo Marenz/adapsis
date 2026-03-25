@@ -1441,7 +1441,7 @@ fn eval_function_body(
                 }
             }
             ast::StatementKind::Await { name, call, .. } => {
-                // First check if the callee is a user-defined Forge function
+                // First check if the callee is a user-defined Adapsis function
                 // If so, call it normally (it will use +await internally for IO)
                 if program.get_function(&call.callee).is_some() {
                     let val = eval_call(program, call, env)?;
@@ -1454,7 +1454,7 @@ fn eval_function_body(
                     // Builtin IO operation
                     let handle = match env.get_raw("__coroutine_handle") {
                         Some(Value::CoroutineHandle(h)) => h.clone(),
-                        _ => bail!("+await requires async context — use 'forge run-async'"),
+                        _ => bail!("+await requires async context — use 'adapsis run-async'"),
                     };
                     let args: Vec<Value> = call
                         .args
@@ -2881,7 +2881,7 @@ mod tests {
     use super::*;
     use crate::{parser, session::IoMock, validator};
 
-    /// Helper: parse Forge source and build a program from it.
+    /// Helper: parse Adapsis source and build a program from it.
     fn build_program(source: &str) -> ast::Program {
         let ops = parser::parse(source).expect("parse failed");
         let mut program = ast::Program::default();
@@ -3159,7 +3159,7 @@ mod tests {
     #[test]
     fn test_mock_escape_decoding_via_parser() {
         // Verify that !mock strings are properly unescaped by the parser.
-        // The Forge source text: !mock http_get "api.test" -> "{\"ok\":true,\"items\":[1,2]}"
+        // The Adapsis source text: !mock http_get "api.test" -> "{\"ok\":true,\"items\":[1,2]}"
         let source = "!mock http_get \"api.test\" -> \"{\\\"ok\\\":true,\\\"items\\\":[1,2]}\"";
         let mocks = extract_mocks(source);
         assert_eq!(mocks.len(), 1);
@@ -3184,7 +3184,7 @@ mod tests {
         let program = build_program(fn_source);
 
         // This is how it would appear in a .ax file — escaped quotes
-        // Forge source: !mock http_get "api.svc" -> "{\"status\":\"healthy\",\"uptime\":99}"
+        // Adapsis source: !mock http_get "api.svc" -> "{\"status\":\"healthy\",\"uptime\":99}"
         let mock_source = "!mock http_get \"api.svc\" -> \"{\\\"status\\\":\\\"healthy\\\",\\\"uptime\\\":99}\"";
         let mocks = extract_mocks(mock_source);
 
@@ -3299,7 +3299,7 @@ mod tests {
     #[test]
     fn test_orchestrator_mock_json_escape_json_get_json_array_len() {
         // Proves: !mock with escaped JSON → parser decodes → json_get + json_array_len work
-        // Forge source: !mock http_get "x" -> "{\"ok\":true,\"result\":[]}"
+        // Adapsis source: !mock http_get "x" -> "{\"ok\":true,\"result\":[]}"
         let fn_source = "\
 +fn check (url:String)->Int [async]
   +await body:String = http_get(url)
@@ -5762,5 +5762,117 @@ mod tests {
         env.populate_shared_from_program(&program);
         assert!(matches!(env.shared_cache.get("A.x"), Some(Value::Int(1))));
         assert!(matches!(env.shared_cache.get("B.y"), Some(Value::Int(2))));
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test --release bench_vm_vs_treewalker -- --ignored --nocapture
+    fn bench_vm_vs_treewalker() {
+        use std::time::Instant;
+
+        let source = r#"
+!module Bench
++fn fib (n:Int)->Int
+  +if n <= 1
+    +return n
+  +else
+    +return fib(n - 1) + fib(n - 2)
+  +end
++end
+
++fn sum_to (n:Int)->Int
+  +let total:Int = 0
+  +let i:Int = 0
+  +while i <= n
+    +set total = total + i
+    +set i = i + 1
+  +end
+  +return total
++end
+
++fn collatz_steps (n:Int)->Int
+  +let steps:Int = 0
+  +let current:Int = n
+  +while current != 1
+    +if current % 2 == 0
+      +set current = current / 2
+    +else
+      +set current = current * 3 + 1
+    +end
+    +set steps = steps + 1
+  +end
+  +return steps
++end
+
++fn nested_loops (n:Int)->Int
+  +let total:Int = 0
+  +let i:Int = 0
+  +while i < n
+    +let j:Int = 0
+    +while j < n
+      +set total = total + i * j
+      +set j = j + 1
+    +end
+    +set i = i + 1
+  +end
+  +return total
++end
+"#;
+
+        let program = build_program(source);
+
+        struct Bench {
+            name: &'static str,
+            input: &'static str,
+            expected: i64,
+        }
+
+        let benches = vec![
+            Bench { name: "Bench.fib", input: "25", expected: 75025 },
+            Bench { name: "Bench.sum_to", input: "9000", expected: 40504500 },
+            Bench { name: "Bench.collatz_steps", input: "27", expected: 111 },
+            Bench { name: "Bench.nested_loops", input: "100", expected: 24502500 },
+        ];
+
+        println!("\n=== Adapsis VM vs Tree-Walker Benchmark ===\n");
+        println!("{:<25} {:>12} {:>12} {:>10}", "Function", "Tree-Walk", "VM", "Speedup");
+        println!("{}", "-".repeat(62));
+
+        for b in &benches {
+            let func = program.get_function(b.name).unwrap();
+            let input_expr = crate::parser::parse_expr_pub(0, b.input).unwrap();
+
+            // Tree-walker: warmup + measure
+            let _ = eval_call_with_input(&program, b.name, &input_expr);
+            let start = Instant::now();
+            let tw_result = eval_call_with_input(&program, b.name, &input_expr).unwrap();
+            let tw_time = start.elapsed();
+            let tw_str = format!("{tw_result}");
+            assert_eq!(tw_str, b.expected.to_string(), "tree-walk mismatch for {}", b.name);
+
+            // VM: warmup + measure
+            let vm_args_warmup = input_to_vm_args(&input_expr, func).unwrap();
+            let compiled = crate::vm::compile_function(func, &program).unwrap();
+            let _ = crate::vm::execute_with_io(&compiled, vm_args_warmup, &program, &|_, _| {
+                anyhow::bail!("no IO")
+            });
+            let vm_args = input_to_vm_args(&input_expr, func).unwrap();
+            let start = Instant::now();
+            let vm_result = crate::vm::execute_with_io(&compiled, vm_args, &program, &|_, _| {
+                anyhow::bail!("no IO")
+            }).unwrap();
+            let vm_time = start.elapsed();
+            let vm_str = format!("{vm_result}");
+            assert_eq!(vm_str, b.expected.to_string(), "VM mismatch for {}", b.name);
+
+            let speedup = tw_time.as_secs_f64() / vm_time.as_secs_f64();
+            println!(
+                "{:<25} {:>10.2}ms {:>10.2}ms {:>9.1}x",
+                b.name,
+                tw_time.as_secs_f64() * 1000.0,
+                vm_time.as_secs_f64() * 1000.0,
+                speedup,
+            );
+        }
+        println!();
     }
 }

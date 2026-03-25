@@ -645,10 +645,24 @@ pub enum VmResult {
 /// For synchronous functions, returns `VmResult::Done(value)`.
 /// For functions that hit an `AwaitIo` instruction, returns `VmResult::Await`
 /// with the suspended state so the caller can perform IO and resume.
+/// Compilation cache: avoids recompiling the same function on every call.
+pub type CompileCache = std::collections::HashMap<String, CompiledFunction>;
+
 pub fn execute(
     compiled: &CompiledFunction,
     args: Vec<Value>,
     program: &ast::Program,
+) -> Result<VmResult> {
+    let mut cache = CompileCache::new();
+    cache.insert(compiled.name.clone(), compiled.clone());
+    execute_cached(compiled, args, program, &mut cache)
+}
+
+fn execute_cached(
+    compiled: &CompiledFunction,
+    args: Vec<Value>,
+    program: &ast::Program,
+    cache: &mut CompileCache,
 ) -> Result<VmResult> {
     let mut state = VmState {
         function_name: compiled.name.clone(),
@@ -666,14 +680,15 @@ pub fn execute(
         }
     }
 
-    run_loop(&mut state, program)
+    run_loop(state, program, cache)
 }
 
 /// Resume a suspended VM after an async IO operation completes.
 /// Pushes the IO result onto the stack and continues execution.
 pub fn resume(mut vm_state: VmState, io_result: Value, program: &ast::Program) -> Result<VmResult> {
     vm_state.stack.push(io_result);
-    run_loop(&mut vm_state, program)
+    let mut cache = CompileCache::new();
+    run_loop(vm_state, program, &mut cache)
 }
 
 /// Execute a compiled function with async IO support.
@@ -685,7 +700,9 @@ pub fn execute_with_io(
     program: &ast::Program,
     io_handler: &dyn Fn(&str, &[Value]) -> Result<Value>,
 ) -> Result<Value> {
-    let mut result = execute(compiled, args, program)?;
+    let mut cache = CompileCache::new();
+    cache.insert(compiled.name.clone(), compiled.clone());
+    let mut result = execute_cached(compiled, args, program, &mut cache)?;
     loop {
         match result {
             VmResult::Done(val) => return Ok(val),
@@ -695,14 +712,20 @@ pub fn execute_with_io(
                 vm_state,
             } => {
                 let io_result = io_handler(&op_name, &args)?;
-                result = resume(vm_state, io_result, program)?;
+                let mut vm_state = vm_state;
+                vm_state.stack.push(io_result);
+                result = run_loop(vm_state, program, &mut cache)?;
             }
         }
     }
 }
 
 /// The main execution loop. Processes instructions until Return or AwaitIo.
-fn run_loop(state: &mut VmState, program: &ast::Program) -> Result<VmResult> {
+fn run_loop(
+    mut state: VmState,
+    program: &ast::Program,
+    cache: &mut CompileCache,
+) -> Result<VmResult> {
     loop {
         if state.ip >= state.bytecode.len() {
             // Fell off the end — return unit
@@ -722,16 +745,20 @@ fn run_loop(state: &mut VmState, program: &ast::Program) -> Result<VmResult> {
 
             // ── Locals ───────────────────────────────────────────────
             Op::LoadLocal(slot) => {
-                let val = state.locals.get(slot).cloned().unwrap_or(Value::None);
+                let base = state.call_stack.last().map(|f| f.locals_base).unwrap_or(0);
+                let idx = base + slot;
+                let val = state.locals.get(idx).cloned().unwrap_or(Value::None);
                 state.stack.push(val);
             }
             Op::StoreLocal(slot) => {
+                let base = state.call_stack.last().map(|f| f.locals_base).unwrap_or(0);
+                let idx = base + slot;
                 let val = pop_stack(&mut state.stack)?;
                 // Grow locals if needed
-                while state.locals.len() <= slot {
+                while state.locals.len() <= idx {
                     state.locals.push(Value::None);
                 }
-                state.locals[slot] = val;
+                state.locals[idx] = val;
             }
 
             // ── Arithmetic ───────────────────────────────────────────
@@ -825,27 +852,36 @@ fn run_loop(state: &mut VmState, program: &ast::Program) -> Result<VmResult> {
                 }
                 call_args.reverse(); // arguments were pushed left-to-right
 
-                // Compile and execute the callee
-                let func = program
-                    .get_function(&name)
-                    .ok_or_else(|| anyhow::anyhow!("vm: function `{name}` not found"))?;
-                let callee_compiled = compile_function(func, program)?;
-                match execute(&callee_compiled, call_args, program)? {
-                    VmResult::Done(val) => state.stack.push(val),
-                    VmResult::Await {
-                        op_name,
-                        args,
-                        vm_state,
-                    } => {
-                        // Propagate suspension up
-                        // Save current state on call stack
-                        return Ok(VmResult::Await {
-                            op_name,
-                            args,
-                            vm_state,
-                        });
-                    }
+                // Compile callee (cached — only compiles once per function)
+                if !cache.contains_key(&name) {
+                    let func = program
+                        .get_function(&name)
+                        .ok_or_else(|| anyhow::anyhow!("vm: function `{name}` not found"))?;
+                    let compiled = compile_function(func, program)?;
+                    cache.insert(name.clone(), compiled);
                 }
+                let callee = cache.get(&name).unwrap();
+
+                // Save current frame
+                let locals_base = state.locals.len();
+                state.call_stack.push(Frame {
+                    return_ip: state.ip,
+                    return_bytecode: std::mem::replace(
+                        &mut state.bytecode,
+                        callee.bytecode.clone(),
+                    ),
+                    locals_base,
+                });
+
+                // Allocate locals for callee and load arguments
+                state.locals.resize(
+                    locals_base + callee.local_count.max(call_args.len()),
+                    Value::None,
+                );
+                for (i, arg) in call_args.into_iter().enumerate() {
+                    state.locals[locals_base + i] = arg;
+                }
+                state.ip = 0;
             }
             Op::CallBuiltin(name, argc) => {
                 let mut call_args = Vec::with_capacity(argc);
