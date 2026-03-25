@@ -479,40 +479,57 @@ pub struct PlanStepResponse {
     pub status: String,
 }
 
-pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse> {
-    let session = session.lock().await;
-    let plan = session.meta.plan.iter().map(|s| PlanStepResponse {
-        description: s.description.clone(),
-        status: match s.status {
-            crate::session::PlanStatus::Pending => "pending",
-            crate::session::PlanStatus::InProgress => "in_progress",
-            crate::session::PlanStatus::Done => "done",
-            crate::session::PlanStatus::Failed => "failed",
-        }.to_string(),
-    }).collect();
-    let roadmap = session.meta.roadmap.iter().map(|r| RoadmapItemResponse {
-        description: r.description.clone(),
-        done: r.done,
-    }).collect();
-    Json(StatusResponse {
-        revision: session.meta.revision,
-        mutations: session.meta.mutations.len(),
-        history_entries: session.meta.history.len(),
-        plan,
-        roadmap,
-        functions: session
-            .program
-            .functions
-            .iter()
-            .map(|f| f.name.clone())
-            .collect(),
-        types: session.program.types.iter().map(|t| t.name().to_string()).collect(),
-        routes: session.runtime.http_routes.iter().map(|r| RouteInfo {
+pub async fn status(State(config): State<AppConfig>) -> Json<StatusResponse> {
+    // Tier 1: read program (RwLock read — non-exclusive, fast)
+    let (functions, types, program_summary) = {
+        let program = config.program.read().await;
+        (
+            program.functions.iter().map(|f| f.name.clone()).collect(),
+            program.types.iter().map(|t| t.name().to_string()).collect(),
+            validator::program_summary(&program),
+        )
+    };
+    // Tier 2: read runtime (RwLock read — non-exclusive, fast)
+    let routes = {
+        let rt = config.runtime.read().unwrap();
+        rt.http_routes.iter().map(|r| RouteInfo {
             method: r.method.clone(),
             path: r.path.clone(),
             handler_fn: r.handler_fn.clone(),
-        }).collect(),
-        program_summary: validator::program_summary(&session.program),
+        }).collect()
+    };
+    // Tier 3: read meta (brief lock)
+    let (revision, mutations, history_entries, plan, roadmap) = {
+        let meta = config.meta.lock().await;
+        (
+            meta.revision,
+            meta.mutations.len(),
+            meta.history.len(),
+            meta.plan.iter().map(|s| PlanStepResponse {
+                description: s.description.clone(),
+                status: match s.status {
+                    crate::session::PlanStatus::Pending => "pending",
+                    crate::session::PlanStatus::InProgress => "in_progress",
+                    crate::session::PlanStatus::Done => "done",
+                    crate::session::PlanStatus::Failed => "failed",
+                }.to_string(),
+            }).collect(),
+            meta.roadmap.iter().map(|r| RoadmapItemResponse {
+                description: r.description.clone(),
+                done: r.done,
+            }).collect(),
+        )
+    };
+    Json(StatusResponse {
+        revision,
+        mutations,
+        history_entries,
+        plan,
+        roadmap,
+        functions,
+        types,
+        routes,
+        program_summary,
     })
 }
 
@@ -529,15 +546,28 @@ pub struct HistoryResponse {
 }
 
 pub async fn history(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<HistoryRequest>,
 ) -> Json<HistoryResponse> {
-    let session = session.lock().await;
+    // Tier 3: read meta (brief lock)
+    let meta = config.meta.lock().await;
     let limit = req.limit.unwrap_or(20);
+    // format_recent_history is on Session, but we can reconstruct from meta directly.
+    // For now, build a temporary Session just for the formatting helper.
+    // TODO: move format_recent_history to SessionMeta.
+    let formatted = {
+        let temp = crate::session::Session {
+            program: crate::ast::Program::default(),
+            runtime: crate::session::RuntimeState::default(),
+            meta: meta.clone(),
+            sandbox: None,
+        };
+        temp.format_recent_history(limit)
+    };
     Json(HistoryResponse {
-        formatted: session.format_recent_history(limit),
-        mutations: session.meta.mutations.clone(),
-        history: session.meta.history.clone(),
+        formatted,
+        mutations: meta.mutations.clone(),
+        history: meta.history.clone(),
     })
 }
 
@@ -554,16 +584,25 @@ pub struct RewindResponse {
 }
 
 pub async fn rewind(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<RewindRequest>,
 ) -> Json<RewindResponse> {
-    let mut session = session.lock().await;
+    // Rewind needs all tiers — use the session shim for now (rare operation)
+    let mut session = config.session.lock().await;
     match session.rewind_to(req.revision) {
-        Ok(()) => Json(RewindResponse {
-            revision: session.meta.revision,
-            success: true,
-            message: format!("rewound to revision {}", req.revision),
-        }),
+        Ok(()) => {
+            // Sync tiers from session after rewind
+            *config.program.write().await = session.program.clone();
+            {
+                let mut meta = config.meta.lock().await;
+                *meta = session.meta.clone();
+            }
+            Json(RewindResponse {
+                revision: session.meta.revision,
+                success: true,
+                message: format!("rewound to revision {}", req.revision),
+            })
+        }
         Err(e) => Json(RewindResponse {
             revision: session.meta.revision,
             success: false,
@@ -669,10 +708,13 @@ fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
     }
 }
 
-pub async fn program(State(session): State<SharedSession>) -> Json<ProgramResponse> {
-    let session = session.lock().await;
+pub async fn program(State(config): State<AppConfig>) -> Json<ProgramResponse> {
+    // Tier 1: read program (RwLock read — non-exclusive)
+    let prog = config.program.read().await;
+    // Tier 3: read meta for revision (brief)
+    let revision = config.meta.lock().await.revision;
 
-    let types = session.program.types.iter().map(|td| {
+    let types = prog.types.iter().map(|td| {
         match td {
             crate::ast::TypeDecl::Struct(s) => TypeDetail {
                 name: s.name.clone(),
@@ -693,7 +735,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
         }
     }).collect();
 
-    let functions = session.program.functions.iter().map(|f| {
+    let functions = prog.functions.iter().map(|f| {
         let (stmts, _) = f.body.iter().map(|s| {
             let (kind, summary) = stmt_summary(&s.kind);
             StatementDetail { id: s.id.clone(), kind, summary }
@@ -712,7 +754,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
         }
     }).collect();
 
-    let modules = session.program.modules.iter().map(|m| {
+    let modules = prog.modules.iter().map(|m| {
         fn build_module_detail(m: &crate::ast::Module) -> ModuleDetail {
             let mod_types = m.types.iter().map(|td| match td {
                 crate::ast::TypeDecl::Struct(s) => TypeDetail {
@@ -742,7 +784,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
     }).collect();
 
     Json(ProgramResponse {
-        revision: session.meta.revision,
+        revision,
         types,
         functions,
         modules,
@@ -1793,9 +1835,10 @@ pub struct OpenCodeResponse {
 }
 
 /// Build the full router with LLM support.
-pub async fn agents(State(session): State<SharedSession>) -> Json<Vec<crate::session::AgentStatus>> {
-    let session = session.lock().await;
-    Json(session.meta.agent_log.clone())
+pub async fn agents(State(config): State<AppConfig>) -> Json<Vec<crate::session::AgentStatus>> {
+    // Tier 3: read meta (brief lock)
+    let meta = config.meta.lock().await;
+    Json(meta.agent_log.clone())
 }
 
 /// SSE streaming version of /api/ask — streams events as they happen.
@@ -3044,16 +3087,15 @@ async fn session_mutate(
 pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
-    let session_routes = axum::Router::new()
+    let config_routes = axum::Router::new()
+        // Read-only handlers (migrated to tier locks)
         .route("/api/status", get(status))
         .route("/api/program", get(program))
         .route("/api/history", post(history))
         .route("/api/rewind", post(rewind))
         .route("/api/agents", get(agents))
         .route("/api/routes", get(list_routes))
-        .with_state(config.session.clone());
-
-    let config_routes = axum::Router::new()
+        // Write handlers (still using session shim)
         .route("/api/mutate", post(mutate))
         .route("/api/eval", post(eval_fn))
         .route("/api/test", post(test_fn))
@@ -3081,14 +3123,14 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .fallback(adapsis_route_dispatch)
         .with_state(config);
 
-    session_routes.merge(config_routes).merge(multi_session_routes).merge(webhook_fallback)
+    config_routes.merge(multi_session_routes).merge(webhook_fallback)
 }
 
 /// GET /api/routes — list all Adapsis-registered HTTP routes.
-async fn list_routes(State(session): State<SharedSession>) -> Json<serde_json::Value> {
-    let session = session.lock().await;
-    let routes: Vec<serde_json::Value> = session
-        .runtime
+async fn list_routes(State(config): State<AppConfig>) -> Json<serde_json::Value> {
+    // Tier 2: read runtime (RwLock read — non-exclusive, fast)
+    let rt = config.runtime.read().unwrap();
+    let routes: Vec<serde_json::Value> = rt
         .http_routes
         .iter()
         .map(|r| {
