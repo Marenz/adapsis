@@ -842,6 +842,7 @@ fn fork_runtime_for_test(
         http_routes: http_routes.to_vec(),
         shared_vars,
         roadmap: Vec::new(),
+        plan: Vec::new(),
     };
     Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }
