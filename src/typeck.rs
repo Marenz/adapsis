@@ -1927,4 +1927,303 @@ mod tests {
         let callees = collect_callees_from_stmts(&func.body);
         assert!(callees.contains(&"double".to_string()));
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Effect registration and querying
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn symbol_table_registers_fail_effect() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check pos x > 0 ~err_neg
+  +return x
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let sig = table.resolve_function("validate").unwrap();
+        assert!(sig.effects.contains(&Effect::Fail));
+        assert!(matches!(sig.return_type, Type::Result(_)));
+    }
+
+    #[test]
+    fn symbol_table_registers_mut_effect() {
+        let source = "\
++fn counter ()->Int [mut]
+  +return 0
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let sig = table.resolve_function("counter").unwrap();
+        assert!(sig.effects.contains(&Effect::Mut));
+    }
+
+    #[test]
+    fn symbol_table_no_effects_for_pure() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let sig = table.resolve_function("add").unwrap();
+        assert!(
+            sig.effects.is_empty(),
+            "pure function should have no effects"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Match arm body type checking
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_match_arm_return_type_ok() {
+        let source = "\
++type Color = Red | Green | Blue
+
++fn color_name (c:Color)->String
+  +match c
+  +case Red
+    +return \"red\"
+  +case Green
+    +return \"green\"
+  +case Blue
+    +return \"blue\"
+  +end
+";
+        let errors = check(source, "color_name");
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn check_match_arm_return_type_mismatch() {
+        let source = "\
++type Color = Red | Green | Blue
+
++fn color_name (c:Color)->String
+  +match c
+  +case Red
+    +return 42
+  +case Green
+    +return \"green\"
+  +case Blue
+    +return \"blue\"
+  +end
+";
+        let errors = check(source, "color_name");
+        assert!(
+            !errors.is_empty(),
+            "expected return type mismatch in Red arm"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("return type mismatch")),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn check_match_arm_let_binding_ok() {
+        let source = "\
++type Shape = Circle(Float) | Rect(Float, Float)
+
++fn describe (s:Shape)->String
+  +match s
+  +case Circle(r)
+    +let msg:String = \"circle\"
+    +return msg
+  +case Rect(w, h)
+    +let msg:String = \"rect\"
+    +return msg
+  +end
+";
+        let errors = check(source, "describe");
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Branch (if/elif/else) body type checking
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_branch_both_arms_type_ok() {
+        let source = "\
++fn abs_val (x:Int)->Int
+  +if x >= 0
+    +return x
+  +else
+    +let neg:Int = 0 - x
+    +return neg
+  +end
+";
+        let errors = check(source, "abs_val");
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn check_branch_return_mismatch_in_else() {
+        let source = "\
++fn bad (x:Int)->Int
+  +if x > 0
+    +return x
+  +else
+    +return \"negative\"
+  +end
+";
+        let errors = check(source, "bad");
+        assert!(
+            !errors.is_empty(),
+            "expected return type mismatch in else arm"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Each loop type checking
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_each_body_type_ok() {
+        let source = "\
++fn sum_list (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = total + item
+  +end
+  +return total
+";
+        let errors = check(source, "sum_list");
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn check_each_set_mismatch_in_body() {
+        let source = "\
++fn bad (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = \"hello\"
+  +end
+  +return total
+";
+        let errors = check(source, "bad");
+        assert!(
+            !errors.is_empty(),
+            "expected set type mismatch inside each body"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("type mismatch in set")),
+            "errors: {errors:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Call with too many arguments
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_call_too_many_args() {
+        let source = "\
++fn greet (name:String)->String
+  +return name
+
++fn use_greet ()->String
+  +call r:String = greet(\"alice\", \"extra\")
+  +return r
+";
+        let errors = check(source, "use_greet");
+        assert!(!errors.is_empty(), "expected arg count mismatch");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("expects 1 arguments, got 2")),
+            "errors: {errors:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Complex program with multiple types and functions
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_complex_program_no_errors() {
+        let source = "\
++type User = name:String, age:Int
++type Color = Red | Green | Blue
+
++fn create_user (name:String, age:Int)->User
+  +let u:User = {name: name, age: age}
+  +return u
+
++fn get_age (u:User)->Int
+  +return u.age
+
++fn color_code (c:Color)->Int
+  +match c
+  +case Red
+    +return 1
+  +case Green
+    +return 2
+  +case Blue
+    +return 3
+  +end
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        for func in &program.functions {
+            let errors = check_function(&table, func);
+            assert!(errors.is_empty(), "errors in {}: {errors:?}", func.name);
+        }
+    }
+
+    #[test]
+    fn check_module_function_resolution() {
+        let source = "\
+!module Utils
++fn double (x:Int)->Int
+  +return x * 2
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        // Both qualified and bare should resolve
+        assert!(table.resolve_function("Utils.double").is_some());
+        assert!(table.resolve_function("double").is_some());
+        let sig = table.resolve_function("Utils.double").unwrap();
+        assert_eq!(sig.params.len(), 1);
+        assert!(matches!(sig.return_type, Type::Int));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Query: ?source reconstruction roundtrip
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn query_source_returns_function_source() {
+        let source = "\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "?source double", &[]);
+        assert!(
+            result.contains("+fn double"),
+            "should contain function header: {result}"
+        );
+        assert!(
+            result.contains("+return"),
+            "should contain return stmt: {result}"
+        );
+    }
+
+    #[test]
+    fn query_source_unknown_function() {
+        let program = build_program("+fn noop ()->Int\n  +return 0\n");
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "?source nonexistent", &[]);
+        assert!(
+            result.contains("not found") || result.contains("No match"),
+            "should indicate not found: {result}"
+        );
+    }
 }
