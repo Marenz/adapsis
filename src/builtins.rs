@@ -1152,21 +1152,48 @@ pub fn format_for_prompt() -> String {
     out
 }
 
-/// Check if a name is a builtin (sync or IO).
+/// Pre-built set of all builtin names (sync + IO) and their aliases for O(1) lookup.
+/// Lazily initialized on first access.
+static ALL_BUILTIN_SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut set = std::collections::HashSet::new();
+        for b in BUILTINS {
+            set.insert(b.name);
+            for alias in b.aliases {
+                set.insert(alias);
+            }
+        }
+        for b in IO_BUILTINS {
+            set.insert(b.name);
+            for alias in b.aliases {
+                set.insert(alias);
+            }
+        }
+        set
+    });
+
+/// Pre-built set of IO builtin names and aliases for O(1) lookup.
+/// Lazily initialized on first access.
+static IO_BUILTIN_SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut set = std::collections::HashSet::new();
+        for b in IO_BUILTINS {
+            set.insert(b.name);
+            for alias in b.aliases {
+                set.insert(alias);
+            }
+        }
+        set
+    });
+
+/// Check if a name is a builtin (sync or IO). O(1) HashSet lookup.
 pub fn is_builtin(name: &str) -> bool {
-    BUILTINS
-        .iter()
-        .any(|b| b.name == name || b.aliases.contains(&name))
-        || IO_BUILTINS
-            .iter()
-            .any(|b| b.name == name || b.aliases.contains(&name))
+    ALL_BUILTIN_SET.contains(name)
 }
 
-/// Check if a name is an IO builtin (requires +await).
+/// Check if a name is an IO builtin (requires +await). O(1) HashSet lookup.
 pub fn is_io_builtin(name: &str) -> bool {
-    IO_BUILTINS
-        .iter()
-        .any(|b| b.name == name || b.aliases.contains(&name))
+    IO_BUILTIN_SET.contains(name)
 }
 
 #[cfg(test)]
@@ -1755,5 +1782,57 @@ mod tests {
             prompt.contains("routes_list"),
             "prompt should show routes_list alias"
         );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // HashSet-based lookup tests (name interning optimization)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn hashset_lookup_matches_linear_scan_for_builtins() {
+        // Verify that the HashSet-based is_builtin matches what a linear scan would find
+        for b in BUILTINS {
+            assert!(
+                is_builtin(b.name),
+                "HashSet should find builtin '{}'",
+                b.name
+            );
+            for alias in b.aliases {
+                assert!(
+                    is_builtin(alias),
+                    "HashSet should find alias '{}' for '{}'",
+                    alias,
+                    b.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hashset_lookup_matches_linear_scan_for_io_builtins() {
+        // Verify that the HashSet-based is_io_builtin matches what a linear scan would find
+        for b in IO_BUILTINS {
+            assert!(
+                is_io_builtin(b.name),
+                "HashSet should find IO builtin '{}'",
+                b.name
+            );
+            for alias in b.aliases {
+                assert!(
+                    is_io_builtin(alias),
+                    "HashSet should find IO alias '{}' for '{}'",
+                    alias,
+                    b.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hashset_rejects_unknown_names() {
+        assert!(!is_builtin("totally_made_up_function"));
+        assert!(!is_io_builtin("totally_made_up_function"));
+        assert!(!is_builtin(""));
+        assert!(!is_io_builtin(""));
     }
 }

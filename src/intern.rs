@@ -166,4 +166,46 @@ mod tests {
         // Length unchanged after re-interning
         assert_eq!(interner.len(), 1000);
     }
+
+    #[test]
+    fn test_clone_preserves_ids() {
+        // Cloning an interner should preserve all interned ids so that
+        // a cloned interner can be used as a seed for a new context.
+        let mut original = StringInterner::new();
+        let id_x = original.intern("x");
+        let id_y = original.intern("y");
+        let id_z = original.intern("z");
+
+        let mut cloned = original.clone();
+        // Cloned interner should resolve the same ids
+        assert_eq!(cloned.resolve(id_x), Some("x"));
+        assert_eq!(cloned.resolve(id_y), Some("y"));
+        assert_eq!(cloned.resolve(id_z), Some("z"));
+
+        // Interning the same strings in the clone should return the same ids
+        assert_eq!(cloned.intern("x"), id_x);
+        assert_eq!(cloned.intern("y"), id_y);
+
+        // Interning a new string in the clone should not affect the original
+        let id_w = cloned.intern("w");
+        assert!(
+            original.get("w").is_none(),
+            "original should not see clone's new entries"
+        );
+        assert_eq!(cloned.resolve(id_w), Some("w"));
+    }
+
+    #[test]
+    fn test_clone_then_extend() {
+        // After cloning, new strings get sequential ids that don't collide
+        let mut base = StringInterner::new();
+        base.intern("a"); // id 0
+        base.intern("b"); // id 1
+
+        let mut extended = base.clone();
+        let id_c = extended.intern("c"); // should be id 2
+        assert_eq!(id_c, 2);
+        assert_eq!(extended.len(), 3);
+        assert_eq!(base.len(), 2); // base unchanged
+    }
 }
