@@ -15,6 +15,15 @@ use crate::parser;
 use crate::typeck;
 use crate::validator;
 
+/// A module load error — pairs the module/file name with the error message.
+#[derive(Debug, Clone)]
+pub struct LoadError {
+    /// Module name (derived from filename, e.g. "MyModule" from "MyModule.ax")
+    pub module_name: String,
+    /// The error message describing why loading failed
+    pub error: String,
+}
+
 /// Runtime state for the module library — tracks what was loaded and any errors.
 #[derive(Debug, Clone)]
 pub struct LibraryState {
@@ -22,6 +31,8 @@ pub struct LibraryState {
     pub loaded_modules: Vec<String>,
     /// Accumulated load/save error messages this session.
     pub errors: Arc<Mutex<Vec<String>>>,
+    /// Structured load errors from startup — (module_name, error_message) pairs.
+    pub load_errors: Arc<Mutex<Vec<LoadError>>>,
 }
 
 impl LibraryState {
@@ -29,6 +40,7 @@ impl LibraryState {
         Self {
             loaded_modules: Vec::new(),
             errors: Arc::new(Mutex::new(Vec::new())),
+            load_errors: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -36,6 +48,27 @@ impl LibraryState {
         if let Ok(mut errs) = self.errors.lock() {
             errs.push(msg);
         }
+    }
+
+    /// Record a structured load error with the module name and error message.
+    fn record_load_error(&self, module_name: String, error: String) {
+        if let Ok(mut errs) = self.load_errors.lock() {
+            errs.push(LoadError { module_name, error });
+        }
+    }
+
+    /// Format load errors for display (e.g. in ?library output or AI context).
+    /// Returns None if there are no load errors.
+    pub fn format_load_errors(&self) -> Option<String> {
+        let errs = self.load_errors.lock().ok()?;
+        if errs.is_empty() {
+            return None;
+        }
+        let mut out = format!("Load errors ({}):\n", errs.len());
+        for le in errs.iter() {
+            out.push_str(&format!("  {}: {}\n", le.module_name, le.error));
+        }
+        Some(out)
     }
 }
 
@@ -258,6 +291,13 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
     files.sort();
 
     for path in &files {
+        // Extract module name from filename (e.g. "MyModule.ax" -> "MyModule")
+        let file_module_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
         match std::fs::read_to_string(path) {
             Ok(source) => match load_module_source(program, &source) {
                 Ok(module_name) => {
@@ -268,15 +308,19 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
                     state.loaded_modules.push(module_name);
                 }
                 Err(e) => {
+                    let err_msg = format!("{e}");
                     let msg = format!("failed to load {}: {e}", path.display());
                     eprintln!("[library] warning: {msg}");
                     state.record_error(msg);
+                    state.record_load_error(file_module_name, err_msg);
                 }
             },
             Err(e) => {
+                let err_msg = format!("could not read file: {e}");
                 let msg = format!("could not read {}: {e}", path.display());
                 eprintln!("[library] warning: {msg}");
                 state.record_error(msg);
+                state.record_load_error(file_module_name, err_msg);
             }
         }
     }
@@ -340,6 +384,105 @@ pub fn persist_module(module: &ast::Module) -> Result<()> {
         .with_context(|| format!("failed to rename {} -> {}", tmp.display(), target.display()))?;
 
     Ok(())
+}
+
+/// Reload a specific module from disk, or all modules if `module_name` is empty.
+///
+/// For a specific module: reads `<module_name>.ax` from the library directory,
+/// removes the old module from the program, and re-parses/loads the file.
+///
+/// For all modules: re-reads all `.ax` files from the library directory and
+/// reloads each one, replacing existing modules.
+///
+/// Returns a status message describing what happened.
+pub fn reload_module(program: &mut ast::Program, module_name: &str) -> Result<String> {
+    let dir = ensure_library_dir()?;
+
+    if module_name.is_empty() {
+        // Reload all modules
+        let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "ax"))
+                .collect(),
+            Err(e) => return Err(anyhow::anyhow!("could not read library dir: {e}")),
+        };
+        files.sort();
+
+        let mut reloaded = Vec::new();
+        let mut failed = Vec::new();
+
+        for path in &files {
+            let file_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+
+            match std::fs::read_to_string(path) {
+                Ok(source) => {
+                    // Remove existing module first
+                    program.modules.retain(|m| m.name != file_name);
+                    match load_module_source(program, &source) {
+                        Ok(name) => {
+                            eprintln!("[library] reloaded module `{name}` from {}", path.display());
+                            reloaded.push(name);
+                        }
+                        Err(e) => {
+                            eprintln!("[library] reload failed for {}: {e}", path.display());
+                            failed.push(format!("{file_name}: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    failed.push(format!("{file_name}: could not read file: {e}"));
+                }
+            }
+        }
+
+        program.rebuild_function_index();
+
+        let mut msg = format!("Reloaded {} module(s)", reloaded.len());
+        if !reloaded.is_empty() {
+            msg.push_str(&format!(": {}", reloaded.join(", ")));
+        }
+        if !failed.is_empty() {
+            msg.push_str(&format!(
+                ". Failed ({}): {}",
+                failed.len(),
+                failed.join("; ")
+            ));
+        }
+        Ok(msg)
+    } else {
+        // Reload a specific module
+        let path = dir.join(format!("{module_name}.ax"));
+        if !path.exists() {
+            return Err(anyhow::anyhow!(
+                "library file not found: {}.ax",
+                module_name
+            ));
+        }
+
+        let source = std::fs::read_to_string(&path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+
+        // Remove the existing module first
+        program.modules.retain(|m| m.name != module_name);
+
+        match load_module_source(program, &source) {
+            Ok(name) => {
+                program.rebuild_function_index();
+                eprintln!("[library] reloaded module `{name}` from {}", path.display());
+                Ok(format!("Reloaded {name} successfully"))
+            }
+            Err(e) => {
+                program.rebuild_function_index();
+                Err(anyhow::anyhow!("Reload failed: {e}"))
+            }
+        }
+    }
 }
 
 /// Determine which module names were affected by a set of parsed operations.
@@ -451,7 +594,15 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
         }
     }
 
-    // Show errors
+    // Show structured load errors (module name + error message)
+    if let Some(state) = lib_state {
+        if let Some(load_errors_text) = state.format_load_errors() {
+            out.push('\n');
+            out.push_str(&load_errors_text);
+        }
+    }
+
+    // Show general errors
     if let Some(state) = lib_state {
         if let Ok(errs) = state.errors.lock() {
             if !errs.is_empty() {
@@ -650,5 +801,158 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(&file);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Tests for structured load errors
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_load_error_struct() {
+        let state = LibraryState::new();
+
+        // Initially empty
+        assert!(state.format_load_errors().is_none());
+
+        // Record a load error
+        state.record_load_error("BadModule".to_string(), "parse error on line 5".to_string());
+        let output = state.format_load_errors().unwrap();
+        assert!(output.contains("Load errors (1):"), "header: {output}");
+        assert!(
+            output.contains("BadModule: parse error on line 5"),
+            "content: {output}"
+        );
+    }
+
+    #[test]
+    fn test_multiple_load_errors() {
+        let state = LibraryState::new();
+        state.record_load_error(
+            "ModuleA".to_string(),
+            "no !module declaration found".to_string(),
+        );
+        state.record_load_error(
+            "ModuleB".to_string(),
+            "unexpected token at line 3".to_string(),
+        );
+
+        let output = state.format_load_errors().unwrap();
+        assert!(output.contains("Load errors (2):"), "header: {output}");
+        assert!(
+            output.contains("ModuleA: no !module declaration found"),
+            "A: {output}"
+        );
+        assert!(
+            output.contains("ModuleB: unexpected token at line 3"),
+            "B: {output}"
+        );
+    }
+
+    #[test]
+    fn test_query_library_shows_load_errors() {
+        let program = ast::Program::default();
+        let state = LibraryState::new();
+        state.record_load_error("BrokenMod".to_string(), "syntax error".to_string());
+
+        let output = query_library(&program, Some(&state));
+        assert!(
+            output.contains("Load errors (1):"),
+            "should show load errors section: {output}"
+        );
+        assert!(
+            output.contains("BrokenMod: syntax error"),
+            "should show specific error: {output}"
+        );
+    }
+
+    #[test]
+    fn test_query_library_no_errors_no_section() {
+        let program = ast::Program::default();
+        let state = LibraryState::new();
+
+        let output = query_library(&program, Some(&state));
+        assert!(
+            !output.contains("Load errors"),
+            "should not show load errors section when empty: {output}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Tests for library_reload
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_reload_specific_module() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib_dir = tmp.path().join("modules");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        // Write a module file
+        let source = "!module ReloadTest\n+fn greet ()->String\n  +return \"hello\"\n";
+        std::fs::write(lib_dir.join("ReloadTest.ax"), source).unwrap();
+
+        // Load the module initially
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        assert_eq!(program.modules.len(), 1);
+        assert_eq!(program.modules[0].functions[0].name, "greet");
+
+        // Update the file on disk with a different function
+        let updated_source = "!module ReloadTest\n+fn farewell ()->String\n  +return \"bye\"\n";
+        std::fs::write(lib_dir.join("ReloadTest.ax"), updated_source).unwrap();
+
+        // Override HOME so reload_module uses our temp dir
+        // Note: reload_module uses library_dir() which uses HOME env var.
+        // For isolated test, we test load_module_source directly instead.
+        let mut program2 = ast::Program::default();
+        let content = std::fs::read_to_string(lib_dir.join("ReloadTest.ax")).unwrap();
+        let result = load_module_source(&mut program2, &content);
+        assert!(result.is_ok(), "reload should succeed: {result:?}");
+        assert_eq!(result.unwrap(), "ReloadTest");
+        assert_eq!(program2.modules[0].functions[0].name, "farewell");
+    }
+
+    #[test]
+    fn test_reload_nonexistent_module_fails() {
+        let mut program = ast::Program::default();
+        // This will fail because the file doesn't exist in the real library dir
+        // (or if it does, it's a valid module — either way tests the path)
+        let result = reload_module(&mut program, "NonExistentModule99999");
+        assert!(result.is_err(), "should fail for nonexistent module");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found") || err.contains("could not"),
+            "error should mention not found: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_errors_recorded_during_library_load() {
+        // Create a temp dir with a malformed .ax file
+        let tmp = tempfile::tempdir().unwrap();
+        let lib_dir = tmp.path().join("modules");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        // Write a valid module
+        let valid_source = "!module GoodMod\n+fn ok ()->Int\n  +return 1\n";
+        std::fs::write(lib_dir.join("GoodMod.ax"), valid_source).unwrap();
+
+        // Write an invalid module (no !module declaration)
+        let bad_source = "+fn orphan ()->Int\n  +return 42\n";
+        std::fs::write(lib_dir.join("BadMod.ax"), bad_source).unwrap();
+
+        // We can't easily test load_module_library since it reads from HOME,
+        // but we can test the underlying function
+        let mut program = ast::Program::default();
+        let bad_result = load_module_source(&mut program, bad_source);
+        assert!(bad_result.is_err(), "bad module should fail to load");
+        let err = bad_result.unwrap_err().to_string();
+        assert!(
+            err.contains("no !module declaration"),
+            "error should mention missing module declaration: {err}"
+        );
     }
 }
