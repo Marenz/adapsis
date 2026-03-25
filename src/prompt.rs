@@ -590,9 +590,15 @@ They return the same output as the corresponding `?` query commands.
 - `+await result:String = query_routes()` — registered HTTP routes (same as `?routes`). Alias: `routes_list()`
 - `+await result:String = query_tasks()` — spawned async tasks (same as `?tasks`)
 - `+await result:String = query_library()` — library status (same as `?library`)
+- `+await result:String = library_reload("ModuleName")` — reload a specific module from disk. Re-reads the .ax file, removes old module, and re-parses. Returns "Reloaded ModuleName successfully" or fails with error.
+- `+await result:String = library_reload("")` — reload ALL modules from the library directory. Useful for recovering from startup load errors.
 
 These require `[io,async]` effects and `+await`. Use them for self-modifying or reflective programs
 that need to inspect their own structure at runtime.
+
+Note: If library modules fail to load at startup (parse errors, missing files, etc.), the load errors
+are included in the initial context sent to you. Use `?library` to check load error details, or
+`library_reload()` to retry loading failed modules after fixing the .ax files.
 
 Example:
 ```

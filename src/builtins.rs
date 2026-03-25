@@ -814,7 +814,20 @@ pub static IO_BUILTINS: &[Builtin] = &[
                Takes `(target:String, new_code:String)`. \
                Target is like 'Module.func.s1' (statement 1 of Module.func). \
                new_code is valid Adapsis code for the replacement statement(s). \
-               Returns confirmation or fails with validation error. \
+                Returns confirmation or fails with validation error. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "library_reload",
+        aliases: &[],
+        short: "reload library module(s) from disk: library_reload(name) -> String",
+        long: "Reloads a module from the persistent library directory (~/.config/adapsis/modules/). \
+               Takes `(name:String)` — the module name (e.g. \"MyModule\"). \
+               If name is empty string \"\", reloads ALL .ax files from the library directory. \
+               The existing module is removed from the program and re-parsed from disk. \
+               Returns \"Reloaded ModuleName successfully\" on success, or fails with the error. \
+               Useful for recovering from load errors at startup without restarting. \
                Requires `+await`.",
         category: BuiltinCategory::Io,
     },
