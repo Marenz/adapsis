@@ -3233,35 +3233,33 @@ async fn adapsis_route_dispatch(
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
 
-    // Look up a matching registered route
-    let session = config.session.lock().await;
-    let route = session
-        .runtime
-        .http_routes
-        .iter()
-        .find(|r| r.method == method_str && r.path == path);
+    // Tier 2: look up a matching registered route (brief read lock)
+    let handler_fn = {
+        let rt = config.runtime.read().unwrap();
+        rt.http_routes
+            .iter()
+            .find(|r| r.method == method_str && r.path == path)
+            .map(|r| r.handler_fn.clone())
+    };
 
-    let Some(route) = route else {
+    let Some(handler_fn) = handler_fn else {
         return (StatusCode::NOT_FOUND, format!("no Adapsis route for {method_str} {path}")).into_response();
     };
 
-    let handler_fn = route.handler_fn.clone();
-
-    // Check the handler function exists
-    let func = session.program.get_function(&handler_fn);
-    if func.is_none() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("route handler function `{handler_fn}` not found in program"),
-        )
-            .into_response();
-    }
+    // Tier 1: read program to verify handler exists and clone for eval (brief read lock)
+    let program = {
+        let prog = config.program.read().await;
+        if prog.get_function(&handler_fn).is_none() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("route handler function `{handler_fn}` not found in program"),
+            )
+                .into_response();
+        }
+        prog.clone()
+    };
 
     let body_str = String::from_utf8_lossy(&body).to_string();
-
-    // Clone program and drop the session lock before blocking eval
-    let program = session.program.clone();
-    drop(session);
 
     eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
 
