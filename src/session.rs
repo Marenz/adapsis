@@ -1597,4 +1597,236 @@ mod tests {
         assert!(func.tests.iter().all(|t| t.passed));
         assert!(session.is_function_tested("foo"));
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: SessionMeta serde roundtrip
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn session_meta_serde_roundtrip() {
+        let mut meta = SessionMeta::new();
+        meta.revision = 5;
+        meta.roadmap.push(RoadmapItem { description: "build feature X".to_string(), done: false });
+        meta.plan.push(PlanStep { description: "step 1".to_string(), status: PlanStatus::Pending });
+        meta.chat_messages.push(ChatMessage { role: "user".to_string(), content: "hello".to_string() });
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let restored: SessionMeta = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(restored.revision, 5);
+        assert_eq!(restored.roadmap.len(), 1);
+        assert_eq!(restored.roadmap[0].description, "build feature X");
+        assert_eq!(restored.plan.len(), 1);
+        assert_eq!(restored.chat_messages.len(), 1);
+        // library_state is #[serde(skip)] — should be None after roundtrip
+        assert!(restored.library_state.is_none());
+    }
+
+    #[test]
+    fn session_serde_flatten_roundtrip() {
+        let mut session = Session::new();
+        session.meta.revision = 3;
+        session.meta.roadmap.push(RoadmapItem { description: "test".to_string(), done: true });
+
+        let json = serde_json::to_string(&session).expect("serialize");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize");
+
+        // With #[serde(flatten)], meta fields appear at the top level in JSON
+        assert_eq!(restored.meta.revision, 3);
+        assert_eq!(restored.meta.roadmap.len(), 1);
+        assert!(restored.meta.roadmap[0].done);
+        // sandbox is #[serde(skip)] — should be None
+        assert!(restored.sandbox.is_none());
+    }
+
+    #[test]
+    fn session_serde_flatten_fields_at_top_level() {
+        let mut session = Session::new();
+        session.meta.revision = 7;
+        let json = serde_json::to_string(&session).expect("serialize");
+        // With flatten, "revision" should be a top-level key, not nested under "meta"
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("revision").is_some(), "revision should be top-level: {json}");
+        assert!(v.get("meta").is_none(), "meta should not be a separate key: {json}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: AgentBranch fork/merge
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn agent_branch_fork_creates_independent_program() {
+        let mut session = Session::new();
+        session.apply("+fn greet ()->String\n  +return \"hello\"\n").unwrap();
+        assert!(session.program.get_function("greet").is_some());
+
+        let branch = AgentBranch::fork("test-agent", AgentScope::Full, "add a function", &session);
+        assert!(branch.program.get_function("greet").is_some());
+        assert_eq!(branch.fork_revision, session.meta.revision);
+        assert!(branch.mutations.is_empty());
+    }
+
+    #[test]
+    fn agent_branch_mutation_independent() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+
+        let mut branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        branch.apply("+fn new_fn ()->Int\n  +return 2\n").unwrap();
+
+        // Branch has the new function, session doesn't
+        assert!(branch.program.get_function("new_fn").is_some());
+        assert!(session.program.get_function("new_fn").is_none());
+    }
+
+    #[test]
+    fn agent_branch_merge_applies_mutations() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+
+        let mut branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        branch.apply("+fn added ()->Int\n  +return 42\n").unwrap();
+
+        let conflicts = branch.merge_into(&mut session);
+        assert!(conflicts.is_empty(), "expected no conflicts, got: {conflicts:?}");
+        assert!(session.program.get_function("added").is_some());
+    }
+
+    #[test]
+    fn agent_branch_fork_isolates_runtime() {
+        let mut session = Session::new();
+        session.runtime.shared_vars.insert("key".to_string(), crate::eval::Value::Int(10));
+
+        let branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        assert!(matches!(
+            branch.runtime_state.shared_vars.get("key"),
+            Some(crate::eval::Value::Int(10))
+        ));
+
+        // Mutating session runtime doesn't affect branch
+        session.runtime.shared_vars.insert("key".to_string(), crate::eval::Value::Int(99));
+        assert!(matches!(
+            branch.runtime_state.shared_vars.get("key"),
+            Some(crate::eval::Value::Int(10))
+        ), "branch should be unaffected by session mutation");
+    }
+
+    #[test]
+    fn agent_branch_merge_propagates_shared_var_changes() {
+        let mut session = Session::new();
+        session.runtime.shared_vars.insert("counter".to_string(), crate::eval::Value::Int(0));
+
+        let mut branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        // Modify shared var in branch
+        branch.runtime_state.shared_vars.insert("counter".to_string(), crate::eval::Value::Int(5));
+
+        let conflicts = branch.merge_into(&mut session);
+        assert!(conflicts.is_empty());
+        // Session should have the updated value
+        assert!(matches!(
+            session.runtime.shared_vars.get("counter"),
+            Some(crate::eval::Value::Int(5))
+        ));
+    }
+
+    #[test]
+    fn agent_branch_merge_ignores_unchanged_vars() {
+        let mut session = Session::new();
+        session.runtime.shared_vars.insert("stable".to_string(), crate::eval::Value::Int(42));
+
+        let branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        // Don't modify any shared vars
+
+        // Change session's value before merge
+        session.runtime.shared_vars.insert("stable".to_string(), crate::eval::Value::Int(100));
+
+        let conflicts = branch.merge_into(&mut session);
+        assert!(conflicts.is_empty());
+        // Session value should stay at 100 (branch didn't change it)
+        assert!(matches!(
+            session.runtime.shared_vars.get("stable"),
+            Some(crate::eval::Value::Int(100))
+        ));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: !sandbox enter/merge/discard
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn sandbox_enter_and_status() {
+        let mut session = Session::new();
+        // Not in sandbox initially
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Status);
+        assert!(ok);
+        assert!(msg.contains("not in sandbox"));
+
+        // Enter sandbox
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Enter);
+        assert!(ok, "enter should succeed: {msg}");
+        assert!(session.sandbox.is_some());
+
+        // Status should report active
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Status);
+        assert!(ok);
+        assert!(msg.contains("in sandbox mode"));
+    }
+
+    #[test]
+    fn sandbox_double_enter_rejected() {
+        let mut session = Session::new();
+        session.handle_sandbox(&parser::SandboxAction::Enter);
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Enter);
+        assert!(!ok, "double enter should fail");
+        assert!(msg.contains("already in sandbox"));
+    }
+
+    #[test]
+    fn sandbox_merge_keeps_changes() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+        session.handle_sandbox(&parser::SandboxAction::Enter);
+
+        // Add a function while in sandbox
+        session.apply("+fn new_fn ()->Int\n  +return 42\n").unwrap();
+        assert!(session.program.get_function("new_fn").is_some());
+
+        // Merge — changes stay
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Merge);
+        assert!(ok, "merge should succeed: {msg}");
+        assert!(session.sandbox.is_none());
+        assert!(session.program.get_function("new_fn").is_some(), "merged function should persist");
+    }
+
+    #[test]
+    fn sandbox_discard_reverts_changes() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+        let rev_before = session.meta.revision;
+
+        session.handle_sandbox(&parser::SandboxAction::Enter);
+        session.apply("+fn sandbox_fn ()->Int\n  +return 99\n").unwrap();
+        assert!(session.program.get_function("sandbox_fn").is_some());
+
+        // Discard — revert all sandbox changes
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Discard);
+        assert!(ok, "discard should succeed: {msg}");
+        assert!(session.sandbox.is_none());
+        assert!(session.program.get_function("sandbox_fn").is_none(), "discarded function should be gone");
+        assert_eq!(session.meta.revision, rev_before, "revision should be restored");
+    }
+
+    #[test]
+    fn sandbox_merge_without_enter_fails() {
+        let mut session = Session::new();
+        let (_, ok) = session.handle_sandbox(&parser::SandboxAction::Merge);
+        assert!(!ok, "merge without enter should fail");
+    }
+
+    #[test]
+    fn sandbox_discard_without_enter_fails() {
+        let mut session = Session::new();
+        let (_, ok) = session.handle_sandbox(&parser::SandboxAction::Discard);
+        assert!(!ok, "discard without enter should fail");
+    }
 }
