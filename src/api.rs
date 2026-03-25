@@ -1242,9 +1242,15 @@ pub async fn ask(
                 if has_mutations {
                     match session.apply(&code) {
                         Ok(res) => {
-                            // Sync shared vars to the Arc<RwLock> runtime
+                            // Sync all tiers from session after mutation
+                            *config.program.write().await = session.program.clone();
+                            {
+                                let mut meta = config.meta.lock().await;
+                                *meta = session.meta.clone();
+                            }
                             if let Ok(mut rt) = config.runtime.write() {
                                 rt.shared_vars = session.runtime.shared_vars.clone();
+                                rt.http_routes = session.runtime.http_routes.clone();
                             }
                             for (msg, ok) in res {
                                 eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
@@ -1923,30 +1929,43 @@ pub async fn ask_stream(
         };
 
         let mut messages = {
-            let mut session = config_clone.session.lock().await;
-            if session.meta.chat_messages.is_empty() {
-                session.meta.chat_messages.push(crate::session::ChatMessage {
+            // Tier 1: read program briefly for summary
+            let program_summary = {
+                let program = config_clone.program.read().await;
+                crate::validator::program_summary_compact(&program)
+            };
+            // Tier 3: read/write meta briefly for chat history + plan context
+            let mut meta = config_clone.meta.lock().await;
+            if meta.chat_messages.is_empty() {
+                meta.chat_messages.push(crate::session::ChatMessage {
                     role: "system".to_string(), content: system_prompt,
                 });
             }
-            let (plan_ctx, needs_plan) = build_plan_context(&session.meta.plan);
+            let (plan_ctx, needs_plan) = build_plan_context(&meta.plan);
             let plan_hint = if needs_plan {
                 "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
             } else { "" };
             let context = format!("Working directory: {}\n{}{}\nUser: {}{}",
                 config_clone.project_dir,
-                crate::validator::program_summary_compact(&session.program),
+                program_summary,
                 plan_ctx, req.message, plan_hint);
             log_activity(&config_clone.log_file, "user", &context).await;
-            session.meta.chat_messages.push(crate::session::ChatMessage {
+            meta.chat_messages.push(crate::session::ChatMessage {
                 role: "user".to_string(), content: context,
             });
-            session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
+            let msgs = meta.chat_messages.iter().map(|m| match m.role.as_str() {
                 "system" => crate::llm::ChatMessage::system(m.content.clone()),
                 "assistant" => crate::llm::ChatMessage::assistant(&m.content),
                 _ => crate::llm::ChatMessage::user(m.content.clone()),
-            }).collect::<Vec<_>>()
-        };
+            }).collect::<Vec<_>>();
+            // Also sync meta back to session shim so it stays consistent
+            {
+                let mut session = config_clone.session.lock().await;
+                session.meta = meta.clone();
+            }
+            drop(meta);
+            msgs
+        }; // All locks released before LLM call
 
         let max_iterations = config_clone.max_iterations;
         let mut last_context = req.message.clone();
@@ -2105,9 +2124,15 @@ pub async fn ask_stream(
                     if has_mutations {
                         match session.apply(&code) {
                             Ok(res) => {
-                                // Sync shared vars to the Arc<RwLock> runtime
+                                // Sync all tiers from session after mutation
+                                *config_clone.program.write().await = session.program.clone();
+                                {
+                                    let mut meta = config_clone.meta.lock().await;
+                                    *meta = session.meta.clone();
+                                }
                                 if let Ok(mut rt) = config_clone.runtime.write() {
                                     rt.shared_vars = session.runtime.shared_vars.clone();
+                                    rt.http_routes = session.runtime.http_routes.clone();
                                 }
                                 for (msg, ok) in &res {
                                     if !*ok { has_errors = true; }
