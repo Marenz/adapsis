@@ -302,19 +302,19 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
 </code>
 
 ### Inline Expression Eval
-`!eval` also accepts inline expressions (not just function names):
+`!eval` accepts inline expressions — use this instead of creating wrapper functions:
 ```
 !eval 1 + 2                        — arithmetic → 3
-!eval 3 * 4 + 1                    — precedence → 13
 !eval concat("hello", " ", "world") — builtin call → "hello world"
 !eval len("test")                  — builtin call → 4
-!eval 3 > 2                        — comparison → true
-!eval len(concat("a", "b"))        — nested calls → 2
-!eval {name: "alice", age: 25}     — struct literal
-!eval list(1, 2, 3)                — list creation → [1, 2, 3]
-!eval "hello"                      — string literal → "hello"
-!eval 42                           — numeric literal → 42
-!eval true                         — boolean literal → true
+!eval shell_exec("gh issue list")  — IO/async builtin → runs directly
+!eval shell_exec("ls -la")         — no wrapper function needed!
+!eval http_get("http://localhost:3002/api/status") — direct HTTP call
+!eval self_restart()               — system operations
+```
+IMPORTANT: Do NOT create wrapper functions just to call a builtin.
+Bad:  +fn Temp.check() -> String [io,async] / +await r = shell_exec("ls") / +return r
+Good: !eval shell_exec("ls")
 !eval double(5)                    — user function call (if defined)
 ```
 If the argument parses as a complete expression, it is evaluated directly.
