@@ -58,9 +58,17 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            program.functions.push(converted);
+            program.functions.push(std::sync::Arc::new(converted));
             program.rebuild_function_index();
             Ok(msg)
+        }
+        parser::Operation::SharedVar(sv) => {
+            bail!(
+                "+shared `{}` must be inside a module. Use: !module MyModule\\n+shared {}:{} = ...",
+                sv.name,
+                sv.name,
+                format!("{:?}", sv.ty)
+            );
         }
         parser::Operation::Replace(replace) => apply_replace(program, replace),
         parser::Operation::Test(_) => {
@@ -80,6 +88,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::OpenCode(_) => Ok("opencode (handled by orchestrator)".to_string()),
         parser::Operation::Message { .. } => Ok("message (handled by orchestrator)".to_string()),
         parser::Operation::Done => Ok("done (handled by orchestrator)".to_string()),
+        parser::Operation::Sandbox(_) => Ok("sandbox (handled by session)".to_string()),
         parser::Operation::Roadmap(_) => Ok("roadmap (handled by session)".to_string()),
         parser::Operation::Remove(target) => {
             if let Some((mod_name, item_name)) = target.split_once('.') {
@@ -158,57 +167,12 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             }
             bail!("`{target}` not found");
         }
-        parser::Operation::RemoveRoute { method, path } => {
-            let before = program.http_routes.len();
-            let mut removed_handler = None;
-            program.http_routes.retain(|r| {
-                if r.method == *method && r.path == *path {
-                    removed_handler = Some(r.handler_fn.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            if program.http_routes.len() < before {
-                Ok(format!(
-                    "removed route {} {} (was -> `{}`)",
-                    method,
-                    path,
-                    removed_handler.unwrap_or_default()
-                ))
-            } else {
-                bail!("no route found for {} {}", method, path);
-            }
+        parser::Operation::RemoveRoute { .. } => {
+            Ok("route removal (handled by session)".to_string())
         }
         parser::Operation::Mock { .. } => Ok("mock (handled by session)".to_string()),
         parser::Operation::Unmock => Ok("unmock (handled by session)".to_string()),
-        parser::Operation::Route {
-            method,
-            path,
-            handler_fn,
-        } => {
-            // Register or replace an HTTP route in program state
-            let route = ast::HttpRoute {
-                method: method.clone(),
-                path: path.clone(),
-                handler_fn: handler_fn.clone(),
-            };
-            // Replace existing route for same method+path, or add new
-            if let Some(existing) = program
-                .http_routes
-                .iter_mut()
-                .find(|r| r.method == *method && r.path == *path)
-            {
-                let old_fn = existing.handler_fn.clone();
-                existing.handler_fn = handler_fn.clone();
-                Ok(format!(
-                    "updated route {method} {path} -> `{handler_fn}` (was `{old_fn}`)"
-                ))
-            } else {
-                program.http_routes.push(route);
-                Ok(format!("added route {method} {path} -> `{handler_fn}`"))
-            }
-        }
+        parser::Operation::Route { .. } => Ok("route (handled by session)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements at top level — execute immediately (not stored in AST)
         parser::Operation::Let(_)
@@ -228,19 +192,10 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
     }
 }
 
-/// Remove all HTTP routes whose handler_fn matches the given function name.
-/// Returns a list of "METHOD /path" strings for the removed routes.
-fn remove_routes_for_handler(program: &mut ast::Program, handler_name: &str) -> Vec<String> {
-    let mut removed = Vec::new();
-    program.http_routes.retain(|r| {
-        if r.handler_fn == handler_name {
-            removed.push(format!("{} {}", r.method, r.path));
-            false
-        } else {
-            true
-        }
-    });
-    removed
+/// Route cleanup is now handled by Session — validator no longer touches routes.
+/// Returns empty; callers will be updated to use session-level route removal.
+fn remove_routes_for_handler(_program: &mut ast::Program, _handler_name: &str) -> Vec<String> {
+    Vec::new()
 }
 
 fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result<String> {
@@ -253,6 +208,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             types: vec![],
             functions: vec![],
             modules: vec![],
+            shared_vars: vec![],
         });
     }
     let mod_idx = existing_idx.unwrap_or(program.modules.len() - 1);
@@ -296,11 +252,25 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 // Now mutably access module to add/replace function
                 let m = &mut program.modules[mod_idx];
                 if let Some(pos) = m.functions.iter().position(|f| f.name == converted.name) {
-                    m.functions[pos] = converted;
+                    m.functions[pos] = std::sync::Arc::new(converted);
                     replaced_fns += 1;
                 } else {
-                    m.functions.push(converted);
+                    m.functions.push(std::sync::Arc::new(converted));
                     added_fns += 1;
+                }
+            }
+            parser::Operation::SharedVar(sv) => {
+                let converted = ast::SharedVarDecl {
+                    name: sv.name.clone(),
+                    ty: convert_type(&sv.ty)?,
+                    default: convert_expr(&sv.default)?,
+                };
+                let m = &mut program.modules[mod_idx];
+                // Replace existing shared var with same name, or add new
+                if let Some(pos) = m.shared_vars.iter().position(|v| v.name == converted.name) {
+                    m.shared_vars[pos] = converted;
+                } else {
+                    m.shared_vars.push(converted);
                 }
             }
             parser::Operation::Module(nested) => bail!(
@@ -309,7 +279,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 decl.name
             ),
             other => bail!(
-                "unexpected operation in module `{}`: {:?} — only +fn and +type are allowed",
+                "unexpected operation in module `{}`: {:?} — only +fn, +type, and +shared are allowed",
                 decl.name,
                 std::mem::discriminant(other)
             ),
@@ -359,12 +329,14 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 .functions
                 .iter_mut()
                 .find(|f| f.name == fn_name)
+                .map(|f| std::sync::Arc::make_mut(f))
                 .or_else(|| {
                     program
                         .modules
                         .iter_mut()
                         .flat_map(|m| m.functions.iter_mut())
                         .find(|f| f.name == fn_name)
+                        .map(|f| std::sync::Arc::make_mut(f))
                 })
                 .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
             let mut new_body = vec![];
@@ -389,6 +361,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                     .functions
                     .iter_mut()
                     .find(|f| f.name == fn_name)
+                    .map(|f| std::sync::Arc::make_mut(f))
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
                 replace_statement(&mut func.body, stmt_id, &replace.body)?;
                 Ok(format!("replaced `{}`", replace.target))
@@ -405,6 +378,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                     .functions
                     .iter_mut()
                     .find(|f| f.name == fn_name)
+                    .map(|f| std::sync::Arc::make_mut(f))
                     .ok_or_else(|| {
                         anyhow!("function `{fn_name}` not found in module `{mod_name}`")
                     })?;
@@ -435,6 +409,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 .functions
                 .iter_mut()
                 .find(|f| f.name == fn_name)
+                .map(|f| std::sync::Arc::make_mut(f))
                 .ok_or_else(|| anyhow!("function `{fn_name}` not found in module `{mod_name}`"))?;
             replace_statement(&mut func.body, stmt_id, &replace.body)?;
             Ok(format!("replaced `{}`", replace.target))
@@ -1165,6 +1140,7 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
             types: vec![],
             functions: vec![],
             modules: vec![],
+            shared_vars: vec![],
         });
     }
     let target = program
@@ -1188,14 +1164,22 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
     let moved_fn_names: std::collections::HashSet<String> = names.iter().cloned().collect();
 
     for func in &mut program.functions {
-        update_call_sites(&mut func.body, &moved_fn_names, target_module);
+        update_call_sites(
+            &mut std::sync::Arc::make_mut(func).body,
+            &moved_fn_names,
+            target_module,
+        );
     }
     for module in &mut program.modules {
         if module.name == target_module {
             continue;
         }
         for func in &mut module.functions {
-            update_call_sites(&mut func.body, &moved_fn_names, target_module);
+            update_call_sites(
+                &mut std::sync::Arc::make_mut(func).body,
+                &moved_fn_names,
+                target_module,
+            );
         }
     }
 
@@ -1355,16 +1339,7 @@ pub fn program_summary_compact(program: &ast::Program) -> String {
         out.push_str(&format!(" fns=[{}]\n", fns.join(", ")));
     }
 
-    if !program.http_routes.is_empty() {
-        out.push_str("Routes:\n");
-        for route in &program.http_routes {
-            out.push_str(&format!(
-                "  {} {} -> {}\n",
-                route.method, route.path, route.handler_fn
-            ));
-        }
-    }
-
+    // Routes are now in RuntimeState, not Program — use ?routes to see them.
     out.push_str("\nUse ?symbols, ?callers, ?callees, ?deps, ?routes for details.\n");
     out
 }
@@ -1414,4 +1389,356 @@ pub fn program_summary(program: &ast::Program) -> String {
 
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_effect
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_effect_all_valid() {
+        assert_eq!(convert_effect("io").unwrap(), ast::Effect::Io);
+        assert_eq!(convert_effect("mut").unwrap(), ast::Effect::Mut);
+        assert_eq!(convert_effect("fail").unwrap(), ast::Effect::Fail);
+        assert_eq!(convert_effect("async").unwrap(), ast::Effect::Async);
+        assert_eq!(convert_effect("rand").unwrap(), ast::Effect::Rand);
+        assert_eq!(convert_effect("yield").unwrap(), ast::Effect::Yield);
+        assert_eq!(convert_effect("parallel").unwrap(), ast::Effect::Parallel);
+        assert_eq!(convert_effect("unsafe").unwrap(), ast::Effect::Unsafe);
+    }
+
+    #[test]
+    fn convert_effect_case_insensitive() {
+        assert_eq!(convert_effect("IO").unwrap(), ast::Effect::Io);
+        assert_eq!(convert_effect("Async").unwrap(), ast::Effect::Async);
+    }
+
+    #[test]
+    fn convert_effect_invalid() {
+        assert!(convert_effect("invalid_effect").is_err());
+        assert!(convert_effect("").is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_binary_op
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_binary_op_arithmetic() {
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Add),
+            ast::BinaryOp::Add
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Sub),
+            ast::BinaryOp::Sub
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Mul),
+            ast::BinaryOp::Mul
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Div),
+            ast::BinaryOp::Div
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Mod),
+            ast::BinaryOp::Mod
+        );
+    }
+
+    #[test]
+    fn convert_binary_op_comparison() {
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Gt),
+            ast::BinaryOp::GreaterThan
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Lt),
+            ast::BinaryOp::LessThan
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Gte),
+            ast::BinaryOp::GreaterThanOrEqual
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Lte),
+            ast::BinaryOp::LessThanOrEqual
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Eq),
+            ast::BinaryOp::Equal
+        );
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::Neq),
+            ast::BinaryOp::NotEqual
+        );
+    }
+
+    #[test]
+    fn convert_binary_op_logic() {
+        assert_eq!(
+            convert_binary_op(&parser::BinaryOp::And),
+            ast::BinaryOp::And
+        );
+        assert_eq!(convert_binary_op(&parser::BinaryOp::Or), ast::BinaryOp::Or);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_unary_op
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_unary_op_all() {
+        assert_eq!(convert_unary_op(&parser::UnaryOp::Not), ast::UnaryOp::Not);
+        assert_eq!(convert_unary_op(&parser::UnaryOp::Neg), ast::UnaryOp::Neg);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // convert_type
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_type_primitives() {
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Int".into())).unwrap(),
+            ast::Type::Int
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Float".into())).unwrap(),
+            ast::Type::Float
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Bool".into())).unwrap(),
+            ast::Type::Bool
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("String".into())).unwrap(),
+            ast::Type::String
+        );
+        assert_eq!(
+            convert_type(&parser::TypeExpr::Named("Byte".into())).unwrap(),
+            ast::Type::Byte
+        );
+    }
+
+    #[test]
+    fn convert_type_user_struct() {
+        let ty = convert_type(&parser::TypeExpr::Named("User".into())).unwrap();
+        assert_eq!(ty, ast::Type::Struct("User".to_string()));
+    }
+
+    #[test]
+    fn convert_type_list() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![parser::TypeExpr::Named("Int".into())],
+        })
+        .unwrap();
+        assert_eq!(ty, ast::Type::List(Box::new(ast::Type::Int)));
+    }
+
+    #[test]
+    fn convert_type_map() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![
+                parser::TypeExpr::Named("String".into()),
+                parser::TypeExpr::Named("Int".into()),
+            ],
+        })
+        .unwrap();
+        assert_eq!(
+            ty,
+            ast::Type::Map(Box::new(ast::Type::String), Box::new(ast::Type::Int))
+        );
+    }
+
+    #[test]
+    fn convert_type_option() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "Option".into(),
+            args: vec![parser::TypeExpr::Named("Int".into())],
+        })
+        .unwrap();
+        assert_eq!(ty, ast::Type::Option(Box::new(ast::Type::Int)));
+    }
+
+    #[test]
+    fn convert_type_result() {
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "Result".into(),
+            args: vec![parser::TypeExpr::Named("String".into())],
+        })
+        .unwrap();
+        assert_eq!(ty, ast::Type::Result(Box::new(ast::Type::String)));
+    }
+
+    #[test]
+    fn convert_type_nested_generic() {
+        // List<List<Int>>
+        let ty = convert_type(&parser::TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![parser::TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![parser::TypeExpr::Named("Int".into())],
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            ty,
+            ast::Type::List(Box::new(ast::Type::List(Box::new(ast::Type::Int))))
+        );
+    }
+
+    #[test]
+    fn convert_type_wrong_arity() {
+        // List with 0 args
+        assert!(convert_type(&parser::TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![],
+        })
+        .is_err());
+
+        // Map with 1 arg
+        assert!(convert_type(&parser::TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![parser::TypeExpr::Named("Int".into())],
+        })
+        .is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // is_builtin_name
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn is_builtin_name_true() {
+        assert!(is_builtin_name("concat"));
+        assert!(is_builtin_name("len"));
+        assert!(is_builtin_name("http_get"));
+    }
+
+    #[test]
+    fn is_builtin_name_false() {
+        assert!(!is_builtin_name("my_custom_fn"));
+        assert!(!is_builtin_name(""));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // apply_and_validate with types and functions
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn apply_struct_type() {
+        let mut program = ast::Program::default();
+        let ops = parser::parse("+type User = id:Int, name:String").unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(
+            result.is_ok(),
+            "adding struct type should succeed: {:?}",
+            result
+        );
+        assert_eq!(program.types.len(), 1);
+        assert_eq!(program.types[0].name(), "User");
+    }
+
+    #[test]
+    fn apply_union_type() {
+        let mut program = ast::Program::default();
+        let ops = parser::parse("+type Color = Red | Green | Blue").unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok());
+        assert_eq!(program.types.len(), 1);
+        assert_eq!(program.types[0].name(), "Color");
+    }
+
+    #[test]
+    fn apply_function() {
+        let mut program = ast::Program::default();
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(
+            result.is_ok(),
+            "adding function should succeed: {:?}",
+            result
+        );
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].name, "add");
+        assert_eq!(program.functions[0].params.len(), 2);
+    }
+
+    #[test]
+    fn apply_function_with_effects() {
+        let mut program = ast::Program::default();
+        let source = "\
++fn fetch (url:String)->String [io,async]
+  +return url
+";
+        let ops = parser::parse(source).unwrap();
+        apply_and_validate(&mut program, &ops[0]).unwrap();
+        assert_eq!(program.functions[0].effects.len(), 2);
+        assert!(program.functions[0].effects.contains(&ast::Effect::Io));
+        assert!(program.functions[0].effects.contains(&ast::Effect::Async));
+    }
+
+    #[test]
+    fn apply_duplicate_function_updates() {
+        let mut program = ast::Program::default();
+        let source1 = "+fn greet ()->String\n  +return \"hello\"\n";
+        let source2 = "+fn greet ()->String\n  +return \"hi\"\n";
+        let ops1 = parser::parse(source1).unwrap();
+        let ops2 = parser::parse(source2).unwrap();
+        apply_and_validate(&mut program, &ops1[0]).unwrap();
+        assert_eq!(program.functions.len(), 1);
+        // Re-adding same function name — validator either replaces or errors
+        let result = apply_and_validate(&mut program, &ops2[0]);
+        // Either it succeeds (replacing) or errors with "duplicate" — both are valid
+        if result.is_ok() {
+            assert_eq!(program.functions.len(), 1);
+        } else {
+            let err = format!("{}", result.unwrap_err());
+            assert!(
+                err.contains("duplicate"),
+                "expected duplicate error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_module_with_function() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Math
++fn add (a:Int, b:Int)->Int
+  +return a + b
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "adding module should succeed: {:?}", result);
+        assert_eq!(program.modules.len(), 1);
+        assert_eq!(program.modules[0].name, "Math");
+        assert_eq!(program.modules[0].functions.len(), 1);
+    }
+
+    #[test]
+    fn apply_remove_function() {
+        let mut program = ast::Program::default();
+        let fn_ops = parser::parse("+fn greet ()->String\n  +return \"hi\"\n").unwrap();
+        apply_and_validate(&mut program, &fn_ops[0]).unwrap();
+        assert_eq!(program.functions.len(), 1);
+
+        let rm_ops = parser::parse("!remove greet").unwrap();
+        let result = apply_and_validate(&mut program, &rm_ops[0]);
+        assert!(result.is_ok());
+        assert_eq!(program.functions.len(), 0);
+    }
 }

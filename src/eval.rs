@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use crate::ast;
 use crate::compiler::CompiledProgram;
 use crate::parser;
+use crate::vm;
 
 /// Cache for JIT-compiled programs, keyed by session revision.
 /// When the revision matches, the compiled module is reused instead of recompiling.
@@ -21,7 +22,6 @@ pub fn new_jit_cache() -> JitCache {
 #[allow(dead_code)]
 pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
-    StateHandle(std::sync::Arc<std::sync::Mutex<Value>>),
     TaskHandle(crate::coroutine::TaskId),
     Union {
         variant: String,
@@ -84,10 +84,6 @@ impl fmt::Display for Value {
             }
             Value::CoroutineHandle(_) => write!(f, "<coroutine>"),
             Value::TaskHandle(id) => write!(f, "<task:{id}>"),
-            Value::StateHandle(s) => {
-                let val = s.lock().unwrap();
-                write!(f, "<state:{val}>")
-            }
         }
     }
 }
@@ -149,12 +145,52 @@ impl Value {
 /// variable, and lookups walk the stack from top to bottom.
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
+    /// Shared runtime state for +shared variable access.
+    shared_runtime: Option<crate::session::SharedRuntime>,
+    /// Local cache of shared vars (key = "Module.name") for borrow-friendly reads.
+    shared_cache: HashMap<String, Value>,
 }
 
 impl Env {
     pub fn new() -> Self {
-        Self {
+        let mut env = Self {
             scopes: vec![HashMap::new()],
+            shared_runtime: None,
+            shared_cache: HashMap::new(),
+        };
+        // Auto-pick up thread-local SharedRuntime if set
+        SHARED_RUNTIME.with(|rt| {
+            if let Some(rt) = rt.borrow().as_ref() {
+                env.set_runtime(rt.clone());
+            }
+        });
+        env
+    }
+
+    /// Attach shared runtime state for +shared variable access.
+    pub fn set_runtime(&mut self, rt: crate::session::SharedRuntime) {
+        // Pre-populate the local cache from the runtime's current shared_vars.
+        if let Ok(state) = rt.read() {
+            for (key, val) in &state.shared_vars {
+                self.shared_cache.insert(key.clone(), val.clone());
+            }
+        }
+        self.shared_runtime = Some(rt);
+    }
+
+    /// Populate the shared_cache directly from the program's module shared var
+    /// declarations. This is a fallback for when SharedRuntime is not available
+    /// (e.g. in tests or CLI mode). Evaluates each default expression.
+    pub fn populate_shared_from_program(&mut self, program: &ast::Program) {
+        for module in &program.modules {
+            for sv in &module.shared_vars {
+                let key = format!("{}.{}", module.name, sv.name);
+                if !self.shared_cache.contains_key(&key) {
+                    let value = eval_expr_standalone(program, &sv.default)
+                        .unwrap_or(Value::Int(0));
+                    self.shared_cache.insert(key, value);
+                }
+            }
         }
     }
 
@@ -179,8 +215,9 @@ impl Env {
     }
 
     /// Mutate an existing variable: walk scopes top-to-bottom, update the
-    /// first scope that contains `name`. If not found, insert into the top
-    /// scope (same as `set`). Used by `+set`.
+    /// first scope that contains `name`. If not found in local scopes, check
+    /// shared vars (keyed by "Module.name"). If still not found, insert into
+    /// the top scope (same as `set`). Used by `+set`.
     fn set_existing(&mut self, name: &str, value: Value) {
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(name) {
@@ -188,15 +225,49 @@ impl Env {
                 return;
             }
         }
+        // Check shared vars: derive "Module.name" key from current function context
+        if !self.shared_cache.is_empty() {
+            let module_name = FN_NAME_STACK.with(|s| {
+                let stack = s.borrow();
+                stack.last().and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
+            });
+            if let Some(module) = module_name {
+                let key = format!("{module}.{name}");
+                if self.shared_cache.contains_key(&key) {
+                    self.shared_cache.insert(key.clone(), value.clone());
+                    // Write through to runtime
+                    if let Some(rt) = &self.shared_runtime {
+                        if let Ok(mut state) = rt.write() {
+                            state.shared_vars.insert(key, value);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // Not found anywhere — define in current scope
         self.set(name, value);
     }
 
     /// Look up a variable by walking scopes from top to bottom.
+    /// Falls back to shared vars cache (keyed by "Module.name") if not found locally.
     fn get(&self, name: &str) -> Result<&Value> {
         for scope in self.scopes.iter().rev() {
             if let Some(val) = scope.get(name) {
                 return Ok(val);
+            }
+        }
+        // Check shared vars: derive "Module.name" key from current function context
+        if !self.shared_cache.is_empty() {
+            let module_name = FN_NAME_STACK.with(|s| {
+                let stack = s.borrow();
+                stack.last().and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
+            });
+            if let Some(module) = module_name {
+                let key = format!("{module}.{name}");
+                if let Some(val) = self.shared_cache.get(&key) {
+                    return Ok(val);
+                }
             }
         }
         Err(anyhow!("undefined variable `{name}`"))
@@ -336,9 +407,67 @@ pub fn eval_compiled_or_interpreted_cached(
         }
     }
 
+    // Try bytecode VM (middle tier — more complete than JIT, faster than tree-walk)
+    // For async functions, the VM will hit AwaitIo and fall through to the interpreter.
+    if let Ok(result) = try_vm_execute(program, func, input) {
+        return Ok((result, false));
+    }
+
     // Fall back to interpreter
     let result = eval_call_with_input(program, function_name, input)?;
     Ok((result, false))
+}
+
+/// Try to execute a function via the bytecode VM. Returns the formatted result
+/// string on success, or an error to fall through to the tree-walker.
+fn try_vm_execute(
+    program: &ast::Program,
+    func: &ast::FunctionDecl,
+    input: &parser::Expr,
+) -> Result<String> {
+    // Convert input expression to VM argument values
+    let vm_args = input_to_vm_args(input, func)?;
+
+    // Compile to bytecode
+    let compiled = vm::compile_function(func, program)?;
+
+    // Execute with IO support — if the function hits AwaitIo, bail to
+    // let the tree-walker handle it (it has proper coroutine support).
+    let result = vm::execute_with_io(&compiled, vm_args, program, &|op_name, _args| {
+        bail!("VM: sync path cannot perform async IO ({op_name})")
+    })?;
+    Ok(format!("{result}"))
+}
+
+/// Convert a parser expression to a Vec<Value> suitable for VM execution.
+fn input_to_vm_args(input: &parser::Expr, func: &ast::FunctionDecl) -> Result<Vec<Value>> {
+    if func.params.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let input_val = eval_parser_expr_standalone(input)?;
+
+    match input_val {
+        // Struct literal with named fields → extract in param order
+        Value::Struct(_, ref fields) => {
+            let mut args = Vec::new();
+            for param in &func.params {
+                if let Some(val) = fields.get(&param.name) {
+                    args.push(val.clone());
+                } else {
+                    bail!("missing argument for parameter `{}`", param.name);
+                }
+            }
+            Ok(args)
+        }
+        // Empty struct (no args provided) and params exist → error
+        Value::None if !func.params.is_empty() => {
+            bail!("no arguments provided for {} parameter(s)", func.params.len());
+        }
+        // Single value with single param → use directly
+        _ if func.params.len() == 1 => Ok(vec![input_val]),
+        _ => bail!("cannot convert input to VM args for {} parameters", func.params.len()),
+    }
 }
 
 /// Try to convert a parser expression to i64 args for the compiler.
@@ -429,6 +558,12 @@ pub fn eval_call_with_input(
     } else {
         bail!("function `{function_name}` not found (not a user function or builtin)")
     }
+}
+
+/// Evaluate an inline expression directly (not a function call).
+/// Used for `!eval 1 + 2`, `!eval concat("a", "b")`, etc.
+pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<Value> {
+    eval_parser_expr_with_program(expr, program)
 }
 
 /// Evaluate a test case against a function in the program.
@@ -640,7 +775,7 @@ pub fn eval_test_case(
     function_name: &str,
     case: &parser::TestCase,
 ) -> Result<String> {
-    eval_test_case_with_mocks(program, function_name, case, &[])
+    eval_test_case_with_mocks(program, function_name, case, &[], &[])
 }
 
 pub fn eval_test_case_with_mocks(
@@ -648,6 +783,7 @@ pub fn eval_test_case_with_mocks(
     function_name: &str,
     case: &parser::TestCase,
     mocks: &[crate::session::IoMock],
+    http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
@@ -662,27 +798,51 @@ pub fn eval_test_case_with_mocks(
         // Async function: spin up a temporary coroutine runtime so +await
         // operations execute through real IO (with mock fallback if provided).
         // This avoids "requires async context" and "no mock for ..." errors.
-        return eval_test_case_with_runtime(program, function_name, case, mocks);
+        return eval_test_case_with_runtime(program, function_name, case, mocks, http_routes);
     }
 
     let input = eval_parser_expr_with_program(&case.input, program)?;
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
     let mut env = Env::new();
+    env.populate_shared_from_program(program);
     bind_input_to_params(program, func, &input, &mut env);
 
-    // Execute function body
-    let result = eval_function_body(program, &func.body, &mut env);
+    // Execute function body (use named variant so FN_NAME_STACK has the qualified name
+    // for shared variable resolution in Env::get())
+    let result = eval_function_body_named(program, function_name, &func.body, &mut env);
 
     let msg = check_test_result(result, &func.return_type, &input, &expected, case.matcher.as_ref())?;
 
     // Check +after assertions (sync path — program is immutable here, so
     // after_checks on routes/modules work; tasks/mocks not applicable in sync)
     for after in &case.after_checks {
-        check_after(program, after, None)?;
+        check_after(program, after, None, http_routes)?;
     }
 
     Ok(msg)
+}
+
+/// Create a forked RuntimeState for test isolation.
+/// Populates shared_vars from program defaults and includes the given HTTP routes.
+/// Returns a SharedRuntime (Arc<RwLock<RuntimeState>>) suitable for set_shared_runtime.
+fn fork_runtime_for_test(
+    program: &ast::Program,
+    http_routes: &[ast::HttpRoute],
+) -> Option<crate::session::SharedRuntime> {
+    let mut shared_vars = HashMap::new();
+    for module in &program.modules {
+        for sv in &module.shared_vars {
+            let key = format!("{}.{}", module.name, sv.name);
+            let value = eval_expr_standalone(program, &sv.default).unwrap_or(Value::Int(0));
+            shared_vars.insert(key, value);
+        }
+    }
+    let forked = crate::session::RuntimeState {
+        http_routes: http_routes.to_vec(),
+        shared_vars,
+    };
+    Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }
 
 /// Run a test case for an async function by spinning up a temporary coroutine
@@ -692,6 +852,7 @@ fn eval_test_case_with_runtime(
     function_name: &str,
     case: &parser::TestCase,
     mocks: &[crate::session::IoMock],
+    http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
@@ -705,11 +866,16 @@ fn eval_test_case_with_runtime(
     let mocks = mocks.to_vec();
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
+    let routes = http_routes.to_vec();
+    let forked_runtime = fork_runtime_for_test(&program, http_routes);
 
     // Spin up a temporary tokio runtime + coroutine IO loop on a dedicated
     // thread.  This works whether or not the caller is already inside a tokio
     // runtime (nested block_on is not allowed, so we always use a fresh thread).
     std::thread::spawn(move || {
+        // Use a forked RuntimeState for test isolation — shared vars are fresh
+        // copies from program defaults, not the live runtime.
+        set_shared_runtime(forked_runtime);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -740,6 +906,7 @@ fn eval_test_case_with_runtime(
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
                 let mut env = Env::new();
+                env.populate_shared_from_program(&program);
 
                 // Create handle: mocks checked first, unmatched ops use real IO.
                 let handle = if mocks.is_empty() {
@@ -755,7 +922,7 @@ fn eval_test_case_with_runtime(
 
                 // Check +after assertions
                 for after in &after_checks {
-                    check_after(&program, after, None)?;
+                    check_after(&program, after, None, &routes)?;
                 }
 
                 Ok::<String, anyhow::Error>(msg)
@@ -782,6 +949,7 @@ pub async fn eval_test_case_async(
     case: &parser::TestCase,
     mocks: &[crate::session::IoMock],
     io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+    http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
     let func = program
         .get_function(function_name)
@@ -794,7 +962,7 @@ pub async fn eval_test_case_async(
 
     // If the function isn't async, delegate to the sync path
     if !has_async {
-        return eval_test_case_with_mocks(program, function_name, case, mocks);
+        return eval_test_case_with_mocks(program, function_name, case, mocks, http_routes);
     }
 
     let input = eval_parser_expr_with_program(&case.input, program)?;
@@ -807,13 +975,20 @@ pub async fn eval_test_case_async(
     let mocks = mocks.to_vec();
     let matcher = case.matcher.clone();
     let after_checks = case.after_checks.clone();
+    let routes = http_routes.to_vec();
+    let forked_rt = fork_runtime_for_test(&program, http_routes);
 
     let eval_result = tokio::task::spawn_blocking(move || {
+        // Use a forked RuntimeState for test isolation — shared vars are fresh
+        // copies from program defaults, not the live runtime.
+        set_shared_runtime(forked_rt);
+
         let func = program
             .get_function(&fn_name)
             .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
         let mut env = Env::new();
+        env.populate_shared_from_program(&program);
 
         // Create handle: mocks are checked first, unmatched ops fall through
         // to real IO via the sender.
@@ -831,7 +1006,7 @@ pub async fn eval_test_case_async(
 
         // Check +after assertions
         for after in &after_checks {
-            check_after(&program, after, None)?;
+            check_after(&program, after, None, &routes)?;
         }
 
         Ok::<String, anyhow::Error>(msg)
@@ -924,18 +1099,19 @@ fn check_after(
     program: &ast::Program,
     after: &parser::AfterCheck,
     mocks: Option<&[crate::session::IoMock]>,
+    http_routes: &[ast::HttpRoute],
 ) -> Result<()> {
     match after.target.as_str() {
         "routes" => {
             match after.matcher.as_str() {
                 "contains" => {
-                    let found = program.http_routes.iter().any(|r| {
+                    let found = http_routes.iter().any(|r| {
                         r.path.contains(&after.value) || r.handler_fn.contains(&after.value)
                     });
                     if !found {
                         bail!("+after routes contains \"{}\": no matching route found (routes: {:?})",
                             after.value,
-                            program.http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
+                            http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
                     }
                 }
                 other => bail!("+after routes: unknown matcher `{other}` (expected `contains`)"),
@@ -989,6 +1165,13 @@ pub fn eval_function_body_pub(
     env: &mut Env,
 ) -> Result<Value> {
     eval_function_body(program, body, env)
+}
+
+/// Evaluate an AST expression in isolation (no function context).
+/// Used for evaluating +shared variable default values like `0`, `""`, `true`.
+pub fn eval_expr_standalone(program: &ast::Program, expr: &ast::Expr) -> Result<Value> {
+    let mut env = Env::new();
+    eval_ast_expr(program, expr, &mut env)
 }
 
 /// Public entry point that also sets the top-level function name for snapshot tracking.
@@ -1345,6 +1528,15 @@ std::thread_local! {
     static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Stack of function names for the current call chain (used by task snapshots).
     static FN_NAME_STACK: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Thread-local SharedRuntime so newly-created Env instances automatically
+    /// have access to +shared variables without explicit plumbing.
+    static SHARED_RUNTIME: std::cell::RefCell<Option<crate::session::SharedRuntime>> = std::cell::RefCell::new(None);
+}
+
+/// Set the thread-local SharedRuntime for +shared variable access.
+/// Call this before any eval functions that need shared variable support.
+pub fn set_shared_runtime(rt: Option<crate::session::SharedRuntime>) {
+    SHARED_RUNTIME.with(|s| *s.borrow_mut() = rt);
 }
 
 const MAX_CALL_DEPTH: usize = 256;
@@ -1388,7 +1580,7 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
     eval_builtin_or_user(program, &call.callee, args, env)
 }
 
-fn eval_builtin_or_user(
+pub fn eval_builtin_or_user(
     program: &ast::Program,
     callee: &str,
     args: Vec<Value>,
@@ -1727,41 +1919,6 @@ fn eval_builtin_or_user(
                     Ok(Value::String(parts.join(delim)))
                 }
                 _ => bail!("join expects (List, String)"),
-            }
-        }
-        // Shared state operations
-        "state" => {
-            // state(initial_value) → StateHandle
-            if args.len() != 1 {
-                bail!("state(initial_value) expects 1 argument");
-            }
-            Ok(Value::StateHandle(std::sync::Arc::new(
-                std::sync::Mutex::new(args.into_iter().next().unwrap()),
-            )))
-        }
-        "get_state" => {
-            if args.len() != 1 {
-                bail!("get_state(handle) expects 1 argument");
-            }
-            match &args[0] {
-                Value::StateHandle(s) => {
-                    let val = s.lock().unwrap().clone();
-                    Ok(val)
-                }
-                _ => bail!("get_state expects a StateHandle"),
-            }
-        }
-        "set_state" => {
-            if args.len() != 2 {
-                bail!("set_state(handle, value) expects 2 arguments");
-            }
-            match &args[0] {
-                Value::StateHandle(s) => {
-                    let mut guard = s.lock().unwrap();
-                    *guard = args[1].clone();
-                    Ok(Value::Int(0))
-                }
-                _ => bail!("set_state expects (StateHandle, value)"),
             }
         }
         "abs" => {
@@ -2322,6 +2479,19 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                 }
                 return eval_function_body(program, &func.body, &mut env);
             }
+            // Try as builtin function (concat, len, to_string, etc.)
+            // Skip Ok/Err/Some/None — these are handled by eval_parser_expr_standalone
+            // with special parser-level semantics (e.g. Err(bare_ident) as error labels).
+            if crate::builtins::is_builtin(&name)
+                && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+            {
+                let eval_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_program(a, program))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut env = Env::new();
+                return eval_builtin_or_user(program, &name, eval_args, &mut env);
+            }
             // Fall through to standalone (handles union constructors, Ok, Err)
             eval_parser_expr_standalone(expr)
         }
@@ -2659,6 +2829,46 @@ fn trace_body(
     None
 }
 
+/// Try to execute a function via the bytecode VM.
+/// Returns `Some(Ok(val))` on success, `None` if the VM can't handle it
+/// (compilation error or async suspension), allowing the tree-walker to
+/// take over as fallback. Optionally accepts a CoroutineHandle for async IO.
+pub fn try_vm_eval(
+    func: &ast::FunctionDecl,
+    args: &[Value],
+    program: &ast::Program,
+) -> Option<Result<Value>> {
+    let compiled = match vm::compile_function(func, program) {
+        Ok(c) => c,
+        Err(_) => return None, // VM can't compile → fall back
+    };
+    // Use execute_with_io — for sync callers, IO operations cause fallback
+    match vm::execute_with_io(&compiled, args.to_vec(), program, &|op, _| {
+        bail!("VM: async IO ({op}) not available in sync context")
+    }) {
+        Ok(val) => Some(Ok(val)),
+        Err(_) => None, // any error → fall back
+    }
+}
+
+/// Try to execute a function via the bytecode VM with async IO support.
+/// The io_handler performs IO operations when the VM suspends.
+pub fn try_vm_eval_async(
+    func: &ast::FunctionDecl,
+    args: &[Value],
+    program: &ast::Program,
+    io_handler: &dyn Fn(&str, &[Value]) -> Result<Value>,
+) -> Option<Result<Value>> {
+    let compiled = match vm::compile_function(func, program) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    match vm::execute_with_io(&compiled, args.to_vec(), program, io_handler) {
+        Ok(val) => Some(Ok(val)),
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2769,7 +2979,7 @@ mod tests {
             patterns: vec!["example.com".to_string()],
             response: "hello".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "async test with mock should pass: {:?}", result);
     }
 
@@ -2817,7 +3027,7 @@ mod tests {
             patterns: vec!["example.com".to_string()],
             response: "world".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "io test with mock should pass: {:?}", result);
     }
 
@@ -2844,7 +3054,7 @@ mod tests {
             patterns: vec!["1000".to_string()],
             response: "".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "sleep mock test should pass: {:?}", result);
     }
 
@@ -2875,7 +3085,7 @@ mod tests {
             patterns: vec!["api.test.com".to_string()],
             response: "nested_ok".to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "nested async call should pass: {:?}", result);
     }
 
@@ -2906,7 +3116,7 @@ mod tests {
             patterns: vec!["api.example.com".to_string()],
             response: r#"{"name":"alice","age":30}"#.to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "json_get on mock JSON should pass: {:?}", result);
     }
 
@@ -2933,7 +3143,7 @@ mod tests {
             patterns: vec!["api.example.com".to_string()],
             response: r#"[1,2,3]"#.to_string(),
         }];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "json_array_len on mock JSON should pass: {:?}", result);
     }
 
@@ -2976,7 +3186,7 @@ mod tests {
         let cases = extract_test_cases(test_source);
         let (fn_name, case) = &cases[0];
 
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
         assert!(result.is_ok(), "end-to-end mock JSON test should pass: {:?}", result);
     }
 
@@ -3013,7 +3223,7 @@ mod tests {
         for test in &test_ops {
             for case in &test.cases {
                 results.push(eval_test_case_with_mocks(
-                    &program, &test.function_name, case, &io_mocks,
+                    &program, &test.function_name, case, &io_mocks, &[],
                 ));
             }
         }
@@ -3124,7 +3334,7 @@ mod tests {
         }];
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let result = eval_test_case_async(&program, fn_name, case, &mocks, tx).await;
+        let result = eval_test_case_async(&program, fn_name, case, &mocks, tx, &[]).await;
         assert!(result.is_ok(), "async test case should pass: {:?}", result);
     }
 
@@ -3204,7 +3414,7 @@ mod tests {
         let (fn_name, case) = &cases[0];
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let result = eval_test_case_async(&program, fn_name, case, &[], tx).await;
+        let result = eval_test_case_async(&program, fn_name, case, &[], tx, &[]).await;
         assert!(result.is_ok(), "sync function via async path should pass: {:?}", result);
     }
 
@@ -3395,7 +3605,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "zero-arg function call as param value should work: {:?}", result);
         assert!(result.unwrap().contains("expected \"localhost\""));
     }
@@ -3420,7 +3630,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "bare function name as param value should call function: {:?}", result);
         assert!(result.unwrap().contains("expected \"localhost\""));
     }
@@ -3444,7 +3654,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "function call with args as param value: {:?}", result);
         assert!(result.unwrap().contains("expected 3000"));
     }
@@ -3468,7 +3678,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "function call in expected value: {:?}", result);
         assert!(result.unwrap().contains("expected"));
     }
@@ -3542,7 +3752,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "+with positional strings: {:?}", result);
         assert!(result.unwrap().contains("expected \"helloworld\""));
     }
@@ -3559,6 +3769,229 @@ mod tests {
         let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
         assert!(result.is_ok(), "builtin positional strings: {:?}", result);
         assert_eq!(result.unwrap().0, "\"foobar\"");
+    }
+
+    // ── Inline expression eval (!eval <expr>) ─────────────────────────
+
+    #[test]
+    fn test_eval_inline_arithmetic() {
+        let program = ast::Program::default();
+        let source = "!eval 1 + 2";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some(), "should be inline expression");
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 1+2: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "3");
+    }
+
+    #[test]
+    fn test_eval_inline_multiply_add() {
+        let program = ast::Program::default();
+        let source = "!eval 3 * 4 + 1";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 3*4+1: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "13");
+    }
+
+    #[test]
+    fn test_eval_inline_string_literal() {
+        let program = ast::Program::default();
+        let source = r#"!eval "hello""#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline string: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "\"hello\"");
+    }
+
+    #[test]
+    fn test_eval_inline_numeric_literal() {
+        let program = ast::Program::default();
+        let source = "!eval 42";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 42: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "42");
+    }
+
+    #[test]
+    fn test_eval_inline_boolean() {
+        let program = ast::Program::default();
+        let source = "!eval true";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline true: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "true");
+    }
+
+    #[test]
+    fn test_eval_inline_comparison() {
+        let program = ast::Program::default();
+        let source = "!eval 3 > 2";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 3>2: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "true");
+    }
+
+    #[test]
+    fn test_eval_inline_concat_call() {
+        let program = ast::Program::default();
+        let source = r#"!eval concat("hello", " ", "world")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline concat: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "\"hello world\"");
+    }
+
+    #[test]
+    fn test_eval_inline_len_call() {
+        let program = ast::Program::default();
+        let source = r#"!eval len("hello")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline len: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "5");
+    }
+
+    #[test]
+    fn test_eval_inline_nested_calls() {
+        let program = ast::Program::default();
+        let source = r#"!eval len(concat("a", "b"))"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline nested calls: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "2");
+    }
+
+    #[test]
+    fn test_eval_inline_struct_literal() {
+        let program = ast::Program::default();
+        let source = r#"!eval {name: "alice", age: 25}"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline struct: {:?}", result);
+        let val = result.unwrap();
+        // Struct should contain the fields
+        match val {
+            Value::Struct(_, fields) => {
+                assert!(matches!(fields.get("name"), Some(Value::String(s)) if s == "alice"), "expected name=alice");
+                assert!(matches!(fields.get("age"), Some(Value::Int(25))), "expected age=25");
+            }
+            _ => panic!("expected struct, got {val}"),
+        }
+    }
+
+    #[test]
+    fn test_eval_inline_list_creation() {
+        let program = ast::Program::default();
+        let source = "!eval list(1, 2, 3)";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline list: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_eval_inline_user_function_call() {
+        // Inline expression calling a user-defined function
+        let source = "\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = "!eval double(5)";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline user fn call: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "10");
+    }
+
+    #[test]
+    fn test_eval_func_name_still_works() {
+        // Existing !eval func_name syntax should still work
+        let source = "\
++fn greet ()->String
+  +return \"hello\"
+";
+        let program = build_program(source);
+        let eval_source = "!eval greet";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_none(), "bare function name should not be inline");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "bare function name: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"hello\"");
+    }
+
+    #[test]
+    fn test_eval_func_with_args_still_works() {
+        // Existing !eval func_name arg1 arg2 syntax should still work
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let result:Int = a + b
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = "!eval add 3 4";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_none(), "func + args should not be inline");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "func with args: {:?}", result);
+        assert_eq!(result.unwrap().0, "7");
     }
 
     // ── Side-effect checks for function calls in test params ──────────
@@ -3584,7 +4017,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_err(), "impure function should be rejected: {:?}", result);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("side effects"), "error should mention side effects: {err}");
@@ -3611,7 +4044,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_err(), "impure function call should be rejected: {:?}", result);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("side effects"), "error should mention side effects: {err}");
@@ -3637,7 +4070,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "[fail] function should be allowed in test params: {:?}", result);
         assert!(result.unwrap().contains("expected \"localhost\""));
     }
@@ -3657,7 +4090,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "escaped quotes in key=value string: {:?}", result);
     }
 
@@ -3675,7 +4108,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "escaped quotes in multiple args: {:?}", result);
     }
 
@@ -3691,7 +4124,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "newline escape in test value: {:?}", result);
     }
 
@@ -3713,7 +4146,7 @@ mod tests {
 ";
         let cases = extract_test_cases(test_source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "should fail when IO builtin used without +await");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("async IO operation"), "error should mention async IO: {err}");
@@ -3741,7 +4174,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "+return inside +each should propagate: {:?}", result);
     }
 
@@ -3765,7 +4198,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         assert_eq!(cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &cases[0].0, &cases[0].1, &[], &[]);
         assert!(result.is_ok(), "+let with field access in +each: {:?}", result);
     }
 
@@ -3775,7 +4208,6 @@ mod tests {
     fn test_format_expr_struct_with_list_roundtrip() {
         // Bug: format_expr produced `messages=list()last_id=0` (missing separator)
         // for struct fields containing function calls, causing reparse failure.
-        use crate::session::StoredTestCase;
 
         let source = "\
 +type State = {messages:List<String>, last_id:Int}
@@ -3795,7 +4227,7 @@ mod tests {
         let (fn_name, case) = &cases[0];
 
         // First, verify the test passes directly
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "direct test should pass: {:?}", result);
 
         // Now simulate the store/reparse cycle that invalidate_and_retest does
@@ -3812,7 +4244,7 @@ mod tests {
         // And the reparsed test should pass
         let reparsed_cases = extract_test_cases(&reconstructed);
         assert_eq!(reparsed_cases.len(), 1);
-        let result = eval_test_case_with_mocks(&program, &reparsed_cases[0].0, &reparsed_cases[0].1, &[]);
+        let result = eval_test_case_with_mocks(&program, &reparsed_cases[0].0, &reparsed_cases[0].1, &[], &[]);
         assert!(result.is_ok(), "reparsed test should pass: {:?}", result);
     }
 
@@ -3832,7 +4264,7 @@ mod tests {
         assert_eq!(cases.len(), 1);
         let (fn_name, case) = &cases[0];
         assert!(case.matcher.is_some(), "should have a matcher");
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "contains matcher should pass: {:?}", result);
     }
 
@@ -3848,7 +4280,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "contains matcher should fail when substring absent");
     }
 
@@ -3864,7 +4296,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "starts_with matcher should pass: {:?}", result);
     }
 
@@ -3880,7 +4312,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "starts_with matcher should fail on wrong prefix");
     }
 
@@ -3898,7 +4330,7 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert!(matches!(case.matcher, Some(parser::TestMatcher::AnyOk)));
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "AnyOk matcher should pass for Ok result: {:?}", result);
     }
 
@@ -3915,7 +4347,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "AnyOk matcher should fail on Err result");
     }
 
@@ -3933,7 +4365,7 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert!(matches!(case.matcher, Some(parser::TestMatcher::AnyErr)));
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "AnyErr matcher should pass for Err result: {:?}", result);
     }
 
@@ -3950,7 +4382,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "AnyErr matcher should fail on Ok result");
     }
 
@@ -3968,7 +4400,7 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert!(matches!(case.matcher, Some(parser::TestMatcher::ErrContaining(_))));
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "ErrContaining matcher should pass: {:?}", result);
     }
 
@@ -3985,7 +4417,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "ErrContaining should fail on wrong message");
     }
 
@@ -4012,7 +4444,13 @@ mod tests {
         assert_eq!(case.after_checks[0].target, "routes");
         assert_eq!(case.after_checks[0].value, "/chat");
 
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        // Routes are now in RuntimeState, pass them explicitly
+        let routes = vec![crate::ast::HttpRoute {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            handler_fn: "handler".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &routes);
         assert!(result.is_ok(), "+after routes should pass: {:?}", result);
     }
 
@@ -4030,7 +4468,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "+after routes should fail when route missing");
     }
 
@@ -4049,7 +4487,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "+after modules should pass: {:?}", result);
     }
 
@@ -4066,7 +4504,7 @@ mod tests {
         let program = build_program(source);
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_err(), "+after modules should fail when module missing");
     }
 
@@ -4088,7 +4526,12 @@ mod tests {
         let (fn_name, case) = &cases[0];
         assert!(case.matcher.is_some());
         assert_eq!(case.after_checks.len(), 1);
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let routes = vec![crate::ast::HttpRoute {
+            method: "GET".to_string(),
+            path: "/api".to_string(),
+            handler_fn: "handler".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &routes);
         assert!(result.is_ok(), "matcher + after should pass: {:?}", result);
     }
 
@@ -4111,7 +4554,12 @@ mod tests {
         let cases = extract_test_cases(source);
         let (fn_name, case) = &cases[0];
         assert_eq!(case.after_checks.len(), 2);
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let routes = vec![crate::ast::HttpRoute {
+            method: "POST".to_string(),
+            path: "/webhook".to_string(),
+            handler_fn: "handler".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &routes);
         assert!(result.is_ok(), "multiple +after checks should pass: {:?}", result);
     }
 
@@ -4131,7 +4579,1179 @@ mod tests {
         let (fn_name, case) = &cases[0];
         // No matcher — this is the old exact match behavior
         assert!(case.matcher.is_none(), "Err(bare_ident) should not create a matcher");
-        let result = eval_test_case_with_mocks(&program, fn_name, case, &[]);
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "exact Err match should still work: {:?}", result);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Inline expression helpers for builtin/arithmetic tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// Evaluate an inline expression string and return the formatted result.
+    fn eval_expr_str(program: &ast::Program, expr_text: &str) -> String {
+        let expr = parser::parse_expr_pub(0, expr_text)
+            .unwrap_or_else(|e| panic!("parse failed for `{expr_text}`: {e}"));
+        let val = eval_inline_expr(program, &expr)
+            .unwrap_or_else(|e| panic!("eval failed for `{expr_text}`: {e}"));
+        format!("{val}")
+    }
+
+    /// Evaluate and return the raw Value (for type-specific assertions).
+    fn eval_expr_val(program: &ast::Program, expr_text: &str) -> Value {
+        let expr = parser::parse_expr_pub(0, expr_text)
+            .unwrap_or_else(|e| panic!("parse failed for `{expr_text}`: {e}"));
+        eval_inline_expr(program, &expr)
+            .unwrap_or_else(|e| panic!("eval failed for `{expr_text}`: {e}"))
+    }
+
+    /// Evaluate a full program and return the result of eval'ing a function.
+    /// Uses interpreter-only path to avoid JIT crashes in test context.
+    fn eval_fn_result(source: &str, fn_name: &str, input: &str) -> String {
+        let program = build_program(source);
+        let input_expr = if input.is_empty() {
+            parser::Expr::StructLiteral(vec![])
+        } else {
+            parser::parse_test_input(0, input).expect("parse input failed")
+        };
+        eval_call_with_input(&program, fn_name, &input_expr)
+            .unwrap_or_else(|e| panic!("eval `{fn_name}` failed: {e}"))
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Arithmetic operations (+, -, *, /, %)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn arith_subtraction() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "10 - 3"), "7");
+    }
+
+    #[test]
+    fn arith_division() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "10 / 3"), "3");
+    }
+
+    #[test]
+    fn arith_modulo() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "10 % 3"), "1");
+    }
+
+    #[test]
+    fn arith_negative_result() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "3 - 10"), "-7");
+    }
+
+    #[test]
+    fn arith_compound_precedence() {
+        let p = ast::Program::default();
+        // (2 * 3) + (10 / 5) - 1 = 6 + 2 - 1 = 7
+        assert_eq!(eval_expr_str(&p, "2 * 3 + 10 / 5 - 1"), "7");
+    }
+
+    #[test]
+    fn arith_float_basic() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, "3.5 + 1.5");
+        match val {
+            Value::Float(f) => assert!((f - 5.0).abs() < 1e-10),
+            _ => panic!("expected Float, got {val}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Comparison and boolean logic
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn cmp_less_than() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "2 < 5"), "true");
+        assert_eq!(eval_expr_str(&p, "5 < 2"), "false");
+    }
+
+    #[test]
+    fn cmp_gte_lte() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "5 >= 5"), "true");
+        assert_eq!(eval_expr_str(&p, "5 <= 5"), "true");
+        assert_eq!(eval_expr_str(&p, "4 >= 5"), "false");
+        assert_eq!(eval_expr_str(&p, "6 <= 5"), "false");
+    }
+
+    #[test]
+    fn cmp_eq_neq() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "42 == 42"), "true");
+        assert_eq!(eval_expr_str(&p, "42 != 42"), "false");
+        assert_eq!(eval_expr_str(&p, "42 != 43"), "true");
+    }
+
+    #[test]
+    fn bool_and_or_not() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "true AND true"), "true");
+        assert_eq!(eval_expr_str(&p, "true AND false"), "false");
+        assert_eq!(eval_expr_str(&p, "false OR true"), "true");
+        assert_eq!(eval_expr_str(&p, "false OR false"), "false");
+        assert_eq!(eval_expr_str(&p, "NOT true"), "false");
+        assert_eq!(eval_expr_str(&p, "NOT false"), "true");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Builtin function calls
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_split() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"split("a,b,c", ",")"#), r#"["a", "b", "c"]"#);
+    }
+
+    #[test]
+    fn builtin_join() {
+        let p = ast::Program::default();
+        // join uses Display format for list items — strings include quotes
+        assert_eq!(eval_expr_str(&p, "join(list(1, 2, 3), \"-\")"), r#""1-2-3""#);
+    }
+
+    #[test]
+    fn builtin_trim() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"trim("  hello  ")"#), r#""hello""#);
+    }
+
+    #[test]
+    fn builtin_to_string() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "to_string(42)"), r#""42""#);
+        assert_eq!(eval_expr_str(&p, "to_string(true)"), r#""true""#);
+    }
+
+    #[test]
+    fn builtin_to_int() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"to_int("42")"#), "42");
+        assert_eq!(eval_expr_str(&p, "to_int(3.7)"), "3");
+        assert_eq!(eval_expr_str(&p, "to_int(true)"), "1");
+    }
+
+    #[test]
+    fn builtin_push_and_get() {
+        let p = ast::Program::default();
+        // push returns a new list
+        assert_eq!(eval_expr_str(&p, "push(list(1, 2), 3)"), "[1, 2, 3]");
+        // get returns element at index
+        assert_eq!(eval_expr_str(&p, "get(list(10, 20, 30), 1)"), "20");
+    }
+
+    #[test]
+    fn builtin_char_at() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"char_at("hello", 0)"#), r#""h""#);
+        assert_eq!(eval_expr_str(&p, r#"char_at("hello", 4)"#), r#""o""#);
+    }
+
+    #[test]
+    fn builtin_substring() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"substring("hello world", 0, 5)"#), r#""hello""#);
+        assert_eq!(eval_expr_str(&p, r#"substring("hello world", 6, 11)"#), r#""world""#);
+    }
+
+    #[test]
+    fn builtin_starts_with_ends_with() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"starts_with("hello", "hel")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"starts_with("hello", "xyz")"#), "false");
+        assert_eq!(eval_expr_str(&p, r#"ends_with("hello", "llo")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"ends_with("hello", "xyz")"#), "false");
+    }
+
+    #[test]
+    fn builtin_contains() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"contains("hello world", "world")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"contains("hello world", "xyz")"#), "false");
+    }
+
+    #[test]
+    fn builtin_index_of() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"index_of("hello", "ll")"#), "2");
+        assert_eq!(eval_expr_str(&p, r#"index_of("hello", "xyz")"#), "-1");
+    }
+
+    #[test]
+    fn builtin_abs() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "abs(5)"), "5");
+    }
+
+    #[test]
+    fn builtin_min_max() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "min(3, 7)"), "3");
+        assert_eq!(eval_expr_str(&p, "max(3, 7)"), "7");
+    }
+
+    #[test]
+    fn builtin_floor() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "floor(3.7)"), "3");
+        assert_eq!(eval_expr_str(&p, "floor(3.2)"), "3");
+    }
+
+    #[test]
+    fn builtin_pow() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "pow(2, 10)"), "1024");
+    }
+
+    #[test]
+    fn builtin_len_on_list() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "len(list(1, 2, 3))"), "3");
+        assert_eq!(eval_expr_str(&p, "len(list())"), "0");
+    }
+
+    #[test]
+    fn builtin_base64_encode() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"base64_encode("hello")"#), r#""aGVsbG8=""#);
+    }
+
+    #[test]
+    fn builtin_digit_value() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"digit_value("5")"#), "5");
+        assert_eq!(eval_expr_str(&p, r#"digit_value("a")"#), "-1");
+    }
+
+    #[test]
+    fn builtin_is_digit_char() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"is_digit_char("7")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"is_digit_char("x")"#), "false");
+    }
+
+    #[test]
+    fn builtin_char_code_and_from_char_code() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"char_code("A")"#), "65");
+        assert_eq!(eval_expr_str(&p, "from_char_code(65)"), r#""A""#);
+    }
+
+    #[test]
+    fn builtin_bitwise_ops() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "bit_and(12, 10)"), "8"); // 1100 & 1010 = 1000
+        assert_eq!(eval_expr_str(&p, "bit_or(12, 10)"), "14"); // 1100 | 1010 = 1110
+        assert_eq!(eval_expr_str(&p, "bit_xor(12, 10)"), "6"); // 1100 ^ 1010 = 0110
+        assert_eq!(eval_expr_str(&p, "bit_shl(1, 3)"), "8");   // 1 << 3 = 8
+        assert_eq!(eval_expr_str(&p, "bit_shr(8, 2)"), "2");   // 8 >> 2 = 2
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Let bindings and variable lookup
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn let_binding_and_return() {
+        let result = eval_fn_result("\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+", "double", "5");
+        assert_eq!(result, "10");
+    }
+
+    #[test]
+    fn let_multiple_bindings() {
+        let result = eval_fn_result("\
++fn compute (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +let product:Int = a * b
+  +let result:Int = sum + product
+  +return result
+", "compute", "a=3 b=4");
+        // sum=7, product=12, result=19
+        assert_eq!(result, "19");
+    }
+
+    #[test]
+    fn set_mutation() {
+        let result = eval_fn_result("\
++fn count_up ()->Int
+  +let i:Int = 0
+  +set i = i + 1
+  +set i = i + 1
+  +set i = i + 1
+  +return i
+", "count_up", "");
+        assert_eq!(result, "3");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // If/elif/else control flow
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn if_then_branch() {
+        let source = "\
++fn classify (x:Int)->String
+  +if x > 0
+    +return \"positive\"
+  +else
+    +return \"non-positive\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "classify", "5"), "\"positive\"");
+        assert_eq!(eval_fn_result(source, "classify", "0"), "\"non-positive\"");
+    }
+
+    #[test]
+    fn if_elif_else() {
+        let source = "\
++fn describe (x:Int)->String
+  +if x > 0
+    +return \"positive\"
+  +elif x == 0
+    +return \"zero\"
+  +else
+    +return \"negative\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "describe", "5"), "\"positive\"");
+        assert_eq!(eval_fn_result(source, "describe", "0"), "\"zero\"");
+        assert_eq!(eval_fn_result(source, "describe", "-3"), "\"negative\"");
+    }
+
+    #[test]
+    fn nested_if() {
+        let source = "\
++fn size (x:Int)->String
+  +if x > 0
+    +if x > 100
+      +return \"big\"
+    +else
+      +return \"small\"
+    +end
+  +else
+    +return \"non-positive\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "size", "200"), "\"big\"");
+        assert_eq!(eval_fn_result(source, "size", "50"), "\"small\"");
+        assert_eq!(eval_fn_result(source, "size", "-1"), "\"non-positive\"");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Pattern matching on union types
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn match_on_union() {
+        let source = "\
++type Shape = Circle(Float) | Rect(Float, Float) | Point
+
++fn area (s:Shape)->Float
+  +match s
+  +case Circle(r)
+    +return r * r * 3.14
+  +case Rect(w, h)
+    +return w * h
+  +case Point
+    +return 0.0
+  +end
+";
+        let program = build_program(source);
+        // Test with Circle(5.0)
+        let input = parser::parse_test_input(0, "Circle(5.0)").unwrap();
+        let result = eval_call_with_input(&program, "area", &input).unwrap();
+        let f: f64 = result.parse().unwrap();
+        assert!((f - 78.5).abs() < 0.01, "Circle area: {result}");
+
+        // Test with Rect(3.0, 4.0)
+        let input = parser::parse_test_input(0, "Rect(3.0, 4.0)").unwrap();
+        let result = eval_call_with_input(&program, "area", &input).unwrap();
+        let f: f64 = result.parse().unwrap();
+        assert!((f - 12.0).abs() < 0.01, "Rect area: {result}");
+    }
+
+    #[test]
+    fn match_wildcard() {
+        let source = "\
++type Color = Red | Green | Blue
+
++fn is_red (c:Color)->Bool
+  +match c
+  +case Red
+    +return true
+  +case _
+    +return false
+  +end
+";
+        let program = build_program(source);
+        let input = parser::parse_test_input(0, "Red").unwrap();
+        let result = eval_call_with_input(&program, "is_red", &input).unwrap();
+        assert_eq!(result, "true");
+
+        let input = parser::parse_test_input(0, "Blue").unwrap();
+        let result = eval_call_with_input(&program, "is_red", &input).unwrap();
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn match_recursive_type() {
+        let source = "\
++type Expr = Literal(Int) | Add(Expr, Expr)
+
++fn eval_expr (e:Expr)->Int
+  +match e
+  +case Literal(val)
+    +return val
+  +case Add(left, right)
+    +let l:Int = eval_expr(left)
+    +let r:Int = eval_expr(right)
+    +return l + r
+  +end
+";
+        let program = build_program(source);
+        // Add(Literal(2), Literal(3)) should be 5
+        let input = parser::parse_test_input(0, "Add(Literal(2), Literal(3))").unwrap();
+        let result = eval_call_with_input(&program, "eval_expr", &input).unwrap();
+        assert_eq!(result, "5");
+
+        // Add(Literal(1), Add(Literal(2), Literal(3))) should be 6
+        let input = parser::parse_test_input(0, "Add(Literal(1), Add(Literal(2), Literal(3)))").unwrap();
+        let result = eval_call_with_input(&program, "eval_expr", &input).unwrap();
+        assert_eq!(result, "6");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Check statements (success and failure)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_passes() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +check small x < 100 ~err_too_large
+  +return x
+";
+        // [fail] functions wrap successful returns in Ok
+        assert_eq!(eval_fn_result(source, "validate", "50"), "Ok(50)");
+    }
+
+    #[test]
+    fn check_fails_first() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+";
+        let result = eval_fn_result(source, "validate", "-5");
+        assert!(result.contains("Err") && result.contains("err_negative"),
+            "expected Err(err_negative), got: {result}");
+    }
+
+    #[test]
+    fn check_fails_second() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +check small x < 100 ~err_too_large
+  +return x
+";
+        let result = eval_fn_result(source, "validate", "200");
+        assert!(result.contains("Err") && result.contains("err_too_large"),
+            "expected Err(err_too_large), got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Function calls with error propagation ([fail] effect)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn function_call_chain() {
+        let source = "\
++fn double (x:Int)->Int
+  +let r:Int = x * 2
+  +return r
+
++fn quadruple (x:Int)->Int
+  +let d:Int = double(x)
+  +let r:Int = double(d)
+  +return r
+";
+        assert_eq!(eval_fn_result(source, "quadruple", "5"), "20");
+    }
+
+    #[test]
+    fn function_call_with_check_propagation() {
+        // When a [fail] function calls another [fail] function that fails,
+        // the error should propagate via the +call binding
+        let source = "\
++fn validate_positive (x:Int)->Result<Int> [fail]
+  +check pos x > 0 ~err_negative
+  +return x
+
++fn process (x:Int)->Result<Int> [fail]
+  +call val:Int = validate_positive(x)
+  +let result:Int = val * 2
+  +return result
+";
+        assert_eq!(eval_fn_result(source, "process", "5"), "Ok(10)");
+        let result = eval_fn_result(source, "process", "-1");
+        assert!(result.contains("Err"), "expected Err propagation, got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Struct construction and field access
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn struct_create_and_access() {
+        let source = "\
++type Point = x:Int, y:Int
+
++fn get_x (p:Point)->Int
+  +return p.x
+
++fn make_point ()->Point
+  +let p:Point = {x: 10, y: 20}
+  +return p
+";
+        let result = eval_fn_result(source, "make_point", "");
+        // Field order in HashMap is not deterministic, check both fields present
+        assert!(result.contains("x: 10"), "expected x: 10 in {result}");
+        assert!(result.contains("y: 20"), "expected y: 20 in {result}");
+        assert_eq!(eval_fn_result(source, "get_x", "x=5 y=10"), "5");
+    }
+
+    #[test]
+    fn struct_field_access_in_expression() {
+        let source = "\
++type Rect = width:Int, height:Int
+
++fn area (r:Rect)->Int
+  +let a:Int = r.width * r.height
+  +return a
+";
+        assert_eq!(eval_fn_result(source, "area", "width=3 height=4"), "12");
+    }
+
+    #[test]
+    fn struct_nested_field_access() {
+        let source = "\
++type Inner = value:Int
++type Outer = inner:Inner, label:String
+
++fn get_value (o:Outer)->Int
+  +return o.inner.value
+";
+        assert_eq!(eval_fn_result(source, "get_value", r#"inner={value: 42} label="test""#), "42");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // While loops
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn while_loop_counter() {
+        let source = "\
++fn count_to (n:Int)->Int
+  +let i:Int = 0
+  +while i < n
+    +set i = i + 1
+  +end
+  +return i
+";
+        assert_eq!(eval_fn_result(source, "count_to", "5"), "5");
+        assert_eq!(eval_fn_result(source, "count_to", "0"), "0");
+    }
+
+    #[test]
+    fn while_loop_accumulator() {
+        let source = "\
++fn sum_to (n:Int)->Int
+  +let total:Int = 0
+  +let i:Int = 1
+  +while i <= n
+    +set total = total + i
+    +set i = i + 1
+  +end
+  +return total
+";
+        assert_eq!(eval_fn_result(source, "sum_to", "10"), "55");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // String concat with mixed types
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn concat_mixed_types() {
+        let p = ast::Program::default();
+        // concat coerces non-strings to string via Display
+        assert_eq!(eval_expr_str(&p, r#"concat("count: ", 42)"#), r#""count: 42""#);
+        assert_eq!(eval_expr_str(&p, r#"concat("flag: ", true)"#), r#""flag: true""#);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Error cases for builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_get_out_of_bounds() {
+        let p = ast::Program::default();
+        let expr = parser::parse_expr_pub(0, "get(list(1, 2), 5)").unwrap();
+        let result = eval_inline_expr(&p, &expr);
+        assert!(result.is_err(), "expected error for out-of-bounds get");
+    }
+
+    #[test]
+    fn builtin_char_at_out_of_bounds() {
+        let p = ast::Program::default();
+        let expr = parser::parse_expr_pub(0, r#"char_at("hi", 10)"#).unwrap();
+        let result = eval_inline_expr(&p, &expr);
+        assert!(result.is_err(), "expected error for out-of-bounds char_at");
+    }
+
+    #[test]
+    fn builtin_to_int_invalid() {
+        let p = ast::Program::default();
+        let expr = parser::parse_expr_pub(0, r#"to_int("not_a_number")"#).unwrap();
+        let result = eval_inline_expr(&p, &expr);
+        assert!(result.is_err(), "expected error for invalid to_int");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Missing builtins: bit_not, left_rotate, to_hex, u32_wrap, sqrt
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_bit_not() {
+        let p = ast::Program::default();
+        // bit_not(0) = -1 (all bits flipped in two's complement)
+        assert_eq!(eval_expr_str(&p, "bit_not(0)"), "-1");
+        // bit_not(-1) = 0
+        assert_eq!(eval_expr_str(&p, "bit_not(-1)"), "0");
+    }
+
+    #[test]
+    fn builtin_left_rotate() {
+        let p = ast::Program::default();
+        // 1 rotated left by 4 = 16 (32-bit rotation)
+        assert_eq!(eval_expr_str(&p, "left_rotate(1, 4)"), "16");
+        // rotl alias works too
+        assert_eq!(eval_expr_str(&p, "rotl(1, 4)"), "16");
+    }
+
+    #[test]
+    fn builtin_to_hex() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "to_hex(255)"), r#""000000ff""#);
+        assert_eq!(eval_expr_str(&p, "to_hex(0)"), r#""00000000""#);
+    }
+
+    #[test]
+    fn builtin_u32_wrap() {
+        let p = ast::Program::default();
+        // Large value wraps to 32-bit unsigned
+        assert_eq!(eval_expr_str(&p, "u32_wrap(256)"), "256");
+        // Negative wraps around
+        let val = eval_expr_val(&p, "u32_wrap(-1)");
+        match val {
+            Value::Int(n) => assert_eq!(n, 4294967295), // u32::MAX
+            _ => panic!("expected Int, got {val}"),
+        }
+    }
+
+    #[test]
+    fn builtin_sqrt() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, "sqrt(25)");
+        match val {
+            Value::Float(f) => assert!((f - 5.0).abs() < 1e-10),
+            _ => panic!("expected Float, got {val}"),
+        }
+        let val = eval_expr_val(&p, "sqrt(2.0)");
+        match val {
+            Value::Float(f) => assert!((f - 1.41421356).abs() < 1e-5),
+            _ => panic!("expected Float, got {val}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Ok/Err/Some constructors
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn constructor_ok() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, "Ok(42)");
+        match val {
+            Value::Ok(inner) => {
+                assert!(matches!(*inner, Value::Int(42)));
+            }
+            _ => panic!("expected Ok(42), got {val}"),
+        }
+    }
+
+    #[test]
+    fn constructor_err() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, r#"Err("not found")"#);
+        match val {
+            Value::Err(msg) => assert_eq!(msg, "\"not found\""),
+            _ => panic!("expected Err, got {val}"),
+        }
+    }
+
+    #[test]
+    fn constructor_some() {
+        let p = ast::Program::default();
+        // Some(5) via parser expression path creates a Union variant
+        let val = eval_expr_val(&p, "Some(5)");
+        // The parser expr path treats Some as a generic union constructor
+        let display = format!("{val}");
+        assert!(display.contains("5"), "expected Some containing 5, got {display}");
+    }
+
+    #[test]
+    fn constructor_ok_no_args() {
+        let p = ast::Program::default();
+        // Ok() with no args wraps None
+        let val = eval_expr_val(&p, "Ok()");
+        assert!(matches!(val, Value::Ok(ref inner) if matches!(**inner, Value::None)),
+            "expected Ok(None), got {val}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // regex_match and regex_replace
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_regex_match() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"regex_match("^[0-9]+$", "12345")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"regex_match("^[0-9]+$", "abc")"#), "false");
+        assert_eq!(eval_expr_str(&p, r#"regex_match("[a-z]+", "Hello World")"#), "true");
+    }
+
+    #[test]
+    fn builtin_regex_replace() {
+        let p = ast::Program::default();
+        assert_eq!(
+            eval_expr_str(&p, r#"regex_replace("[0-9]+", "NUM", "foo123bar456")"#),
+            r#""fooNUMbarNUM""#
+        );
+        assert_eq!(
+            eval_expr_str(&p, r#"regex_replace("\\s+", "-", "hello   world")"#),
+            r#""hello-world""#
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Result/Option pattern matching
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn match_on_result_ok() {
+        let source = "\
++fn unwrap_or_default (r:Result<Int>)->Int
+  +match r
+  +case Ok(val)
+    +return val
+  +case Err(msg)
+    +return 0
+  +end
+";
+        // Pass Ok(42)
+        assert_eq!(eval_fn_result(source, "unwrap_or_default", "Ok(42)"), "42");
+    }
+
+    #[test]
+    fn match_on_result_err() {
+        let source = "\
++fn unwrap_or_default (r:Result<Int>)->Int
+  +match r
+  +case Ok(val)
+    +return val
+  +case Err(msg)
+    +return 0
+  +end
+";
+        // Pass Err("fail")
+        assert_eq!(eval_fn_result(source, "unwrap_or_default", r#"Err("fail")"#), "0");
+    }
+
+    #[test]
+    fn match_on_option_some_none() {
+        let source = "\
++type Maybe = Just(Int) | Nothing
+
++fn get_or_zero (m:Maybe)->Int
+  +match m
+  +case Just(val)
+    +return val
+  +case Nothing
+    +return 0
+  +end
+";
+        assert_eq!(eval_fn_result(source, "get_or_zero", "Just(99)"), "99");
+        assert_eq!(eval_fn_result(source, "get_or_zero", "Nothing"), "0");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Effect checking — pure function cannot call IO
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn pure_function_rejects_io_call() {
+        // A pure function (no effects) calling an IO builtin produces an error
+        // result (the function returns an Err value, not a hard crash)
+        let result = eval_fn_result("\
++fn bad ()->String
+  +return http_get(\"http://example.com\")
+", "bad", "");
+        // The eval catches the IO-without-await error and returns it
+        assert!(result.contains("async IO operation") || result.contains("http_get"),
+            "expected IO rejection message, got: {result}");
+    }
+
+    #[test]
+    fn fail_effect_wraps_result() {
+        // [fail] functions wrap their return in Ok on success, Err on check failure
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+";
+        let result = eval_fn_result(source, "validate", "10");
+        assert!(result.starts_with("Ok("), "expected Ok wrapping, got: {result}");
+        let result = eval_fn_result(source, "validate", "-1");
+        assert!(result.starts_with("Err("), "expected Err wrapping, got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Each loop over lists
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn each_loop_accumulate() {
+        let source = "\
++fn sum_list (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = total + item
+  +end
+  +return total
+";
+        assert_eq!(eval_fn_result(source, "sum_list", "list(1, 2, 3, 4, 5)"), "15");
+    }
+
+    #[test]
+    fn each_loop_transform() {
+        let source = "\
++fn double_all (items:List<Int>)->List<Int>
+  +let result:List<Int> = list()
+  +each items item:Int
+    +set result = push(result, item * 2)
+  +end
+  +return result
+";
+        assert_eq!(eval_fn_result(source, "double_all", "list(1, 2, 3)"), "[2, 4, 6]");
+    }
+
+    #[test]
+    fn each_loop_empty_list() {
+        let source = "\
++fn sum_list (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = total + item
+  +end
+  +return total
+";
+        assert_eq!(eval_fn_result(source, "sum_list", "list()"), "0");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // While loop with early return
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn while_loop_factorial() {
+        let source = "\
++fn factorial (n:Int)->Int
+  +let result:Int = 1
+  +let i:Int = 1
+  +while i <= n
+    +set result = result * i
+    +set i = i + 1
+  +end
+  +return result
+";
+        assert_eq!(eval_fn_result(source, "factorial", "5"), "120");
+        assert_eq!(eval_fn_result(source, "factorial", "0"), "1");
+        assert_eq!(eval_fn_result(source, "factorial", "1"), "1");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // If/elif/else chains (additional cases)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn if_multiple_elif() {
+        let source = "\
++fn grade (score:Int)->String
+  +if score >= 90
+    +return \"A\"
+  +elif score >= 80
+    +return \"B\"
+  +elif score >= 70
+    +return \"C\"
+  +elif score >= 60
+    +return \"D\"
+  +else
+    +return \"F\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "grade", "95"), "\"A\"");
+        assert_eq!(eval_fn_result(source, "grade", "85"), "\"B\"");
+        assert_eq!(eval_fn_result(source, "grade", "75"), "\"C\"");
+        assert_eq!(eval_fn_result(source, "grade", "65"), "\"D\"");
+        assert_eq!(eval_fn_result(source, "grade", "50"), "\"F\"");
+    }
+
+    #[test]
+    fn if_with_complex_condition() {
+        let source = "\
++fn in_range (x:Int)->Bool
+  +if x >= 10 AND x <= 20
+    +return true
+  +else
+    +return false
+  +end
+";
+        assert_eq!(eval_fn_result(source, "in_range", "15"), "true");
+        assert_eq!(eval_fn_result(source, "in_range", "5"), "false");
+        assert_eq!(eval_fn_result(source, "in_range", "25"), "false");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Check statement (additional edge cases)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_with_compound_condition() {
+        let source = "\
++fn validate_range (x:Int)->Result<Int> [fail]
+  +check in_range x >= 0 AND x <= 100 ~err_out_of_range
+  +return x
+";
+        assert_eq!(eval_fn_result(source, "validate_range", "50"), "Ok(50)");
+        let result = eval_fn_result(source, "validate_range", "-1");
+        assert!(result.contains("err_out_of_range"), "expected err_out_of_range, got: {result}");
+        let result = eval_fn_result(source, "validate_range", "200");
+        assert!(result.contains("err_out_of_range"), "expected err_out_of_range, got: {result}");
+    }
+
+    #[test]
+    fn check_multiple_sequential() {
+        // Multiple checks, each with different error labels
+        let source = "\
++fn validate_user (name:String, age:Int)->Result<String> [fail]
+  +check has_name len(name) > 0 ~err_empty_name
+  +check valid_age age >= 0 AND age <= 150 ~err_bad_age
+  +return concat(name, \" is valid\")
+";
+        assert_eq!(
+            eval_fn_result(source, "validate_user", r#"name="alice" age=25"#),
+            r#"Ok("alice is valid")"#
+        );
+        let result = eval_fn_result(source, "validate_user", r#"name="" age=25"#);
+        assert!(result.contains("err_empty_name"), "got: {result}");
+        let result = eval_fn_result(source, "validate_user", r#"name="bob" age=-5"#);
+        assert!(result.contains("err_bad_age"), "got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Match with nested variant bindings
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn match_nested_variant_bindings() {
+        let source = "\
++type Tree = Leaf(Int) | Node(Tree, Tree)
+
++fn tree_sum (t:Tree)->Int
+  +match t
+  +case Leaf(val)
+    +return val
+  +case Node(left, right)
+    +let l:Int = tree_sum(left)
+    +let r:Int = tree_sum(right)
+    +return l + r
+  +end
+";
+        // Leaf(5) = 5
+        assert_eq!(eval_fn_result(source, "tree_sum", "Leaf(5)"), "5");
+        // Node(Leaf(3), Leaf(7)) = 10
+        assert_eq!(eval_fn_result(source, "tree_sum", "Node(Leaf(3), Leaf(7))"), "10");
+        // Node(Node(Leaf(1), Leaf(2)), Leaf(3)) = 6
+        assert_eq!(eval_fn_result(source, "tree_sum", "Node(Node(Leaf(1), Leaf(2)), Leaf(3))"), "6");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: fork_runtime_for_test isolation
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fork_runtime_creates_isolated_shared_vars() {
+        let source = "\
+!module Counter
++shared count:Int = 0
++fn get_count ()->Int
+  +return count
+";
+        let program = build_program(source);
+        let routes = vec![];
+        let forked = fork_runtime_for_test(&program, &routes);
+        assert!(forked.is_some());
+        let rt = forked.unwrap();
+        let state = rt.read().unwrap();
+        // Should have Counter.count initialized to 0
+        assert_eq!(
+            state.shared_vars.get("Counter.count").map(|v| format!("{v}")),
+            Some("0".to_string()),
+            "forked runtime should have Counter.count=0"
+        );
+    }
+
+    #[test]
+    fn fork_runtime_mutation_does_not_affect_original() {
+        let source = "\
+!module State
++shared value:Int = 10
++fn get ()->Int
+  +return value
+";
+        let program = build_program(source);
+        let routes = vec![];
+
+        let forked1 = fork_runtime_for_test(&program, &routes).unwrap();
+        let forked2 = fork_runtime_for_test(&program, &routes).unwrap();
+
+        // Mutate forked1
+        {
+            let mut state = forked1.write().unwrap();
+            state.shared_vars.insert("State.value".to_string(), Value::Int(99));
+        }
+
+        // forked2 should still have original value
+        {
+            let state = forked2.read().unwrap();
+            assert!(matches!(
+                state.shared_vars.get("State.value"),
+                Some(Value::Int(10))
+            ), "forked2 should be unaffected by forked1 mutation");
+        }
+    }
+
+    #[test]
+    fn fork_runtime_includes_http_routes() {
+        let program = ast::Program::default();
+        let routes = vec![ast::HttpRoute {
+            method: "POST".to_string(),
+            path: "/webhook".to_string(),
+            handler_fn: "handle".to_string(),
+        }];
+        let forked = fork_runtime_for_test(&program, &routes).unwrap();
+        let state = forked.read().unwrap();
+        assert_eq!(state.http_routes.len(), 1);
+        assert_eq!(state.http_routes[0].path, "/webhook");
+    }
+
+    #[test]
+    fn fork_runtime_empty_program_no_shared_vars() {
+        let program = ast::Program::default();
+        let forked = fork_runtime_for_test(&program, &[]).unwrap();
+        let state = forked.read().unwrap();
+        assert!(state.shared_vars.is_empty());
+        assert!(state.http_routes.is_empty());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: +shared variable behavior
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn shared_var_populated_in_env() {
+        let source = "\
+!module Config
++shared debug:Bool = false
++shared max_retries:Int = 3
++fn get_retries ()->Int
+  +return max_retries
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+        // Should have both shared vars in the cache
+        assert!(matches!(
+            env.shared_cache.get("Config.debug"),
+            Some(Value::Bool(false))
+        ));
+        assert!(matches!(
+            env.shared_cache.get("Config.max_retries"),
+            Some(Value::Int(3))
+        ));
+    }
+
+    #[test]
+    fn shared_var_accessible_via_qualified_name() {
+        // Shared vars are stored as "Module.name" keys
+        let source = "\
+!module App
++shared counter:Int = 42
++fn get ()->Int
+  +return 0
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+        // Direct cache lookup with qualified key
+        assert!(matches!(
+            env.shared_cache.get("App.counter"),
+            Some(Value::Int(42))
+        ));
+    }
+
+    #[test]
+    fn shared_var_multiple_modules() {
+        let source = "\
+!module A
++shared x:Int = 1
++fn get_x ()->Int
+  +return x
+
+!module B
++shared y:Int = 2
++fn get_y ()->Int
+  +return y
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+        assert!(matches!(env.shared_cache.get("A.x"), Some(Value::Int(1))));
+        assert!(matches!(env.shared_cache.get("B.y"), Some(Value::Int(2))));
     }
 }

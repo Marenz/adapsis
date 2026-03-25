@@ -80,6 +80,14 @@ Pure functions have no effect annotation.
   to the named Adapsis function, which receives the request body as String and returns String.
   Use ?routes to list registered routes.
 
+### Shared Variables
++shared name:Type = default_value
+  Declare module-scoped mutable state. Must be inside a module.
+  Example:
+  !module Counter
+  +shared count:Int = 0
+  +shared label:String = "default"
+
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
   Move functions, types, or modules into a target module (creates if needed).
@@ -108,6 +116,10 @@ Pure functions have no effect annotation.
 !remove TypeName                     — remove a type
 !remove route POST /api/ask          — remove an HTTP route by method+path (handler function is kept)
 !unroute GET /path                   — shorthand alias for !remove route METHOD /path
+
+**Reject-on-fail**: When you `!replace` a function or redefine it in a module, its existing tests
+are automatically re-run. If ANY test fails, the replacement is **reverted** to the previous body
+and you get a REJECTED message. Fix the replacement to pass all existing tests before resubmitting.
 
 ### Testing
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
@@ -289,6 +301,25 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
 !eval eval_expr Add(Literal(1), Mul(Literal(2), Literal(3)))
 </code>
 
+### Inline Expression Eval
+`!eval` also accepts inline expressions (not just function names):
+```
+!eval 1 + 2                        — arithmetic → 3
+!eval 3 * 4 + 1                    — precedence → 13
+!eval concat("hello", " ", "world") — builtin call → "hello world"
+!eval len("test")                  — builtin call → 4
+!eval 3 > 2                        — comparison → true
+!eval len(concat("a", "b"))        — nested calls → 2
+!eval {name: "alice", age: 25}     — struct literal
+!eval list(1, 2, 3)                — list creation → [1, 2, 3]
+!eval "hello"                      — string literal → "hello"
+!eval 42                           — numeric literal → 42
+!eval true                         — boolean literal → true
+!eval double(5)                    — user function call (if defined)
+```
+If the argument parses as a complete expression, it is evaluated directly.
+Otherwise, it falls back to the existing `!eval func_name args` behavior.
+
 When the runtime reports errors, fix them with targeted !replace operations or by regenerating the affected function.
 
 ## Important Workflow Notes
@@ -395,7 +426,7 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 **Adapsis-level (instant):**
 - Define types, functions, modules
 - Write and run tests (`!test`)
-- Evaluate functions (`!eval`)
+- Evaluate functions (`!eval func_name args`) or inline expressions (`!eval 1 + 2`)
 - Query program state (`?symbols`, `?source`, `?deps`, `?tasks`, `?inspect task N`, `?inbox`)
 - Manage plans (`!plan set/done/fail`)
 - Spawn sub-agents (`!agent name --scope <scope> task`)
@@ -483,6 +514,16 @@ Use `!mock` to register fake IO responses, then `!test` works with async functio
 Mocks intercept +await calls during tests — if the operation and args match the
 pattern, the mock value is returned without real IO. Use !unmock to clear all mocks.
 Tests with mocks run async functions through the coroutine executor automatically.
+
+### Sandbox Mode
+Use `!sandbox` to experiment safely without affecting the main program:
+```
+!sandbox              — enter sandbox (snapshot current state)
+!sandbox status       — check if sandbox is active
+... make changes, test them ...
+!sandbox merge        — keep changes (commit to session)
+!sandbox discard      — revert all sandbox changes
+```
 
 ### End-to-end testing
 

@@ -234,7 +234,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             crate::api::format_inspect_task(&self.task_registry, &self.snapshot_registry, tid)
                         } else {
                             let table = typeck::build_symbol_table(&program);
-                            typeck::handle_query(&program, &table, query)
+                            typeck::handle_query(&program, &table, query, &[])
                         };
                         println!("  Query `{query}`:\n{response}");
                         self.emit(ForgeEvent::QueryResult {
@@ -302,7 +302,7 @@ impl<B: LlmBackend> Orchestrator<B> {
             for test in &test_ops {
                 println!("  Testing {}:", test.function_name);
                 for (i, case) in test.cases.iter().enumerate() {
-                    match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks) {
+                    match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
                         Ok(msg) => {
                             println!("    PASS [{i}]: {msg}");
                             self.emit(ForgeEvent::TestPass {
@@ -652,7 +652,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                 for test in &test_ops {
                     println!("  Testing {}:", test.function_name);
                     for (i, case) in test.cases.iter().enumerate() {
-                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks) {
+                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
                             Ok(msg) => {
                                 println!("    PASS [{i}]: {msg}");
                                 self.emit(ForgeEvent::TestPass {

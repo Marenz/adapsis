@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,18 @@ use serde::{Deserialize, Serialize};
 use crate::ast;
 use crate::parser;
 use crate::validator;
+
+/// Runtime infrastructure state (Tier 2) — shared across async tasks via Arc<RwLock>.
+/// Holds HTTP routes and shared variables, separate from the AST program state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeState {
+    pub http_routes: Vec<crate::ast::HttpRoute>,
+    #[serde(skip)]
+    pub shared_vars: HashMap<String, crate::eval::Value>,
+}
+
+/// Thread-safe handle to the runtime state.
+pub type SharedRuntime = Arc<RwLock<RuntimeState>>;
 
 /// A single entry in the mutation log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,11 +73,10 @@ pub enum HistoryEntry {
     },
 }
 
-/// A Forge session — program state + mutation log + working history.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Session {
-    /// Current program state
-    pub program: ast::Program,
+/// Session metadata — mutation log, working history, conversation, and configuration.
+/// Separated from the core program AST and runtime for Tier 3 modularity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMeta {
     /// Append-only mutation log
     pub mutations: Vec<MutationEntry>,
     /// Working history (evals, tests, queries)
@@ -88,13 +100,6 @@ pub struct Session {
     /// Agent message bus: agent_name → inbox of pending messages
     #[serde(default)]
     pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
-    /// Functions that have been tested (passed at least one test). Eval/spawn blocked until tested.
-    #[serde(default)]
-    pub tested_functions: std::collections::HashSet<String>,
-    /// Stored test cases — re-run automatically when functions change.
-    /// Key is the function name; value is the list of stored cases.
-    #[serde(default)]
-    pub stored_tests: HashMap<String, Vec<StoredTestCase>>,
     /// OpenCode session ID — reused across !opencode calls to maintain context
     #[serde(default)]
     pub opencode_session_id: Option<String>,
@@ -104,6 +109,49 @@ pub struct Session {
     /// Library state — tracks loaded modules and errors. Not serialized.
     #[serde(skip)]
     pub library_state: Option<crate::library::LibraryState>,
+}
+
+impl SessionMeta {
+    pub fn new() -> Self {
+        Self {
+            mutations: Vec::new(),
+            history: Vec::new(),
+            revision: 0,
+            sources: Vec::new(),
+            chat_messages: Vec::new(),
+            agent_log: Vec::new(),
+            roadmap: Vec::new(),
+            plan: Vec::new(),
+            agent_mailbox: HashMap::new(),
+            opencode_session_id: None,
+            io_mocks: Vec::new(),
+            library_state: None,
+        }
+    }
+}
+
+/// Snapshot of program + runtime state saved when entering a sandbox.
+#[derive(Debug, Clone)]
+pub struct SandboxState {
+    pub original_program: ast::Program,
+    pub original_runtime: RuntimeState,
+    pub entered_at_revision: usize,
+}
+
+/// A Forge session — program state + runtime + metadata.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Session {
+    /// Current program state
+    pub program: ast::Program,
+    /// Runtime state (Tier 2): HTTP routes, shared variables. Serialized with session.
+    #[serde(default)]
+    pub runtime: RuntimeState,
+    /// Session metadata: mutation log, history, conversation, mocks, etc.
+    #[serde(flatten)]
+    pub meta: SessionMeta,
+    /// Sandbox state — present when in sandbox mode. Not persisted.
+    #[serde(skip)]
+    pub sandbox: Option<SandboxState>,
 }
 
 /// A long-term roadmap item.
@@ -119,27 +167,6 @@ pub struct IoMock {
     pub operation: String,      // e.g. "http_get", "http_post", "llm_call"
     pub patterns: Vec<String>,  // One pattern per argument position to match (contains check)
     pub response: String,       // value to return
-}
-
-/// A stored test case — input and expected as source-level strings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredTestCase {
-    pub input: String,
-    pub expected: String,
-    /// Serialized matcher type (e.g. "contains:foo", "starts_with:bar", "AnyOk", "AnyErr", "ErrContaining:msg")
-    #[serde(default)]
-    pub matcher: Option<String>,
-    /// Serialized after checks as "target matcher value" triples
-    #[serde(default)]
-    pub after_checks: Vec<StoredAfterCheck>,
-}
-
-/// Serialized form of a +after check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredAfterCheck {
-    pub target: String,
-    pub matcher: String,
-    pub value: String,
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -252,19 +279,32 @@ pub struct AgentBranch {
     pub fork_revision: usize,
     pub program: ast::Program,
     pub mutations: Vec<String>,
+    /// Forked copy of runtime state (isolated from main session).
+    pub runtime_state: RuntimeState,
+    /// Snapshot of shared_vars at fork time — used to detect changes during merge.
+    runtime_state_snapshot: HashMap<String, crate::eval::Value>,
 }
 
 impl AgentBranch {
     /// Create a new branch forked from the current session state.
     pub fn fork(name: &str, scope: AgentScope, task: &str, session: &Session) -> Self {
+        let runtime_state = session.runtime.clone();
+        let snapshot = runtime_state.shared_vars.clone();
         Self {
             name: name.to_string(),
             scope,
             task: task.to_string(),
-            fork_revision: session.revision,
+            fork_revision: session.meta.revision,
             program: session.program.clone(),
             mutations: Vec::new(),
+            runtime_state,
+            runtime_state_snapshot: snapshot,
         }
+    }
+
+    /// Access the forked runtime state.
+    pub fn runtime(&self) -> &RuntimeState {
+        &self.runtime_state
     }
 
     /// Apply a mutation to this branch (respecting scope).
@@ -322,6 +362,18 @@ impl AgentBranch {
             }
         }
 
+        // Merge shared_vars that changed during the branch's lifetime.
+        // Only copy vars where the branch value differs from the fork-time snapshot.
+        for (key, val) in &self.runtime_state.shared_vars {
+            let changed = match self.runtime_state_snapshot.get(key) {
+                Some(old_val) => format!("{old_val}") != format!("{val}"),
+                None => true, // new key added during branch
+            };
+            if changed {
+                session.runtime.shared_vars.insert(key.clone(), val.clone());
+            }
+        }
+
         conflicts
     }
 }
@@ -337,20 +389,9 @@ impl Session {
     pub fn new() -> Self {
         Self {
             program: ast::Program::default(),
-            mutations: Vec::new(),
-            chat_messages: Vec::new(),
-            agent_log: Vec::new(),
-            plan: Vec::new(),
-            history: Vec::new(),
-            revision: 0,
-            sources: Vec::new(),
-            agent_mailbox: HashMap::new(),
-            tested_functions: std::collections::HashSet::new(),
-            stored_tests: HashMap::new(),
-            opencode_session_id: None,
-            io_mocks: Vec::new(),
-            roadmap: Vec::new(),
-            library_state: None,
+            runtime: RuntimeState::default(),
+            meta: SessionMeta::new(),
+            sandbox: None,
         }
     }
 
@@ -362,7 +403,7 @@ impl Session {
             content: content.to_string(),
             timestamp: now(),
         };
-        self.agent_mailbox
+        self.meta.agent_mailbox
             .entry(to.to_string())
             .or_default()
             .push(msg);
@@ -370,82 +411,167 @@ impl Session {
 
     /// Drain all pending messages for an agent.
     pub fn drain_messages(&mut self, agent_name: &str) -> Vec<AgentMessage> {
-        self.agent_mailbox.remove(agent_name).unwrap_or_default()
+        self.meta.agent_mailbox.remove(agent_name).unwrap_or_default()
     }
 
     /// Peek at pending messages without removing them.
     pub fn peek_messages(&self, agent_name: &str) -> &[AgentMessage] {
-        self.agent_mailbox
+        self.meta.agent_mailbox
             .get(agent_name)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
 
-    /// Mark a function as tested, resolving bare names to qualified module names.
-    pub fn mark_tested(&mut self, fn_name: &str) {
-        self.tested_functions.insert(fn_name.to_string());
-        if !fn_name.contains('.') {
-            let qnames: Vec<String> = self.program.modules.iter()
-                .flat_map(|m| m.functions.iter()
-                    .filter(|f| f.name == fn_name)
-                    .map(|f| format!("{}.{}", m.name, f.name)))
-                .collect();
-            for qn in qnames {
-                self.tested_functions.insert(qn);
-            }
-        }
-    }
-
     /// Check whether a function is considered "tested":
-    /// either it's in the `tested_functions` HashSet, or the function's AST
-    /// `tests` field is non-empty and all test cases have `passed == true`.
+    /// the function's AST `tests` field is non-empty and all test cases have `passed == true`.
     pub fn is_function_tested(&self, fn_name: &str) -> bool {
-        if self.tested_functions.contains(fn_name) {
-            return true;
-        }
         if let Some(func) = self.program.get_function(fn_name) {
-            if !func.tests.is_empty() && func.tests.iter().all(|t| t.passed) {
-                return true;
-            }
+            !func.tests.is_empty() && func.tests.iter().all(|t| t.passed)
+        } else {
+            false
         }
-        false
     }
 
-    /// Store test cases for a function, keyed by both bare and qualified name.
-    /// Also populates the function's `tests` field in the AST.
+    /// Add or replace an HTTP route.
+    pub fn add_route(&mut self, route: ast::HttpRoute) -> String {
+        if let Some(existing) = self.runtime.http_routes.iter_mut()
+            .find(|r| r.method == route.method && r.path == route.path)
+        {
+            let old_fn = existing.handler_fn.clone();
+            existing.handler_fn = route.handler_fn.clone();
+            format!("updated route {} {} -> `{}` (was `{old_fn}`)", route.method, route.path, route.handler_fn)
+        } else {
+            let msg = format!("added route {} {} -> `{}`", route.method, route.path, route.handler_fn);
+            self.runtime.http_routes.push(route);
+            msg
+        }
+    }
+
+    /// Remove an HTTP route by method and path.
+    pub fn remove_route(&mut self, method: &str, path: &str) -> Result<String> {
+        let before = self.runtime.http_routes.len();
+        let mut removed_handler = None;
+        self.runtime.http_routes.retain(|r| {
+            if r.method == method && r.path == path {
+                removed_handler = Some(r.handler_fn.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if self.runtime.http_routes.len() < before {
+            Ok(format!("removed route {} {} (was -> `{}`)", method, path, removed_handler.unwrap_or_default()))
+        } else {
+            Err(anyhow!("no route found for {} {}", method, path))
+        }
+    }
+
+    /// Remove all routes whose handler matches a function name.
+    pub fn remove_routes_for_handler(&mut self, handler_name: &str) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.runtime.http_routes.retain(|r| {
+            if r.handler_fn == handler_name {
+                removed.push(format!("{} {}", r.method, r.path));
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    /// Get a snapshot of all HTTP routes.
+    pub fn get_routes(&self) -> &[ast::HttpRoute] {
+        &self.runtime.http_routes
+    }
+
+    /// Find a route by method and path.
+    pub fn find_route(&self, method: &str, path: &str) -> Option<&ast::HttpRoute> {
+        self.runtime.http_routes.iter().find(|r| r.method == method && r.path == path)
+    }
+
+    /// Handle a sandbox action (enter, merge, discard, status).
+    fn handle_sandbox(&mut self, action: &parser::SandboxAction) -> (String, bool) {
+        match action {
+            parser::SandboxAction::Enter => {
+                if self.sandbox.is_some() {
+                    return ("already in sandbox mode — use !sandbox merge or !sandbox discard first".to_string(), false);
+                }
+                self.sandbox = Some(SandboxState {
+                    original_program: self.program.clone(),
+                    original_runtime: self.runtime.clone(),
+                    entered_at_revision: self.meta.revision,
+                });
+                ("entered sandbox mode — mutations are isolated. Use !sandbox merge to keep changes or !sandbox discard to revert.".to_string(), true)
+            }
+            parser::SandboxAction::Merge => {
+                if self.sandbox.is_none() {
+                    return ("not in sandbox mode".to_string(), false);
+                }
+                let sandbox = self.sandbox.take().unwrap();
+                let changes = self.meta.revision.saturating_sub(sandbox.entered_at_revision);
+                (format!("sandbox merged — {changes} mutation(s) kept"), true)
+            }
+            parser::SandboxAction::Discard => {
+                if self.sandbox.is_none() {
+                    return ("not in sandbox mode".to_string(), false);
+                }
+                let sandbox = self.sandbox.take().unwrap();
+                let discarded = self.meta.revision.saturating_sub(sandbox.entered_at_revision);
+                self.program = sandbox.original_program;
+                self.runtime = sandbox.original_runtime;
+                self.meta.revision = sandbox.entered_at_revision;
+                self.program.rebuild_function_index();
+                (format!("sandbox discarded — reverted {discarded} mutation(s)"), true)
+            }
+            parser::SandboxAction::Status => {
+                if let Some(ref sandbox) = self.sandbox {
+                    let changes = self.meta.revision.saturating_sub(sandbox.entered_at_revision);
+                    (format!("in sandbox mode (entered at revision {}, {changes} mutations since)", sandbox.entered_at_revision), true)
+                } else {
+                    ("not in sandbox mode".to_string(), true)
+                }
+            }
+        }
+    }
+
+    /// Initialize shared variables from module declarations.
+    /// For each +shared decl, if the key "Module.name" does not already exist
+    /// in runtime.shared_vars, evaluate the default expression and insert it.
+    pub fn init_shared_vars(&mut self) {
+        for module in &self.program.modules {
+            for sv in &module.shared_vars {
+                let key = format!("{}.{}", module.name, sv.name);
+                if !self.runtime.shared_vars.contains_key(&key) {
+                    let value = crate::eval::eval_expr_standalone(&self.program, &sv.default)
+                        .unwrap_or(crate::eval::Value::Int(0));
+                    self.runtime.shared_vars.insert(key, value);
+                }
+            }
+        }
+    }
+
+    /// Store test cases for a function in the AST.
+    /// Populates the function's `tests` field (replace, not append).
     pub fn store_test(&mut self, fn_name: &str, cases: &[parser::TestCase]) {
-        let stored: Vec<StoredTestCase> = cases
+        let ast_tests: Vec<ast::TestCase> = cases
             .iter()
-            .map(|c| StoredTestCase {
+            .map(|c| ast::TestCase {
                 input: format_expr(&c.input),
                 expected: format_expr(&c.expected),
+                passed: true,
                 matcher: c.matcher.as_ref().map(serialize_matcher),
-                after_checks: c.after_checks.iter().map(|a| StoredAfterCheck {
+                after_checks: c.after_checks.iter().map(|a| ast::AfterCheck {
                     target: a.target.clone(),
                     matcher: a.matcher.clone(),
                     value: a.value.clone(),
                 }).collect(),
             })
             .collect();
-
-        // Populate the function's tests field in the AST (replace, not append).
-        // store_test is only called after all tests pass, so mark passed=true.
-        let ast_tests: Vec<ast::TestCase> = stored
-            .iter()
-            .map(|s| ast::TestCase {
-                input: s.input.clone(),
-                expected: s.expected.clone(),
-                passed: true,
-            })
-            .collect();
         if let Some(func) = self.program.get_function_mut(fn_name) {
-            func.tests = ast_tests;
+            func.tests = ast_tests.clone();
         }
-
-        self.stored_tests
-            .insert(fn_name.to_string(), stored.clone());
-
-        // Also store under qualified name(s) if bare
+        // Also store on qualified name(s) if bare name was given
         if !fn_name.contains('.') {
             let qnames: Vec<String> = self
                 .program
@@ -458,22 +584,17 @@ impl Session {
                         .map(|f| format!("{}.{}", m.name, f.name))
                 })
                 .collect();
-            for qn in qnames {
-                self.stored_tests.insert(qn, stored.clone());
+            for qn in &qnames {
+                if let Some(func) = self.program.get_function_mut(qn) {
+                    func.tests = ast_tests.clone();
+                }
             }
         }
     }
 
-    /// Invalidate test status for affected functions, then re-run any stored
-    /// tests. Returns a list of (fn_name, passed, detail) for each re-run.
-    /// Must be called AFTER `apply_and_validate` so the function is already
-    /// updated in the program.
-    fn invalidate_and_retest(
-        &mut self,
-        op: &parser::Operation,
-    ) -> Vec<(String, bool, String)> {
-        // Collect affected function names
-        let affected: Vec<String> = match op {
+    /// Extract the function names affected by an operation (for test invalidation).
+    fn affected_function_names(op: &parser::Operation) -> Vec<String> {
+        match op {
             parser::Operation::Module(m) => {
                 m.body
                     .iter()
@@ -486,13 +607,61 @@ impl Session {
                     })
                     .collect()
             }
-            parser::Operation::Replace(r) => vec![r.target.clone()],
-            _ => return Vec::new(),
-        };
+            parser::Operation::Replace(r) => {
+                // Strip `.sN` suffix — e.g. "Mod.func.s1" → "Mod.func"
+                let target = &r.target;
+                let func_name = if let Some(dot_pos) = target.rfind('.') {
+                    let suffix = &target[dot_pos + 1..];
+                    if suffix.starts_with('s') && suffix[1..].parse::<usize>().is_ok() {
+                        target[..dot_pos].to_string()
+                    } else {
+                        target.clone()
+                    }
+                } else {
+                    target.clone()
+                };
+                vec![func_name]
+            }
+            _ => Vec::new(),
+        }
+    }
 
-        // Invalidate: remove from tested_functions and reset AST passed flags
+    /// Save pre-mutation backups of function bodies for affected functions
+    /// that already have tests (for reject-on-fail).
+    fn backup_affected_bodies(&self, op: &parser::Operation) -> HashMap<String, Vec<ast::Statement>> {
+        let affected = Self::affected_function_names(op);
+        let mut backups = HashMap::new();
         for name in &affected {
-            self.tested_functions.remove(name);
+            if let Some(func) = self.program.get_function(name) {
+                if !func.tests.is_empty() {
+                    backups.insert(name.clone(), func.body.clone());
+                }
+            }
+        }
+        backups
+    }
+
+    /// Invalidate test status for affected functions, then re-run any stored
+    /// tests. If any test fails, REVERT the function body to its pre-change
+    /// state (reject-on-fail). Returns a list of (fn_name, passed, detail)
+    /// for each re-run.
+    ///
+    /// `pre_backups` must be captured BEFORE `apply_and_validate` so the
+    /// backup contains the original (pre-mutation) function body.
+    fn invalidate_and_retest(
+        &mut self,
+        op: &parser::Operation,
+        pre_backups: HashMap<String, Vec<ast::Statement>>,
+    ) -> Vec<(String, bool, String)> {
+        let affected = Self::affected_function_names(op);
+        if affected.is_empty() {
+            return Vec::new();
+        }
+
+        let backups = pre_backups;
+
+        // Invalidate: reset AST passed flags
+        for name in &affected {
             if let Some(func) = self.program.get_function_mut(name) {
                 for t in &mut func.tests {
                     t.passed = false;
@@ -503,21 +672,19 @@ impl Session {
         let mut retest_results = Vec::new();
 
         for name in &affected {
-            // Find stored tests: try exact name, then bare name
-            let cases = self.stored_tests.get(name).cloned().or_else(|| {
-                let bare = name.rsplit('.').next().unwrap_or(name);
-                self.stored_tests.get(bare).cloned()
-            });
+            // Read test cases from the function's AST (primary source of truth)
+            let ast_cases: Vec<ast::TestCase> = self.program.get_function(name)
+                .map(|f| f.tests.clone())
+                .unwrap_or_default();
 
-            let cases = match cases {
-                Some(c) if !c.is_empty() => c,
-                _ => continue,
-            };
+            if ast_cases.is_empty() {
+                continue;
+            }
 
             // Reconstruct test source and re-run
             let bare = name.rsplit('.').next().unwrap_or(name);
             let mut test_src = format!("!test {bare}\n");
-            for case in &cases {
+            for case in &ast_cases {
                 // Reconstruct the expect portion, including matcher syntax
                 let expect_str = reconstruct_expect(&case.expected, case.matcher.as_deref());
                 test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, expect_str));
@@ -536,7 +703,8 @@ impl Session {
                                     &self.program,
                                     &test.function_name,
                                     case,
-                                    &self.io_mocks,
+                                    &self.meta.io_mocks,
+                                    &self.runtime.http_routes,
                                 ) {
                                     Ok(msg) => {
                                         retest_results.push((
@@ -556,22 +724,45 @@ impl Session {
                                 }
                             }
                             if all_passed {
-                                self.mark_tested(name);
                                 // Restore passed=true on AST tests after successful retest
                                 if let Some(func) = self.program.get_function_mut(name) {
                                     for t in &mut func.tests {
                                         t.passed = true;
                                     }
                                 }
+                            } else {
+                                // Reject: revert to the backed-up body and restore test flags
+                                if let Some(old_body) = backups.get(name) {
+                                    if let Some(func) = self.program.get_function_mut(name) {
+                                        func.body = old_body.clone();
+                                        for t in &mut func.tests {
+                                            t.passed = true;
+                                        }
+                                    }
+                                    retest_results.push((
+                                        name.clone(),
+                                        false,
+                                        "REJECTED: replacement reverted because existing tests failed".to_string(),
+                                    ));
+                                }
                             }
                         }
                     }
                 }
                 Err(e) => {
+                    // Parse error reconstructing tests — revert to be safe
+                    if let Some(old_body) = backups.get(name) {
+                        if let Some(func) = self.program.get_function_mut(name) {
+                            func.body = old_body.clone();
+                            for t in &mut func.tests {
+                                t.passed = true;
+                            }
+                        }
+                    }
                     retest_results.push((
                         name.clone(),
                         false,
-                        format!("retest parse error: {e}"),
+                        format!("retest parse error (reverted): {e}"),
                     ));
                 }
             }
@@ -597,7 +788,8 @@ impl Session {
                             &self.program,
                             &test.function_name,
                             case,
-                            &self.io_mocks,
+                            &self.meta.io_mocks,
+                            &self.runtime.http_routes,
                         ) {
                             Ok(msg) => results.push((format!("PASS: {msg}"), true)),
                             Err(e) => {
@@ -607,7 +799,6 @@ impl Session {
                         }
                     }
                     if all_passed && !test.cases.is_empty() {
-                        self.mark_tested(&test.function_name);
                         self.store_test(&test.function_name, &test.cases);
                     }
                 }
@@ -618,7 +809,7 @@ impl Session {
                 }
                 parser::Operation::Plan(action) => match action {
                     parser::PlanAction::Set(steps) => {
-                        self.plan = steps
+                        self.meta.plan = steps
                             .iter()
                             .map(|s| PlanStep {
                                 description: s.clone(),
@@ -628,20 +819,20 @@ impl Session {
                         results.push((format!("Plan: {} steps", steps.len()), true));
                     }
                     parser::PlanAction::Progress(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Done;
                             results.push((format!("Step {n} done"), true));
                         }
                     }
                     parser::PlanAction::Fail(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Failed;
                             results.push((format!("Step {n} failed"), true));
                         }
                     }
                     parser::PlanAction::Show => {
                         let plan_str = self
-                            .plan
+                            .meta.plan
                             .iter()
                             .enumerate()
                             .map(|(i, s)| {
@@ -672,7 +863,7 @@ impl Session {
                     response,
                 } => {
                     let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                    self.io_mocks.push(IoMock {
+                    self.meta.io_mocks.push(IoMock {
                         operation: operation.clone(),
                         patterns: patterns.clone(),
                         response: response.clone(),
@@ -686,16 +877,36 @@ impl Session {
                     ));
                 }
                 parser::Operation::Unmock => {
-                    let count = self.io_mocks.len();
-                    self.io_mocks.clear();
+                    let count = self.meta.io_mocks.len();
+                    self.meta.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
+                }
+                parser::Operation::Route { method, path, handler_fn } => {
+                    let route = ast::HttpRoute {
+                        method: method.clone(),
+                        path: path.clone(),
+                        handler_fn: handler_fn.clone(),
+                    };
+                    let msg = self.add_route(route);
+                    results.push((msg, true));
+                }
+                parser::Operation::RemoveRoute { method, path } => {
+                    match self.remove_route(method, path) {
+                        Ok(msg) => results.push((msg, true)),
+                        Err(e) => results.push((format!("{e}"), false)),
+                    }
+                }
+                parser::Operation::Sandbox(action) => {
+                    let msg = self.handle_sandbox(action);
+                    results.push(msg);
                 }
                 _ => {
                     any_definition = true;
+                    let pre_backups = self.backup_affected_bodies(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => {
                             results.push((msg, true));
-                            for (name, passed, detail) in self.invalidate_and_retest(op) {
+                            for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
                                 results.push((detail, passed));
                                 let _ = name;
                             }
@@ -724,27 +935,30 @@ impl Session {
         };
 
         if any_definition {
-            self.revision += 1;
-            self.mutations.push(MutationEntry {
-                revision: self.revision,
+            self.meta.revision += 1;
+            self.meta.mutations.push(MutationEntry {
+                revision: self.meta.revision,
                 timestamp: now(),
                 source: source.to_string(),
                 summary,
                 success,
             });
-            self.sources.push(source.to_string());
+            self.meta.sources.push(source.to_string());
 
             // Persist affected modules to the library
             let affected = crate::library::affected_module_names(&operations);
-            eprintln!("[library] apply: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.library_state.is_some());
+            eprintln!("[library] apply: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.meta.library_state.is_some());
             if success && !affected.is_empty() {
                 crate::library::persist_affected_modules(
                     &self.program,
                     &affected,
-                    self.library_state.as_ref(),
+                    self.meta.library_state.as_ref(),
                 );
             }
         }
+
+        // Initialize any newly-declared shared variables
+        self.init_shared_vars();
 
         Ok(results)
     }
@@ -781,8 +995,9 @@ impl Session {
                                     &self.program,
                                     &test.function_name,
                                     case,
-                                    &self.io_mocks,
+                                    &self.meta.io_mocks,
                                     sender.clone(),
+                                    &self.runtime.http_routes,
                                 )
                                 .await
                             } else {
@@ -790,7 +1005,8 @@ impl Session {
                                     &self.program,
                                     &test.function_name,
                                     case,
-                                    &self.io_mocks,
+                                    &self.meta.io_mocks,
+                                    &self.runtime.http_routes,
                                 )
                             }
                         } else {
@@ -798,7 +1014,8 @@ impl Session {
                                 &self.program,
                                 &test.function_name,
                                 case,
-                                &self.io_mocks,
+                                &self.meta.io_mocks,
+                                &self.runtime.http_routes,
                             )
                         };
 
@@ -811,7 +1028,6 @@ impl Session {
                         }
                     }
                     if all_passed && !test.cases.is_empty() {
-                        self.mark_tested(&test.function_name);
                         self.store_test(&test.function_name, &test.cases);
                     }
                 }
@@ -820,7 +1036,7 @@ impl Session {
                 | parser::Operation::Query(_) => {}
                 parser::Operation::Plan(action) => match action {
                     parser::PlanAction::Set(steps) => {
-                        self.plan = steps
+                        self.meta.plan = steps
                             .iter()
                             .map(|s| PlanStep {
                                 description: s.clone(),
@@ -830,20 +1046,20 @@ impl Session {
                         results.push((format!("Plan: {} steps", steps.len()), true));
                     }
                     parser::PlanAction::Progress(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Done;
                             results.push((format!("Step {n} done"), true));
                         }
                     }
                     parser::PlanAction::Fail(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Failed;
                             results.push((format!("Step {n} failed"), true));
                         }
                     }
                     parser::PlanAction::Show => {
                         let plan_str = self
-                            .plan
+                            .meta.plan
                             .iter()
                             .enumerate()
                             .map(|(i, s)| {
@@ -874,7 +1090,7 @@ impl Session {
                     response,
                 } => {
                     let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                    self.io_mocks.push(IoMock {
+                    self.meta.io_mocks.push(IoMock {
                         operation: operation.clone(),
                         patterns: patterns.clone(),
                         response: response.clone(),
@@ -888,16 +1104,36 @@ impl Session {
                     ));
                 }
                 parser::Operation::Unmock => {
-                    let count = self.io_mocks.len();
-                    self.io_mocks.clear();
+                    let count = self.meta.io_mocks.len();
+                    self.meta.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
+                }
+                parser::Operation::Route { method, path, handler_fn } => {
+                    let route = ast::HttpRoute {
+                        method: method.clone(),
+                        path: path.clone(),
+                        handler_fn: handler_fn.clone(),
+                    };
+                    let msg = self.add_route(route);
+                    results.push((msg, true));
+                }
+                parser::Operation::RemoveRoute { method, path } => {
+                    match self.remove_route(method, path) {
+                        Ok(msg) => results.push((msg, true)),
+                        Err(e) => results.push((format!("{e}"), false)),
+                    }
+                }
+                parser::Operation::Sandbox(action) => {
+                    let msg = self.handle_sandbox(action);
+                    results.push(msg);
                 }
                 _ => {
                     any_definition = true;
+                    let pre_backups = self.backup_affected_bodies(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => {
                             results.push((msg, true));
-                            for (name, passed, detail) in self.invalidate_and_retest(op) {
+                            for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
                                 results.push((detail, passed));
                                 let _ = name;
                             }
@@ -926,27 +1162,30 @@ impl Session {
         };
 
         if any_definition {
-            self.revision += 1;
-            self.mutations.push(MutationEntry {
-                revision: self.revision,
+            self.meta.revision += 1;
+            self.meta.mutations.push(MutationEntry {
+                revision: self.meta.revision,
                 timestamp: now(),
                 source: source.to_string(),
                 summary,
                 success,
             });
-            self.sources.push(source.to_string());
+            self.meta.sources.push(source.to_string());
 
             // Persist affected modules to the library
             let affected = crate::library::affected_module_names(&operations);
-            eprintln!("[library] apply_async: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.library_state.is_some());
+            eprintln!("[library] apply_async: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.meta.library_state.is_some());
             if success && !affected.is_empty() {
                 crate::library::persist_affected_modules(
                     &self.program,
                     &affected,
-                    self.library_state.as_ref(),
+                    self.meta.library_state.as_ref(),
                 );
             }
         }
+
+        // Initialize any newly-declared shared variables
+        self.init_shared_vars();
 
         Ok(results)
     }
@@ -959,8 +1198,8 @@ impl Session {
 
     /// Record an eval in the working history.
     pub fn record_eval(&mut self, function: &str, input: &str, result: &str) {
-        self.history.push(HistoryEntry::Eval {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Eval {
+            revision: self.meta.revision,
             function: function.to_string(),
             input: input.to_string(),
             result: result.to_string(),
@@ -975,8 +1214,8 @@ impl Session {
         failed: usize,
         details: Vec<String>,
     ) {
-        self.history.push(HistoryEntry::Test {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Test {
+            revision: self.meta.revision,
             function: function.to_string(),
             passed,
             failed,
@@ -986,8 +1225,8 @@ impl Session {
 
     /// Record a query in the working history.
     pub fn record_query(&mut self, query: &str, response: &str) {
-        self.history.push(HistoryEntry::Query {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Query {
+            revision: self.meta.revision,
             query: query.to_string(),
             response: response.to_string(),
         });
@@ -995,8 +1234,8 @@ impl Session {
 
     /// Record a trace in the working history.
     pub fn record_trace(&mut self, function: &str, steps: usize) {
-        self.history.push(HistoryEntry::Trace {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Trace {
+            revision: self.meta.revision,
             function: function.to_string(),
             steps,
         });
@@ -1004,17 +1243,17 @@ impl Session {
 
     /// Replay mutations up to a specific revision, reconstructing program state.
     pub fn rewind_to(&mut self, target_revision: usize) -> Result<()> {
-        if target_revision > self.sources.len() {
+        if target_revision > self.meta.sources.len() {
             return Err(anyhow!(
                 "revision {} doesn't exist (latest is {})",
                 target_revision,
-                self.sources.len()
+                self.meta.sources.len()
             ));
         }
 
         // Rebuild from scratch
         self.program = ast::Program::default();
-        for source in &self.sources[..target_revision] {
+        for source in &self.meta.sources[..target_revision] {
             let operations = parser::parse(source)?;
             for op in &operations {
                 match op {
@@ -1028,7 +1267,7 @@ impl Session {
                 }
             }
         }
-        self.revision = target_revision;
+        self.meta.revision = target_revision;
         Ok(())
     }
 
@@ -1038,8 +1277,8 @@ impl Session {
         out.push_str("=== Recent History ===\n");
 
         // Show last N mutations
-        let start = self.mutations.len().saturating_sub(max_entries);
-        for entry in &self.mutations[start..] {
+        let start = self.meta.mutations.len().saturating_sub(max_entries);
+        for entry in &self.meta.mutations[start..] {
             let status = if entry.success { "OK" } else { "ERR" };
             out.push_str(&format!(
                 "[rev {}] {} — {}\n",
@@ -1048,8 +1287,8 @@ impl Session {
         }
 
         // Show last N history entries
-        let start = self.history.len().saturating_sub(max_entries);
-        for entry in &self.history[start..] {
+        let start = self.meta.history.len().saturating_sub(max_entries);
+        for entry in &self.meta.history[start..] {
             match entry {
                 HistoryEntry::Eval {
                     revision,
@@ -1114,25 +1353,25 @@ impl Session {
     fn handle_roadmap(&mut self, action: &parser::RoadmapAction) -> (String, bool) {
         match action {
             parser::RoadmapAction::Show => {
-                let items = self.roadmap.iter().enumerate().map(|(i, item)| {
+                let items = self.meta.roadmap.iter().enumerate().map(|(i, item)| {
                     format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
                 }).collect::<Vec<_>>().join("\n");
                 (if items.is_empty() { "Roadmap is empty.".to_string() } else { format!("Roadmap:\n{items}") }, true)
             }
             parser::RoadmapAction::Add(desc) => {
-                self.roadmap.push(RoadmapItem { description: desc.clone(), done: false });
-                (format!("Roadmap: added \"{}\" (#{}).", desc, self.roadmap.len()), true)
+                self.meta.roadmap.push(RoadmapItem { description: desc.clone(), done: false });
+                (format!("Roadmap: added \"{}\" (#{}).", desc, self.meta.roadmap.len()), true)
             }
             parser::RoadmapAction::Done(n) => {
-                if let Some(item) = self.roadmap.get_mut(n.saturating_sub(1)) {
+                if let Some(item) = self.meta.roadmap.get_mut(n.saturating_sub(1)) {
                     item.done = true;
                     (format!("Roadmap: #{n} done."), true)
                 } else { (format!("Roadmap: #{n} not found."), false) }
             }
             parser::RoadmapAction::Remove(n) => {
                 let idx = n.saturating_sub(1);
-                if idx < self.roadmap.len() {
-                    let removed = self.roadmap.remove(idx);
+                if idx < self.meta.roadmap.len() {
+                    let removed = self.meta.roadmap.remove(idx);
                     (format!("Roadmap: removed \"{}\".", removed.description), true)
                 } else { (format!("Roadmap: #{n} not found."), false) }
             }
@@ -1301,7 +1540,7 @@ mod tests {
     #[test]
     fn store_test_marks_ast_tests_passed() {
         let mut session = Session::new();
-        session.program.functions.push(test_function("foo"));
+        session.program.functions.push(std::sync::Arc::new(test_function("foo")));
         session.program.rebuild_function_index();
 
         let cases = vec![parser::TestCase {
@@ -1312,7 +1551,6 @@ mod tests {
         }];
 
         session.store_test("foo", &cases);
-        session.tested_functions.clear();
 
         let func = session.program.get_function("foo").unwrap();
         assert_eq!(func.tests.len(), 1);
@@ -1350,12 +1588,245 @@ mod tests {
             ],
         });
 
+        let pre_backups = session.backup_affected_bodies(&op);
         validator::apply_and_validate(&mut session.program, &op).unwrap();
-        let results = session.invalidate_and_retest(&op);
+        let results = session.invalidate_and_retest(&op, pre_backups);
 
         assert!(!results.is_empty());
         let func = session.program.get_function("foo").unwrap();
         assert!(func.tests.iter().all(|t| t.passed));
         assert!(session.is_function_tested("foo"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: SessionMeta serde roundtrip
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn session_meta_serde_roundtrip() {
+        let mut meta = SessionMeta::new();
+        meta.revision = 5;
+        meta.roadmap.push(RoadmapItem { description: "build feature X".to_string(), done: false });
+        meta.plan.push(PlanStep { description: "step 1".to_string(), status: PlanStatus::Pending });
+        meta.chat_messages.push(ChatMessage { role: "user".to_string(), content: "hello".to_string() });
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let restored: SessionMeta = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(restored.revision, 5);
+        assert_eq!(restored.roadmap.len(), 1);
+        assert_eq!(restored.roadmap[0].description, "build feature X");
+        assert_eq!(restored.plan.len(), 1);
+        assert_eq!(restored.chat_messages.len(), 1);
+        // library_state is #[serde(skip)] — should be None after roundtrip
+        assert!(restored.library_state.is_none());
+    }
+
+    #[test]
+    fn session_serde_flatten_roundtrip() {
+        let mut session = Session::new();
+        session.meta.revision = 3;
+        session.meta.roadmap.push(RoadmapItem { description: "test".to_string(), done: true });
+
+        let json = serde_json::to_string(&session).expect("serialize");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize");
+
+        // With #[serde(flatten)], meta fields appear at the top level in JSON
+        assert_eq!(restored.meta.revision, 3);
+        assert_eq!(restored.meta.roadmap.len(), 1);
+        assert!(restored.meta.roadmap[0].done);
+        // sandbox is #[serde(skip)] — should be None
+        assert!(restored.sandbox.is_none());
+    }
+
+    #[test]
+    fn session_serde_flatten_fields_at_top_level() {
+        let mut session = Session::new();
+        session.meta.revision = 7;
+        let json = serde_json::to_string(&session).expect("serialize");
+        // With flatten, "revision" should be a top-level key, not nested under "meta"
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("revision").is_some(), "revision should be top-level: {json}");
+        assert!(v.get("meta").is_none(), "meta should not be a separate key: {json}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: AgentBranch fork/merge
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn agent_branch_fork_creates_independent_program() {
+        let mut session = Session::new();
+        session.apply("+fn greet ()->String\n  +return \"hello\"\n").unwrap();
+        assert!(session.program.get_function("greet").is_some());
+
+        let branch = AgentBranch::fork("test-agent", AgentScope::Full, "add a function", &session);
+        assert!(branch.program.get_function("greet").is_some());
+        assert_eq!(branch.fork_revision, session.meta.revision);
+        assert!(branch.mutations.is_empty());
+    }
+
+    #[test]
+    fn agent_branch_mutation_independent() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+
+        let mut branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        branch.apply("+fn new_fn ()->Int\n  +return 2\n").unwrap();
+
+        // Branch has the new function, session doesn't
+        assert!(branch.program.get_function("new_fn").is_some());
+        assert!(session.program.get_function("new_fn").is_none());
+    }
+
+    #[test]
+    fn agent_branch_merge_applies_mutations() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+
+        let mut branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        branch.apply("+fn added ()->Int\n  +return 42\n").unwrap();
+
+        let conflicts = branch.merge_into(&mut session);
+        assert!(conflicts.is_empty(), "expected no conflicts, got: {conflicts:?}");
+        assert!(session.program.get_function("added").is_some());
+    }
+
+    #[test]
+    fn agent_branch_fork_isolates_runtime() {
+        let mut session = Session::new();
+        session.runtime.shared_vars.insert("key".to_string(), crate::eval::Value::Int(10));
+
+        let branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        assert!(matches!(
+            branch.runtime_state.shared_vars.get("key"),
+            Some(crate::eval::Value::Int(10))
+        ));
+
+        // Mutating session runtime doesn't affect branch
+        session.runtime.shared_vars.insert("key".to_string(), crate::eval::Value::Int(99));
+        assert!(matches!(
+            branch.runtime_state.shared_vars.get("key"),
+            Some(crate::eval::Value::Int(10))
+        ), "branch should be unaffected by session mutation");
+    }
+
+    #[test]
+    fn agent_branch_merge_propagates_shared_var_changes() {
+        let mut session = Session::new();
+        session.runtime.shared_vars.insert("counter".to_string(), crate::eval::Value::Int(0));
+
+        let mut branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        // Modify shared var in branch
+        branch.runtime_state.shared_vars.insert("counter".to_string(), crate::eval::Value::Int(5));
+
+        let conflicts = branch.merge_into(&mut session);
+        assert!(conflicts.is_empty());
+        // Session should have the updated value
+        assert!(matches!(
+            session.runtime.shared_vars.get("counter"),
+            Some(crate::eval::Value::Int(5))
+        ));
+    }
+
+    #[test]
+    fn agent_branch_merge_ignores_unchanged_vars() {
+        let mut session = Session::new();
+        session.runtime.shared_vars.insert("stable".to_string(), crate::eval::Value::Int(42));
+
+        let branch = AgentBranch::fork("agent", AgentScope::Full, "task", &session);
+        // Don't modify any shared vars
+
+        // Change session's value before merge
+        session.runtime.shared_vars.insert("stable".to_string(), crate::eval::Value::Int(100));
+
+        let conflicts = branch.merge_into(&mut session);
+        assert!(conflicts.is_empty());
+        // Session value should stay at 100 (branch didn't change it)
+        assert!(matches!(
+            session.runtime.shared_vars.get("stable"),
+            Some(crate::eval::Value::Int(100))
+        ));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Architecture: !sandbox enter/merge/discard
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn sandbox_enter_and_status() {
+        let mut session = Session::new();
+        // Not in sandbox initially
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Status);
+        assert!(ok);
+        assert!(msg.contains("not in sandbox"));
+
+        // Enter sandbox
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Enter);
+        assert!(ok, "enter should succeed: {msg}");
+        assert!(session.sandbox.is_some());
+
+        // Status should report active
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Status);
+        assert!(ok);
+        assert!(msg.contains("in sandbox mode"));
+    }
+
+    #[test]
+    fn sandbox_double_enter_rejected() {
+        let mut session = Session::new();
+        session.handle_sandbox(&parser::SandboxAction::Enter);
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Enter);
+        assert!(!ok, "double enter should fail");
+        assert!(msg.contains("already in sandbox"));
+    }
+
+    #[test]
+    fn sandbox_merge_keeps_changes() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+        session.handle_sandbox(&parser::SandboxAction::Enter);
+
+        // Add a function while in sandbox
+        session.apply("+fn new_fn ()->Int\n  +return 42\n").unwrap();
+        assert!(session.program.get_function("new_fn").is_some());
+
+        // Merge — changes stay
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Merge);
+        assert!(ok, "merge should succeed: {msg}");
+        assert!(session.sandbox.is_none());
+        assert!(session.program.get_function("new_fn").is_some(), "merged function should persist");
+    }
+
+    #[test]
+    fn sandbox_discard_reverts_changes() {
+        let mut session = Session::new();
+        session.apply("+fn base ()->Int\n  +return 1\n").unwrap();
+        let rev_before = session.meta.revision;
+
+        session.handle_sandbox(&parser::SandboxAction::Enter);
+        session.apply("+fn sandbox_fn ()->Int\n  +return 99\n").unwrap();
+        assert!(session.program.get_function("sandbox_fn").is_some());
+
+        // Discard — revert all sandbox changes
+        let (msg, ok) = session.handle_sandbox(&parser::SandboxAction::Discard);
+        assert!(ok, "discard should succeed: {msg}");
+        assert!(session.sandbox.is_none());
+        assert!(session.program.get_function("sandbox_fn").is_none(), "discarded function should be gone");
+        assert_eq!(session.meta.revision, rev_before, "revision should be restored");
+    }
+
+    #[test]
+    fn sandbox_merge_without_enter_fails() {
+        let mut session = Session::new();
+        let (_, ok) = session.handle_sandbox(&parser::SandboxAction::Merge);
+        assert!(!ok, "merge without enter should fail");
+    }
+
+    #[test]
+    fn sandbox_discard_without_enter_fails() {
+        let mut session = Session::new();
+        let (_, ok) = session.handle_sandbox(&parser::SandboxAction::Discard);
+        assert!(!ok, "discard without enter should fail");
     }
 }

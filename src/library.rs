@@ -70,6 +70,19 @@ pub fn reconstruct_module_source(module: &ast::Module) -> String {
         out.push('\n');
     }
 
+    // Shared variables (after types, before functions)
+    for sv in &module.shared_vars {
+        out.push_str(&format!(
+            "+shared {}:{} = {}\n",
+            sv.name,
+            format_type(&sv.ty),
+            crate::typeck::reconstruct_expr(&sv.default),
+        ));
+    }
+    if !module.shared_vars.is_empty() {
+        out.push('\n');
+    }
+
     // Then functions
     for func in &module.functions {
         out.push_str(&reconstruct_function_source(func));
@@ -147,6 +160,39 @@ fn reconstruct_function_source(func: &ast::FunctionDecl) -> String {
     for stmt in &func.body {
         typeck::reconstruct_stmt_pub(&mut out, stmt, 1);
     }
+
+    // Include persisted tests in source reconstruction
+    if !func.tests.is_empty() {
+        out.push('\n');
+        out.push_str(&format!("!test {}\n", func.name));
+        for tc in &func.tests {
+            let expect_part = if let Some(ref m) = tc.matcher {
+                if m == "AnyOk" {
+                    "Ok".to_string()
+                } else if m == "AnyErr" {
+                    "Err".to_string()
+                } else if let Some(msg) = m.strip_prefix("ErrContaining:") {
+                    format!("Err(\"{}\")", msg)
+                } else if let Some(sub) = m.strip_prefix("contains:") {
+                    format!("contains(\"{}\")", sub)
+                } else if let Some(pre) = m.strip_prefix("starts_with:") {
+                    format!("starts_with(\"{}\")", pre)
+                } else {
+                    tc.expected.clone()
+                }
+            } else {
+                tc.expected.clone()
+            };
+            out.push_str(&format!("  +with {} -> expect {}\n", tc.input, expect_part));
+            for ac in &tc.after_checks {
+                out.push_str(&format!(
+                    "  +after {} {} \"{}\"\n",
+                    ac.target, ac.matcher, ac.value
+                ));
+            }
+        }
+    }
+
     out
 }
 
@@ -515,7 +561,7 @@ mod tests {
             validator::apply_and_validate(&mut program, op).unwrap();
         }
         let table = crate::typeck::build_symbol_table(&program);
-        let output = crate::typeck::handle_query(&program, &table, "?symbols");
+        let output = crate::typeck::handle_query(&program, &table, "?symbols", &[]);
         // Must contain qualified names
         assert!(
             output.contains("Probe.hi"),
@@ -543,7 +589,7 @@ mod tests {
             validator::apply_and_validate(&mut program, op).unwrap();
         }
         let table = crate::typeck::build_symbol_table(&program);
-        let output = crate::typeck::handle_query(&program, &table, "?source Probe.hi");
+        let output = crate::typeck::handle_query(&program, &table, "?source Probe.hi", &[]);
         assert!(
             output.contains("+fn hi"),
             "?source Probe.hi failed:\n{output}"
@@ -555,7 +601,7 @@ mod tests {
     fn test_library_query_in_handle_query() {
         let program = ast::Program::default();
         let table = crate::typeck::build_symbol_table(&program);
-        let output = crate::typeck::handle_query(&program, &table, "?library");
+        let output = crate::typeck::handle_query(&program, &table, "?library", &[]);
         // Must NOT return "unknown query"
         assert!(
             !output.contains("unknown query"),
@@ -572,7 +618,7 @@ mod tests {
         // This test verifies that session.apply() calls persist logic
         let mut session = crate::session::Session::new();
         // Give it a library state
-        session.library_state = Some(LibraryState::new());
+        session.meta.library_state = Some(LibraryState::new());
 
         let source = "!module TestPersist\n+fn check ()->Int\n  +return 1\n";
         let result = session.apply(source);
