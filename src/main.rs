@@ -23,7 +23,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "forge", about = "Adapsis — the adaptive, self-modifying AI programming environment")]
+#[command(name = "adapsis", about = "Adapsis — the adaptive, self-modifying AI programming environment")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -155,7 +155,7 @@ enum Command {
         api: String,
 
         /// Session file (used when auto-starting AdapsisOS)
-        #[arg(short, long, default_value = "forgeos-session.json")]
+        #[arg(short, long, default_value = "adapsisos-session.json")]
         session: String,
 
         /// LLM server URL (used when auto-starting)
@@ -174,7 +174,7 @@ enum Command {
         port: u16,
 
         /// Session file path
-        #[arg(short, long, default_value = "forgeos-session.json")]
+        #[arg(short, long, default_value = "adapsisos-session.json")]
         session: String,
 
         /// LLM server URL (OpenAI-compatible)
@@ -199,7 +199,7 @@ enum Command {
         autonomous: Option<String>,
 
         /// Log file for structured AI activity logging (what it sees, thinks, does)
-        #[arg(long, default_value = "forgeos.log")]
+        #[arg(long, default_value = "adapsisos.log")]
         log_file: String,
 
         /// JSONL training data log (one entry per iteration: input/output/outcome)
@@ -207,7 +207,7 @@ enum Command {
         training_log: String,
 
         /// Directory where !opencode runs and builds. AdapsisOS should be started from
-        /// {dir}/target/release/forge so exec restart picks up rebuilt binaries.
+        /// {dir}/target/release/adapsis so exec restart picks up rebuilt binaries.
         #[arg(long, env = "FORGE_OPENCODE_GIT_DIR")]
         opencode_git_dir: Option<String>,
 
@@ -653,7 +653,7 @@ async fn main() -> Result<()> {
                 // Auto-start AdapsisOS in the background
                 let model = model.unwrap_or_else(|| {
                     eprintln!("No model specified. Set FORGE_MODEL env var or use --model.");
-                    eprintln!("Example: FORGE_MODEL=anthropic/claude-haiku-4-5-20251001 forge repl");
+                    eprintln!("Example: FORGE_MODEL=anthropic/claude-haiku-4-5-20251001 adapsis repl");
                     std::process::exit(1);
                 });
 
@@ -926,7 +926,7 @@ async fn main() -> Result<()> {
                 let mut args: Vec<String> = std::env::args().collect();
                 args.retain(|a| a != "-d" && a != "--daemonize");
                 
-                let log_file = std::fs::File::create("/tmp/forgeos.log")
+                let log_file = std::fs::File::create("/tmp/adapsisos.log")
                     .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
                 
                 let child = std::process::Command::new(&exe)
@@ -1159,10 +1159,47 @@ async fn main() -> Result<()> {
                                             if let Some(data) = line.strip_prefix("data: ") {
                                                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                                                     let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                                    eprintln!("[autonomous] SSE event: {etype}");
-                                                    if etype == "end" || etype == "done" {
-                                                        eprintln!("[autonomous] SSE {etype} received, ending request...");
-                                                        got_end = true;
+                                                    match etype {
+                                                        // High-frequency streaming chunks — don't spam logs
+                                                        "content" | "thinking" => {}
+                                                        "end" | "done" => {
+                                                            eprintln!("[autonomous] {etype}");
+                                                            got_end = true;
+                                                        }
+                                                        "text" => {
+                                                            let preview = event.get("text")
+                                                                .and_then(|t| t.as_str())
+                                                                .map(|s| s.chars().take(120).collect::<String>())
+                                                                .unwrap_or_default();
+                                                            eprintln!("[ai-text] {preview}");
+                                                        }
+                                                        "code" => {
+                                                            let preview = event.get("code")
+                                                                .and_then(|t| t.as_str())
+                                                                .map(|s| s.chars().take(120).collect::<String>())
+                                                                .unwrap_or_default();
+                                                            eprintln!("[code] {preview}");
+                                                        }
+                                                        "error" => {
+                                                            let msg = event.get("message")
+                                                                .and_then(|t| t.as_str())
+                                                                .unwrap_or("unknown");
+                                                            eprintln!("[error] {msg}");
+                                                        }
+                                                        "feedback" => {
+                                                            let msg = event.get("message")
+                                                                .and_then(|t| t.as_str())
+                                                                .map(|s| s.chars().take(200).collect::<String>())
+                                                                .unwrap_or_default();
+                                                            eprintln!("[feedback] {msg}");
+                                                        }
+                                                        _ => {
+                                                            let detail = event.get("message")
+                                                                .and_then(|t| t.as_str())
+                                                                .map(|s| format!(": {}", s.chars().take(100).collect::<String>()))
+                                                                .unwrap_or_default();
+                                                            eprintln!("[autonomous] {etype}{detail}");
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1202,8 +1239,8 @@ async fn main() -> Result<()> {
             }
 
             match axum::serve(listener, app).await {
-                Ok(()) => eprintln!("[forge] server exited cleanly"),
-                Err(e) => eprintln!("[forge] server error: {e}"),
+                Ok(()) => eprintln!("[adapsis] server exited cleanly"),
+                Err(e) => eprintln!("[adapsis] server error: {e}"),
             }
         }
         Command::Ask { message, api } => {
