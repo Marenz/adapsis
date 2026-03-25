@@ -2316,20 +2316,49 @@ pub async fn ask_stream(
 
                                         let stdout = child.stdout.take().unwrap();
                                         let mut reader = BufReader::new(stdout).lines();
-                                        let idle_timeout = std::time::Duration::from_secs(300);
+                                        // Track last activity from both stdout and stderr.
+                                        // The idle timeout kills only if NEITHER stream has
+                                        // produced output for the timeout duration.
+                                        let last_activity = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+                                        let last_activity_stderr = last_activity.clone();
+
+                                        // Spawn stderr reader that updates last_activity
+                                        let stderr = child.stderr.take();
+                                        if let Some(stderr) = stderr {
+                                            tokio::spawn(async move {
+                                                let mut reader = BufReader::new(stderr).lines();
+                                                while let Ok(Some(_)) = reader.next_line().await {
+                                                    *last_activity_stderr.lock().unwrap() = std::time::Instant::now();
+                                                }
+                                            });
+                                        }
+
+                                        let idle_timeout = std::time::Duration::from_secs(600); // 10 min
                                         loop {
-                                            let line = match tokio::time::timeout(idle_timeout, reader.next_line()).await {
-                                                Ok(Ok(Some(line))) => line,
+                                            let line = match tokio::time::timeout(std::time::Duration::from_secs(30), reader.next_line()).await {
+                                                Ok(Ok(Some(line))) => {
+                                                    *last_activity.lock().unwrap() = std::time::Instant::now();
+                                                    line
+                                                }
                                                 Ok(Ok(None)) => break, // EOF
                                                 Ok(Err(e)) => { eprintln!("[opencode] read error: {e}"); break; }
                                                 Err(_) => {
-                                                    eprintln!("[opencode] idle timeout (5 min no output), killing");
-                                                    // Kill entire process group to clean up opencode subprocesses
-                                                    if let Some(pid) = child.id() {
-                                                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                                                    // No stdout line for 30s — check if stderr had activity
+                                                    let elapsed = last_activity.lock().unwrap().elapsed();
+                                                    if elapsed >= idle_timeout {
+                                                        let msg = format!("[opencode] IDLE TIMEOUT: no output on stdout or stderr for {}s — killing OpenCode process", elapsed.as_secs());
+                                                        eprintln!("{msg}");
+                                                        log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
+                                                        has_errors = true;
+                                                        feedback_details.push(format!("ERROR: {msg}"));
+                                                        // Kill entire process group to clean up opencode subprocesses
+                                                        if let Some(pid) = child.id() {
+                                                            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                                                        }
+                                                        let _ = child.kill().await;
+                                                        break;
                                                     }
-                                                    let _ = child.kill().await;
-                                                    break;
+                                                    continue; // stderr had recent activity, keep waiting
                                                 }
                                             };
                                             // Keep last 20 lines for error context
