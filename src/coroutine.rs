@@ -659,6 +659,107 @@ impl CoroutineHandle {
                     })?;
                 return Ok(Value::String(result));
             }
+
+            // ── Plan operations — handled locally, no IO channel needed ──
+            "plan_show" => {
+                let result = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| {
+                        let steps: Vec<String> = state.plan.iter().enumerate().map(|(i, step)| {
+                            let icon = match step.status {
+                                crate::session::PlanStatus::Pending => "[ ]",
+                                crate::session::PlanStatus::InProgress => "[~]",
+                                crate::session::PlanStatus::Done => "[x]",
+                                crate::session::PlanStatus::Failed => "[!]",
+                            };
+                            format!("{} {}: {}", icon, i + 1, step.description)
+                        }).collect();
+                        if steps.is_empty() {
+                            "No plan set.".to_string()
+                        } else {
+                            steps.join("\n")
+                        }
+                    }))
+                    .unwrap_or_else(|| "No plan set.".to_string());
+                return Ok(Value::String(result));
+            }
+            "plan_set" => {
+                let steps_str = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{other}"),
+                    None => bail!("plan_set expects (steps:String)"),
+                };
+                let descriptions: Vec<String> = steps_str
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if descriptions.is_empty() {
+                    bail!("plan_set: steps must not be empty");
+                }
+                let count = descriptions.len();
+                if let Some(rt) = crate::eval::get_shared_runtime() {
+                    if let Ok(mut state) = rt.write() {
+                        state.plan = descriptions
+                            .into_iter()
+                            .map(|d| crate::session::PlanStep {
+                                description: d,
+                                status: crate::session::PlanStatus::Pending,
+                            })
+                            .collect();
+                    }
+                }
+                return Ok(Value::String(format!("Plan set with {count} steps.")));
+            }
+            "plan_done" => {
+                let n = match args.first() {
+                    Some(Value::Int(n)) => *n,
+                    _ => bail!("plan_done expects (n:Int)"),
+                };
+                if n < 1 {
+                    bail!("plan_done: index must be >= 1");
+                }
+                let result = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("plan_done: no runtime available"))
+                    .and_then(|rt| {
+                        rt.write()
+                            .map_err(|_| anyhow::anyhow!("plan_done: could not access runtime"))
+                            .and_then(|mut state| {
+                                let idx = (n as usize).saturating_sub(1);
+                                if idx < state.plan.len() {
+                                    state.plan[idx].status = crate::session::PlanStatus::Done;
+                                    Ok(format!("Plan: step {n} done."))
+                                } else {
+                                    Err(anyhow::anyhow!("plan_done: step {n} not found (plan has {} steps)", state.plan.len()))
+                                }
+                            })
+                    })?;
+                return Ok(Value::String(result));
+            }
+            "plan_fail" => {
+                let n = match args.first() {
+                    Some(Value::Int(n)) => *n,
+                    _ => bail!("plan_fail expects (n:Int)"),
+                };
+                if n < 1 {
+                    bail!("plan_fail: index must be >= 1");
+                }
+                let result = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("plan_fail: no runtime available"))
+                    .and_then(|rt| {
+                        rt.write()
+                            .map_err(|_| anyhow::anyhow!("plan_fail: could not access runtime"))
+                            .and_then(|mut state| {
+                                let idx = (n as usize).saturating_sub(1);
+                                if idx < state.plan.len() {
+                                    state.plan[idx].status = crate::session::PlanStatus::Failed;
+                                    Ok(format!("Plan: step {n} failed."))
+                                } else {
+                                    Err(anyhow::anyhow!("plan_fail: step {n} not found (plan has {} steps)", state.plan.len()))
+                                }
+                            })
+                    })?;
+                return Ok(Value::String(result));
+            }
             _ => {} // fall through to mock/IO dispatch
         }
 
@@ -897,6 +998,7 @@ mod tests {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
+            plan: vec![],
         }));
         crate::eval::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
@@ -1012,5 +1114,179 @@ mod tests {
         let (handle, _rt) = setup_roadmap_runtime();
         let result = handle.execute_await("roadmap_done", &[Value::String("1".into())]);
         assert!(result.is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Plan IO builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn plan_show_empty() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = unwrap_string(handle.execute_await("plan_show", &[]).unwrap());
+        assert_eq!(result, "No plan set.");
+    }
+
+    #[test]
+    fn plan_set_and_show() {
+        let (handle, rt) = setup_roadmap_runtime();
+
+        let result = unwrap_string(
+            handle.execute_await("plan_set", &[Value::String("Parse input\nValidate data\nStore results".into())]).unwrap()
+        );
+        assert_eq!(result, "Plan set with 3 steps.");
+
+        // Verify state
+        assert_eq!(rt.read().unwrap().plan.len(), 3);
+        assert_eq!(rt.read().unwrap().plan[0].description, "Parse input");
+        assert_eq!(rt.read().unwrap().plan[1].description, "Validate data");
+        assert_eq!(rt.read().unwrap().plan[2].description, "Store results");
+
+        // Show should list all steps
+        let show = unwrap_string(handle.execute_await("plan_show", &[]).unwrap());
+        assert!(show.contains("[ ] 1: Parse input"), "step 1: {show}");
+        assert!(show.contains("[ ] 2: Validate data"), "step 2: {show}");
+        assert!(show.contains("[ ] 3: Store results"), "step 3: {show}");
+    }
+
+    #[test]
+    fn plan_set_empty_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("plan_set", &[Value::String("  \n  \n  ".into())]);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("must not be empty"),
+            "should reject empty steps"
+        );
+    }
+
+    #[test]
+    fn plan_set_no_args_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("plan_set", &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plan_set_skips_blank_lines() {
+        let (handle, rt) = setup_roadmap_runtime();
+
+        let result = unwrap_string(
+            handle.execute_await("plan_set", &[Value::String("Step A\n\n  \nStep B".into())]).unwrap()
+        );
+        assert_eq!(result, "Plan set with 2 steps.");
+        assert_eq!(rt.read().unwrap().plan.len(), 2);
+        assert_eq!(rt.read().unwrap().plan[0].description, "Step A");
+        assert_eq!(rt.read().unwrap().plan[1].description, "Step B");
+    }
+
+    #[test]
+    fn plan_done_marks_step() {
+        let (handle, rt) = setup_roadmap_runtime();
+
+        handle.execute_await("plan_set", &[Value::String("Alpha\nBravo".into())]).unwrap();
+
+        let result = unwrap_string(
+            handle.execute_await("plan_done", &[Value::Int(2)]).unwrap()
+        );
+        assert_eq!(result, "Plan: step 2 done.");
+
+        // Verify state
+        assert_eq!(rt.read().unwrap().plan[0].status, crate::session::PlanStatus::Pending);
+        assert_eq!(rt.read().unwrap().plan[1].status, crate::session::PlanStatus::Done);
+
+        // Show should reflect [x]
+        let show = unwrap_string(handle.execute_await("plan_show", &[]).unwrap());
+        assert!(show.contains("[ ] 1: Alpha"), "Alpha pending: {show}");
+        assert!(show.contains("[x] 2: Bravo"), "Bravo done: {show}");
+    }
+
+    #[test]
+    fn plan_done_out_of_bounds() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        handle.execute_await("plan_set", &[Value::String("Only step".into())]).unwrap();
+
+        let result = handle.execute_await("plan_done", &[Value::Int(5)]);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("not found"),
+            "should error on out-of-bounds index"
+        );
+    }
+
+    #[test]
+    fn plan_done_zero_index_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("plan_done", &[Value::Int(0)]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(">= 1"));
+    }
+
+    #[test]
+    fn plan_done_wrong_type_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("plan_done", &[Value::String("1".into())]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plan_fail_marks_step() {
+        let (handle, rt) = setup_roadmap_runtime();
+
+        handle.execute_await("plan_set", &[Value::String("First\nSecond\nThird".into())]).unwrap();
+
+        let result = unwrap_string(
+            handle.execute_await("plan_fail", &[Value::Int(1)]).unwrap()
+        );
+        assert_eq!(result, "Plan: step 1 failed.");
+
+        // Verify state
+        assert_eq!(rt.read().unwrap().plan[0].status, crate::session::PlanStatus::Failed);
+        assert_eq!(rt.read().unwrap().plan[1].status, crate::session::PlanStatus::Pending);
+
+        // Show should reflect [!]
+        let show = unwrap_string(handle.execute_await("plan_show", &[]).unwrap());
+        assert!(show.contains("[!] 1: First"), "First failed: {show}");
+        assert!(show.contains("[ ] 2: Second"), "Second pending: {show}");
+    }
+
+    #[test]
+    fn plan_fail_out_of_bounds() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        handle.execute_await("plan_set", &[Value::String("Only step".into())]).unwrap();
+
+        let result = handle.execute_await("plan_fail", &[Value::Int(3)]);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("not found"),
+            "should error on out-of-bounds index"
+        );
+    }
+
+    #[test]
+    fn plan_fail_zero_index_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("plan_fail", &[Value::Int(0)]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(">= 1"));
+    }
+
+    #[test]
+    fn plan_fail_wrong_type_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("plan_fail", &[Value::String("1".into())]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plan_set_replaces_existing() {
+        let (handle, rt) = setup_roadmap_runtime();
+
+        handle.execute_await("plan_set", &[Value::String("Old step 1\nOld step 2".into())]).unwrap();
+        assert_eq!(rt.read().unwrap().plan.len(), 2);
+
+        handle.execute_await("plan_set", &[Value::String("New step".into())]).unwrap();
+        assert_eq!(rt.read().unwrap().plan.len(), 1);
+        assert_eq!(rt.read().unwrap().plan[0].description, "New step");
     }
 }

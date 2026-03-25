@@ -556,6 +556,25 @@ Example:
 +end
 ```
 
+### Plan IO Builtins
+
+You can manage the plan programmatically from Adapsis functions using these async IO operations:
+
+- `+await text:String = plan_show()` — returns the current plan as formatted text. Each line: `[ ] N: desc`, `[x] N: desc` (done), `[!] N: desc` (failed). Returns `No plan set.` if empty.
+- `+await result:String = plan_set("Step one\nStep two\nStep three")` — replaces the plan. Each line becomes a step, auto-numbered from 1. Returns `Plan set with N steps.`
+- `+await result:String = plan_done(1)` — marks step 1 as done, returns `Plan: step 1 done.`
+- `+await result:String = plan_fail(2)` — marks step 2 as failed, returns `Plan: step 2 failed.`
+
+These require `[io,async]` effects and `+await`. They operate on the same plan as the `!plan` command.
+
+Example:
+```
++fn setup_plan ()->String [io,async]
+  +await r:String = plan_set("Parse input\nValidate data\nStore results")
+  +return r
++end
+```
+
 ### Multi-Session API
 
 AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session

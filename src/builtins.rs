@@ -507,6 +507,34 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Marks a roadmap item as done by its 1-based index and returns a confirmation String like `Roadmap: #N done.`. Takes `(n:Int)`. Fails if the index is out of bounds. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    Builtin {
+        name: "plan_show",
+        aliases: &[],
+        short: "get current plan as String",
+        long: "Returns the current plan as a formatted String. Each line is `[ ] N: description`, `[x] N: description` (done), or `[!] N: description` (failed). Returns `No plan set.` when empty. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "plan_set",
+        aliases: &[],
+        short: "replace current plan from newline-separated steps",
+        long: "Replaces the current plan. Takes `(steps:String)` where each line is a step description. Steps are auto-numbered starting from 1. Returns `Plan set with N steps.`. Fails if steps string is empty. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "plan_done",
+        aliases: &[],
+        short: "mark plan step N as done",
+        long: "Marks plan step N (1-based) as done and returns `Plan: step N done.`. Takes `(n:Int)`. Fails if the index is out of bounds. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "plan_fail",
+        aliases: &[],
+        short: "mark plan step N as failed",
+        long: "Marks plan step N (1-based) as failed and returns `Plan: step N failed.`. Takes `(n:Int)`. Fails if the index is out of bounds. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).
