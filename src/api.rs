@@ -244,10 +244,12 @@ pub async fn eval_fn(
             let fn_name = ev.function_name.clone();
             let input = ev.input.clone();
             let sender = sender.clone();
+            let runtime_for_blocking = config.runtime.clone();
 
             drop(session); // release lock before blocking
 
             let eval_result = tokio::task::spawn_blocking(move || {
+                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                 let func = program.get_function(&fn_name)
                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -1268,8 +1270,10 @@ pub async fn ask(
                                     let fn_name = ev.function_name.clone();
                                     let input = ev.input.clone();
                                     let sender = sender.clone();
+                                    let runtime_for_blocking = config.runtime.clone();
                                     drop(session);
                                     let eval_result = tokio::task::spawn_blocking(move || {
+                                        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                         let func = program.get_function(&fn_name)
                                             .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -2140,8 +2144,10 @@ pub async fn ask_stream(
                                         let fn_name = ev.function_name.clone();
                                         let input = ev.input.clone();
                                         let sender = sender.clone();
+                                        let runtime_for_blocking = config_clone.runtime.clone();
                                         drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                             let func = program.get_function(&fn_name)
                                                 .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -2225,8 +2231,10 @@ pub async fn ask_stream(
                                             ));
                                         }
                                         let program = session.program.clone();
+                                        let runtime_for_blocking = config_clone.runtime.clone();
                                         drop(session);
                                         let result = tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                             crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
                                         }).await;
                                         match result {
@@ -3142,12 +3150,14 @@ async fn adapsis_route_dispatch(
 
     // Clone program and drop the session lock before blocking eval
     let program = session.program.clone();
+    let runtime_for_blocking = config.runtime.clone();
     drop(session);
 
     eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
 
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
+        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
         let func = program
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;

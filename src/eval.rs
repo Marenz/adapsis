@@ -876,6 +876,7 @@ fn eval_test_case_with_runtime(
     std::thread::spawn(move || {
         // Use a forked RuntimeState for test isolation — shared vars are fresh
         // copies from program defaults, not the live runtime.
+        let forked_rt_clone = forked_runtime.clone();
         set_shared_runtime(forked_runtime);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -901,7 +902,9 @@ fn eval_test_case_with_runtime(
 
             // Run the evaluation in a blocking task so blocking_send/blocking_recv
             // don't stall the tokio executor.
+            let forked_rt_for_blocking = forked_rt_clone;
             let eval_result = tokio::task::spawn_blocking(move || {
+                set_shared_runtime(forked_rt_for_blocking);
                 let func = program
                     .get_function(&fn_name)
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
