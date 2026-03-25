@@ -841,6 +841,8 @@ fn fork_runtime_for_test(
     let forked = crate::session::RuntimeState {
         http_routes: http_routes.to_vec(),
         shared_vars,
+        roadmap: Vec::new(),
+        plan: Vec::new(),
     };
     Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }
@@ -875,6 +877,7 @@ fn eval_test_case_with_runtime(
     std::thread::spawn(move || {
         // Use a forked RuntimeState for test isolation — shared vars are fresh
         // copies from program defaults, not the live runtime.
+        let forked_rt_clone = forked_runtime.clone();
         set_shared_runtime(forked_runtime);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -900,7 +903,9 @@ fn eval_test_case_with_runtime(
 
             // Run the evaluation in a blocking task so blocking_send/blocking_recv
             // don't stall the tokio executor.
+            let forked_rt_for_blocking = forked_rt_clone;
             let eval_result = tokio::task::spawn_blocking(move || {
+                set_shared_runtime(forked_rt_for_blocking);
                 let func = program
                     .get_function(&fn_name)
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
@@ -1533,6 +1538,12 @@ std::thread_local! {
 /// Call this before any eval functions that need shared variable support.
 pub fn set_shared_runtime(rt: Option<crate::session::SharedRuntime>) {
     SHARED_RUNTIME.with(|s| *s.borrow_mut() = rt);
+}
+
+/// Get the thread-local SharedRuntime (if set). Used by coroutine.rs for
+/// roadmap builtins that need access to runtime state.
+pub fn get_shared_runtime() -> Option<crate::session::SharedRuntime> {
+    SHARED_RUNTIME.with(|s| s.borrow().clone())
 }
 
 const MAX_CALL_DEPTH: usize = 256;

@@ -26,6 +26,20 @@ use crate::validator;
 
 pub type SharedSession = Arc<Mutex<Session>>;
 
+/// Copy roadmap from session metadata into SharedRuntime so IO builtins can access it.
+fn sync_roadmap_to_runtime(session: &Session, runtime: &crate::session::SharedRuntime) {
+    if let Ok(mut rt) = runtime.write() {
+        rt.roadmap = session.meta.roadmap.clone();
+    }
+}
+
+/// Copy roadmap from SharedRuntime back into session metadata after eval.
+fn sync_roadmap_from_runtime(session: &mut Session, runtime: &crate::session::SharedRuntime) {
+    if let Ok(rt) = runtime.read() {
+        session.meta.roadmap = rt.roadmap.clone();
+    }
+}
+
 impl AppConfig {
     /// Sync the independent tier locks from the session shim.
     /// Call after any mutation that modifies the session (apply, store_test, plan updates, etc).
@@ -35,6 +49,16 @@ impl AppConfig {
         if let Ok(mut rt) = self.runtime.write() {
             rt.shared_vars = session.runtime.shared_vars.clone();
             rt.http_routes = session.runtime.http_routes.clone();
+            rt.roadmap = session.meta.roadmap.clone();
+        }
+    }
+
+    /// Sync runtime changes (roadmap, shared_vars) back into the session shim.
+    /// Call after eval/test that may have called roadmap_add/roadmap_done builtins.
+    pub fn sync_runtime_to_session(&self, session: &mut Session) {
+        if let Ok(rt) = self.runtime.read() {
+            session.meta.roadmap = rt.roadmap.clone();
+            session.runtime.shared_vars = rt.shared_vars.clone();
         }
     }
 }
@@ -258,8 +282,10 @@ pub async fn eval_fn(
             let fn_name = ev.function_name.clone();
             let input = ev.input.clone();
             let sender = sender.clone();
+            let runtime_for_blocking = config.runtime.clone();
 
             let eval_result = tokio::task::spawn_blocking(move || {
+                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                 let func = program.get_function(&fn_name)
                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -270,6 +296,12 @@ pub async fn eval_fn(
                 eval::bind_input_to_params(&program, func, &input_val, &mut env);
                 eval::eval_function_body_pub(&program, &func.body, &mut env)
             }).await;
+
+            // Sync roadmap back after async eval
+            {
+                let mut s = config.session.lock().await;
+                sync_roadmap_from_runtime(&mut s, &config.runtime);
+            }
 
             return match eval_result {
                 Ok(Ok(val)) => Json(EvalResponse {
@@ -1613,8 +1645,10 @@ pub async fn ask(
                                     let fn_name = ev.function_name.clone();
                                     let input = ev.input.clone();
                                     let sender = sender.clone();
+                                    let runtime_for_blocking = config.runtime.clone();
                                     drop(session);
                                     let eval_result = tokio::task::spawn_blocking(move || {
+                                        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                         let func = program.get_function(&fn_name)
                                             .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -2314,6 +2348,7 @@ pub async fn ask_stream(
 
             // Apply code
             let mut session = config_clone.session.lock().await;
+            sync_roadmap_to_runtime(&session, &config_clone.runtime);
             let mut op_result = OperationResult::new();
 
             match crate::parser::parse(&code) {
@@ -2457,8 +2492,10 @@ pub async fn ask_stream(
                                         let fn_name = ev.function_name.clone();
                                         let input = ev.input.clone();
                                         let sender = sender.clone();
+                                        let runtime_for_blocking = config_clone.runtime.clone();
                                         drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                             let func = program.get_function(&fn_name)
                                                 .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -2525,8 +2562,10 @@ pub async fn ask_stream(
                                             ));
                                         }
                                         let program = session.program.clone();
+                                        let runtime_for_blocking = config_clone.runtime.clone();
                                         drop(session);
                                         let result = tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                             crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
                                         }).await;
                                         match result {
@@ -2947,6 +2986,7 @@ pub async fn ask_stream(
                 }
             }
 
+            sync_roadmap_from_runtime(&mut session, &config_clone.runtime);
             drop(session);
 
             // Build detailed feedback with ALL results so the AI can see them
@@ -3450,10 +3490,13 @@ async fn adapsis_route_dispatch(
 
     let body_str = String::from_utf8_lossy(&body).to_string();
 
+    let runtime_for_blocking = config.runtime.clone();
+
     eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
 
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
+        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
         let func = program
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
