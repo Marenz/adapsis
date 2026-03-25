@@ -88,6 +88,16 @@ pub enum Operation {
     Query(String),
     /// Shared variable declaration: +shared name:Type = default_expr
     SharedVar(SharedVarDecl),
+    /// Sandbox mode: !sandbox [enter|merge|discard|status]
+    Sandbox(SandboxAction),
+}
+
+#[derive(Debug, Clone)]
+pub enum SandboxAction {
+    Enter,
+    Merge,
+    Discard,
+    Status,
 }
 
 /// A shared variable declaration at the parser level.
@@ -1080,6 +1090,19 @@ impl<'a> Parser<'a> {
         if text.trim() == "!unmock" {
             self.index += 1;
             return Ok(Operation::Unmock);
+        }
+
+        if let Some(rest) = text.strip_prefix("!sandbox") {
+            let sub = rest.trim();
+            let action = match sub {
+                "merge" => SandboxAction::Merge,
+                "discard" => SandboxAction::Discard,
+                "status" => SandboxAction::Status,
+                "" | "enter" => SandboxAction::Enter,
+                other => bail!("line {}: unknown sandbox action `{other}`, expected enter/merge/discard/status", line.number),
+            };
+            self.index += 1;
+            return Ok(Operation::Sandbox(action));
         }
 
         if let Some(rest) = text.strip_prefix("!mock") {

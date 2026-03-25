@@ -649,6 +649,16 @@ Side-effect assertions with +after (checked after the function runs, state resto
         long: "Moves one or more functions or types into another module and updates call sites automatically. Use it for reorganization without rewriting references by hand.",
     },
     ActionCommand {
+        name: "!sandbox",
+        args: "[enter|merge|discard|status]",
+        short: "enter/exit isolated sandbox mode for safe experimentation",
+        long: "Enters a sandbox where all mutations are isolated. \
+               `!sandbox` or `!sandbox enter` — snapshot current program+runtime, begin sandbox. \
+               `!sandbox merge` — keep all sandbox changes (commit to session). \
+               `!sandbox discard` — revert all sandbox changes (restore snapshot). \
+               `!sandbox status` — report whether sandbox is active and how many mutations since entry.",
+    },
+    ActionCommand {
         name: "!undo",
         args: "",
         short: "revert last mutation",
