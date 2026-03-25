@@ -867,6 +867,24 @@ impl CoroutineHandle {
                 return Ok(Value::String(result));
             }
 
+            // ── library_reload — reload module(s) from disk ──
+            "library_reload" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{other}"),
+                    None => String::new(),
+                };
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("library_reload: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("library_reload: could not acquire program write lock"))?;
+
+                let result = crate::library::reload_module(&mut program, &name)?;
+                // Update the read-only snapshot so query builtins see the changes
+                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                return Ok(Value::String(result));
+            }
+
             // ── Mutation operations — write to program AST via thread-local ──
             "mutate" => {
                 let code = match args.first() {
@@ -3477,5 +3495,34 @@ mod tests {
             Value::String("  +return 42".into()),
         ]);
         assert!(result.is_err(), "replacing in nonexistent function should fail");
+    }
+
+    // ── library_reload ──
+
+    #[test]
+    fn library_reload_nonexistent_module_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("library_reload", &[
+            Value::String("NonExistentModule99999".into()),
+        ]);
+        assert!(result.is_err(), "should fail for nonexistent module");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found") || err.contains("could not"),
+            "error should mention not found: {err}"
+        );
+    }
+
+    #[test]
+    fn library_reload_empty_name_reloads_all() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        // With empty name, it reloads all modules from the library dir.
+        // This should succeed even if the library dir is empty.
+        let result = handle.execute_await("library_reload", &[
+            Value::String("".into()),
+        ]);
+        assert!(result.is_ok(), "should succeed with empty name: {result:?}");
+        let msg = unwrap_string(result.unwrap());
+        assert!(msg.contains("Reloaded"), "should report reloaded: {msg}");
     }
 }
