@@ -35,6 +35,11 @@ pub type SessionManager = Arc<Mutex<std::collections::HashMap<String, Arc<tokio:
 #[derive(Clone)]
 pub struct AppConfig {
     pub session: SharedSession,
+    /// Tier 1: Program AST — read-heavy, use read() for queries, write() briefly for mutations
+    pub program: std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
+    /// Tier 3: Session metadata — chat history, plan, roadmap, mocks, mutation log.
+    /// Brief locks only; never hold during LLM calls or IO.
+    pub meta: std::sync::Arc<tokio::sync::Mutex<crate::session::SessionMeta>>,
     pub llm_url: String,
     pub llm_model: String,
     pub llm_api_key: Option<String>,
@@ -3271,6 +3276,12 @@ mod tests {
         let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
         AppConfig {
             session,
+            program: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ast::Program::default(),
+            )),
+            meta: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::session::SessionMeta::new(),
+            )),
             llm_url: String::new(),
             llm_model: String::new(),
             llm_api_key: None,
