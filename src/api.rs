@@ -96,12 +96,20 @@ pub async fn mutate(
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
+    // Mutate still uses the session shim — it calls apply_async which needs
+    // &mut self access to program+meta+runtime. After mutation, sync the tiers.
     let mut session = config.session.lock().await;
     match session.apply_async(&req.source, config.io_sender.as_ref()).await {
         Ok(results) => {
-            // Sync shared vars to the Arc<RwLock> runtime
+            // Sync all tiers from session after mutation
+            *config.program.write().await = session.program.clone();
+            {
+                let mut meta = config.meta.lock().await;
+                *meta = session.meta.clone();
+            }
             if let Ok(mut rt) = config.runtime.write() {
                 rt.shared_vars = session.runtime.shared_vars.clone();
+                rt.http_routes = session.runtime.http_routes.clone();
             }
             Json(MutateResponse {
                 revision: session.meta.revision,
@@ -145,7 +153,6 @@ pub async fn eval_fn(
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    let mut session = config.session.lock().await;
 
     // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
     if let Some(ref expr_str) = req.expression {
@@ -160,7 +167,9 @@ pub async fn eval_fn(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
-                match eval::eval_inline_expr(&session.program, &expr) {
+                // Tier 1: read program briefly for eval
+                let program = config.program.read().await;
+                match eval::eval_inline_expr(&program, &expr) {
                     Ok(val) => {
                         return Json(EvalResponse {
                             result: format!("{val}"),
@@ -211,31 +220,40 @@ pub async fn eval_fn(
         inline_expr: None,
     };
 
-    // Block eval of untested functions (>2 statements) in AdapsisOS mode
-    if session.program.require_modules {
-        if let Some(func) = session.program.get_function(&ev.function_name) {
-            if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
-                return Json(EvalResponse {
-                    result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
-                    success: false,
-                    compiled: None,
-                });
+    // Tier 1: read program to check testedness and get function info
+    // Clone what we need so the lock is released before eval runs
+    let (_require_modules, needs_async, revision) = {
+        let program = config.program.read().await;
+        let meta = config.meta.lock().await;
+
+        // Block eval of untested functions (>2 statements) in AdapsisOS mode
+        if program.require_modules {
+            if let Some(func) = program.get_function(&ev.function_name) {
+                let is_tested = !func.tests.is_empty() && func.tests.iter().all(|t| t.passed);
+                if func.body.len() > 2 && !is_tested {
+                    return Json(EvalResponse {
+                        result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
+                        success: false,
+                        compiled: None,
+                    });
+                }
             }
         }
-    }
 
-    let needs_async = session.program.get_function(&ev.function_name)
-        .is_some_and(|f| f.effects.iter().any(|e|
-            matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+        let needs_async = program.get_function(&ev.function_name)
+            .is_some_and(|f| f.effects.iter().any(|e|
+                matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
+        (program.require_modules, needs_async, meta.revision)
+    };
 
     if needs_async {
         if let Some(sender) = &config.io_sender {
-            let program = session.program.clone();
+            // Tier 1: clone program for the blocking task (lock released before blocking)
+            let program = config.program.read().await.clone();
             let fn_name = ev.function_name.clone();
             let input = ev.input.clone();
             let sender = sender.clone();
-
-            drop(session); // release lock before blocking
 
             let eval_result = tokio::task::spawn_blocking(move || {
                 let func = program.get_function(&fn_name)
@@ -269,10 +287,22 @@ pub async fn eval_fn(
         }
     }
 
-    match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
+    // Tier 1: read program for eval (no lock held during eval itself for sync path)
+    let program = config.program.read().await;
+    match eval::eval_compiled_or_interpreted_cached(&program, &ev.function_name, &ev.input, Some(&config.jit_cache), revision) {
         Ok((result, compiled)) => {
-            // re-acquire session for recording (we may have dropped it above for async)
-            session.record_eval(&ev.function_name, &req.input, &result);
+            drop(program); // release Tier 1 before writing Tier 3
+            // Tier 3: record eval in history (brief lock)
+            {
+                let mut meta = config.meta.lock().await;
+                let rev = meta.revision;
+                meta.history.push(crate::session::HistoryEntry::Eval {
+                    revision: rev,
+                    function: ev.function_name.clone(),
+                    input: req.input.clone(),
+                    result: result.clone(),
+                });
+            }
             Json(EvalResponse {
                 result,
                 success: true,
@@ -312,7 +342,6 @@ pub async fn test_fn(
     Json(req): Json<TestRequest>,
 ) -> Json<TestResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    let mut session = config.session.lock().await;
     let operations = match parser::parse(&req.source) {
         Ok(ops) => ops,
         Err(e) => {
@@ -333,40 +362,33 @@ pub async fn test_fn(
 
     for op in &operations {
         if let parser::Operation::Test(test) = op {
-            // Check if the function under test has async/io effects
-            let needs_async = session.program.get_function(&test.function_name)
-                .is_some_and(|f| f.effects.iter().any(|e|
-                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+            // Tier 1: read program to check async needs; Tier 3: get mocks
+            // Clone what we need so locks are released before test execution
+            let (program_snapshot, needs_async, mocks, routes) = {
+                let program = config.program.read().await;
+                let meta = config.meta.lock().await;
+                let needs_async = program.get_function(&test.function_name)
+                    .is_some_and(|f| f.effects.iter().any(|e|
+                        matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+                let routes = config.runtime.read().unwrap().http_routes.clone();
+                (program.clone(), needs_async, meta.io_mocks.clone(), routes)
+            }; // All locks released
 
             for case in &test.cases {
+                // NO LOCKS HELD during test execution
                 let case_result = if needs_async {
                     if let Some(sender) = &config.io_sender {
-                        // Run through real coroutine runtime (with mock fallback)
-                        let program = session.program.clone();
-                        let fn_name = test.function_name.clone();
-                        let case = case.clone();
-                        let mocks = session.meta.io_mocks.clone();
-                        let routes = session.runtime.http_routes.clone();
-                        let sender = sender.clone();
-
-                        drop(session); // release lock before blocking
-
-                        let result = eval::eval_test_case_async(
-                            &program, &fn_name, &case, &mocks, sender, &routes,
-                        ).await;
-
-                        session = config.session.lock().await;
-                        result
+                        eval::eval_test_case_async(
+                            &program_snapshot, &test.function_name, case, &mocks, sender.clone(), &routes,
+                        ).await
                     } else {
-                        // No IO sender — fall back to mock-only execution
                         eval::eval_test_case_with_mocks(
-                            &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
+                            &program_snapshot, &test.function_name, case, &mocks, &routes,
                         )
                     }
                 } else {
-                    // Sync function — run directly
                     eval::eval_test_case_with_mocks(
-                        &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
+                        &program_snapshot, &test.function_name, case, &mocks, &routes,
                     )
                 };
 
@@ -387,12 +409,27 @@ pub async fn test_fn(
                     }
                 }
             }
-            let details: Vec<String> = results.iter().map(|r| {
-                format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
-            }).collect();
-            session.record_test(&test.function_name, passed, failed, details);
+            // Tier 3: record test results (brief lock)
+            {
+                let mut meta = config.meta.lock().await;
+                let rev = meta.revision;
+                let details: Vec<String> = results.iter().map(|r| {
+                    format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
+                }).collect();
+                meta.history.push(crate::session::HistoryEntry::Test {
+                    revision: rev,
+                    function: test.function_name.clone(),
+                    passed,
+                    failed,
+                    details,
+                });
+            }
+            // Tier 1: store tests on the program if all passed (brief write lock)
             if failed == 0 && !test.cases.is_empty() {
+                let mut session = config.session.lock().await;
                 session.store_test(&test.function_name, &test.cases);
+                // Sync program tier from session
+                *config.program.write().await = session.program.clone();
             }
         }
     }
@@ -418,9 +455,10 @@ pub async fn query(
     State(config): State<AppConfig>,
     Json(req): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
-    let mut session = config.session.lock().await;
     let response = if req.query.trim() == "?inbox" || req.query.trim().starts_with("?inbox") {
-        let msgs = session.peek_messages("main");
+        // Tier 3: read meta (brief lock)
+        let meta = config.meta.lock().await;
+        let msgs = meta.agent_mailbox.get("main").map(|v| v.as_slice()).unwrap_or(&[]);
         if msgs.is_empty() { "No messages.".to_string() }
         else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
     } else if req.query.trim() == "?tasks" {
@@ -428,12 +466,27 @@ pub async fn query(
     } else if let Some(task_id) = parse_inspect_task_query(req.query.trim()) {
         format_inspect_task(&config.task_registry, &config.snapshot_registry, task_id)
     } else if req.query.trim() == "?library" {
-        crate::library::query_library(&session.program, session.meta.library_state.as_ref())
+        // Tier 1 + Tier 3: read program + meta
+        let program = config.program.read().await;
+        let meta = config.meta.lock().await;
+        crate::library::query_library(&program, meta.library_state.as_ref())
     } else {
-        let table = typeck::build_symbol_table(&session.program);
-        typeck::handle_query(&session.program, &table, &req.query, &session.runtime.http_routes)
+        // Tier 1 + Tier 2: read program + runtime
+        let program = config.program.read().await;
+        let routes = config.runtime.read().unwrap().http_routes.clone();
+        let table = typeck::build_symbol_table(&program);
+        typeck::handle_query(&program, &table, &req.query, &routes)
     };
-    session.record_query(&req.query, &response);
+    // Tier 3: brief write to record query in history
+    {
+        let mut meta = config.meta.lock().await;
+        let rev = meta.revision;
+        meta.history.push(crate::session::HistoryEntry::Query {
+            revision: rev,
+            query: req.query.clone(),
+            response: response.clone(),
+        });
+    }
     Json(QueryResponse { response })
 }
 
