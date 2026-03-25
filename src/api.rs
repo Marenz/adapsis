@@ -2004,7 +2004,7 @@ pub async fn ask_stream(
                 config_clone.project_dir,
                 program_summary,
                 plan_ctx, req.message, plan_hint);
-            log_activity(&config_clone.log_file, "user", &context).await;
+            tx.log("user", &context).await;
             meta.chat_messages.push(crate::session::ChatMessage {
                 role: "user".to_string(), content: context,
             });
@@ -2029,55 +2029,47 @@ pub async fn ask_stream(
             {
                 let mut queue = config_clone.message_queue.lock().await;
                 for injected in queue.drain(..) {
-                    eprintln!("[inject] processing: {}...", injected.chars().take(80).collect::<String>());
-                    log_activity(&config_clone.log_file, "inject", &injected).await;
+                    tx.log("inject", &injected).await;
                     messages.push(crate::llm::ChatMessage::user(injected));
-                    let _ = tx.send(serde_json::json!({"type": "result", "message": "Injected message received", "success": true})).await;
                 }
             }
 
-            let _ = tx.send(serde_json::json!({"type": "iteration", "n": iteration + 1})).await;
-            log_activity(&config_clone.log_file, "iter", &format!("iteration {}/{}", iteration + 1, max_iterations)).await;
+            tx.log("iter", &format!("iteration {}/{}", iteration + 1, max_iterations)).await;
 
-            // Retry LLM calls on transient errors (network, timeout)
+            // === Streaming LLM call ===
+            // generate_streaming() retries the HTTP connection internally.
+            // Once connected, chunks flow through the channel — no "waiting"
+            // timer needed because the chunks themselves are progress.
             let output = {
-                let mut last_err = String::new();
-                let mut result = None;
-                let waiting_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-                let wf = waiting_flag.clone();
-                let log_ref = config_clone.log_file.clone();
-                let broadcast_ref = config_clone.event_broadcast.clone();
-                let iter_num = iteration + 1;
-                tokio::spawn(async move {
-                    let mut secs = 0u64;
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                        if !wf.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                        secs += 30;
-                        let msg = format!("Waiting for LLM response... ({secs}s, iteration {iter_num})");
-                        eprintln!("[waiting] {msg}");
-                        log_activity(&log_ref, "waiting", &msg).await;
-                        let _ = broadcast_ref.send(serde_json::json!({"type": "result", "message": msg, "success": true}));
+                let mut rx = match llm.generate_streaming(messages.clone()).await {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        tx.log("llm-error", &format!("{e}")).await;
+                        break;
                     }
-                });
-                for retry in 0..3 {
-                    match llm.generate(messages.clone()).await {
-                        Ok(o) => { result = Some(o); break; }
-                        Err(e) => {
-                            last_err = format!("{e}");
-                            log_activity(&config_clone.log_file, "llm-error", &format!("attempt {}/{}: {e}", retry + 1, 3)).await;
-                            if retry < 2 {
-                                let _ = tx.send(serde_json::json!({"type": "error", "message": format!("LLM error (retrying): {e}")})).await;
-                                tokio::time::sleep(std::time::Duration::from_secs(5 * (retry as u64 + 1))).await;
-                            }
+                };
+
+                // Forward incremental chunks to SSE
+                let mut final_output = None;
+                while let Some(chunk) = rx.recv().await {
+                    match chunk {
+                        crate::llm::StreamChunk::Thinking(text) => {
+                            let _ = tx.send(serde_json::json!({"type": "thinking", "text": text})).await;
+                        }
+                        crate::llm::StreamChunk::Content(text) => {
+                            let _ = tx.send(serde_json::json!({"type": "content", "text": text})).await;
+                        }
+                        crate::llm::StreamChunk::Done(output) => {
+                            final_output = Some(output);
                         }
                     }
                 }
-                waiting_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                match result {
+
+                match final_output {
                     Some(o) => o,
                     None => {
-                        let _ = tx.send(serde_json::json!({"type": "error", "message": format!("LLM failed after 3 retries: {last_err}")})).await;
+                        // Channel closed without Done — stream error
+                        tx.log("llm-error", "LLM stream ended without completing").await;
                         break;
                     }
                 }
@@ -2085,18 +2077,18 @@ pub async fn ask_stream(
 
             messages.push(crate::llm::ChatMessage::assistant(&output.text));
 
+            // Log thinking (full text for the log file, already streamed incrementally above)
             if !output.thinking.is_empty() {
-                log_activity(&config_clone.log_file, "think", &output.thinking).await;
-                let _ = tx.send(serde_json::json!({"type": "thinking", "text": output.thinking})).await;
+                write_log_file(&config_clone.log_file, "think", &output.thinking).await;
             }
 
-            // Extract prose
+            // Extract prose and send as a single text event
             let mut clean = output.text.clone();
             while let Some(s) = clean.find("<think>") { if let Some(e) = clean.find("</think>") { clean.replace_range(s..e+8, ""); } else { break; } }
             while let Some(s) = clean.find("<code>") { if let Some(e) = clean.find("</code>") { clean.replace_range(s..e+7, ""); } else { break; } }
             let clean = clean.trim();
             if !clean.is_empty() {
-                log_activity(&config_clone.log_file, "ai-text", clean).await;
+                write_log_file(&config_clone.log_file, "ai-text", clean).await;
                 let _ = tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             }
 
@@ -2112,8 +2104,7 @@ pub async fn ask_stream(
                 continue;
             }
 
-            log_activity(&config_clone.log_file, "code", &code).await;
-            let _ = tx.send(serde_json::json!({"type": "code", "code": code})).await;
+            tx.log("code", &code).await;
 
             // Apply code
             let mut session = config_clone.session.lock().await;
@@ -2420,14 +2411,13 @@ pub async fn ask_stream(
                                             "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
                                             untested.len(), untested.join(", ")
                                         );
-                                        log_activity(&config_clone.log_file, "done-rejected", &challenge).await;
+                                        tx.log("done-rejected", &challenge).await;
                                         feedback_details.push(format!("ERROR: {challenge}"));
                                         has_errors = true;
                                         continue;
                                     }
                                 }
-                                log_activity(&config_clone.log_file, "done", &format!("AI said !done at iteration {}", iteration + 1)).await;
-                                let _ = tx.send(serde_json::json!({"type": "done"})).await;
+                                tx.log("done", &format!("AI said !done at iteration {}", iteration + 1)).await;
                                 accepted_done = true;
                                 break;
                             }
@@ -2934,13 +2924,12 @@ pub async fn ask_stream(
                 let errors: Vec<&str> = feedback_details.iter()
                     .filter(|d| d.starts_with("ERROR:") || d.starts_with("FAIL:") || d.contains("[FAILED]"))
                     .map(|s| s.as_str()).collect();
-                let _ = tx.send(serde_json::json!({"type": "feedback", "message": format!("Errors found ({} issues), retrying...", errors.len())})).await;
                 let feedback = format!(
                     "Results:\n{}\n\n{}\n\nFix the errors and continue.",
                     feedback_details.join("\n"),
                     plan_summary
                 );
-                log_activity(&config_clone.log_file, "feedback", &feedback).await;
+                tx.log("feedback", &format!("Errors found ({} issues), retrying...\n{feedback}", errors.len())).await;
                 log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, true, train_tests_passed, train_tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
@@ -2951,7 +2940,7 @@ pub async fn ask_stream(
                     format!("Results:\n{}\n\n", feedback_details.join("\n"))
                 };
                 let feedback = format!("{}{}", results_section, plan_summary);
-                log_activity(&config_clone.log_file, "feedback", &feedback).await;
+                tx.log("feedback", &feedback).await;
                 log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, &feedback_details, false, train_tests_passed, train_tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
