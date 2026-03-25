@@ -850,8 +850,22 @@ async fn main() -> Result<()> {
                 Some(std::sync::Arc::new(tokio::sync::Mutex::new(f)))
             };
 
+            // Build the three independent tiers from the loaded session.
+            // These are the new lock-discipline tiers; `shared_session` remains
+            // temporarily as a compatibility shim for handlers not yet migrated.
+            let tier1_program = {
+                let s = shared_session.lock().await;
+                std::sync::Arc::new(tokio::sync::RwLock::new(s.program.clone()))
+            };
+            let tier3_meta = {
+                let s = shared_session.lock().await;
+                std::sync::Arc::new(tokio::sync::Mutex::new(s.meta.clone()))
+            };
+
             let config = api::AppConfig {
                 session: shared_session.clone(),
+                program: tier1_program,
+                meta: tier3_meta,
                 llm_url: url.clone(),
                 llm_model: model.clone(),
                 llm_api_key: api_key.clone(),
