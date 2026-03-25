@@ -486,6 +486,27 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Makes an HTTP POST request and returns the response body as a String. Takes `(url:String, body:String, content_type:String)`; if content type is omitted, it defaults to `application/json`.",
         category: BuiltinCategory::Io,
     },
+    Builtin {
+        name: "roadmap_list",
+        aliases: &[],
+        short: "get current roadmap as String",
+        long: "Returns the current roadmap as a formatted String. Each line is `[ ] N: description` or `[x] N: description` for done items. Returns `Roadmap is empty.` when empty. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "roadmap_add",
+        aliases: &[],
+        short: "add item to roadmap, returns the item text",
+        long: "Adds a new item to the persistent roadmap and returns the item description String. Takes `(item:String)`. Fails if the description is empty. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "roadmap_done",
+        aliases: &[],
+        short: "mark roadmap item N as done",
+        long: "Marks a roadmap item as done by its 1-based index and returns a confirmation String like `Roadmap: #N done.`. Takes `(n:Int)`. Fails if the index is out of bounds. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).

@@ -727,6 +727,7 @@ async fn main() -> Result<()> {
             }
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
+            sess.runtime.roadmap = sess.meta.roadmap.clone();
             let initial_runtime = sess.runtime.clone();
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));

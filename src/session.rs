@@ -22,6 +22,9 @@ pub struct RuntimeState {
     pub http_routes: Vec<crate::ast::HttpRoute>,
     #[serde(skip)]
     pub shared_vars: HashMap<String, crate::eval::Value>,
+    /// Roadmap mirror for builtin access during eval. Synced with SessionMeta.roadmap.
+    #[serde(skip)]
+    pub roadmap: Vec<RoadmapItem>,
 }
 
 /// Thread-safe handle to the runtime state.
