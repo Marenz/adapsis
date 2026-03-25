@@ -1205,8 +1205,12 @@ impl<'a> Parser<'a> {
             // a bare identifier (which would be the existing "!eval func_name" syntax).
             if !rest.is_empty() {
                 if let Ok(expr) = parse_expr(line.number, rest) {
-                    let is_bare_ident = matches!(&expr, Expr::Ident(_));
-                    if !is_bare_ident {
+                    // Bare identifiers (func_name) and module-qualified names
+                    // (Module.func_name) are function references, not inline exprs.
+                    let is_function_ref = matches!(&expr, Expr::Ident(_))
+                        || matches!(&expr, Expr::FieldAccess { base, .. }
+                            if matches!(base.as_ref(), Expr::Ident(_)));
+                    if !is_function_ref {
                         self.index += 1;
                         return Ok(Operation::Eval(EvalMutation {
                             function_name: String::new(),
@@ -4093,6 +4097,51 @@ mod tests {
             Operation::Eval(ev) => {
                 assert_eq!(ev.function_name, "add");
                 assert!(ev.inline_expr.is_none());
+            }
+            _ => panic!("expected Eval, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_module_qualified_function() {
+        let op = parse_one("!eval GithubSync.get_open_issues");
+        match op {
+            Operation::Eval(ev) => {
+                assert_eq!(ev.function_name, "GithubSync.get_open_issues");
+                assert!(
+                    ev.inline_expr.is_none(),
+                    "module-qualified name should be a function ref, not inline expr"
+                );
+            }
+            _ => panic!("expected Eval, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_module_qualified_function_with_args() {
+        let op = parse_one(r#"!eval GithubSync.get_issues "owner/repo""#);
+        match op {
+            Operation::Eval(ev) => {
+                assert_eq!(ev.function_name, "GithubSync.get_issues");
+                assert!(
+                    ev.inline_expr.is_none(),
+                    "module-qualified name with args should be a function ref"
+                );
+            }
+            _ => panic!("expected Eval, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_inline_expression_still_works() {
+        // Verify that actual inline expressions (not function refs) still work
+        let op = parse_one("!eval concat(\"a\", \"b\")");
+        match op {
+            Operation::Eval(ev) => {
+                assert!(
+                    ev.inline_expr.is_some(),
+                    "concat(...) should be inline expr"
+                );
             }
             _ => panic!("expected Eval, got {op:?}"),
         }
