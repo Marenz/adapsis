@@ -2832,26 +2832,23 @@ fn trace_body(
     None
 }
 
-/// Env-var-gated VM execution bridge.
-/// When `ADAPSIS_VM=1` is set, attempts to compile and execute the given
-/// function via the bytecode VM. Returns `None` to fall back to the
-/// tree-walker if the env var is not set or execution fails.
-pub fn try_vm_execute_envgated(
+/// Try to execute a function via the bytecode VM.
+/// Returns `Some(Ok(val))` on success, `None` if the VM can't handle it
+/// (compilation error or async suspension), allowing the tree-walker to
+/// take over as fallback.
+pub fn try_vm_eval(
     func: &ast::FunctionDecl,
     args: &[Value],
     program: &ast::Program,
 ) -> Option<Result<Value>> {
-    if std::env::var("ADAPSIS_VM").ok().as_deref() != Some("1") {
-        return None;
-    }
     let compiled = match vm::compile_function(func, program) {
         Ok(c) => c,
-        Err(e) => return Some(Err(e)),
+        Err(_) => return None, // VM can't compile → fall back
     };
     match vm::execute(&compiled, args.to_vec(), program) {
         Ok(vm::VmResult::Done(val)) => Some(Ok(val)),
-        Ok(vm::VmResult::Await { .. }) => None, // fall back for async
-        Err(e) => Some(Err(e)),
+        Ok(vm::VmResult::Await { .. }) => None, // async → fall back
+        Err(_) => None, // execution error → fall back
     }
 }
 
