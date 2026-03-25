@@ -866,6 +866,139 @@ impl CoroutineHandle {
                 let result = crate::library::query_library(&program, None);
                 return Ok(Value::String(result));
             }
+
+            // ── Mutation operations — write to program AST via thread-local ──
+            "mutate" => {
+                let code = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{other}"),
+                    None => bail!("mutate expects (code:String)"),
+                };
+                if code.trim().is_empty() {
+                    bail!("mutate: code must not be empty");
+                }
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("mutate: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("mutate: could not acquire program write lock"))?;
+
+                let operations = crate::parser::parse(&code)
+                    .map_err(|e| anyhow::anyhow!("mutate: parse error: {e}"))?;
+
+                let mut applied = 0usize;
+                let mut messages = Vec::new();
+                for op in &operations {
+                    // Skip non-mutation operations (tests, evals, queries, etc.)
+                    match op {
+                        crate::parser::Operation::Test(_)
+                        | crate::parser::Operation::Trace(_)
+                        | crate::parser::Operation::Eval(_)
+                        | crate::parser::Operation::Query(_) => continue,
+                        _ => {}
+                    }
+                    match crate::validator::apply_and_validate(&mut program, op) {
+                        Ok(msg) => {
+                            applied += 1;
+                            messages.push(msg);
+                        }
+                        Err(e) => {
+                            bail!("mutate: error applying operation {}: {e}", applied + 1);
+                        }
+                    }
+                }
+                // Update the read-only snapshot so query builtins see the changes
+                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                let summary = if applied == 1 {
+                    format!("Applied 1 mutation: {}", messages[0])
+                } else {
+                    format!("Applied {applied} mutations")
+                };
+                return Ok(Value::String(summary));
+            }
+            "fn_remove" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("fn_remove expects (name:String)"),
+                };
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("fn_remove: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("fn_remove: could not acquire program write lock"))?;
+
+                if let Some((mod_name, fn_name)) = name.split_once('.') {
+                    // Remove function from module
+                    if let Some(m) = program.modules.iter_mut().find(|m| m.name == mod_name) {
+                        let before = m.functions.len();
+                        m.functions.retain(|f| f.name != fn_name);
+                        if m.functions.len() < before {
+                            program.rebuild_function_index();
+                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            return Ok(Value::String(format!("Removed {name}")));
+                        }
+                        bail!("fn_remove: function `{fn_name}` not found in module `{mod_name}`");
+                    }
+                    bail!("fn_remove: module `{mod_name}` not found");
+                }
+                // Top-level function removal
+                if let Some(pos) = program.functions.iter().position(|f| f.name == name) {
+                    program.functions.remove(pos);
+                    program.rebuild_function_index();
+                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    return Ok(Value::String(format!("Removed {name}")));
+                }
+                bail!("fn_remove: function `{name}` not found");
+            }
+            "type_remove" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("type_remove expects (name:String)"),
+                };
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("type_remove: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("type_remove: could not acquire program write lock"))?;
+
+                if let Some((mod_name, type_name)) = name.split_once('.') {
+                    // Remove type from module
+                    if let Some(m) = program.modules.iter_mut().find(|m| m.name == mod_name) {
+                        let before = m.types.len();
+                        m.types.retain(|t| t.name() != type_name);
+                        if m.types.len() < before {
+                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            return Ok(Value::String(format!("Removed {name}")));
+                        }
+                        bail!("type_remove: type `{type_name}` not found in module `{mod_name}`");
+                    }
+                    bail!("type_remove: module `{mod_name}` not found");
+                }
+                // Top-level type removal
+                let name_str: &str = &name;
+                if let Some(pos) = program.types.iter().position(|t| t.name() == name_str) {
+                    program.types.remove(pos);
+                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    return Ok(Value::String(format!("Removed {name}")));
+                }
+                bail!("type_remove: type `{name}` not found");
+            }
+            "module_remove" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("module_remove expects (name:String)"),
+                };
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("module_remove: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("module_remove: could not acquire program write lock"))?;
+
+                if let Some(pos) = program.modules.iter().position(|m| m.name == name) {
+                    program.modules.remove(pos);
+                    program.rebuild_function_index();
+                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    return Ok(Value::String(format!("Removed module {name}")));
+                }
+                bail!("module_remove: module `{name}` not found");
+            }
+
             _ => {} // fall through to mock/IO dispatch
         }
 
@@ -1678,5 +1811,255 @@ mod tests {
 
         let result = handle.execute_await("query_library", &[]);
         assert!(result.is_err(), "query_library should fail without program");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Mutation IO builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// Helper: build a program from Adapsis source and install both read-only
+    /// and mutable program thread-locals. Returns the handle and the mutable
+    /// program Arc for post-mutation assertions.
+    fn setup_mutation_runtime(source: &str) -> (CoroutineHandle, std::sync::Arc<std::sync::RwLock<crate::ast::Program>>) {
+        let ops = crate::parser::parse(source).expect("parse failed");
+        let mut program = crate::ast::Program::default();
+        for op in &ops {
+            match op {
+                crate::parser::Operation::Test(_) | crate::parser::Operation::Eval(_) => {}
+                _ => {
+                    crate::validator::apply_and_validate(&mut program, op)
+                        .expect("validation failed");
+                }
+            }
+        }
+        program.rebuild_function_index();
+        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+
+        let program_mut = std::sync::Arc::new(std::sync::RwLock::new(program));
+        crate::eval::set_shared_program_mut(Some(program_mut.clone()));
+
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![],
+            shared_vars: std::collections::HashMap::new(),
+            roadmap: vec![],
+            plan: vec![],
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+
+        (CoroutineHandle::new_mock(vec![]), program_mut)
+    }
+
+    // ── mutate ──
+
+    #[test]
+    fn mutate_add_function() {
+        let (handle, prog) = setup_mutation_runtime("");
+        let code = "+fn hello ()->String\n  +return \"hi\"\n+end";
+        let result = unwrap_string(
+            handle.execute_await("mutate", &[Value::String(code.into())]).unwrap()
+        );
+        assert!(result.contains("Applied 1 mutation"), "should report 1 mutation: {result}");
+        assert!(result.contains("hello"), "should mention function name: {result}");
+
+        // Verify function was actually added
+        let p = prog.read().unwrap();
+        assert!(p.get_function("hello").is_some(), "hello function should exist in program");
+    }
+
+    #[test]
+    fn mutate_add_module_with_functions() {
+        let (handle, prog) = setup_mutation_runtime("");
+        let code = "!module Greeter\n+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end";
+        let result = unwrap_string(
+            handle.execute_await("mutate", &[Value::String(code.into())]).unwrap()
+        );
+        assert!(result.contains("Applied"), "should report mutations: {result}");
+
+        let p = prog.read().unwrap();
+        assert!(p.get_function("Greeter.greet").is_some(), "Greeter.greet should exist");
+    }
+
+    #[test]
+    fn mutate_empty_code_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("mutate", &[Value::String("".into())]);
+        assert!(result.is_err(), "mutate with empty code should fail");
+        assert!(result.unwrap_err().to_string().contains("empty"), "error should mention empty");
+    }
+
+    #[test]
+    fn mutate_invalid_syntax_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("mutate", &[Value::String("+fn".into())]);
+        assert!(result.is_err(), "mutate with invalid syntax should fail");
+    }
+
+    #[test]
+    fn mutate_no_args_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("mutate", &[]);
+        assert!(result.is_err(), "mutate with no args should fail");
+    }
+
+    #[test]
+    fn mutate_no_program_fails() {
+        crate::eval::set_shared_program_mut(None);
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = handle.execute_await("mutate", &[Value::String("+fn x ()->Int\n  +return 1\n+end".into())]);
+        assert!(result.is_err(), "mutate without program should fail");
+        assert!(result.unwrap_err().to_string().contains("program not available"));
+    }
+
+    // ── fn_remove ──
+
+    #[test]
+    fn fn_remove_top_level() {
+        let (handle, prog) = setup_mutation_runtime(
+            "+fn hello ()->String\n  +return \"hi\"\n+end"
+        );
+        // Verify function exists
+        assert!(prog.read().unwrap().get_function("hello").is_some());
+
+        let result = unwrap_string(
+            handle.execute_await("fn_remove", &[Value::String("hello".into())]).unwrap()
+        );
+        assert_eq!(result, "Removed hello");
+
+        // Verify function was removed
+        assert!(prog.read().unwrap().get_function("hello").is_none());
+    }
+
+    #[test]
+    fn fn_remove_from_module() {
+        let (handle, prog) = setup_mutation_runtime(
+            "!module MyMod\n+fn greet (name:String)->String\n  +return name\n+end"
+        );
+        assert!(prog.read().unwrap().get_function("MyMod.greet").is_some());
+
+        let result = unwrap_string(
+            handle.execute_await("fn_remove", &[Value::String("MyMod.greet".into())]).unwrap()
+        );
+        assert_eq!(result, "Removed MyMod.greet");
+        assert!(prog.read().unwrap().get_function("MyMod.greet").is_none());
+    }
+
+    #[test]
+    fn fn_remove_not_found() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("fn_remove", &[Value::String("nonexistent".into())]);
+        assert!(result.is_err(), "fn_remove should fail for missing function");
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn fn_remove_wrong_type_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("fn_remove", &[Value::Int(42)]);
+        assert!(result.is_err(), "fn_remove should fail with non-String arg");
+    }
+
+    #[test]
+    fn fn_remove_module_not_found() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("fn_remove", &[Value::String("NoModule.func".into())]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("module `NoModule` not found"));
+    }
+
+    // ── type_remove ──
+
+    #[test]
+    fn type_remove_top_level() {
+        let (handle, prog) = setup_mutation_runtime(
+            "+type Color = Red | Green | Blue"
+        );
+        assert!(!prog.read().unwrap().types.is_empty());
+
+        let result = unwrap_string(
+            handle.execute_await("type_remove", &[Value::String("Color".into())]).unwrap()
+        );
+        assert_eq!(result, "Removed Color");
+        assert!(prog.read().unwrap().types.is_empty());
+    }
+
+    #[test]
+    fn type_remove_not_found() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("type_remove", &[Value::String("Missing".into())]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn type_remove_wrong_type_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("type_remove", &[Value::Int(1)]);
+        assert!(result.is_err());
+    }
+
+    // ── module_remove ──
+
+    #[test]
+    fn module_remove_existing() {
+        let (handle, prog) = setup_mutation_runtime(
+            "!module MyMod\n+fn hello ()->String\n  +return \"hi\"\n+end"
+        );
+        assert!(!prog.read().unwrap().modules.is_empty());
+
+        let result = unwrap_string(
+            handle.execute_await("module_remove", &[Value::String("MyMod".into())]).unwrap()
+        );
+        assert_eq!(result, "Removed module MyMod");
+        assert!(prog.read().unwrap().modules.is_empty());
+        assert!(prog.read().unwrap().get_function("MyMod.hello").is_none());
+    }
+
+    #[test]
+    fn module_remove_not_found() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("module_remove", &[Value::String("NoModule".into())]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn module_remove_wrong_type_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("module_remove", &[Value::Int(1)]);
+        assert!(result.is_err());
+    }
+
+    // ── Mutation builtins update read-only snapshot ──
+
+    #[test]
+    fn mutate_updates_query_snapshot() {
+        let (handle, _prog) = setup_mutation_runtime("");
+
+        // Add a function via mutate
+        handle.execute_await("mutate", &[Value::String(
+            "+fn test_func ()->Int\n  +return 42\n+end".into()
+        )]).unwrap();
+
+        // Query builtins should see the new function via updated snapshot
+        let result = unwrap_string(
+            handle.execute_await("query_symbols", &[]).unwrap()
+        );
+        assert!(result.contains("test_func"), "query_symbols should see mutated function: {result}");
+    }
+
+    #[test]
+    fn fn_remove_updates_query_snapshot() {
+        let (handle, _prog) = setup_mutation_runtime(
+            "+fn to_remove ()->String\n  +return \"bye\"\n+end"
+        );
+
+        // Remove the function
+        handle.execute_await("fn_remove", &[Value::String("to_remove".into())]).unwrap();
+
+        // Query builtins should no longer see it
+        let result = unwrap_string(
+            handle.execute_await("query_symbols", &[]).unwrap()
+        );
+        assert!(!result.contains("to_remove"), "query_symbols should not see removed function: {result}");
     }
 }

@@ -606,6 +606,44 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Returns persistent module library status as a String, including directory path, loaded modules, and files on disk. Same output as `?library`. Takes no arguments. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    // Program mutation builtins — modify the live program AST
+    Builtin {
+        name: "mutate",
+        aliases: &[],
+        short: "apply Adapsis code mutations to the program: mutate(code) -> String",
+        long: "Parses a String of Adapsis code (mutations like +fn, +type, !module, etc.) and applies them to the live program. \
+               Returns a summary like \"Applied 3 mutations\" on success, or fails with the parse/validation error. \
+               This is the general-purpose mutation builtin — it does the same thing as sending code to the main loop. \
+               Takes `(code:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "fn_remove",
+        aliases: &[],
+        short: "remove a function by name: fn_remove(name) -> String",
+        long: "Removes a function by fully-qualified name (e.g. \"MyModule.my_func\" or bare \"my_func\" for top-level). \
+               Returns \"Removed <name>\" on success, or fails if the function is not found. \
+               Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "type_remove",
+        aliases: &[],
+        short: "remove a type by name: type_remove(name) -> String",
+        long: "Removes a type by name (e.g. \"MyModule.MyType\" or bare \"MyType\" for top-level). \
+               Returns \"Removed <name>\" on success, or fails if the type is not found. \
+               Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "module_remove",
+        aliases: &[],
+        short: "remove an entire module: module_remove(name) -> String",
+        long: "Removes an entire module and all its contents (functions, types, shared vars). \
+               Returns \"Removed module <name>\" on success, or fails if the module is not found. \
+               Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).
