@@ -1063,7 +1063,11 @@ fn resolve_union_types_in_stmts(
 fn is_builtin_name(name: &str) -> bool {
     crate::builtins::is_builtin(name)
 }
-fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str) -> Result<String> {
+pub fn apply_move(
+    program: &mut ast::Program,
+    names: &[String],
+    target_module: &str,
+) -> Result<String> {
     let mut moved = Vec::new();
     let mut not_found = Vec::new();
     let mut funcs_to_move = Vec::new();

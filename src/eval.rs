@@ -843,6 +843,8 @@ fn fork_runtime_for_test(
         shared_vars,
         roadmap: Vec::new(),
         plan: Vec::new(),
+        agent_mailbox: std::collections::HashMap::new(),
+        pending_commands: Vec::new(),
     };
     Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }

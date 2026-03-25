@@ -999,6 +999,180 @@ impl CoroutineHandle {
                 bail!("module_remove: module `{name}` not found");
             }
 
+            // ── move_symbols — programmatic !move ──
+            "move_symbols" => {
+                let symbols_str = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{other}"),
+                    None => bail!("move_symbols expects (symbols:String, target_module:String)"),
+                };
+                let target_module = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{other}"),
+                    None => bail!("move_symbols expects (symbols:String, target_module:String)"),
+                };
+                if symbols_str.trim().is_empty() {
+                    bail!("move_symbols: symbols must not be empty");
+                }
+                if target_module.trim().is_empty() {
+                    bail!("move_symbols: target_module must not be empty");
+                }
+                let names: Vec<String> = symbols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if names.is_empty() {
+                    bail!("move_symbols: no valid symbol names found in '{symbols_str}'");
+                }
+
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("move_symbols: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("move_symbols: could not acquire program write lock"))?;
+
+                let result = crate::validator::apply_move(&mut program, &names, &target_module)?;
+                // Update read-only snapshot
+                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                return Ok(Value::String(result));
+            }
+
+            // ── trace_run — programmatic !trace ──
+            "trace_run" => {
+                let fn_name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("trace_run expects (fn_name:String, args:String)"),
+                };
+                let args_str = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{other}"),
+                    None => String::new(),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("trace_run: program not available (no async context)"))?;
+
+                let input_expr = if args_str.trim().is_empty() {
+                    crate::parser::Expr::StructLiteral(vec![])
+                } else {
+                    crate::parser::parse_test_input(0, args_str.trim())
+                        .map_err(|e| anyhow::anyhow!("trace_run: failed to parse args: {e}"))?
+                };
+
+                let steps = crate::eval::trace_function(&program, &fn_name, &input_expr)?;
+                let output = steps.iter()
+                    .map(|s| format!("{s}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Ok(Value::String(if output.is_empty() {
+                    format!("Trace of {fn_name}: (no steps)")
+                } else {
+                    format!("Trace of {fn_name}:\n{output}")
+                }));
+            }
+
+            // ── msg_send — programmatic !msg ──
+            "msg_send" => {
+                let target = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("msg_send expects (target:String, message:String)"),
+                };
+                let message = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{other}"),
+                    None => bail!("msg_send expects (target:String, message:String)"),
+                };
+                if target.trim().is_empty() {
+                    bail!("msg_send: target must not be empty");
+                }
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("msg_send: no runtime available"))?;
+                let mut state = rt.write()
+                    .map_err(|_| anyhow::anyhow!("msg_send: could not access runtime"))?;
+
+                let timestamp = format!("{}s", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs());
+                let msg = crate::session::AgentMessage {
+                    from: "main".to_string(),
+                    to: target.clone(),
+                    content: message.clone(),
+                    timestamp,
+                };
+                state.agent_mailbox
+                    .entry(target.clone())
+                    .or_default()
+                    .push(msg);
+
+                return Ok(Value::String(format!("Message sent to '{target}'")));
+            }
+
+            // ── watch_start — programmatic !watch ──
+            "watch_start" => {
+                let fn_name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("watch_start expects (fn_name:String, interval_ms:Int)"),
+                };
+                let interval_ms = match args.get(1) {
+                    Some(Value::Int(n)) => *n,
+                    _ => bail!("watch_start expects (fn_name:String, interval_ms:Int)"),
+                };
+                if fn_name.trim().is_empty() {
+                    bail!("watch_start: fn_name must not be empty");
+                }
+                if interval_ms <= 0 {
+                    bail!("watch_start: interval_ms must be > 0");
+                }
+                // Verify the function exists
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("watch_start: program not available (no async context)"))?;
+                if program.get_function(&fn_name).is_none() {
+                    bail!("watch_start: function `{fn_name}` not found");
+                }
+
+                // Queue the watch command for API-layer processing
+                let cmd = format!("!watch {fn_name} {interval_ms}");
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("watch_start: no runtime available"))?;
+                rt.write()
+                    .map_err(|_| anyhow::anyhow!("watch_start: could not access runtime"))?
+                    .pending_commands.push(cmd);
+
+                return Ok(Value::String(format!("Watching {fn_name} every {interval_ms}ms (queued)")));
+            }
+
+            // ── agent_spawn — programmatic !agent ──
+            "agent_spawn" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
+                };
+                let scope = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
+                };
+                let task = match args.get(2) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
+                };
+                if name.trim().is_empty() {
+                    bail!("agent_spawn: name must not be empty");
+                }
+                if task.trim().is_empty() {
+                    bail!("agent_spawn: task must not be empty");
+                }
+
+                // Queue the agent command for API-layer processing
+                let cmd = format!("!agent {name} --scope {scope}\n{task}");
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("agent_spawn: no runtime available"))?;
+                rt.write()
+                    .map_err(|_| anyhow::anyhow!("agent_spawn: could not access runtime"))?
+                    .pending_commands.push(cmd);
+
+                return Ok(Value::String(format!("Agent '{name}' spawned (scope: {scope})")));
+            }
+
             _ => {} // fall through to mock/IO dispatch
         }
 
@@ -1238,6 +1412,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
             plan: vec![],
+            ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
@@ -1555,6 +1730,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
             plan: vec![],
+            ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
 
@@ -1736,6 +1912,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
             plan: vec![],
+            ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
@@ -1796,6 +1973,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
             plan: vec![],
+            ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
@@ -1843,6 +2021,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
             plan: vec![],
+            ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
 
@@ -2138,6 +2317,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
             plan: vec![],
+            ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
@@ -2156,6 +2336,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             roadmap: vec![],
             plan: vec![],
+            ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
@@ -2180,5 +2361,410 @@ mod tests {
 
         let result = handle.execute_await("routes_list", &[]);
         assert!(result.is_err(), "routes_list should fail without program");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // move_symbols builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn move_symbols_moves_function() {
+        let (handle, prog) = setup_mutation_runtime(
+            "+fn helper ()->String\n  +return \"hi\"\n+end"
+        );
+        assert!(prog.read().unwrap().get_function("helper").is_some());
+
+        let result = unwrap_string(
+            handle.execute_await("move_symbols", &[
+                Value::String("helper".into()),
+                Value::String("Utils".into()),
+            ]).unwrap()
+        );
+        assert!(result.contains("moved"), "should confirm move: {result}");
+        assert!(result.contains("Utils"), "should mention target module: {result}");
+
+        // Function should now be in Utils module, not top-level
+        let p = prog.read().unwrap();
+        assert!(p.get_function("Utils.helper").is_some(), "helper should be in Utils");
+        assert!(p.functions.iter().all(|f| f.name != "helper"), "helper should not be in top-level functions");
+    }
+
+    #[test]
+    fn move_symbols_multiple_comma_separated() {
+        let (handle, prog) = setup_mutation_runtime(
+            "+fn foo ()->Int\n  +return 1\n+end\n\
+             +fn bar ()->Int\n  +return 2\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("move_symbols", &[
+                Value::String("foo, bar".into()),
+                Value::String("Helpers".into()),
+            ]).unwrap()
+        );
+        assert!(result.contains("moved"), "should confirm move: {result}");
+        let p = prog.read().unwrap();
+        assert!(p.get_function("Helpers.foo").is_some());
+        assert!(p.get_function("Helpers.bar").is_some());
+    }
+
+    #[test]
+    fn move_symbols_empty_symbols_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("move_symbols", &[
+            Value::String("".into()),
+            Value::String("Target".into()),
+        ]);
+        assert!(result.is_err(), "should fail with empty symbols");
+    }
+
+    #[test]
+    fn move_symbols_empty_target_fails() {
+        let (handle, _prog) = setup_mutation_runtime(
+            "+fn x ()->Int\n  +return 1\n+end"
+        );
+        let result = handle.execute_await("move_symbols", &[
+            Value::String("x".into()),
+            Value::String("".into()),
+        ]);
+        assert!(result.is_err(), "should fail with empty target");
+    }
+
+    #[test]
+    fn move_symbols_not_found_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("move_symbols", &[
+            Value::String("nonexistent".into()),
+            Value::String("Target".into()),
+        ]);
+        assert!(result.is_err(), "should fail when symbol not found");
+    }
+
+    #[test]
+    fn move_symbols_no_args_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("move_symbols", &[]);
+        assert!(result.is_err(), "should fail with no args");
+    }
+
+    #[test]
+    fn move_symbols_no_program_fails() {
+        crate::eval::set_shared_program_mut(None);
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = handle.execute_await("move_symbols", &[
+            Value::String("x".into()),
+            Value::String("Target".into()),
+        ]);
+        assert!(result.is_err(), "should fail without program");
+        assert!(result.unwrap_err().to_string().contains("program not available"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // trace_run builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn trace_run_simple_function() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("trace_run", &[
+                Value::String("greet".into()),
+                Value::String("\"world\"".into()),
+            ]).unwrap()
+        );
+        assert!(result.contains("Trace of greet"), "should have trace header: {result}");
+        assert!(result.contains("return"), "should have a return step: {result}");
+    }
+
+    #[test]
+    fn trace_run_no_args() {
+        let handle = setup_query_runtime(
+            "+fn get_one ()->Int\n  +return 1\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("trace_run", &[
+                Value::String("get_one".into()),
+                Value::String("".into()),
+            ]).unwrap()
+        );
+        assert!(result.contains("Trace of get_one"), "should trace: {result}");
+    }
+
+    #[test]
+    fn trace_run_function_not_found() {
+        let handle = setup_query_runtime("");
+        let result = handle.execute_await("trace_run", &[
+            Value::String("nonexistent".into()),
+            Value::String("".into()),
+        ]);
+        assert!(result.is_err(), "should fail for missing function");
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn trace_run_wrong_type_fails() {
+        let handle = setup_query_runtime("");
+        let result = handle.execute_await("trace_run", &[Value::Int(42)]);
+        assert!(result.is_err(), "should fail with non-String fn_name");
+    }
+
+    #[test]
+    fn trace_run_no_program_fails() {
+        crate::eval::set_shared_program(None);
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![],
+            shared_vars: std::collections::HashMap::new(),
+            roadmap: vec![],
+            plan: vec![],
+            ..Default::default()
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = handle.execute_await("trace_run", &[
+            Value::String("x".into()),
+            Value::String("".into()),
+        ]);
+        assert!(result.is_err(), "should fail without program");
+        assert!(result.unwrap_err().to_string().contains("program not available"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // msg_send builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn msg_send_delivers_message() {
+        let (handle, rt) = setup_roadmap_runtime();
+        let result = unwrap_string(
+            handle.execute_await("msg_send", &[
+                Value::String("agent1".into()),
+                Value::String("hello from main".into()),
+            ]).unwrap()
+        );
+        assert!(result.contains("Message sent to 'agent1'"), "confirmation: {result}");
+
+        // Verify message is in the mailbox
+        let state = rt.read().unwrap();
+        let inbox = state.agent_mailbox.get("agent1").unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].content, "hello from main");
+        assert_eq!(inbox[0].from, "main");
+        assert_eq!(inbox[0].to, "agent1");
+    }
+
+    #[test]
+    fn msg_send_multiple_messages() {
+        let (handle, rt) = setup_roadmap_runtime();
+        handle.execute_await("msg_send", &[
+            Value::String("agent1".into()),
+            Value::String("first".into()),
+        ]).unwrap();
+        handle.execute_await("msg_send", &[
+            Value::String("agent1".into()),
+            Value::String("second".into()),
+        ]).unwrap();
+
+        let state = rt.read().unwrap();
+        let inbox = state.agent_mailbox.get("agent1").unwrap();
+        assert_eq!(inbox.len(), 2);
+        assert_eq!(inbox[0].content, "first");
+        assert_eq!(inbox[1].content, "second");
+    }
+
+    #[test]
+    fn msg_send_empty_target_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("msg_send", &[
+            Value::String("".into()),
+            Value::String("hello".into()),
+        ]);
+        assert!(result.is_err(), "should fail with empty target");
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn msg_send_no_args_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("msg_send", &[]);
+        assert!(result.is_err(), "should fail with no args");
+    }
+
+    #[test]
+    fn msg_send_wrong_type_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("msg_send", &[Value::Int(42)]);
+        assert!(result.is_err(), "should fail with non-String target");
+    }
+
+    #[test]
+    fn msg_send_missing_message_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("msg_send", &[Value::String("agent1".into())]);
+        assert!(result.is_err(), "should fail without message arg");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // watch_start builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn watch_start_queues_command() {
+        // Set up with a function to watch
+        let (handle, _prog) = setup_mutation_runtime(
+            "+fn checker ()->Int\n  +return 42\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("watch_start", &[
+                Value::String("checker".into()),
+                Value::Int(1000),
+            ]).unwrap()
+        );
+        assert!(result.contains("Watching checker"), "confirmation: {result}");
+        assert!(result.contains("1000ms"), "should mention interval: {result}");
+
+        // Verify command was queued
+        let rt = crate::eval::get_shared_runtime().unwrap();
+        let state = rt.read().unwrap();
+        assert_eq!(state.pending_commands.len(), 1);
+        assert!(state.pending_commands[0].contains("!watch checker 1000"));
+    }
+
+    #[test]
+    fn watch_start_function_not_found_fails() {
+        let handle = setup_query_runtime("");
+        let result = handle.execute_await("watch_start", &[
+            Value::String("nonexistent".into()),
+            Value::Int(1000),
+        ]);
+        assert!(result.is_err(), "should fail for missing function");
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn watch_start_zero_interval_fails() {
+        let handle = setup_query_runtime(
+            "+fn x ()->Int\n  +return 1\n+end"
+        );
+        let result = handle.execute_await("watch_start", &[
+            Value::String("x".into()),
+            Value::Int(0),
+        ]);
+        assert!(result.is_err(), "should fail with zero interval");
+    }
+
+    #[test]
+    fn watch_start_negative_interval_fails() {
+        let handle = setup_query_runtime(
+            "+fn x ()->Int\n  +return 1\n+end"
+        );
+        let result = handle.execute_await("watch_start", &[
+            Value::String("x".into()),
+            Value::Int(-100),
+        ]);
+        assert!(result.is_err(), "should fail with negative interval");
+    }
+
+    #[test]
+    fn watch_start_wrong_type_fn_name_fails() {
+        let (handle, _) = setup_roadmap_runtime();
+        let result = handle.execute_await("watch_start", &[Value::Int(42)]);
+        assert!(result.is_err(), "should fail with non-String fn_name");
+    }
+
+    #[test]
+    fn watch_start_empty_fn_name_fails() {
+        let handle = setup_query_runtime(
+            "+fn x ()->Int\n  +return 1\n+end"
+        );
+        let result = handle.execute_await("watch_start", &[
+            Value::String("".into()),
+            Value::Int(1000),
+        ]);
+        assert!(result.is_err(), "should fail with empty fn_name");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // agent_spawn builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn agent_spawn_queues_command() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = unwrap_string(
+            handle.execute_await("agent_spawn", &[
+                Value::String("worker1".into()),
+                Value::String("new-only".into()),
+                Value::String("Build a calculator module".into()),
+            ]).unwrap()
+        );
+        assert!(result.contains("Agent 'worker1' spawned"), "confirmation: {result}");
+        assert!(result.contains("new-only"), "should mention scope: {result}");
+
+        // Verify command was queued
+        let rt = crate::eval::get_shared_runtime().unwrap();
+        let state = rt.read().unwrap();
+        assert_eq!(state.pending_commands.len(), 1);
+        assert!(state.pending_commands[0].contains("!agent worker1"));
+        assert!(state.pending_commands[0].contains("--scope new-only"));
+        assert!(state.pending_commands[0].contains("Build a calculator module"));
+    }
+
+    #[test]
+    fn agent_spawn_empty_name_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("agent_spawn", &[
+            Value::String("".into()),
+            Value::String("full".into()),
+            Value::String("do something".into()),
+        ]);
+        assert!(result.is_err(), "should fail with empty name");
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn agent_spawn_empty_task_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("agent_spawn", &[
+            Value::String("worker".into()),
+            Value::String("full".into()),
+            Value::String("".into()),
+        ]);
+        assert!(result.is_err(), "should fail with empty task");
+    }
+
+    #[test]
+    fn agent_spawn_no_args_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("agent_spawn", &[]);
+        assert!(result.is_err(), "should fail with no args");
+    }
+
+    #[test]
+    fn agent_spawn_missing_task_fails() {
+        let (handle, _rt) = setup_roadmap_runtime();
+        let result = handle.execute_await("agent_spawn", &[
+            Value::String("worker".into()),
+            Value::String("full".into()),
+        ]);
+        assert!(result.is_err(), "should fail without task arg");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // New builtins are registered
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn new_io_builtins_registered() {
+        for name in &["move_symbols", "watch_start", "agent_spawn", "msg_send", "trace_run"] {
+            assert!(
+                crate::builtins::is_io_builtin(name),
+                "IO builtin '{name}' should be registered"
+            );
+            assert!(
+                crate::builtins::is_builtin(name),
+                "'{name}' should also return true for is_builtin"
+            );
+        }
     }
 }

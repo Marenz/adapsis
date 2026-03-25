@@ -644,6 +644,52 @@ pub static IO_BUILTINS: &[Builtin] = &[
                Takes `(name:String)`. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    // Programmatic equivalents of !move, !watch, !agent, !msg, !trace commands
+    Builtin {
+        name: "move_symbols",
+        aliases: &[],
+        short: "move symbols into a module: move_symbols(symbols, target_module) -> String",
+        long: "Moves comma-separated symbol names (functions, types, or modules) into the target module \
+               and updates all call sites automatically. Same as `!move`. \
+               Takes `(symbols:String, target_module:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "watch_start",
+        aliases: &[],
+        short: "start watching a function periodically: watch_start(fn_name, interval_ms) -> String",
+        long: "Starts polling a function periodically and alerts when its result changes. Same as `!watch`. \
+               Takes `(fn_name:String, interval_ms:Int)`. Returns confirmation. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "agent_spawn",
+        aliases: &[],
+        short: "spawn a background agent: agent_spawn(name, scope, task) -> String",
+        long: "Spawns a background agent with the given name, scope, and task. Same as `!agent`. \
+               Scope can be \"read-only\", \"new-only\", \"module X\", or \"full\". \
+               Takes `(name:String, scope:String, task:String)`. Returns confirmation. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "msg_send",
+        aliases: &[],
+        short: "send a message to an agent or main: msg_send(target, message) -> String",
+        long: "Sends a message to a named agent or to \"main\". Same as `!msg`. \
+               The recipient sees it in `?inbox` or agent feedback. \
+               Takes `(target:String, message:String)`. Returns confirmation. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "trace_run",
+        aliases: &[],
+        short: "run a function with tracing: trace_run(fn_name, args) -> String",
+        long: "Runs a function with step-by-step tracing enabled. Same as `!trace`. \
+               Returns the trace output as a formatted String. \
+               Takes `(fn_name:String, args:String)` where args is the input expression text (or empty). \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).

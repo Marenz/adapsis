@@ -640,6 +640,35 @@ Example:
 +end
 ```
 
+### Programmatic Command Builtins
+
+These IO builtins are programmatic equivalents of `!move`, `!watch`, `!agent`, `!msg`, and `!trace` commands.
+They allow Adapsis code to perform these operations via `+await` instead of using `!`-commands directly.
+
+- `+await result:String = move_symbols(symbols, target_module)` — move comma-separated symbol names (functions, types, modules) into a target module. Updates all call sites automatically. Same as `!move sym1 sym2 Module`.
+- `+await result:String = watch_start(fn_name, interval_ms)` — start watching a function periodically. Same as `!watch fn_name interval_ms`. Queues the watch for API-layer processing.
+- `+await result:String = agent_spawn(name, scope, task)` — spawn a background agent with the given name, scope, and task. Same as `!agent name --scope scope task`. Scope: \"read-only\", \"new-only\", \"module X\", \"full\".
+- `+await result:String = msg_send(target, message)` — send a message to an agent or \"main\". Same as `!msg target message`. The recipient sees it in `?inbox`.
+- `+await result:String = trace_run(fn_name, args)` — run a function with step-by-step tracing. Same as `!trace fn_name args`. Returns the trace output as a formatted String. `args` is the input expression text (empty string for no args).
+
+Example:
+```
++fn reorganize ()->String [io,async]
+  +await r:String = move_symbols("parse_input, validate", "Parser")
+  +return r
++end
+
++fn debug_fn (name:String)->String [io,async]
+  +await trace:String = trace_run(name, "")
+  +return trace
++end
+
++fn notify_agent (agent:String, msg:String)->String [io,async]
+  +await r:String = msg_send(agent, msg)
+  +return r
++end
+```
+
 ### Multi-Session API
 
 AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session
