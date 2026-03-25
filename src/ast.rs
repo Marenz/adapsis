@@ -911,4 +911,713 @@ mod tests {
         b.functions.push(make_fn("f", Type::Int));
         assert_eq!(a, b);
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Expr variant construction
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn expr_literal_int() {
+        let e = Expr::Literal(Literal::Int(42));
+        assert!(matches!(e, Expr::Literal(Literal::Int(42))));
+    }
+
+    #[test]
+    fn expr_literal_float() {
+        let e = Expr::Literal(Literal::Float(3.14));
+        match e {
+            Expr::Literal(Literal::Float(f)) => assert!((f - 3.14).abs() < 1e-10),
+            _ => panic!("expected Float literal"),
+        }
+    }
+
+    #[test]
+    fn expr_literal_bool() {
+        assert_eq!(
+            Expr::Literal(Literal::Bool(true)),
+            Expr::Literal(Literal::Bool(true))
+        );
+        assert_ne!(
+            Expr::Literal(Literal::Bool(true)),
+            Expr::Literal(Literal::Bool(false))
+        );
+    }
+
+    #[test]
+    fn expr_literal_string() {
+        let e = Expr::Literal(Literal::String("hello".to_string()));
+        match &e {
+            Expr::Literal(Literal::String(s)) => assert_eq!(s, "hello"),
+            _ => panic!("expected String literal"),
+        }
+    }
+
+    #[test]
+    fn expr_identifier() {
+        let e = Expr::Identifier("my_var".to_string());
+        assert!(matches!(e, Expr::Identifier(ref n) if n == "my_var"));
+    }
+
+    #[test]
+    fn expr_field_access() {
+        let e = Expr::FieldAccess {
+            base: Box::new(Expr::Identifier("user".to_string())),
+            field: "name".to_string(),
+        };
+        match &e {
+            Expr::FieldAccess { base, field } => {
+                assert!(matches!(base.as_ref(), Expr::Identifier(n) if n == "user"));
+                assert_eq!(field, "name");
+            }
+            _ => panic!("expected FieldAccess"),
+        }
+    }
+
+    #[test]
+    fn expr_call() {
+        let e = Expr::Call(CallExpr {
+            callee: "concat".to_string(),
+            args: vec![
+                Expr::Literal(Literal::String("a".to_string())),
+                Expr::Literal(Literal::String("b".to_string())),
+            ],
+        });
+        match &e {
+            Expr::Call(call) => {
+                assert_eq!(call.callee, "concat");
+                assert_eq!(call.args.len(), 2);
+            }
+            _ => panic!("expected Call"),
+        }
+    }
+
+    #[test]
+    fn expr_binary() {
+        let e = Expr::Binary {
+            left: Box::new(Expr::Literal(Literal::Int(1))),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal(Literal::Int(2))),
+        };
+        match &e {
+            Expr::Binary { op, .. } => assert_eq!(*op, BinaryOp::Add),
+            _ => panic!("expected Binary"),
+        }
+    }
+
+    #[test]
+    fn expr_unary_not() {
+        let e = Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(Expr::Literal(Literal::Bool(true))),
+        };
+        assert!(matches!(
+            e,
+            Expr::Unary {
+                op: UnaryOp::Not,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn expr_unary_neg() {
+        let e = Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(Expr::Literal(Literal::Int(5))),
+        };
+        assert!(matches!(
+            e,
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn expr_struct_init() {
+        let e = Expr::StructInit {
+            ty: "Point".to_string(),
+            fields: vec![
+                StructFieldValue {
+                    name: "x".to_string(),
+                    value: Expr::Literal(Literal::Int(10)),
+                },
+                StructFieldValue {
+                    name: "y".to_string(),
+                    value: Expr::Literal(Literal::Int(20)),
+                },
+            ],
+        };
+        match &e {
+            Expr::StructInit { ty, fields } => {
+                assert_eq!(ty, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "x");
+                assert_eq!(fields[1].name, "y");
+            }
+            _ => panic!("expected StructInit"),
+        }
+    }
+
+    #[test]
+    fn expr_nested_binary() {
+        // (1 + 2) * 3
+        let e = Expr::Binary {
+            left: Box::new(Expr::Binary {
+                left: Box::new(Expr::Literal(Literal::Int(1))),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal(Literal::Int(2))),
+            }),
+            op: BinaryOp::Mul,
+            right: Box::new(Expr::Literal(Literal::Int(3))),
+        };
+        match &e {
+            Expr::Binary {
+                op: BinaryOp::Mul,
+                left,
+                ..
+            } => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expr::Binary {
+                        op: BinaryOp::Add,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected nested Binary"),
+        }
+    }
+
+    #[test]
+    fn expr_equality() {
+        let a = Expr::Literal(Literal::Int(42));
+        let b = Expr::Literal(Literal::Int(42));
+        let c = Expr::Literal(Literal::Int(99));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // StatementKind variant construction
+    // ═════════════════════════════════════════════════════════════════════
+
+    fn make_stmt(kind: StatementKind) -> Statement {
+        Statement {
+            id: "s1".to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn stmt_let() {
+        let stmt = make_stmt(StatementKind::Let {
+            name: "x".to_string(),
+            ty: Type::Int,
+            value: Expr::Literal(Literal::Int(42)),
+        });
+        match &stmt.kind {
+            StatementKind::Let { name, ty, value } => {
+                assert_eq!(name, "x");
+                assert_eq!(*ty, Type::Int);
+                assert_eq!(*value, Expr::Literal(Literal::Int(42)));
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn stmt_set() {
+        let stmt = make_stmt(StatementKind::Set {
+            name: "count".to_string(),
+            value: Expr::Binary {
+                left: Box::new(Expr::Identifier("count".to_string())),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal(Literal::Int(1))),
+            },
+        });
+        assert!(matches!(stmt.kind, StatementKind::Set { .. }));
+    }
+
+    #[test]
+    fn stmt_return() {
+        let stmt = make_stmt(StatementKind::Return {
+            value: Expr::Identifier("result".to_string()),
+        });
+        match &stmt.kind {
+            StatementKind::Return { value } => {
+                assert!(matches!(value, Expr::Identifier(n) if n == "result"));
+            }
+            _ => panic!("expected Return"),
+        }
+    }
+
+    #[test]
+    fn stmt_check() {
+        let stmt = make_stmt(StatementKind::Check {
+            label: "positive".to_string(),
+            condition: Expr::Binary {
+                left: Box::new(Expr::Identifier("x".to_string())),
+                op: BinaryOp::GreaterThan,
+                right: Box::new(Expr::Literal(Literal::Int(0))),
+            },
+            on_fail: "err_negative".to_string(),
+        });
+        match &stmt.kind {
+            StatementKind::Check { label, on_fail, .. } => {
+                assert_eq!(label, "positive");
+                assert_eq!(on_fail, "err_negative");
+            }
+            _ => panic!("expected Check"),
+        }
+    }
+
+    #[test]
+    fn stmt_call() {
+        let stmt = make_stmt(StatementKind::Call {
+            binding: Some(Binding {
+                name: "result".to_string(),
+                ty: Type::String,
+            }),
+            call: CallExpr {
+                callee: "validate".to_string(),
+                args: vec![Expr::Identifier("input".to_string())],
+            },
+        });
+        match &stmt.kind {
+            StatementKind::Call { binding, call } => {
+                assert!(binding.is_some());
+                assert_eq!(binding.as_ref().unwrap().name, "result");
+                assert_eq!(call.callee, "validate");
+                assert_eq!(call.args.len(), 1);
+            }
+            _ => panic!("expected Call"),
+        }
+    }
+
+    #[test]
+    fn stmt_call_no_binding() {
+        let stmt = make_stmt(StatementKind::Call {
+            binding: None,
+            call: CallExpr {
+                callee: "side_effect".to_string(),
+                args: vec![],
+            },
+        });
+        match &stmt.kind {
+            StatementKind::Call { binding, .. } => assert!(binding.is_none()),
+            _ => panic!("expected Call"),
+        }
+    }
+
+    #[test]
+    fn stmt_branch() {
+        let stmt = make_stmt(StatementKind::Branch {
+            condition: Expr::Binary {
+                left: Box::new(Expr::Identifier("x".to_string())),
+                op: BinaryOp::GreaterThan,
+                right: Box::new(Expr::Literal(Literal::Int(0))),
+            },
+            then_body: vec![make_stmt(StatementKind::Return {
+                value: Expr::Literal(Literal::String("positive".to_string())),
+            })],
+            else_body: vec![make_stmt(StatementKind::Return {
+                value: Expr::Literal(Literal::String("non-positive".to_string())),
+            })],
+        });
+        match &stmt.kind {
+            StatementKind::Branch {
+                then_body,
+                else_body,
+                ..
+            } => {
+                assert_eq!(then_body.len(), 1);
+                assert_eq!(else_body.len(), 1);
+            }
+            _ => panic!("expected Branch"),
+        }
+    }
+
+    #[test]
+    fn stmt_while() {
+        let stmt = make_stmt(StatementKind::While {
+            condition: Expr::Binary {
+                left: Box::new(Expr::Identifier("i".to_string())),
+                op: BinaryOp::LessThan,
+                right: Box::new(Expr::Literal(Literal::Int(10))),
+            },
+            body: vec![make_stmt(StatementKind::Set {
+                name: "i".to_string(),
+                value: Expr::Binary {
+                    left: Box::new(Expr::Identifier("i".to_string())),
+                    op: BinaryOp::Add,
+                    right: Box::new(Expr::Literal(Literal::Int(1))),
+                },
+            })],
+        });
+        match &stmt.kind {
+            StatementKind::While { body, .. } => assert_eq!(body.len(), 1),
+            _ => panic!("expected While"),
+        }
+    }
+
+    #[test]
+    fn stmt_match() {
+        let stmt = make_stmt(StatementKind::Match {
+            expr: Expr::Identifier("color".to_string()),
+            arms: vec![
+                MatchArm {
+                    variant: "Red".to_string(),
+                    bindings: vec![],
+                    patterns: None,
+                    body: vec![make_stmt(StatementKind::Return {
+                        value: Expr::Literal(Literal::Int(1)),
+                    })],
+                },
+                MatchArm {
+                    variant: "_".to_string(),
+                    bindings: vec![],
+                    patterns: None,
+                    body: vec![make_stmt(StatementKind::Return {
+                        value: Expr::Literal(Literal::Int(0)),
+                    })],
+                },
+            ],
+        });
+        match &stmt.kind {
+            StatementKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert_eq!(arms[0].variant, "Red");
+                assert_eq!(arms[1].variant, "_");
+            }
+            _ => panic!("expected Match"),
+        }
+    }
+
+    #[test]
+    fn stmt_match_with_bindings() {
+        let arm = MatchArm {
+            variant: "Circle".to_string(),
+            bindings: vec!["radius".to_string()],
+            patterns: None,
+            body: vec![],
+        };
+        assert_eq!(arm.variant, "Circle");
+        assert_eq!(arm.bindings, vec!["radius"]);
+    }
+
+    #[test]
+    fn stmt_each() {
+        let stmt = make_stmt(StatementKind::Each {
+            iterator: Expr::Identifier("items".to_string()),
+            binding: Binding {
+                name: "item".to_string(),
+                ty: Type::String,
+            },
+            body: vec![],
+        });
+        match &stmt.kind {
+            StatementKind::Each { binding, body, .. } => {
+                assert_eq!(binding.name, "item");
+                assert_eq!(binding.ty, Type::String);
+                assert!(body.is_empty());
+            }
+            _ => panic!("expected Each"),
+        }
+    }
+
+    #[test]
+    fn stmt_await() {
+        let stmt = make_stmt(StatementKind::Await {
+            name: "data".to_string(),
+            ty: Type::String,
+            call: CallExpr {
+                callee: "http_get".to_string(),
+                args: vec![Expr::Identifier("url".to_string())],
+            },
+        });
+        match &stmt.kind {
+            StatementKind::Await { name, ty, call } => {
+                assert_eq!(name, "data");
+                assert_eq!(*ty, Type::String);
+                assert_eq!(call.callee, "http_get");
+            }
+            _ => panic!("expected Await"),
+        }
+    }
+
+    #[test]
+    fn stmt_spawn() {
+        let stmt = make_stmt(StatementKind::Spawn {
+            call: CallExpr {
+                callee: "background_task".to_string(),
+                args: vec![],
+            },
+            binding: None,
+        });
+        assert!(matches!(stmt.kind, StatementKind::Spawn { .. }));
+    }
+
+    #[test]
+    fn stmt_yield() {
+        let stmt = make_stmt(StatementKind::Yield {
+            value: Expr::Literal(Literal::Int(42)),
+        });
+        assert!(matches!(stmt.kind, StatementKind::Yield { .. }));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Type construction (generics)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn type_list() {
+        let t = Type::List(Box::new(Type::Int));
+        match &t {
+            Type::List(inner) => assert_eq!(inner.as_ref(), &Type::Int),
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn type_nested_list() {
+        let t = Type::List(Box::new(Type::List(Box::new(Type::String))));
+        match &t {
+            Type::List(outer) => match outer.as_ref() {
+                Type::List(inner) => assert_eq!(inner.as_ref(), &Type::String),
+                _ => panic!("expected nested List"),
+            },
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn type_map() {
+        let t = Type::Map(Box::new(Type::String), Box::new(Type::Int));
+        match &t {
+            Type::Map(k, v) => {
+                assert_eq!(k.as_ref(), &Type::String);
+                assert_eq!(v.as_ref(), &Type::Int);
+            }
+            _ => panic!("expected Map"),
+        }
+    }
+
+    #[test]
+    fn type_option() {
+        let t = Type::Option(Box::new(Type::String));
+        assert!(matches!(&t, Type::Option(inner) if **inner == Type::String));
+    }
+
+    #[test]
+    fn type_result() {
+        let t = Type::Result(Box::new(Type::Int));
+        assert!(matches!(&t, Type::Result(inner) if **inner == Type::Int));
+    }
+
+    #[test]
+    fn type_set() {
+        let t = Type::Set(Box::new(Type::Int));
+        assert!(matches!(&t, Type::Set(inner) if **inner == Type::Int));
+    }
+
+    #[test]
+    fn type_struct_name() {
+        let t = Type::Struct("User".to_string());
+        assert!(matches!(&t, Type::Struct(n) if n == "User"));
+    }
+
+    #[test]
+    fn type_tagged_union_name() {
+        let t = Type::TaggedUnion("Color".to_string());
+        assert!(matches!(&t, Type::TaggedUnion(n) if n == "Color"));
+    }
+
+    #[test]
+    fn type_byte() {
+        assert_eq!(Type::Byte, Type::Byte);
+        assert_ne!(Type::Byte, Type::Int);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // FunctionDecl construction
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn function_decl_with_params_and_effects() {
+        let func = FunctionDecl {
+            id: "fn1".to_string(),
+            name: "fetch".to_string(),
+            params: vec![
+                Param {
+                    id: String::new(),
+                    name: "url".to_string(),
+                    ty: Type::String,
+                },
+                Param {
+                    id: String::new(),
+                    name: "timeout".to_string(),
+                    ty: Type::Int,
+                },
+            ],
+            return_type: Type::Result(Box::new(Type::String)),
+            effects: vec![Effect::Io, Effect::Async, Effect::Fail],
+            body: vec![],
+            tests: vec![],
+        };
+        assert_eq!(func.name, "fetch");
+        assert_eq!(func.params.len(), 2);
+        assert_eq!(func.params[0].name, "url");
+        assert!(matches!(func.return_type, Type::Result(_)));
+        assert_eq!(func.effects.len(), 3);
+        assert!(func.effects.contains(&Effect::Io));
+        assert!(func.effects.contains(&Effect::Async));
+        assert!(func.effects.contains(&Effect::Fail));
+    }
+
+    #[test]
+    fn function_decl_with_body() {
+        let func = FunctionDecl {
+            id: String::new(),
+            name: "double".to_string(),
+            params: vec![Param {
+                id: String::new(),
+                name: "x".to_string(),
+                ty: Type::Int,
+            }],
+            return_type: Type::Int,
+            effects: vec![],
+            body: vec![
+                make_stmt(StatementKind::Let {
+                    name: "result".to_string(),
+                    ty: Type::Int,
+                    value: Expr::Binary {
+                        left: Box::new(Expr::Identifier("x".to_string())),
+                        op: BinaryOp::Mul,
+                        right: Box::new(Expr::Literal(Literal::Int(2))),
+                    },
+                }),
+                make_stmt(StatementKind::Return {
+                    value: Expr::Identifier("result".to_string()),
+                }),
+            ],
+            tests: vec![],
+        };
+        assert_eq!(func.body.len(), 2);
+        assert!(matches!(func.body[0].kind, StatementKind::Let { .. }));
+        assert!(matches!(func.body[1].kind, StatementKind::Return { .. }));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // MatchPattern construction
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn match_pattern_binding() {
+        let p = MatchPattern::Binding("x".to_string());
+        assert!(matches!(p, MatchPattern::Binding(ref n) if n == "x"));
+    }
+
+    #[test]
+    fn match_pattern_variant() {
+        let p = MatchPattern::Variant {
+            variant: "Some".to_string(),
+            sub_patterns: vec![MatchPattern::Binding("val".to_string())],
+        };
+        match &p {
+            MatchPattern::Variant {
+                variant,
+                sub_patterns,
+            } => {
+                assert_eq!(variant, "Some");
+                assert_eq!(sub_patterns.len(), 1);
+            }
+            _ => panic!("expected Variant pattern"),
+        }
+    }
+
+    #[test]
+    fn match_pattern_literal() {
+        let p = MatchPattern::Literal(Literal::Int(0));
+        assert!(matches!(p, MatchPattern::Literal(Literal::Int(0))));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // BinaryOp / UnaryOp coverage
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn all_binary_ops_constructible() {
+        let ops = vec![
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Mul,
+            BinaryOp::Div,
+            BinaryOp::Mod,
+            BinaryOp::GreaterThan,
+            BinaryOp::LessThan,
+            BinaryOp::GreaterThanOrEqual,
+            BinaryOp::LessThanOrEqual,
+            BinaryOp::Equal,
+            BinaryOp::NotEqual,
+            BinaryOp::And,
+            BinaryOp::Or,
+        ];
+        assert_eq!(ops.len(), 13);
+        // Each is distinct
+        for (i, a) in ops.iter().enumerate() {
+            for (j, b) in ops.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "ops at {i} and {j} should differ");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_unary_ops_constructible() {
+        assert_ne!(UnaryOp::Not, UnaryOp::Neg);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // SharedVarDecl and AfterCheck
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn shared_var_decl_construction() {
+        let decl = SharedVarDecl {
+            name: "counter".to_string(),
+            ty: Type::Int,
+            default: Expr::Literal(Literal::Int(0)),
+        };
+        assert_eq!(decl.name, "counter");
+        assert_eq!(decl.ty, Type::Int);
+    }
+
+    #[test]
+    fn after_check_construction() {
+        let check = AfterCheck {
+            target: "routes".to_string(),
+            matcher: "contains".to_string(),
+            value: "/chat".to_string(),
+        };
+        assert_eq!(check.target, "routes");
+        assert_eq!(check.matcher, "contains");
+        assert_eq!(check.value, "/chat");
+    }
+
+    #[test]
+    fn test_case_construction() {
+        let tc = TestCase {
+            input: "x=5".to_string(),
+            expected: "10".to_string(),
+            passed: false,
+            matcher: None,
+            after_checks: vec![],
+        };
+        assert_eq!(tc.input, "x=5");
+        assert!(!tc.passed);
+        assert!(tc.matcher.is_none());
+    }
 }
