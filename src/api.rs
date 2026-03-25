@@ -2186,7 +2186,7 @@ pub async fn ask_stream(
                                 let had_tool_calls_stream = had_tool_calls.clone();
                                 let last_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
                                 let last_text_stream = last_text.clone();
-                                let full_task = format!("{task}. IMPORTANT: Do NOT ask for clarification — proceed with your best judgment. When done: 1) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 2) Register new builtins in src/builtins.rs. 3) Create clean atomic git commits with descriptive messages for each logical change.");
+                                let full_task = format!("{task}. IMPORTANT: Do NOT ask for clarification — proceed with your best judgment. When done: 1) Write Rust tests for the changes you made — cover the happy path and at least one error case. 2) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 3) Register new builtins in src/builtins.rs. 4) Run `cargo test` and fix any failures. 5) Create clean atomic git commits with descriptive messages for each logical change.");
                                 let oc_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(3600),
                                     async {
