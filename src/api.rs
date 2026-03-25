@@ -199,6 +199,37 @@ pub async fn eval_fn(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
+                // Check if the expression contains IO builtins — run async if so
+                if eval::expr_contains_io_builtin(&expr) {
+                    if let Some(sender) = &config.io_sender {
+                        let program = config.program.read().await.clone();
+                        let sender = sender.clone();
+                        let runtime_for_blocking = config.runtime.clone();
+                        let eval_result = tokio::task::spawn_blocking(move || {
+                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            eval::eval_inline_expr_with_io(&program, &expr, sender)
+                        }).await;
+                        return match eval_result {
+                            Ok(Ok(val)) => Json(EvalResponse {
+                                result: format!("{val}"),
+                                success: true,
+                                compiled: Some(false),
+                            }),
+                            Ok(Err(e)) => Json(EvalResponse {
+                                result: format!("{e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                            Err(e) => Json(EvalResponse {
+                                result: format!("task error: {e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                        };
+                    }
+                    // No IO sender available — fall through to sync eval which will error
+                }
                 // Tier 1: read program briefly for eval
                 let program = config.program.read().await;
                 match eval::eval_inline_expr(&program, &expr) {
@@ -1610,6 +1641,31 @@ pub async fn ask(
                         crate::parser::Operation::Eval(ev) => {
                             // Inline expression: evaluate directly
                             if let Some(ref expr) = ev.inline_expr {
+                                // Check if expression contains IO builtins — run async if so
+                                if crate::eval::expr_contains_io_builtin(expr) {
+                                    if let Some(sender) = &config.io_sender {
+                                        let program = session.program.clone();
+                                        let expr = expr.clone();
+                                        let sender = sender.clone();
+                                        let runtime_for_blocking = config.runtime.clone();
+                                        drop(session);
+                                        let eval_result = tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                            crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                        }).await;
+                                        let (msg, success) = match &eval_result {
+                                            Ok(Ok(val)) => (format!("= {val}"), true),
+                                            Ok(Err(e)) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
+                                            Err(e) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
+                                        };
+                                        eprintln!("[web:eval] {msg}");
+                                        iter_results.push(MutationResult { message: msg, success });
+                                        session = config.session.lock().await;
+                                        continue;
+                                    }
+                                    // No IO sender — fall through to sync eval which will error
+                                }
                                 match crate::eval::eval_inline_expr(&session.program, expr) {
                                     Ok(val) => {
                                         let msg = format!("= {val}");
@@ -2461,6 +2517,35 @@ pub async fn ask_stream(
                             crate::parser::Operation::Eval(ev) => {
                                 // Inline expression: evaluate directly
                                 if let Some(ref expr) = ev.inline_expr {
+                                    // Check if expression contains IO builtins — run async if so
+                                    if crate::eval::expr_contains_io_builtin(expr) {
+                                        if let Some(sender) = &config_clone.io_sender {
+                                            let program = session.program.clone();
+                                            let expr = expr.clone();
+                                            let sender = sender.clone();
+                                            let runtime_for_blocking = config_clone.runtime.clone();
+                                            drop(session);
+                                            let eval_result = tokio::task::spawn_blocking(move || {
+                                                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                                crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                            }).await;
+                                            let (msg, success) = match &eval_result {
+                                                Ok(Ok(val)) => (format!("{val}"), true),
+                                                Ok(Err(e)) => (format!("eval error: {e}"), false),
+                                                Err(e) => (format!("eval task error: {e}"), false),
+                                            };
+                                            if success {
+                                                op_result.info(format!("= {msg}"));
+                                            } else {
+                                                op_result.error(&msg);
+                                            }
+                                            let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": "(inline)", "success": success})).await;
+                                            session = config_clone.session.lock().await;
+                                            continue;
+                                        }
+                                        // No IO sender — fall through to sync eval which will error
+                                    }
                                     match crate::eval::eval_inline_expr(&session.program, expr) {
                                         Ok(val) => {
                                             let msg = format!("{val}");
@@ -3263,6 +3348,37 @@ async fn session_eval(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
+                // Check if the expression contains IO builtins — run async if so
+                if eval::expr_contains_io_builtin(&expr) {
+                    if let Some(sender) = &config.io_sender {
+                        let program = program.clone();
+                        let sender = sender.clone();
+                        let runtime_for_blocking = config.runtime.clone();
+                        let eval_result = tokio::task::spawn_blocking(move || {
+                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            eval::eval_inline_expr_with_io(&program, &expr, sender)
+                        }).await;
+                        return match eval_result {
+                            Ok(Ok(val)) => Json(EvalResponse {
+                                result: format!("{val}"),
+                                success: true,
+                                compiled: Some(false),
+                            }),
+                            Ok(Err(e)) => Json(EvalResponse {
+                                result: format!("{e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                            Err(e) => Json(EvalResponse {
+                                result: format!("task error: {e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                        };
+                    }
+                    // No IO sender — fall through to sync eval which will error
+                }
                 match eval::eval_inline_expr(&program, &expr) {
                     Ok(val) => {
                         return Json(EvalResponse {
