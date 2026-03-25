@@ -6,6 +6,10 @@ use std::sync::Arc;
 pub type NodeId = String;
 pub type Identifier = String;
 
+/// A compact interned name identifier for use in the evaluator's scope stack.
+/// This is a `u32` index into a `StringInterner` table — see `crate::intern`.
+pub type InternedName = crate::intern::InternedId;
+
 /// A registered HTTP route that dispatches to an Adapsis function.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HttpRoute {

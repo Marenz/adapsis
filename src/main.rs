@@ -5,6 +5,7 @@ mod compiler;
 mod coroutine;
 mod eval;
 mod events;
+pub mod intern;
 pub mod library;
 mod llm;
 mod orchestrator;
