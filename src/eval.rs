@@ -406,9 +406,70 @@ pub fn eval_compiled_or_interpreted_cached(
         }
     }
 
+    // Try bytecode VM (middle tier — more complete than JIT, faster than tree-walk)
+    // Skip for async/io functions since the VM can't handle IO directly.
+    let has_async = func.effects.iter().any(|e|
+        matches!(e, ast::Effect::Io | ast::Effect::Async));
+    if !has_async {
+        if let Ok(result) = try_vm_execute(program, func, input) {
+            return Ok((result, false));
+        }
+    }
+
     // Fall back to interpreter
     let result = eval_call_with_input(program, function_name, input)?;
     Ok((result, false))
+}
+
+/// Try to execute a function via the bytecode VM. Returns the formatted result
+/// string on success, or an error to fall through to the tree-walker.
+fn try_vm_execute(
+    program: &ast::Program,
+    func: &ast::FunctionDecl,
+    input: &parser::Expr,
+) -> Result<String> {
+    // Convert input expression to VM argument values
+    let vm_args = input_to_vm_args(input, func)?;
+
+    // Compile to bytecode
+    let compiled = crate::vm::compile_function(func, program)?;
+
+    // Execute
+    match crate::vm::execute(&compiled, vm_args, program)? {
+        crate::vm::VmResult::Done(val) => Ok(format!("{val}")),
+        crate::vm::VmResult::Await { .. } => bail!("VM: function requires async IO"),
+    }
+}
+
+/// Convert a parser expression to a Vec<Value> suitable for VM execution.
+fn input_to_vm_args(input: &parser::Expr, func: &ast::FunctionDecl) -> Result<Vec<Value>> {
+    if func.params.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let input_val = eval_parser_expr_standalone(input)?;
+
+    match input_val {
+        // Struct literal with named fields → extract in param order
+        Value::Struct(_, ref fields) => {
+            let mut args = Vec::new();
+            for param in &func.params {
+                if let Some(val) = fields.get(&param.name) {
+                    args.push(val.clone());
+                } else {
+                    bail!("missing argument for parameter `{}`", param.name);
+                }
+            }
+            Ok(args)
+        }
+        // Empty struct (no args provided) and params exist → error
+        Value::None if !func.params.is_empty() => {
+            bail!("no arguments provided for {} parameter(s)", func.params.len());
+        }
+        // Single value with single param → use directly
+        _ if func.params.len() == 1 => Ok(vec![input_val]),
+        _ => bail!("cannot convert input to VM args for {} parameters", func.params.len()),
+    }
 }
 
 /// Try to convert a parser expression to i64 args for the compiler.
