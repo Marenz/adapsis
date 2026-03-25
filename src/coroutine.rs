@@ -2062,4 +2062,123 @@ mod tests {
         );
         assert!(!result.contains("to_remove"), "query_symbols should not see removed function: {result}");
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Query alias builtins — verify aliases work with Program access
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn symbols_list_alias_works() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end"
+        );
+        let result = unwrap_string(handle.execute_await("symbols_list", &[]).unwrap());
+        assert!(result.contains("greet"), "symbols_list alias should list greet function: {result}");
+    }
+
+    #[test]
+    fn source_get_alias_works() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("source_get", &[Value::String("greet".into())]).unwrap()
+        );
+        assert!(result.contains("+fn greet"), "source_get alias should return source: {result}");
+    }
+
+    #[test]
+    fn callers_get_alias_works() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end\n\
+             +fn main ()->String\n  +let x:String = greet(\"world\")\n  +return x\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("callers_get", &[Value::String("greet".into())]).unwrap()
+        );
+        assert!(result.contains("main"), "callers_get alias should list main as caller: {result}");
+    }
+
+    #[test]
+    fn callees_get_alias_works() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end\n\
+             +fn main ()->String\n  +let x:String = greet(\"world\")\n  +return x\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("callees_get", &[Value::String("main".into())]).unwrap()
+        );
+        assert!(result.contains("greet"), "callees_get alias should list greet as callee: {result}");
+    }
+
+    #[test]
+    fn deps_get_alias_works() {
+        let handle = setup_query_runtime(
+            "+fn a ()->String\n  +return \"hello\"\n+end\n\
+             +fn b ()->String\n  +let x:String = a()\n  +return x\n+end\n\
+             +fn c ()->String\n  +let x:String = b()\n  +return x\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("deps_get", &[Value::String("c".into())]).unwrap()
+        );
+        assert!(result.contains("a"), "deps_get alias should include transitive dep 'a': {result}");
+        assert!(result.contains("b"), "deps_get alias should include direct dep 'b': {result}");
+    }
+
+    #[test]
+    fn routes_list_alias_works() {
+        let program = crate::ast::Program::default();
+        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![crate::ast::HttpRoute {
+                method: "POST".to_string(),
+                path: "/api/data".to_string(),
+                handler_fn: "handle_data".to_string(),
+            }],
+            shared_vars: std::collections::HashMap::new(),
+            roadmap: vec![],
+            plan: vec![],
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+
+        let result = unwrap_string(handle.execute_await("routes_list", &[]).unwrap());
+        assert!(result.contains("POST"), "routes_list alias should contain POST method: {result}");
+        assert!(result.contains("/api/data"), "routes_list alias should contain path: {result}");
+    }
+
+    #[test]
+    fn alias_no_program_errors() {
+        // Clear the thread-local program
+        crate::eval::set_shared_program(None);
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![],
+            shared_vars: std::collections::HashMap::new(),
+            roadmap: vec![],
+            plan: vec![],
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+
+        // All alias builtins that need the program should error
+        let result = handle.execute_await("symbols_list", &[]);
+        assert!(result.is_err(), "symbols_list should fail without program");
+        assert!(result.unwrap_err().to_string().contains("program not available"),
+            "should mention program not available");
+
+        let result = handle.execute_await("source_get", &[Value::String("x".into())]);
+        assert!(result.is_err(), "source_get should fail without program");
+
+        let result = handle.execute_await("callers_get", &[Value::String("x".into())]);
+        assert!(result.is_err(), "callers_get should fail without program");
+
+        let result = handle.execute_await("callees_get", &[Value::String("x".into())]);
+        assert!(result.is_err(), "callees_get should fail without program");
+
+        let result = handle.execute_await("deps_get", &[Value::String("x".into())]);
+        assert!(result.is_err(), "deps_get should fail without program");
+
+        let result = handle.execute_await("routes_list", &[]);
+        assert!(result.is_err(), "routes_list should fail without program");
+    }
 }

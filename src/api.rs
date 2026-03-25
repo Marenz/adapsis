@@ -286,6 +286,7 @@ pub async fn eval_fn(
 
             let eval_result = tokio::task::spawn_blocking(move || {
                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 let func = program.get_function(&fn_name)
                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -1649,6 +1650,7 @@ pub async fn ask(
                                     drop(session);
                                     let eval_result = tokio::task::spawn_blocking(move || {
                                         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                         let func = program.get_function(&fn_name)
                                             .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -2496,6 +2498,7 @@ pub async fn ask_stream(
                                         drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             let func = program.get_function(&fn_name)
                                                 .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -2566,6 +2569,7 @@ pub async fn ask_stream(
                                         drop(session);
                                         let result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
                                         }).await;
                                         match result {
@@ -3497,6 +3501,7 @@ async fn adapsis_route_dispatch(
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
         let func = program
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;

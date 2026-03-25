@@ -787,6 +787,7 @@ async fn main() -> Result<()> {
                                 };
                                 let program = session.program.clone();
                                 drop(session);
+                                eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
 
                                 let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new();
