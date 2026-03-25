@@ -468,3 +468,447 @@ pub fn escape_string_literal(s: &str) -> String {
 pub fn format_string_literal(s: &str) -> String {
     format!("\"{}\"", escape_string_literal(s))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    /// Create a minimal FunctionDecl with no params, no body, no effects.
+    fn make_fn(name: &str, ret: Type) -> Arc<FunctionDecl> {
+        Arc::new(FunctionDecl {
+            id: String::new(),
+            name: name.to_string(),
+            params: vec![],
+            return_type: ret,
+            effects: vec![],
+            body: vec![],
+            tests: vec![],
+        })
+    }
+
+    /// Create a FunctionDecl with params.
+    fn make_fn_with_params(name: &str, params: Vec<(&str, Type)>, ret: Type) -> Arc<FunctionDecl> {
+        Arc::new(FunctionDecl {
+            id: String::new(),
+            name: name.to_string(),
+            params: params
+                .into_iter()
+                .map(|(n, ty)| Param {
+                    id: String::new(),
+                    name: n.to_string(),
+                    ty,
+                })
+                .collect(),
+            return_type: ret,
+            effects: vec![],
+            body: vec![],
+            tests: vec![],
+        })
+    }
+
+    /// Create a Module with named functions.
+    fn make_module(name: &str, functions: Vec<Arc<FunctionDecl>>) -> Module {
+        Module {
+            id: String::new(),
+            name: name.to_string(),
+            types: vec![],
+            functions,
+            modules: vec![],
+            shared_vars: vec![],
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 1. Program::rebuild_function_index
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rebuild_index_enables_fast_lookup() {
+        let mut program = Program::default();
+        program.functions.push(make_fn("alpha", Type::Int));
+        program.functions.push(make_fn("beta", Type::String));
+        program.functions.push(make_fn("gamma", Type::Bool));
+
+        // Before rebuild, index is empty — falls back to linear scan
+        assert!(program.get_function("alpha").is_some());
+
+        // Rebuild index
+        program.rebuild_function_index();
+
+        // After rebuild, lookup via index
+        assert!(program.get_function("alpha").is_some());
+        assert!(program.get_function("beta").is_some());
+        assert!(program.get_function("gamma").is_some());
+        assert_eq!(program.get_function("alpha").unwrap().name, "alpha");
+    }
+
+    #[test]
+    fn rebuild_index_after_adding_function() {
+        let mut program = Program::default();
+        program.functions.push(make_fn("first", Type::Int));
+        program.rebuild_function_index();
+        assert!(program.get_function("first").is_some());
+
+        // Add another function — index is now stale
+        program.functions.push(make_fn("second", Type::String));
+        // Linear fallback won't find it via index since index doesn't have it,
+        // but it won't find via linear scan either because index is non-empty.
+        // So we must rebuild.
+        program.rebuild_function_index();
+        assert!(program.get_function("second").is_some());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 2. Program::get_function — all lookup paths
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn get_function_qualified_module_lookup() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        let func = program.get_function("Math.add");
+        assert!(func.is_some(), "qualified lookup should find Math.add");
+        assert_eq!(func.unwrap().name, "add");
+    }
+
+    #[test]
+    fn get_function_qualified_wrong_module() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        assert!(program.get_function("Utils.add").is_none());
+    }
+
+    #[test]
+    fn get_function_qualified_wrong_function() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        assert!(program.get_function("Math.subtract").is_none());
+    }
+
+    #[test]
+    fn get_function_top_level_via_index() {
+        let mut program = Program::default();
+        program.functions.push(make_fn("greet", Type::String));
+        program.rebuild_function_index();
+        let func = program.get_function("greet");
+        assert!(func.is_some());
+        assert_eq!(func.unwrap().name, "greet");
+    }
+
+    #[test]
+    fn get_function_top_level_linear_fallback() {
+        // Without rebuilding index, uses linear scan
+        let mut program = Program::default();
+        program.functions.push(make_fn("greet", Type::String));
+        // fn_index is empty, so linear scan
+        let func = program.get_function("greet");
+        assert!(func.is_some());
+    }
+
+    #[test]
+    fn get_function_unqualified_module_search() {
+        // Unqualified name falls through to module search
+        let mut program = Program::default();
+        program.rebuild_function_index(); // empty index
+        program
+            .modules
+            .push(make_module("Utils", vec![make_fn("helper", Type::Int)]));
+        let func = program.get_function("helper");
+        assert!(func.is_some(), "unqualified should find in modules");
+        assert_eq!(func.unwrap().name, "helper");
+    }
+
+    #[test]
+    fn get_function_missing_returns_none() {
+        let program = Program::default();
+        assert!(program.get_function("nonexistent").is_none());
+    }
+
+    #[test]
+    fn get_function_top_level_preferred_over_module() {
+        // If a function exists both top-level and in a module,
+        // top-level (via index) should be found first
+        let mut program = Program::default();
+        program.functions.push(make_fn_with_params(
+            "shared",
+            vec![("x", Type::Int)],
+            Type::Int,
+        ));
+        program
+            .modules
+            .push(make_module("Mod", vec![make_fn("shared", Type::String)]));
+        program.rebuild_function_index();
+        let func = program.get_function("shared").unwrap();
+        // Top-level version has Int return type
+        assert!(matches!(func.return_type, Type::Int));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 3. Program::get_function_mut
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn get_function_mut_qualified() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        let func = program.get_function_mut("Math.add");
+        assert!(func.is_some());
+        // Mutate it
+        func.unwrap().name = "add_modified".to_string();
+        // Verify mutation stuck
+        assert!(program.get_function("Math.add_modified").is_some());
+    }
+
+    #[test]
+    fn get_function_mut_top_level() {
+        let mut program = Program::default();
+        program.functions.push(make_fn("greet", Type::String));
+        program.rebuild_function_index();
+        let func = program.get_function_mut("greet");
+        assert!(func.is_some());
+        func.unwrap().effects.push(Effect::Io);
+        // Verify mutation
+        let func = program.get_function("greet").unwrap();
+        assert!(func.effects.contains(&Effect::Io));
+    }
+
+    #[test]
+    fn get_function_mut_unqualified_module_search() {
+        let mut program = Program::default();
+        program.rebuild_function_index();
+        program
+            .modules
+            .push(make_module("Utils", vec![make_fn("helper", Type::Int)]));
+        let func = program.get_function_mut("helper");
+        assert!(func.is_some());
+    }
+
+    #[test]
+    fn get_function_mut_missing_returns_none() {
+        let mut program = Program::default();
+        assert!(program.get_function_mut("nonexistent").is_none());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 4. TypeDecl::name()
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn type_decl_name_struct() {
+        let decl = TypeDecl::Struct(StructDecl {
+            id: String::new(),
+            name: "User".to_string(),
+            fields: vec![],
+        });
+        assert_eq!(decl.name(), "User");
+    }
+
+    #[test]
+    fn type_decl_name_tagged_union() {
+        let decl = TypeDecl::TaggedUnion(TaggedUnionDecl {
+            id: String::new(),
+            name: "Color".to_string(),
+            variants: vec![],
+        });
+        assert_eq!(decl.name(), "Color");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 5. escape_string_literal
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn escape_plain_string() {
+        assert_eq!(escape_string_literal("hello"), "hello");
+    }
+
+    #[test]
+    fn escape_quotes() {
+        assert_eq!(escape_string_literal(r#"say "hello""#), r#"say \"hello\""#);
+    }
+
+    #[test]
+    fn escape_backslash() {
+        assert_eq!(escape_string_literal(r"path\to\file"), r"path\\to\\file");
+    }
+
+    #[test]
+    fn escape_newline_and_tab() {
+        assert_eq!(
+            escape_string_literal("line1\nline2\ttab"),
+            r"line1\nline2\ttab"
+        );
+    }
+
+    #[test]
+    fn escape_carriage_return() {
+        assert_eq!(escape_string_literal("cr\rhere"), r"cr\rhere");
+    }
+
+    #[test]
+    fn escape_combined() {
+        assert_eq!(escape_string_literal("a\"b\\c\nd\te"), r#"a\"b\\c\nd\te"#);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 6. format_string_literal
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn format_plain_string() {
+        assert_eq!(format_string_literal("hello"), r#""hello""#);
+    }
+
+    #[test]
+    fn format_string_with_quotes() {
+        assert_eq!(format_string_literal(r#"say "hi""#), r#""say \"hi\"""#);
+    }
+
+    #[test]
+    fn format_string_with_special_chars() {
+        assert_eq!(format_string_literal("a\nb"), r#""a\nb""#);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 7. Module construction
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_empty_construction() {
+        let module = make_module("Empty", vec![]);
+        assert_eq!(module.name, "Empty");
+        assert!(module.functions.is_empty());
+        assert!(module.types.is_empty());
+        assert!(module.modules.is_empty());
+        assert!(module.shared_vars.is_empty());
+    }
+
+    #[test]
+    fn module_with_functions() {
+        let module = make_module(
+            "Math",
+            vec![make_fn("add", Type::Int), make_fn("sub", Type::Int)],
+        );
+        assert_eq!(module.name, "Math");
+        assert_eq!(module.functions.len(), 2);
+        assert_eq!(module.functions[0].name, "add");
+        assert_eq!(module.functions[1].name, "sub");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 8. HttpRoute
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn http_route_creation() {
+        let route = HttpRoute {
+            method: "POST".to_string(),
+            path: "/webhook/telegram".to_string(),
+            handler_fn: "handle_telegram".to_string(),
+        };
+        assert_eq!(route.method, "POST");
+        assert_eq!(route.path, "/webhook/telegram");
+        assert_eq!(route.handler_fn, "handle_telegram");
+    }
+
+    #[test]
+    fn http_route_equality() {
+        let a = HttpRoute {
+            method: "GET".to_string(),
+            path: "/health".to_string(),
+            handler_fn: "health".to_string(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 9. Program Display
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn program_display_summary() {
+        let mut program = Program::default();
+        program.functions.push(make_fn("hello", Type::String));
+        program.types.push(TypeDecl::Struct(StructDecl {
+            id: String::new(),
+            name: "Point".to_string(),
+            fields: vec![],
+        }));
+        program
+            .modules
+            .push(make_module("Utils", vec![make_fn("helper", Type::Int)]));
+
+        let display = format!("{program}");
+        assert!(display.contains("1 module(s)"), "display: {display}");
+        assert!(
+            display.contains("1 standalone function(s)"),
+            "display: {display}"
+        );
+        assert!(
+            display.contains("1 standalone type(s)"),
+            "display: {display}"
+        );
+        assert!(display.contains("fn hello"), "display: {display}");
+        assert!(display.contains("type Point"), "display: {display}");
+        assert!(display.contains("module Utils"), "display: {display}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 10. Type and Effect enums
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn type_equality() {
+        assert_eq!(Type::Int, Type::Int);
+        assert_ne!(Type::Int, Type::String);
+        assert_eq!(
+            Type::Result(Box::new(Type::Int)),
+            Type::Result(Box::new(Type::Int))
+        );
+        assert_ne!(
+            Type::Result(Box::new(Type::Int)),
+            Type::Result(Box::new(Type::String))
+        );
+        assert_eq!(
+            Type::List(Box::new(Type::String)),
+            Type::List(Box::new(Type::String))
+        );
+    }
+
+    #[test]
+    fn effect_equality() {
+        assert_eq!(Effect::Io, Effect::Io);
+        assert_ne!(Effect::Io, Effect::Async);
+    }
+
+    #[test]
+    fn program_default_is_empty() {
+        let program = Program::default();
+        assert!(program.modules.is_empty());
+        assert!(program.functions.is_empty());
+        assert!(program.types.is_empty());
+        assert!(!program.require_modules);
+    }
+
+    #[test]
+    fn program_equality() {
+        let mut a = Program::default();
+        let mut b = Program::default();
+        assert_eq!(a, b);
+        a.functions.push(make_fn("f", Type::Int));
+        assert_ne!(a, b);
+        b.functions.push(make_fn("f", Type::Int));
+        assert_eq!(a, b);
+    }
+}
