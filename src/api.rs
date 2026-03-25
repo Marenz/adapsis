@@ -40,6 +40,20 @@ fn sync_roadmap_from_runtime(session: &mut Session, runtime: &crate::session::Sh
     }
 }
 
+impl AppConfig {
+    /// Sync the independent tier locks from the session shim.
+    /// Call after any mutation that modifies the session (apply, store_test, plan updates, etc).
+    pub async fn sync_tiers_from_session(&self, session: &Session) {
+        *self.program.write().await = session.program.clone();
+        *self.meta.lock().await = session.meta.clone();
+        if let Ok(mut rt) = self.runtime.write() {
+            rt.shared_vars = session.runtime.shared_vars.clone();
+            rt.http_routes = session.runtime.http_routes.clone();
+            rt.roadmap = session.meta.roadmap.clone();
+        }
+    }
+}
+
 /// Thread-safe session manager: maps session IDs to independent Program instances.
 /// The "main" session uses the existing `session` field in AppConfig; additional
 /// sessions are stored here with isolated Program state.
@@ -49,6 +63,11 @@ pub type SessionManager = Arc<Mutex<std::collections::HashMap<String, Arc<tokio:
 #[derive(Clone)]
 pub struct AppConfig {
     pub session: SharedSession,
+    /// Tier 1: Program AST — read-heavy, use read() for queries, write() briefly for mutations
+    pub program: std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
+    /// Tier 3: Session metadata — chat history, plan, roadmap, mocks, mutation log.
+    /// Brief locks only; never hold during LLM calls or IO.
+    pub meta: std::sync::Arc<tokio::sync::Mutex<crate::session::SessionMeta>>,
     pub llm_url: String,
     pub llm_model: String,
     pub llm_api_key: Option<String>,
@@ -105,13 +124,12 @@ pub async fn mutate(
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
+    // Mutate still uses the session shim — it calls apply_async which needs
+    // &mut self access to program+meta+runtime. After mutation, sync the tiers.
     let mut session = config.session.lock().await;
-    match session.apply_async(&req.source, config.io_sender.as_ref()).await {
+     match session.apply_async(&req.source, config.io_sender.as_ref()).await {
         Ok(results) => {
-            // Sync shared vars to the Arc<RwLock> runtime
-            if let Ok(mut rt) = config.runtime.write() {
-                rt.shared_vars = session.runtime.shared_vars.clone();
-            }
+            config.sync_tiers_from_session(&session).await;
             Json(MutateResponse {
                 revision: session.meta.revision,
                 results: results
@@ -154,8 +172,6 @@ pub async fn eval_fn(
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    let mut session = config.session.lock().await;
-    sync_roadmap_to_runtime(&session, &config.runtime);
 
     // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
     if let Some(ref expr_str) = req.expression {
@@ -170,7 +186,9 @@ pub async fn eval_fn(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
-                match eval::eval_inline_expr(&session.program, &expr) {
+                // Tier 1: read program briefly for eval
+                let program = config.program.read().await;
+                match eval::eval_inline_expr(&program, &expr) {
                     Ok(val) => {
                         return Json(EvalResponse {
                             result: format!("{val}"),
@@ -221,32 +239,41 @@ pub async fn eval_fn(
         inline_expr: None,
     };
 
-    // Block eval of untested functions (>2 statements) in AdapsisOS mode
-    if session.program.require_modules {
-        if let Some(func) = session.program.get_function(&ev.function_name) {
-            if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
-                return Json(EvalResponse {
-                    result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
-                    success: false,
-                    compiled: None,
-                });
+    // Tier 1: read program to check testedness and get function info
+    // Clone what we need so the lock is released before eval runs
+    let (_require_modules, needs_async, revision) = {
+        let program = config.program.read().await;
+        let meta = config.meta.lock().await;
+
+        // Block eval of untested functions (>2 statements) in AdapsisOS mode
+        if program.require_modules {
+            if let Some(func) = program.get_function(&ev.function_name) {
+                let is_tested = !func.tests.is_empty() && func.tests.iter().all(|t| t.passed);
+                if func.body.len() > 2 && !is_tested {
+                    return Json(EvalResponse {
+                        result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
+                        success: false,
+                        compiled: None,
+                    });
+                }
             }
         }
-    }
 
-    let needs_async = session.program.get_function(&ev.function_name)
-        .is_some_and(|f| f.effects.iter().any(|e|
-            matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+        let needs_async = program.get_function(&ev.function_name)
+            .is_some_and(|f| f.effects.iter().any(|e|
+                matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
+        (program.require_modules, needs_async, meta.revision)
+    };
 
     if needs_async {
         if let Some(sender) = &config.io_sender {
-            let program = session.program.clone();
+            // Tier 1: clone program for the blocking task (lock released before blocking)
+            let program = config.program.read().await.clone();
             let fn_name = ev.function_name.clone();
             let input = ev.input.clone();
             let sender = sender.clone();
             let runtime_for_blocking = config.runtime.clone();
-
-            drop(session); // release lock before blocking
 
             let eval_result = tokio::task::spawn_blocking(move || {
                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
@@ -287,10 +314,22 @@ pub async fn eval_fn(
         }
     }
 
-    match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
+    // Tier 1: read program for eval (no lock held during eval itself for sync path)
+    let program = config.program.read().await;
+    match eval::eval_compiled_or_interpreted_cached(&program, &ev.function_name, &ev.input, Some(&config.jit_cache), revision) {
         Ok((result, compiled)) => {
-            sync_roadmap_from_runtime(&mut session, &config.runtime);
-            session.record_eval(&ev.function_name, &req.input, &result);
+            drop(program); // release Tier 1 before writing Tier 3
+            // Tier 3: record eval in history (brief lock)
+            {
+                let mut meta = config.meta.lock().await;
+                let rev = meta.revision;
+                meta.history.push(crate::session::HistoryEntry::Eval {
+                    revision: rev,
+                    function: ev.function_name.clone(),
+                    input: req.input.clone(),
+                    result: result.clone(),
+                });
+            }
             Json(EvalResponse {
                 result,
                 success: true,
@@ -298,7 +337,6 @@ pub async fn eval_fn(
             })
         }
         Err(e) => {
-            sync_roadmap_from_runtime(&mut session, &config.runtime);
             Json(EvalResponse {
                 result: format!("{e}"),
                 success: false,
@@ -331,7 +369,6 @@ pub async fn test_fn(
     Json(req): Json<TestRequest>,
 ) -> Json<TestResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    let mut session = config.session.lock().await;
     let operations = match parser::parse(&req.source) {
         Ok(ops) => ops,
         Err(e) => {
@@ -352,40 +389,33 @@ pub async fn test_fn(
 
     for op in &operations {
         if let parser::Operation::Test(test) = op {
-            // Check if the function under test has async/io effects
-            let needs_async = session.program.get_function(&test.function_name)
-                .is_some_and(|f| f.effects.iter().any(|e|
-                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+            // Tier 1: read program to check async needs; Tier 3: get mocks
+            // Clone what we need so locks are released before test execution
+            let (program_snapshot, needs_async, mocks, routes) = {
+                let program = config.program.read().await;
+                let meta = config.meta.lock().await;
+                let needs_async = program.get_function(&test.function_name)
+                    .is_some_and(|f| f.effects.iter().any(|e|
+                        matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+                let routes = config.runtime.read().unwrap().http_routes.clone();
+                (program.clone(), needs_async, meta.io_mocks.clone(), routes)
+            }; // All locks released
 
             for case in &test.cases {
+                // NO LOCKS HELD during test execution
                 let case_result = if needs_async {
                     if let Some(sender) = &config.io_sender {
-                        // Run through real coroutine runtime (with mock fallback)
-                        let program = session.program.clone();
-                        let fn_name = test.function_name.clone();
-                        let case = case.clone();
-                        let mocks = session.meta.io_mocks.clone();
-                        let routes = session.runtime.http_routes.clone();
-                        let sender = sender.clone();
-
-                        drop(session); // release lock before blocking
-
-                        let result = eval::eval_test_case_async(
-                            &program, &fn_name, &case, &mocks, sender, &routes,
-                        ).await;
-
-                        session = config.session.lock().await;
-                        result
+                        eval::eval_test_case_async(
+                            &program_snapshot, &test.function_name, case, &mocks, sender.clone(), &routes,
+                        ).await
                     } else {
-                        // No IO sender — fall back to mock-only execution
                         eval::eval_test_case_with_mocks(
-                            &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
+                            &program_snapshot, &test.function_name, case, &mocks, &routes,
                         )
                     }
                 } else {
-                    // Sync function — run directly
                     eval::eval_test_case_with_mocks(
-                        &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
+                        &program_snapshot, &test.function_name, case, &mocks, &routes,
                     )
                 };
 
@@ -406,12 +436,27 @@ pub async fn test_fn(
                     }
                 }
             }
-            let details: Vec<String> = results.iter().map(|r| {
-                format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
-            }).collect();
-            session.record_test(&test.function_name, passed, failed, details);
+            // Tier 3: record test results (brief lock)
+            {
+                let mut meta = config.meta.lock().await;
+                let rev = meta.revision;
+                let details: Vec<String> = results.iter().map(|r| {
+                    format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
+                }).collect();
+                meta.history.push(crate::session::HistoryEntry::Test {
+                    revision: rev,
+                    function: test.function_name.clone(),
+                    passed,
+                    failed,
+                    details,
+                });
+            }
+            // Tier 1: store tests on the program if all passed (brief write lock)
             if failed == 0 && !test.cases.is_empty() {
+                let mut session = config.session.lock().await;
                 session.store_test(&test.function_name, &test.cases);
+                // Sync program tier from session
+                *config.program.write().await = session.program.clone();
             }
         }
     }
@@ -437,9 +482,10 @@ pub async fn query(
     State(config): State<AppConfig>,
     Json(req): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
-    let mut session = config.session.lock().await;
     let response = if req.query.trim() == "?inbox" || req.query.trim().starts_with("?inbox") {
-        let msgs = session.peek_messages("main");
+        // Tier 3: read meta (brief lock)
+        let meta = config.meta.lock().await;
+        let msgs = meta.agent_mailbox.get("main").map(|v| v.as_slice()).unwrap_or(&[]);
         if msgs.is_empty() { "No messages.".to_string() }
         else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
     } else if req.query.trim() == "?tasks" {
@@ -447,12 +493,27 @@ pub async fn query(
     } else if let Some(task_id) = parse_inspect_task_query(req.query.trim()) {
         format_inspect_task(&config.task_registry, &config.snapshot_registry, task_id)
     } else if req.query.trim() == "?library" {
-        crate::library::query_library(&session.program, session.meta.library_state.as_ref())
+        // Tier 1 + Tier 3: read program + meta
+        let program = config.program.read().await;
+        let meta = config.meta.lock().await;
+        crate::library::query_library(&program, meta.library_state.as_ref())
     } else {
-        let table = typeck::build_symbol_table(&session.program);
-        typeck::handle_query(&session.program, &table, &req.query, &session.runtime.http_routes)
+        // Tier 1 + Tier 2: read program + runtime
+        let program = config.program.read().await;
+        let routes = config.runtime.read().unwrap().http_routes.clone();
+        let table = typeck::build_symbol_table(&program);
+        typeck::handle_query(&program, &table, &req.query, &routes)
     };
-    session.record_query(&req.query, &response);
+    // Tier 3: brief write to record query in history
+    {
+        let mut meta = config.meta.lock().await;
+        let rev = meta.revision;
+        meta.history.push(crate::session::HistoryEntry::Query {
+            revision: rev,
+            query: req.query.clone(),
+            response: response.clone(),
+        });
+    }
     Json(QueryResponse { response })
 }
 
@@ -498,40 +559,57 @@ pub struct PlanStepResponse {
     pub status: String,
 }
 
-pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse> {
-    let session = session.lock().await;
-    let plan = session.meta.plan.iter().map(|s| PlanStepResponse {
-        description: s.description.clone(),
-        status: match s.status {
-            crate::session::PlanStatus::Pending => "pending",
-            crate::session::PlanStatus::InProgress => "in_progress",
-            crate::session::PlanStatus::Done => "done",
-            crate::session::PlanStatus::Failed => "failed",
-        }.to_string(),
-    }).collect();
-    let roadmap = session.meta.roadmap.iter().map(|r| RoadmapItemResponse {
-        description: r.description.clone(),
-        done: r.done,
-    }).collect();
-    Json(StatusResponse {
-        revision: session.meta.revision,
-        mutations: session.meta.mutations.len(),
-        history_entries: session.meta.history.len(),
-        plan,
-        roadmap,
-        functions: session
-            .program
-            .functions
-            .iter()
-            .map(|f| f.name.clone())
-            .collect(),
-        types: session.program.types.iter().map(|t| t.name().to_string()).collect(),
-        routes: session.runtime.http_routes.iter().map(|r| RouteInfo {
+pub async fn status(State(config): State<AppConfig>) -> Json<StatusResponse> {
+    // Tier 1: read program (RwLock read — non-exclusive, fast)
+    let (functions, types, program_summary) = {
+        let program = config.program.read().await;
+        (
+            program.functions.iter().map(|f| f.name.clone()).collect(),
+            program.types.iter().map(|t| t.name().to_string()).collect(),
+            validator::program_summary(&program),
+        )
+    };
+    // Tier 2: read runtime (RwLock read — non-exclusive, fast)
+    let routes = {
+        let rt = config.runtime.read().unwrap();
+        rt.http_routes.iter().map(|r| RouteInfo {
             method: r.method.clone(),
             path: r.path.clone(),
             handler_fn: r.handler_fn.clone(),
-        }).collect(),
-        program_summary: validator::program_summary(&session.program),
+        }).collect()
+    };
+    // Tier 3: read meta (brief lock)
+    let (revision, mutations, history_entries, plan, roadmap) = {
+        let meta = config.meta.lock().await;
+        (
+            meta.revision,
+            meta.mutations.len(),
+            meta.history.len(),
+            meta.plan.iter().map(|s| PlanStepResponse {
+                description: s.description.clone(),
+                status: match s.status {
+                    crate::session::PlanStatus::Pending => "pending",
+                    crate::session::PlanStatus::InProgress => "in_progress",
+                    crate::session::PlanStatus::Done => "done",
+                    crate::session::PlanStatus::Failed => "failed",
+                }.to_string(),
+            }).collect(),
+            meta.roadmap.iter().map(|r| RoadmapItemResponse {
+                description: r.description.clone(),
+                done: r.done,
+            }).collect(),
+        )
+    };
+    Json(StatusResponse {
+        revision,
+        mutations,
+        history_entries,
+        plan,
+        roadmap,
+        functions,
+        types,
+        routes,
+        program_summary,
     })
 }
 
@@ -548,15 +626,28 @@ pub struct HistoryResponse {
 }
 
 pub async fn history(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<HistoryRequest>,
 ) -> Json<HistoryResponse> {
-    let session = session.lock().await;
+    // Tier 3: read meta (brief lock)
+    let meta = config.meta.lock().await;
     let limit = req.limit.unwrap_or(20);
+    // format_recent_history is on Session, but we can reconstruct from meta directly.
+    // For now, build a temporary Session just for the formatting helper.
+    // TODO: move format_recent_history to SessionMeta.
+    let formatted = {
+        let temp = crate::session::Session {
+            program: crate::ast::Program::default(),
+            runtime: crate::session::RuntimeState::default(),
+            meta: meta.clone(),
+            sandbox: None,
+        };
+        temp.format_recent_history(limit)
+    };
     Json(HistoryResponse {
-        formatted: session.format_recent_history(limit),
-        mutations: session.meta.mutations.clone(),
-        history: session.meta.history.clone(),
+        formatted,
+        mutations: meta.mutations.clone(),
+        history: meta.history.clone(),
     })
 }
 
@@ -573,16 +664,25 @@ pub struct RewindResponse {
 }
 
 pub async fn rewind(
-    State(session): State<SharedSession>,
+    State(config): State<AppConfig>,
     Json(req): Json<RewindRequest>,
 ) -> Json<RewindResponse> {
-    let mut session = session.lock().await;
+    // Rewind needs all tiers — use the session shim for now (rare operation)
+    let mut session = config.session.lock().await;
     match session.rewind_to(req.revision) {
-        Ok(()) => Json(RewindResponse {
-            revision: session.meta.revision,
-            success: true,
-            message: format!("rewound to revision {}", req.revision),
-        }),
+        Ok(()) => {
+            // Sync tiers from session after rewind
+            *config.program.write().await = session.program.clone();
+            {
+                let mut meta = config.meta.lock().await;
+                *meta = session.meta.clone();
+            }
+            Json(RewindResponse {
+                revision: session.meta.revision,
+                success: true,
+                message: format!("rewound to revision {}", req.revision),
+            })
+        }
         Err(e) => Json(RewindResponse {
             revision: session.meta.revision,
             success: false,
@@ -688,10 +788,13 @@ fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
     }
 }
 
-pub async fn program(State(session): State<SharedSession>) -> Json<ProgramResponse> {
-    let session = session.lock().await;
+pub async fn program(State(config): State<AppConfig>) -> Json<ProgramResponse> {
+    // Tier 1: read program (RwLock read — non-exclusive)
+    let prog = config.program.read().await;
+    // Tier 3: read meta for revision (brief)
+    let revision = config.meta.lock().await.revision;
 
-    let types = session.program.types.iter().map(|td| {
+    let types = prog.types.iter().map(|td| {
         match td {
             crate::ast::TypeDecl::Struct(s) => TypeDetail {
                 name: s.name.clone(),
@@ -712,7 +815,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
         }
     }).collect();
 
-    let functions = session.program.functions.iter().map(|f| {
+    let functions = prog.functions.iter().map(|f| {
         let (stmts, _) = f.body.iter().map(|s| {
             let (kind, summary) = stmt_summary(&s.kind);
             StatementDetail { id: s.id.clone(), kind, summary }
@@ -731,7 +834,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
         }
     }).collect();
 
-    let modules = session.program.modules.iter().map(|m| {
+    let modules = prog.modules.iter().map(|m| {
         fn build_module_detail(m: &crate::ast::Module) -> ModuleDetail {
             let mod_types = m.types.iter().map(|td| match td {
                 crate::ast::TypeDecl::Struct(s) => TypeDetail {
@@ -761,7 +864,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
     }).collect();
 
     Json(ProgramResponse {
-        revision: session.meta.revision,
+        revision,
         types,
         functions,
         modules,
@@ -1166,10 +1269,7 @@ pub async fn ask(
                 if has_mutations {
                     match session.apply(&code) {
                         Ok(res) => {
-                            // Sync shared vars to the Arc<RwLock> runtime
-                            if let Ok(mut rt) = config.runtime.write() {
-                                rt.shared_vars = session.runtime.shared_vars.clone();
-                            }
+                            config.sync_tiers_from_session(&session).await;
                             for (msg, ok) in res {
                                 eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
                                 if !ok { iter_has_errors = true; }
@@ -1814,9 +1914,10 @@ pub struct OpenCodeResponse {
 }
 
 /// Build the full router with LLM support.
-pub async fn agents(State(session): State<SharedSession>) -> Json<Vec<crate::session::AgentStatus>> {
-    let session = session.lock().await;
-    Json(session.meta.agent_log.clone())
+pub async fn agents(State(config): State<AppConfig>) -> Json<Vec<crate::session::AgentStatus>> {
+    // Tier 3: read meta (brief lock)
+    let meta = config.meta.lock().await;
+    Json(meta.agent_log.clone())
 }
 
 /// SSE streaming version of /api/ask — streams events as they happen.
@@ -1848,30 +1949,43 @@ pub async fn ask_stream(
         };
 
         let mut messages = {
-            let mut session = config_clone.session.lock().await;
-            if session.meta.chat_messages.is_empty() {
-                session.meta.chat_messages.push(crate::session::ChatMessage {
+            // Tier 1: read program briefly for summary
+            let program_summary = {
+                let program = config_clone.program.read().await;
+                crate::validator::program_summary_compact(&program)
+            };
+            // Tier 3: read/write meta briefly for chat history + plan context
+            let mut meta = config_clone.meta.lock().await;
+            if meta.chat_messages.is_empty() {
+                meta.chat_messages.push(crate::session::ChatMessage {
                     role: "system".to_string(), content: system_prompt,
                 });
             }
-            let (plan_ctx, needs_plan) = build_plan_context(&session.meta.plan);
+            let (plan_ctx, needs_plan) = build_plan_context(&meta.plan);
             let plan_hint = if needs_plan {
                 "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
             } else { "" };
             let context = format!("Working directory: {}\n{}{}\nUser: {}{}",
                 config_clone.project_dir,
-                crate::validator::program_summary_compact(&session.program),
+                program_summary,
                 plan_ctx, req.message, plan_hint);
             log_activity(&config_clone.log_file, "user", &context).await;
-            session.meta.chat_messages.push(crate::session::ChatMessage {
+            meta.chat_messages.push(crate::session::ChatMessage {
                 role: "user".to_string(), content: context,
             });
-            session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
+            let msgs = meta.chat_messages.iter().map(|m| match m.role.as_str() {
                 "system" => crate::llm::ChatMessage::system(m.content.clone()),
                 "assistant" => crate::llm::ChatMessage::assistant(&m.content),
                 _ => crate::llm::ChatMessage::user(m.content.clone()),
-            }).collect::<Vec<_>>()
-        };
+            }).collect::<Vec<_>>();
+            // Also sync meta back to session shim so it stays consistent
+            {
+                let mut session = config_clone.session.lock().await;
+                session.meta = meta.clone();
+            }
+            drop(meta);
+            msgs
+        }; // All locks released before LLM call
 
         let max_iterations = config_clone.max_iterations;
         let mut last_context = req.message.clone();
@@ -2031,10 +2145,7 @@ pub async fn ask_stream(
                     if has_mutations {
                         match session.apply(&code) {
                             Ok(res) => {
-                                // Sync shared vars to the Arc<RwLock> runtime
-                                if let Ok(mut rt) = config_clone.runtime.write() {
-                                    rt.shared_vars = session.runtime.shared_vars.clone();
-                                }
+                                config_clone.sync_tiers_from_session(&session).await;
                                 for (msg, ok) in &res {
                                     if !*ok { has_errors = true; }
                                     feedback_details.push(format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}));
@@ -2355,20 +2466,49 @@ pub async fn ask_stream(
 
                                         let stdout = child.stdout.take().unwrap();
                                         let mut reader = BufReader::new(stdout).lines();
-                                        let idle_timeout = std::time::Duration::from_secs(300);
+                                        // Track last activity from both stdout and stderr.
+                                        // The idle timeout kills only if NEITHER stream has
+                                        // produced output for the timeout duration.
+                                        let last_activity = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+                                        let last_activity_stderr = last_activity.clone();
+
+                                        // Spawn stderr reader that updates last_activity
+                                        let stderr = child.stderr.take();
+                                        if let Some(stderr) = stderr {
+                                            tokio::spawn(async move {
+                                                let mut reader = BufReader::new(stderr).lines();
+                                                while let Ok(Some(_)) = reader.next_line().await {
+                                                    *last_activity_stderr.lock().unwrap() = std::time::Instant::now();
+                                                }
+                                            });
+                                        }
+
+                                        let idle_timeout = std::time::Duration::from_secs(600); // 10 min
                                         loop {
-                                            let line = match tokio::time::timeout(idle_timeout, reader.next_line()).await {
-                                                Ok(Ok(Some(line))) => line,
+                                            let line = match tokio::time::timeout(std::time::Duration::from_secs(30), reader.next_line()).await {
+                                                Ok(Ok(Some(line))) => {
+                                                    *last_activity.lock().unwrap() = std::time::Instant::now();
+                                                    line
+                                                }
                                                 Ok(Ok(None)) => break, // EOF
                                                 Ok(Err(e)) => { eprintln!("[opencode] read error: {e}"); break; }
                                                 Err(_) => {
-                                                    eprintln!("[opencode] idle timeout (5 min no output), killing");
-                                                    // Kill entire process group to clean up opencode subprocesses
-                                                    if let Some(pid) = child.id() {
-                                                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                                                    // No stdout line for 30s — check if stderr had activity
+                                                    let elapsed = last_activity.lock().unwrap().elapsed();
+                                                    if elapsed >= idle_timeout {
+                                                        let msg = format!("[opencode] IDLE TIMEOUT: no output on stdout or stderr for {}s — killing OpenCode process", elapsed.as_secs());
+                                                        eprintln!("{msg}");
+                                                        log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
+                                                        has_errors = true;
+                                                        feedback_details.push(format!("ERROR: {msg}"));
+                                                        // Kill entire process group to clean up opencode subprocesses
+                                                        if let Some(pid) = child.id() {
+                                                            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                                                        }
+                                                        let _ = child.kill().await;
+                                                        break;
                                                     }
-                                                    let _ = child.kill().await;
-                                                    break;
+                                                    continue; // stderr had recent activity, keep waiting
                                                 }
                                             };
                                             // Keep last 20 lines for error context
@@ -2557,9 +2697,12 @@ pub async fn ask_stream(
                                             Ok(b) if b.status.success() => {
                                                 log_activity(&config_clone.log_file, "opencode-restart", "rebuild successful, attempting restart").await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
-                                                // Save session before restart
+                                                // Save session before restart — sync tiers first
                                                 {
-                                                    let session = config_clone.session.lock().await;
+                                                    let mut session = config_clone.session.lock().await;
+                                                    session.program = config_clone.program.read().await.clone();
+                                                    session.meta = config_clone.meta.lock().await.clone();
+                                                    if let Ok(rt) = config_clone.runtime.read() { session.runtime = rt.clone(); }
                                                     if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
                                                         let _ = session.save(std::path::Path::new(&path));
                                                     }
@@ -3042,16 +3185,15 @@ async fn session_mutate(
 pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
-    let session_routes = axum::Router::new()
+    let config_routes = axum::Router::new()
+        // Read-only handlers (migrated to tier locks)
         .route("/api/status", get(status))
         .route("/api/program", get(program))
         .route("/api/history", post(history))
         .route("/api/rewind", post(rewind))
         .route("/api/agents", get(agents))
         .route("/api/routes", get(list_routes))
-        .with_state(config.session.clone());
-
-    let config_routes = axum::Router::new()
+        // Write handlers (still using session shim)
         .route("/api/mutate", post(mutate))
         .route("/api/eval", post(eval_fn))
         .route("/api/test", post(test_fn))
@@ -3079,14 +3221,14 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .fallback(adapsis_route_dispatch)
         .with_state(config);
 
-    session_routes.merge(config_routes).merge(multi_session_routes).merge(webhook_fallback)
+    config_routes.merge(multi_session_routes).merge(webhook_fallback)
 }
 
 /// GET /api/routes — list all Adapsis-registered HTTP routes.
-async fn list_routes(State(session): State<SharedSession>) -> Json<serde_json::Value> {
-    let session = session.lock().await;
-    let routes: Vec<serde_json::Value> = session
-        .runtime
+async fn list_routes(State(config): State<AppConfig>) -> Json<serde_json::Value> {
+    // Tier 2: read runtime (RwLock read — non-exclusive, fast)
+    let rt = config.runtime.read().unwrap();
+    let routes: Vec<serde_json::Value> = rt
         .http_routes
         .iter()
         .map(|r| {
@@ -3122,36 +3264,35 @@ async fn adapsis_route_dispatch(
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
 
-    // Look up a matching registered route
-    let session = config.session.lock().await;
-    let route = session
-        .runtime
-        .http_routes
-        .iter()
-        .find(|r| r.method == method_str && r.path == path);
+    // Tier 2: look up a matching registered route (brief read lock)
+    let handler_fn = {
+        let rt = config.runtime.read().unwrap();
+        rt.http_routes
+            .iter()
+            .find(|r| r.method == method_str && r.path == path)
+            .map(|r| r.handler_fn.clone())
+    };
 
-    let Some(route) = route else {
+    let Some(handler_fn) = handler_fn else {
         return (StatusCode::NOT_FOUND, format!("no Adapsis route for {method_str} {path}")).into_response();
     };
 
-    let handler_fn = route.handler_fn.clone();
-
-    // Check the handler function exists
-    let func = session.program.get_function(&handler_fn);
-    if func.is_none() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("route handler function `{handler_fn}` not found in program"),
-        )
-            .into_response();
-    }
+    // Tier 1: read program to verify handler exists and clone for eval (brief read lock)
+    let program = {
+        let prog = config.program.read().await;
+        if prog.get_function(&handler_fn).is_none() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("route handler function `{handler_fn}` not found in program"),
+            )
+                .into_response();
+        }
+        prog.clone()
+    };
 
     let body_str = String::from_utf8_lossy(&body).to_string();
 
-    // Clone program and drop the session lock before blocking eval
-    let program = session.program.clone();
     let runtime_for_blocking = config.runtime.clone();
-    drop(session);
 
     eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
 
@@ -3276,6 +3417,12 @@ mod tests {
         let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
         AppConfig {
             session,
+            program: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ast::Program::default(),
+            )),
+            meta: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::session::SessionMeta::new(),
+            )),
             llm_url: String::new(),
             llm_model: String::new(),
             llm_api_key: None,
