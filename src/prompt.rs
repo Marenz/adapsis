@@ -538,6 +538,23 @@ Unit tests verify individual functions. You MUST also verify the whole system wo
 Routes (+route) serve on the same port as AdapsisOS.
 For custom servers, use tcp_listen/tcp_accept/tcp_read/tcp_write async IO builtins.
 
+### Multi-Session API
+
+AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session
+has its own independent Program state (types, functions, modules). The main session
+(used by the CLI and AI loop) is always available as \"main\".
+
+API endpoints:
+- `GET /api/sessions` — list all session IDs (JSON array, always includes \"main\")
+- `POST /api/sessions` — create a new session. Body: `{\"session_id\": \"name\"}`.
+  Returns `{\"session_id\": \"name\", \"status\": \"created\"}`.
+- `DELETE /api/sessions/:id` — delete a session (cannot delete \"main\").
+- `POST /api/sessions/:id/eval` — evaluate in a specific session. Same body as `/api/eval`.
+- `POST /api/sessions/:id/mutate` — apply mutations to a specific session. Same body as `/api/mutate`.
+
+Sessions are isolated: functions defined in one session are not visible in another.
+The \"main\" session delegates to the existing `/api/eval` and `/api/mutate` endpoints.
+
 ### Design Principles
 
 Every function you write persists. Every type becomes part of the system. Build like

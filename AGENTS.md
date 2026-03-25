@@ -62,6 +62,11 @@ POST /api/ask-stream  — SSE streaming AI conversation
 GET  /api/events      — SSE broadcast of all activity (for web UI)
 GET  /api/tasks       — list spawned async tasks
 GET  /api/log         — recent log entries
+GET  /api/sessions          — list all session IDs
+POST /api/sessions          — create session: {"session_id":"name"}
+DELETE /api/sessions/:id    — delete a session
+POST /api/sessions/:id/eval — eval in a specific session
+POST /api/sessions/:id/mutate — mutate in a specific session
 ```
 
 ## Architecture
