@@ -26,6 +26,11 @@ use crate::validator;
 
 pub type SharedSession = Arc<Mutex<Session>>;
 
+/// Thread-safe session manager: maps session IDs to independent Program instances.
+/// The "main" session uses the existing `session` field in AppConfig; additional
+/// sessions are stored here with isolated Program state.
+pub type SessionManager = Arc<Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<crate::ast::Program>>>>>;
+
 /// Extended state for the API, including LLM and OpenCode configuration.
 #[derive(Clone)]
 pub struct AppConfig {
@@ -59,6 +64,9 @@ pub struct AppConfig {
     pub training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// Shared runtime state (Tier 2) — HTTP routes, shared variables
     pub runtime: crate::session::SharedRuntime,
+    /// Multi-session manager: maps session IDs to independent Program instances.
+    /// The "main" session uses the existing `session` field above.
+    pub sessions: SessionManager,
 }
 
 #[derive(Deserialize)]
@@ -72,7 +80,7 @@ pub struct MutateResponse {
     pub results: Vec<MutationResult>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MutationResult {
     pub message: String,
     pub success: bool,
@@ -2777,6 +2785,257 @@ pub async fn ask_stream(
     axum::response::sse::Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-session endpoints
+// ═══════════════════════════════════════════════════════════════════════
+
+/// GET /api/sessions — list all session IDs (always includes "main").
+async fn list_sessions(
+    State(config): State<AppConfig>,
+) -> Json<serde_json::Value> {
+    let sessions = config.sessions.lock().await;
+    let mut ids: Vec<String> = vec!["main".to_string()];
+    ids.extend(sessions.keys().cloned());
+    ids.sort();
+    ids.dedup();
+    Json(serde_json::json!(ids))
+}
+
+#[derive(Deserialize)]
+pub struct CreateSessionRequest {
+    pub session_id: String,
+}
+
+/// POST /api/sessions — create a new named session with an empty Program.
+async fn create_session(
+    State(config): State<AppConfig>,
+    Json(req): Json<CreateSessionRequest>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let session_id = req.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not be empty"})),
+        );
+    }
+    if session_id == "main" {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "cannot create session with reserved id 'main'"})),
+        );
+    }
+
+    let mut sessions = config.sessions.lock().await;
+    if sessions.contains_key(&session_id) {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("session '{}' already exists", session_id)})),
+        );
+    }
+
+    sessions.insert(
+        session_id.clone(),
+        Arc::new(tokio::sync::Mutex::new(crate::ast::Program::default())),
+    );
+
+    (
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({"session_id": session_id, "status": "created"})),
+    )
+}
+
+/// DELETE /api/sessions/:id — delete a session.
+async fn delete_session(
+    State(config): State<AppConfig>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    if session_id == "main" {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "cannot delete the 'main' session"})),
+        );
+    }
+
+    let mut sessions = config.sessions.lock().await;
+    if sessions.remove(&session_id).is_some() {
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
+        )
+    } else {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("session '{}' not found", session_id)})),
+        )
+    }
+}
+
+/// POST /api/sessions/:id/eval — evaluate a function in a specific session's Program.
+/// Accepts the same JSON body as /api/eval (EvalRequest).
+async fn session_eval(
+    State(config): State<AppConfig>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(req): Json<EvalRequest>,
+) -> Json<EvalResponse> {
+    // For "main", delegate to the main session
+    if session_id == "main" {
+        return eval_fn(State(config), Json(req)).await;
+    }
+
+    // Look up the session's Program
+    let sessions = config.sessions.lock().await;
+    let program_lock = match sessions.get(&session_id) {
+        Some(p) => p.clone(),
+        None => {
+            return Json(EvalResponse {
+                result: format!("session '{}' not found", session_id),
+                success: false,
+                compiled: None,
+            });
+        }
+    };
+    drop(sessions); // release SessionManager lock
+
+    let program = program_lock.lock().await;
+
+    // Handle inline expression evaluation
+    if let Some(ref expr_str) = req.expression {
+        eprintln!("[session:{session_id}:eval] inline: {expr_str}");
+        let expr_str = expr_str.trim();
+        if expr_str.is_empty() {
+            return Json(EvalResponse {
+                result: "empty expression".to_string(),
+                success: false,
+                compiled: None,
+            });
+        }
+        match parser::parse_expr_pub(0, expr_str) {
+            Ok(expr) => {
+                match eval::eval_inline_expr(&program, &expr) {
+                    Ok(val) => {
+                        return Json(EvalResponse {
+                            result: format!("{val}"),
+                            success: true,
+                            compiled: Some(false),
+                        });
+                    }
+                    Err(e) => {
+                        return Json(EvalResponse {
+                            result: format!("{e}"),
+                            success: false,
+                            compiled: None,
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                return Json(EvalResponse {
+                    result: format!("parse error: {e}"),
+                    success: false,
+                    compiled: None,
+                });
+            }
+        }
+    }
+
+    eprintln!("[session:{session_id}:eval] {} {}", req.function, req.input);
+
+    // Parse input
+    let input_expr = if req.input.trim().is_empty() {
+        parser::Expr::StructLiteral(vec![])
+    } else {
+        match parser::parse_test_input(0, &req.input) {
+            Ok(expr) => expr,
+            Err(e) => {
+                return Json(EvalResponse {
+                    result: format!("parse error: {e}"),
+                    success: false,
+                    compiled: None,
+                });
+            }
+        }
+    };
+
+    let ev = parser::EvalMutation {
+        function_name: req.function.clone(),
+        input: input_expr,
+        inline_expr: None,
+    };
+
+    // Evaluate (interpreted only for session-scoped programs — no JIT cache)
+    match eval::eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input) {
+        Ok((result, compiled)) => Json(EvalResponse {
+            result,
+            success: true,
+            compiled: Some(compiled),
+        }),
+        Err(e) => Json(EvalResponse {
+            result: format!("{e}"),
+            success: false,
+            compiled: None,
+        }),
+    }
+}
+
+/// POST /api/sessions/:id/mutate — apply mutations to a specific session's Program.
+async fn session_mutate(
+    State(config): State<AppConfig>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(req): Json<MutateRequest>,
+) -> Json<MutateResponse> {
+    // For "main", delegate to the main session
+    if session_id == "main" {
+        return mutate(State(config), Json(req)).await;
+    }
+
+    // Look up the session's Program
+    let sessions = config.sessions.lock().await;
+    let program_lock = match sessions.get(&session_id) {
+        Some(p) => p.clone(),
+        None => {
+            return Json(MutateResponse {
+                revision: 0,
+                results: vec![MutationResult {
+                    message: format!("session '{}' not found", session_id),
+                    success: false,
+                }],
+            });
+        }
+    };
+    drop(sessions);
+
+    let mut program = program_lock.lock().await;
+
+    eprintln!("[session:{session_id}:mutate] {}", req.source.chars().take(100).collect::<String>());
+
+    match parser::parse(&req.source) {
+        Ok(ops) => {
+            let mut results = Vec::new();
+            for op in &ops {
+                match op {
+                    // Skip non-mutation operations
+                    parser::Operation::Test(_)
+                    | parser::Operation::Trace(_)
+                    | parser::Operation::Eval(_)
+                    | parser::Operation::Query(_) => {}
+                    _ => match validator::apply_and_validate(&mut program, op) {
+                        Ok(msg) => results.push(MutationResult { message: msg, success: true }),
+                        Err(e) => results.push(MutationResult { message: format!("{e}"), success: false }),
+                    },
+                }
+            }
+            Json(MutateResponse { revision: 0, results })
+        }
+        Err(e) => Json(MutateResponse {
+            revision: 0,
+            results: vec![MutationResult {
+                message: format!("error: {e}"),
+                success: false,
+            }],
+        }),
+    }
+}
+
 pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
@@ -2804,12 +3063,20 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/events", get(events_stream))
         .with_state(config.clone());
 
+    let multi_session_routes = axum::Router::new()
+        .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions", post(create_session))
+        .route("/api/sessions/{id}", axum::routing::delete(delete_session))
+        .route("/api/sessions/{id}/eval", post(session_eval))
+        .route("/api/sessions/{id}/mutate", post(session_mutate))
+        .with_state(config.clone());
+
     // Adapsis-registered HTTP route dispatch (e.g. webhook endpoints)
     let webhook_fallback = axum::Router::new()
         .fallback(adapsis_route_dispatch)
         .with_state(config);
 
-    session_routes.merge(config_routes).merge(webhook_fallback)
+    session_routes.merge(config_routes).merge(multi_session_routes).merge(webhook_fallback)
 }
 
 /// GET /api/routes — list all Adapsis-registered HTTP routes.
@@ -2989,6 +3256,407 @@ async fn get_log(
         lines[start..].join("\n")
     } else {
         "No log file configured.".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a minimal AppConfig for testing multi-session endpoints.
+    fn test_config() -> AppConfig {
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(),
+        ));
+        let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
+        AppConfig {
+            session,
+            llm_url: String::new(),
+            llm_model: String::new(),
+            llm_api_key: None,
+            project_dir: ".".to_string(),
+            io_sender: None,
+            self_trigger: trigger_tx,
+            task_registry: None,
+            snapshot_registry: None,
+            log_file: None,
+            training_log: None,
+            jit_cache: crate::eval::new_jit_cache(),
+            event_broadcast: tokio::sync::broadcast::channel(16).0,
+            opencode_git_dir: ".".to_string(),
+            opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            max_iterations: 1,
+            runtime: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::session::RuntimeState::default(),
+            )),
+            sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // GET /api/sessions — list sessions
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn list_sessions_includes_main() {
+        let config = test_config();
+        let Json(result) = list_sessions(State(config)).await;
+        let ids = result.as_array().unwrap();
+        assert!(
+            ids.iter().any(|v| v.as_str() == Some("main")),
+            "list should always include 'main'"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_includes_created_sessions() {
+        let config = test_config();
+        // Create a session directly in the map
+        config
+            .sessions
+            .lock()
+            .await
+            .insert(
+                "test-session".to_string(),
+                std::sync::Arc::new(tokio::sync::Mutex::new(
+                    crate::ast::Program::default(),
+                )),
+            );
+
+        let Json(result) = list_sessions(State(config)).await;
+        let ids: Vec<&str> = result
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(ids.contains(&"main"));
+        assert!(ids.contains(&"test-session"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // POST /api/sessions — create session
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn create_session_happy_path() {
+        let config = test_config();
+        let (status, Json(body)) = create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "my-session".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(body["session_id"], "my-session");
+        assert_eq!(body["status"], "created");
+
+        // Verify it's in the map
+        let sessions = config.sessions.lock().await;
+        assert!(sessions.contains_key("my-session"));
+    }
+
+    #[tokio::test]
+    async fn create_session_empty_id_rejected() {
+        let config = test_config();
+        let (status, Json(body)) = create_session(
+            State(config),
+            Json(CreateSessionRequest {
+                session_id: "  ".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn create_session_main_reserved() {
+        let config = test_config();
+        let (status, Json(body)) = create_session(
+            State(config),
+            Json(CreateSessionRequest {
+                session_id: "main".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("reserved"));
+    }
+
+    #[tokio::test]
+    async fn create_session_duplicate_rejected() {
+        let config = test_config();
+        // Create first
+        create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "dup".to_string(),
+            }),
+        )
+        .await;
+        // Create duplicate
+        let (status, Json(body)) = create_session(
+            State(config),
+            Json(CreateSessionRequest {
+                session_id: "dup".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("already exists"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // DELETE /api/sessions/:id — delete session
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn delete_session_happy_path() {
+        let config = test_config();
+        // Create then delete
+        create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "to-delete".to_string(),
+            }),
+        )
+        .await;
+        let (status, Json(body)) = delete_session(
+            State(config.clone()),
+            axum::extract::Path("to-delete".to_string()),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["status"], "deleted");
+
+        // Verify removed
+        let sessions = config.sessions.lock().await;
+        assert!(!sessions.contains_key("to-delete"));
+    }
+
+    #[tokio::test]
+    async fn delete_session_main_rejected() {
+        let config = test_config();
+        let (status, Json(body)) = delete_session(
+            State(config),
+            axum::extract::Path("main".to_string()),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("cannot delete"));
+    }
+
+    #[tokio::test]
+    async fn delete_session_not_found() {
+        let config = test_config();
+        let (status, Json(body)) = delete_session(
+            State(config),
+            axum::extract::Path("nonexistent".to_string()),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("not found"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // POST /api/sessions/:id/eval — eval in session
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn session_eval_not_found() {
+        let config = test_config();
+        let Json(response) = session_eval(
+            State(config),
+            axum::extract::Path("nonexistent".to_string()),
+            Json(EvalRequest {
+                function: "foo".to_string(),
+                input: String::new(),
+                expression: None,
+            }),
+        )
+        .await;
+        assert!(!response.success);
+        assert!(response.result.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn session_eval_inline_expression() {
+        let config = test_config();
+        // Create a session
+        create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "eval-test".to_string(),
+            }),
+        )
+        .await;
+
+        // Eval an inline expression (no functions needed)
+        let Json(response) = session_eval(
+            State(config),
+            axum::extract::Path("eval-test".to_string()),
+            Json(EvalRequest {
+                function: String::new(),
+                input: String::new(),
+                expression: Some("1 + 2".to_string()),
+            }),
+        )
+        .await;
+        assert!(response.success, "eval should succeed: {}", response.result);
+        assert_eq!(response.result, "3");
+    }
+
+    #[tokio::test]
+    async fn session_eval_function_in_session() {
+        let config = test_config();
+        // Create session
+        create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "fn-test".to_string(),
+            }),
+        )
+        .await;
+
+        // Add a function via session_mutate
+        session_mutate(
+            State(config.clone()),
+            axum::extract::Path("fn-test".to_string()),
+            Json(MutateRequest {
+                source: "+fn double (x:Int)->Int\n  +return x * 2\n".to_string(),
+            }),
+        )
+        .await;
+
+        // Eval the function
+        let Json(response) = session_eval(
+            State(config),
+            axum::extract::Path("fn-test".to_string()),
+            Json(EvalRequest {
+                function: "double".to_string(),
+                input: "5".to_string(),
+                expression: None,
+            }),
+        )
+        .await;
+        assert!(response.success, "eval should succeed: {}", response.result);
+        assert_eq!(response.result, "10");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // POST /api/sessions/:id/mutate — mutate in session
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn session_mutate_happy_path() {
+        let config = test_config();
+        create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "mut-test".to_string(),
+            }),
+        )
+        .await;
+
+        let Json(response) = session_mutate(
+            State(config.clone()),
+            axum::extract::Path("mut-test".to_string()),
+            Json(MutateRequest {
+                source: "+fn greet ()->String\n  +return \"hello\"\n".to_string(),
+            }),
+        )
+        .await;
+        assert!(
+            response.results.iter().all(|r| r.success),
+            "mutate should succeed: {:?}",
+            response.results
+        );
+
+        // Verify the function exists in the session
+        let sessions = config.sessions.lock().await;
+        let program = sessions.get("mut-test").unwrap().lock().await;
+        assert!(program.get_function("greet").is_some());
+    }
+
+    #[tokio::test]
+    async fn session_mutate_not_found() {
+        let config = test_config();
+        let Json(response) = session_mutate(
+            State(config),
+            axum::extract::Path("nonexistent".to_string()),
+            Json(MutateRequest {
+                source: "+fn greet ()->String\n  +return \"hello\"\n".to_string(),
+            }),
+        )
+        .await;
+        assert!(response.results.iter().any(|r| !r.success));
+        assert!(response.results[0].message.contains("not found"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Isolation: sessions have independent Programs
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn sessions_are_isolated() {
+        let config = test_config();
+
+        // Create two sessions
+        create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "session-a".to_string(),
+            }),
+        )
+        .await;
+        create_session(
+            State(config.clone()),
+            Json(CreateSessionRequest {
+                session_id: "session-b".to_string(),
+            }),
+        )
+        .await;
+
+        // Add a function to session-a only
+        session_mutate(
+            State(config.clone()),
+            axum::extract::Path("session-a".to_string()),
+            Json(MutateRequest {
+                source: "+fn only_in_a ()->Int\n  +return 42\n".to_string(),
+            }),
+        )
+        .await;
+
+        // session-a should have the function
+        let Json(resp_a) = session_eval(
+            State(config.clone()),
+            axum::extract::Path("session-a".to_string()),
+            Json(EvalRequest {
+                function: "only_in_a".to_string(),
+                input: String::new(),
+                expression: None,
+            }),
+        )
+        .await;
+        assert!(resp_a.success, "session-a should have the function");
+
+        // session-b should NOT have it
+        let Json(resp_b) = session_eval(
+            State(config),
+            axum::extract::Path("session-b".to_string()),
+            Json(EvalRequest {
+                function: "only_in_a".to_string(),
+                input: String::new(),
+                expression: None,
+            }),
+        )
+        .await;
+        assert!(!resp_b.success, "session-b should not have session-a's function");
     }
 }
 
