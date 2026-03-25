@@ -1355,7 +1355,7 @@ impl Session {
     }
 
     fn handle_roadmap(&mut self, action: &parser::RoadmapAction) -> (String, bool) {
-        match action {
+        let result = match action {
             parser::RoadmapAction::Show => {
                 let items = self.meta.roadmap.iter().enumerate().map(|(i, item)| {
                     format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
@@ -1379,7 +1379,10 @@ impl Session {
                     (format!("Roadmap: removed \"{}\".", removed.description), true)
                 } else { (format!("Roadmap: #{n} not found."), false) }
             }
-        }
+        };
+        // Keep runtime copy in sync so roadmap builtins see the same data.
+        self.runtime.roadmap = self.meta.roadmap.clone();
+        result
     }
 }
 
