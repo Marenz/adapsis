@@ -760,6 +760,112 @@ impl CoroutineHandle {
                     })?;
                 return Ok(Value::String(result));
             }
+            // ── Query operations — access program AST via thread-local ──
+            // These reuse the same logic as the ? query commands in typeck.rs.
+            "query_symbols" => {
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_symbols: program not available (no async context)"))?;
+                let table = crate::typeck::build_symbol_table(&program);
+                let result = crate::typeck::handle_query(&program, &table, "?symbols", &[]);
+                return Ok(Value::String(result));
+            }
+            "query_symbols_detail" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("query_symbols_detail expects (name:String)"),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_symbols_detail: program not available"))?;
+                let table = crate::typeck::build_symbol_table(&program);
+                let query = format!("?symbols {name}");
+                let result = crate::typeck::handle_query(&program, &table, &query, &[]);
+                return Ok(Value::String(result));
+            }
+            "query_source" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("query_source expects (name:String)"),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_source: program not available"))?;
+                let table = crate::typeck::build_symbol_table(&program);
+                let query = format!("?source {name}");
+                let result = crate::typeck::handle_query(&program, &table, &query, &[]);
+                return Ok(Value::String(result));
+            }
+            "query_callers" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("query_callers expects (name:String)"),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_callers: program not available"))?;
+                let table = crate::typeck::build_symbol_table(&program);
+                let query = format!("?callers {name}");
+                let result = crate::typeck::handle_query(&program, &table, &query, &[]);
+                return Ok(Value::String(result));
+            }
+            "query_callees" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("query_callees expects (name:String)"),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_callees: program not available"))?;
+                let table = crate::typeck::build_symbol_table(&program);
+                let query = format!("?callees {name}");
+                let result = crate::typeck::handle_query(&program, &table, &query, &[]);
+                return Ok(Value::String(result));
+            }
+            "query_deps" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("query_deps expects (name:String)"),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_deps: program not available"))?;
+                let table = crate::typeck::build_symbol_table(&program);
+                let query = format!("?deps {name}");
+                let result = crate::typeck::handle_query(&program, &table, &query, &[]);
+                return Ok(Value::String(result));
+            }
+            "query_deps_all" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("query_deps_all expects (name:String)"),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_deps_all: program not available"))?;
+                let table = crate::typeck::build_symbol_table(&program);
+                let query = format!("?deps-all {name}");
+                let result = crate::typeck::handle_query(&program, &table, &query, &[]);
+                return Ok(Value::String(result));
+            }
+            "query_routes" => {
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_routes: program not available"))?;
+                // Get HTTP routes from SharedRuntime
+                let routes = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
+                    .unwrap_or_default();
+                let table = crate::typeck::build_symbol_table(&program);
+                let result = crate::typeck::handle_query(&program, &table, "?routes", &routes);
+                return Ok(Value::String(result));
+            }
+            "query_tasks" => {
+                let result = if let Some(reg) = &self.task_registry {
+                    crate::api::format_tasks(&Some(reg.clone()))
+                } else {
+                    "No task registry (not in async context).".to_string()
+                };
+                return Ok(Value::String(result));
+            }
+            "query_library" => {
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_library: program not available"))?;
+                let result = crate::library::query_library(&program, None);
+                return Ok(Value::String(result));
+            }
             _ => {} // fall through to mock/IO dispatch
         }
 
@@ -1288,5 +1394,289 @@ mod tests {
         handle.execute_await("plan_set", &[Value::String("New step".into())]).unwrap();
         assert_eq!(rt.read().unwrap().plan.len(), 1);
         assert_eq!(rt.read().unwrap().plan[0].description, "New step");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Query IO builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// Helper: build a program from Adapsis source and install it as the thread-local.
+    fn setup_query_runtime(source: &str) -> CoroutineHandle {
+        let ops = crate::parser::parse(source).expect("parse failed");
+        let mut program = crate::ast::Program::default();
+        for op in &ops {
+            match op {
+                crate::parser::Operation::Test(_) | crate::parser::Operation::Eval(_) => {}
+                _ => {
+                    crate::validator::apply_and_validate(&mut program, op)
+                        .expect("validation failed");
+                }
+            }
+        }
+        program.rebuild_function_index();
+        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+
+        // Also set up a runtime for query_routes/query_tasks
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![],
+            shared_vars: std::collections::HashMap::new(),
+            roadmap: vec![],
+            plan: vec![],
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+
+        CoroutineHandle::new_mock(vec![])
+    }
+
+    #[test]
+    fn query_symbols_empty_program() {
+        let handle = setup_query_runtime("");
+        let result = unwrap_string(handle.execute_await("query_symbols", &[]).unwrap());
+        assert!(result.contains("Types:"), "should contain Types header: {result}");
+        assert!(result.contains("Functions:"), "should contain Functions header: {result}");
+    }
+
+    #[test]
+    fn query_symbols_with_function() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end"
+        );
+        let result = unwrap_string(handle.execute_await("query_symbols", &[]).unwrap());
+        assert!(result.contains("greet"), "should list greet function: {result}");
+    }
+
+    #[test]
+    fn query_symbols_detail_existing() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_symbols_detail", &[Value::String("greet".into())]).unwrap()
+        );
+        assert!(result.contains("greet"), "should show greet details: {result}");
+        assert!(result.contains("params") || result.contains("String"),
+            "should show parameter info: {result}");
+    }
+
+    #[test]
+    fn query_symbols_detail_not_found() {
+        let handle = setup_query_runtime("");
+        let result = unwrap_string(
+            handle.execute_await("query_symbols_detail", &[Value::String("nonexistent".into())]).unwrap()
+        );
+        assert!(result.contains("not found"), "should say not found: {result}");
+    }
+
+    #[test]
+    fn query_symbols_detail_wrong_type_fails() {
+        let handle = setup_query_runtime("");
+        let result = handle.execute_await("query_symbols_detail", &[Value::Int(42)]);
+        assert!(result.is_err(), "should fail with non-String arg");
+    }
+
+    #[test]
+    fn query_source_existing_function() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_source", &[Value::String("greet".into())]).unwrap()
+        );
+        assert!(result.contains("+fn greet"), "should contain function definition: {result}");
+        assert!(result.contains("concat"), "should contain function body: {result}");
+    }
+
+    #[test]
+    fn query_source_not_found() {
+        let handle = setup_query_runtime("");
+        let result = unwrap_string(
+            handle.execute_await("query_source", &[Value::String("missing".into())]).unwrap()
+        );
+        assert!(result.contains("not found"), "should say not found: {result}");
+    }
+
+    #[test]
+    fn query_source_wrong_type_fails() {
+        let handle = setup_query_runtime("");
+        let result = handle.execute_await("query_source", &[Value::Int(1)]);
+        assert!(result.is_err(), "should fail with non-String arg");
+    }
+
+    #[test]
+    fn query_callers_no_callers() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_callers", &[Value::String("greet".into())]).unwrap()
+        );
+        assert!(result.contains("no callers"), "should say no callers: {result}");
+    }
+
+    #[test]
+    fn query_callers_with_caller() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end\n\
+             +fn main ()->String\n  +let x:String = greet(\"world\")\n  +return x\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_callers", &[Value::String("greet".into())]).unwrap()
+        );
+        assert!(result.contains("main"), "should list main as caller: {result}");
+    }
+
+    #[test]
+    fn query_callees_lists_calls() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end\n\
+             +fn main ()->String\n  +let x:String = greet(\"world\")\n  +return x\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_callees", &[Value::String("main".into())]).unwrap()
+        );
+        assert!(result.contains("greet"), "should list greet as callee: {result}");
+    }
+
+    #[test]
+    fn query_callees_wrong_type_fails() {
+        let handle = setup_query_runtime("");
+        let result = handle.execute_await("query_callees", &[Value::Int(1)]);
+        assert!(result.is_err(), "should fail with non-String arg");
+    }
+
+    #[test]
+    fn query_deps_same_as_callees() {
+        let handle = setup_query_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end\n\
+             +fn main ()->String\n  +let x:String = greet(\"world\")\n  +return x\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_deps", &[Value::String("main".into())]).unwrap()
+        );
+        assert!(result.contains("greet"), "should list greet as dependency: {result}");
+    }
+
+    #[test]
+    fn query_deps_all_transitive() {
+        let handle = setup_query_runtime(
+            "+fn a ()->String\n  +return \"hello\"\n+end\n\
+             +fn b ()->String\n  +let x:String = a()\n  +return x\n+end\n\
+             +fn c ()->String\n  +let x:String = b()\n  +return x\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_deps_all", &[Value::String("c".into())]).unwrap()
+        );
+        // c -> b -> a, so both a and b should appear
+        assert!(result.contains("a"), "should include transitive dep 'a': {result}");
+        assert!(result.contains("b"), "should include direct dep 'b': {result}");
+    }
+
+    #[test]
+    fn query_deps_all_no_deps() {
+        let handle = setup_query_runtime(
+            "+fn a ()->String\n  +return \"hello\"\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("query_deps_all", &[Value::String("a".into())]).unwrap()
+        );
+        assert!(result.contains("no dependencies"), "should say no dependencies: {result}");
+    }
+
+    #[test]
+    fn query_routes_empty() {
+        let handle = setup_query_runtime("");
+        let result = unwrap_string(handle.execute_await("query_routes", &[]).unwrap());
+        assert!(result.contains("No HTTP routes"), "should say no routes: {result}");
+    }
+
+    #[test]
+    fn query_routes_with_routes() {
+        // Set up runtime with routes
+        let program = crate::ast::Program::default();
+        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![crate::ast::HttpRoute {
+                method: "GET".to_string(),
+                path: "/health".to_string(),
+                handler_fn: "health_check".to_string(),
+            }],
+            shared_vars: std::collections::HashMap::new(),
+            roadmap: vec![],
+            plan: vec![],
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+
+        let result = unwrap_string(handle.execute_await("query_routes", &[]).unwrap());
+        assert!(result.contains("GET"), "should contain GET method: {result}");
+        assert!(result.contains("/health"), "should contain /health path: {result}");
+        assert!(result.contains("health_check"), "should contain handler: {result}");
+    }
+
+    #[test]
+    fn query_tasks_no_registry() {
+        let handle = setup_query_runtime("");
+        let result = unwrap_string(handle.execute_await("query_tasks", &[]).unwrap());
+        // Mock handles don't have a task registry
+        assert!(result.contains("No task registry") || result.contains("No tasks"),
+            "should indicate no tasks available: {result}");
+    }
+
+    #[test]
+    fn query_tasks_with_registry() {
+        let registry: TaskRegistry = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        // Add a task
+        registry.lock().unwrap().insert(1, TaskInfo {
+            id: 1,
+            function_name: "my_task".to_string(),
+            status: WaitReason::Running,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+        });
+
+        let (tx, _) = mpsc::channel(1);
+        let handle = CoroutineHandle {
+            io_tx: tx,
+            task_id: None,
+            task_registry: Some(registry),
+            snapshot_registry: None,
+            mocks: Some(vec![]),
+        };
+
+        let result = unwrap_string(handle.execute_await("query_tasks", &[]).unwrap());
+        assert!(result.contains("my_task"), "should show task: {result}");
+        assert!(result.contains("running"), "should show status: {result}");
+    }
+
+    #[test]
+    fn query_library_returns_string() {
+        let handle = setup_query_runtime("");
+        let result = unwrap_string(handle.execute_await("query_library", &[]).unwrap());
+        assert!(result.contains("Module library"), "should contain library info: {result}");
+    }
+
+    #[test]
+    fn query_no_program_errors() {
+        // Clear the thread-local program
+        crate::eval::set_shared_program(None);
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![],
+            shared_vars: std::collections::HashMap::new(),
+            roadmap: vec![],
+            plan: vec![],
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+
+        // All query builtins that need the program should error
+        let result = handle.execute_await("query_symbols", &[]);
+        assert!(result.is_err(), "query_symbols should fail without program");
+        assert!(result.unwrap_err().to_string().contains("program not available"),
+            "should mention program not available");
+
+        let result = handle.execute_await("query_source", &[Value::String("x".into())]);
+        assert!(result.is_err(), "query_source should fail without program");
+
+        let result = handle.execute_await("query_library", &[]);
+        assert!(result.is_err(), "query_library should fail without program");
     }
 }
