@@ -624,9 +624,15 @@ Side-effect assertions with +after (checked after the function runs, state resto
     },
     ActionCommand {
         name: "!eval",
-        args: "<fn> [args]",
-        short: "evaluate a function or builtin",
-        long: "Evaluates a function or builtin immediately and shows the result. In AdapsisOS mode, functions with more than two statements must pass `!test` before `!eval` is allowed.",
+        args: "<fn> [args] | <expression>",
+        short: "evaluate a function/builtin or inline expression",
+        long: "Evaluates a function, builtin, or inline expression and shows the result. \
+               Two modes: (1) `!eval func_name arg1 arg2` calls a function with arguments. \
+               (2) `!eval <expr>` evaluates an expression directly — supports arithmetic (`1 + 2`), \
+               function calls (`concat(\"a\", \"b\")`), builtins (`len(\"hello\")`), \
+               comparisons (`3 > 2`), struct literals (`{name: \"alice\"}`), \
+               list creation (`list(1, 2, 3)`), and nested calls (`len(concat(\"a\", \"b\"))`). \
+               In AdapsisOS mode, functions with more than two statements must pass `!test` before `!eval` is allowed.",
     },
     ActionCommand {
         name: "!trace",

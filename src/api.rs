@@ -111,7 +111,12 @@ pub async fn mutate(
 #[derive(Deserialize)]
 pub struct EvalRequest {
     pub function: String,
+    #[serde(default)]
     pub input: String,
+    /// Inline expression to evaluate directly (e.g. "1 + 2", "concat(\"a\", \"b\")").
+    /// When set, `function` and `input` are ignored.
+    #[serde(default)]
+    pub expression: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -127,8 +132,49 @@ pub async fn eval_fn(
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    eprintln!("[web:eval] {} {}", req.function, req.input);
     let mut session = config.session.lock().await;
+
+    // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
+    if let Some(ref expr_str) = req.expression {
+        eprintln!("[web:eval] inline: {expr_str}");
+        let expr_str = expr_str.trim();
+        if expr_str.is_empty() {
+            return Json(EvalResponse {
+                result: "empty expression".to_string(),
+                success: false,
+                compiled: None,
+            });
+        }
+        match parser::parse_expr_pub(0, expr_str) {
+            Ok(expr) => {
+                match eval::eval_inline_expr(&session.program, &expr) {
+                    Ok(val) => {
+                        return Json(EvalResponse {
+                            result: format!("{val}"),
+                            success: true,
+                            compiled: Some(false),
+                        });
+                    }
+                    Err(e) => {
+                        return Json(EvalResponse {
+                            result: format!("{e}"),
+                            success: false,
+                            compiled: None,
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                return Json(EvalResponse {
+                    result: format!("parse error: {e}"),
+                    success: false,
+                    compiled: None,
+                });
+            }
+        }
+    }
+
+    eprintln!("[web:eval] {} {}", req.function, req.input);
 
     // Parse input directly instead of reconstructing "!eval fn input" source
     // which breaks when the input contains unescaped quotes or special chars.
@@ -149,6 +195,7 @@ pub async fn eval_fn(
     let ev = parser::EvalMutation {
         function_name: req.function.clone(),
         input: input_expr,
+        inline_expr: None,
     };
 
     // Block eval of untested functions (>2 statements) in AdapsisOS mode
@@ -211,6 +258,7 @@ pub async fn eval_fn(
 
     match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.revision) {
         Ok((result, compiled)) => {
+            // re-acquire session for recording (we may have dropped it above for async)
             session.record_eval(&ev.function_name, &req.input, &result);
             Json(EvalResponse {
                 result,
@@ -1148,6 +1196,24 @@ pub async fn ask(
                             }
                         }
                         crate::parser::Operation::Eval(ev) => {
+                            // Inline expression: evaluate directly
+                            if let Some(ref expr) = ev.inline_expr {
+                                match crate::eval::eval_inline_expr(&session.program, expr) {
+                                    Ok(val) => {
+                                        let msg = format!("= {val}");
+                                        eprintln!("[web:eval] {msg}");
+                                        iter_results.push(MutationResult { message: msg, success: true });
+                                    }
+                                    Err(e) => {
+                                        iter_has_errors = true;
+                                        let msg = format!("eval error: {e}");
+                                        eprintln!("[web:eval:err] {msg}");
+                                        iter_results.push(MutationResult { message: msg, success: false });
+                                    }
+                                }
+                                continue;
+                            }
+
                             // Block eval of untested functions in AdapsisOS mode
                             if session.program.require_modules {
                                 if let Some(func) = session.program.get_function(&ev.function_name) {
@@ -2002,6 +2068,24 @@ pub async fn ask_stream(
                                 }
                             }
                             crate::parser::Operation::Eval(ev) => {
+                                // Inline expression: evaluate directly
+                                if let Some(ref expr) = ev.inline_expr {
+                                    match crate::eval::eval_inline_expr(&session.program, expr) {
+                                        Ok(val) => {
+                                            let msg = format!("{val}");
+                                            feedback_details.push(format!("= {msg}"));
+                                            let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": "(inline)", "success": true})).await;
+                                        }
+                                        Err(e) => {
+                                            has_errors = true;
+                                            let msg = format!("eval error: {e}");
+                                            feedback_details.push(format!("ERROR: {msg}"));
+                                            let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": "(inline)", "success": false})).await;
+                                        }
+                                    }
+                                    continue;
+                                }
+
                                 // Block eval of untested functions (>2 statements) in AdapsisOS mode
                                 if session.program.require_modules {
                                     if let Some(func) = session.program.get_function(&ev.function_name) {
