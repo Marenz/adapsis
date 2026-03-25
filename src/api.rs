@@ -50,15 +50,17 @@ impl AppConfig {
             rt.shared_vars = session.runtime.shared_vars.clone();
             rt.http_routes = session.runtime.http_routes.clone();
             rt.roadmap = session.meta.roadmap.clone();
+            rt.agent_mailbox = session.meta.agent_mailbox.clone();
         }
     }
 
-    /// Sync runtime changes (roadmap, shared_vars) back into the session shim.
-    /// Call after eval/test that may have called roadmap_add/roadmap_done builtins.
+    /// Sync runtime changes (roadmap, shared_vars, agent_mailbox) back into the session shim.
+    /// Call after eval/test that may have called roadmap_add/roadmap_done/msg_send builtins.
     pub fn sync_runtime_to_session(&self, session: &mut Session) {
         if let Ok(rt) = self.runtime.read() {
             session.meta.roadmap = rt.roadmap.clone();
             session.runtime.shared_vars = rt.shared_vars.clone();
+            session.meta.agent_mailbox = rt.agent_mailbox.clone();
         }
     }
 }

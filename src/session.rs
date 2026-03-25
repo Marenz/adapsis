@@ -29,6 +29,12 @@ pub struct RuntimeState {
     /// Plan mirror for builtin access during eval. Synced with SessionMeta.plan.
     #[serde(skip)]
     pub plan: Vec<PlanStep>,
+    /// Agent mailbox mirror for builtin access during eval. Synced with SessionMeta.agent_mailbox.
+    #[serde(skip)]
+    pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
+    /// Pending commands queued by IO builtins (watch_start, agent_spawn) for API-layer processing.
+    #[serde(skip)]
+    pub pending_commands: Vec<String>,
 }
 
 /// Thread-safe handle to the runtime state.
