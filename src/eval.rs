@@ -4499,4 +4499,652 @@ mod tests {
         let result = eval_test_case_with_mocks(&program, fn_name, case, &[], &[]);
         assert!(result.is_ok(), "exact Err match should still work: {:?}", result);
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Inline expression helpers for builtin/arithmetic tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// Evaluate an inline expression string and return the formatted result.
+    fn eval_expr_str(program: &ast::Program, expr_text: &str) -> String {
+        let expr = parser::parse_expr_pub(0, expr_text)
+            .unwrap_or_else(|e| panic!("parse failed for `{expr_text}`: {e}"));
+        let val = eval_inline_expr(program, &expr)
+            .unwrap_or_else(|e| panic!("eval failed for `{expr_text}`: {e}"));
+        format!("{val}")
+    }
+
+    /// Evaluate and return the raw Value (for type-specific assertions).
+    fn eval_expr_val(program: &ast::Program, expr_text: &str) -> Value {
+        let expr = parser::parse_expr_pub(0, expr_text)
+            .unwrap_or_else(|e| panic!("parse failed for `{expr_text}`: {e}"));
+        eval_inline_expr(program, &expr)
+            .unwrap_or_else(|e| panic!("eval failed for `{expr_text}`: {e}"))
+    }
+
+    /// Evaluate a full program and return the result of eval'ing a function.
+    /// Uses interpreter-only path to avoid JIT crashes in test context.
+    fn eval_fn_result(source: &str, fn_name: &str, input: &str) -> String {
+        let program = build_program(source);
+        let input_expr = if input.is_empty() {
+            parser::Expr::StructLiteral(vec![])
+        } else {
+            parser::parse_test_input(0, input).expect("parse input failed")
+        };
+        eval_call_with_input(&program, fn_name, &input_expr)
+            .unwrap_or_else(|e| panic!("eval `{fn_name}` failed: {e}"))
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Arithmetic operations (+, -, *, /, %)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn arith_subtraction() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "10 - 3"), "7");
+    }
+
+    #[test]
+    fn arith_division() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "10 / 3"), "3");
+    }
+
+    #[test]
+    fn arith_modulo() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "10 % 3"), "1");
+    }
+
+    #[test]
+    fn arith_negative_result() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "3 - 10"), "-7");
+    }
+
+    #[test]
+    fn arith_compound_precedence() {
+        let p = ast::Program::default();
+        // (2 * 3) + (10 / 5) - 1 = 6 + 2 - 1 = 7
+        assert_eq!(eval_expr_str(&p, "2 * 3 + 10 / 5 - 1"), "7");
+    }
+
+    #[test]
+    fn arith_float_basic() {
+        let p = ast::Program::default();
+        let val = eval_expr_val(&p, "3.5 + 1.5");
+        match val {
+            Value::Float(f) => assert!((f - 5.0).abs() < 1e-10),
+            _ => panic!("expected Float, got {val}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Comparison and boolean logic
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn cmp_less_than() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "2 < 5"), "true");
+        assert_eq!(eval_expr_str(&p, "5 < 2"), "false");
+    }
+
+    #[test]
+    fn cmp_gte_lte() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "5 >= 5"), "true");
+        assert_eq!(eval_expr_str(&p, "5 <= 5"), "true");
+        assert_eq!(eval_expr_str(&p, "4 >= 5"), "false");
+        assert_eq!(eval_expr_str(&p, "6 <= 5"), "false");
+    }
+
+    #[test]
+    fn cmp_eq_neq() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "42 == 42"), "true");
+        assert_eq!(eval_expr_str(&p, "42 != 42"), "false");
+        assert_eq!(eval_expr_str(&p, "42 != 43"), "true");
+    }
+
+    #[test]
+    fn bool_and_or_not() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "true AND true"), "true");
+        assert_eq!(eval_expr_str(&p, "true AND false"), "false");
+        assert_eq!(eval_expr_str(&p, "false OR true"), "true");
+        assert_eq!(eval_expr_str(&p, "false OR false"), "false");
+        assert_eq!(eval_expr_str(&p, "NOT true"), "false");
+        assert_eq!(eval_expr_str(&p, "NOT false"), "true");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Builtin function calls
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_split() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"split("a,b,c", ",")"#), r#"["a", "b", "c"]"#);
+    }
+
+    #[test]
+    fn builtin_join() {
+        let p = ast::Program::default();
+        // join uses Display format for list items — strings include quotes
+        assert_eq!(eval_expr_str(&p, "join(list(1, 2, 3), \"-\")"), r#""1-2-3""#);
+    }
+
+    #[test]
+    fn builtin_trim() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"trim("  hello  ")"#), r#""hello""#);
+    }
+
+    #[test]
+    fn builtin_to_string() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "to_string(42)"), r#""42""#);
+        assert_eq!(eval_expr_str(&p, "to_string(true)"), r#""true""#);
+    }
+
+    #[test]
+    fn builtin_to_int() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"to_int("42")"#), "42");
+        assert_eq!(eval_expr_str(&p, "to_int(3.7)"), "3");
+        assert_eq!(eval_expr_str(&p, "to_int(true)"), "1");
+    }
+
+    #[test]
+    fn builtin_push_and_get() {
+        let p = ast::Program::default();
+        // push returns a new list
+        assert_eq!(eval_expr_str(&p, "push(list(1, 2), 3)"), "[1, 2, 3]");
+        // get returns element at index
+        assert_eq!(eval_expr_str(&p, "get(list(10, 20, 30), 1)"), "20");
+    }
+
+    #[test]
+    fn builtin_char_at() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"char_at("hello", 0)"#), r#""h""#);
+        assert_eq!(eval_expr_str(&p, r#"char_at("hello", 4)"#), r#""o""#);
+    }
+
+    #[test]
+    fn builtin_substring() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"substring("hello world", 0, 5)"#), r#""hello""#);
+        assert_eq!(eval_expr_str(&p, r#"substring("hello world", 6, 11)"#), r#""world""#);
+    }
+
+    #[test]
+    fn builtin_starts_with_ends_with() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"starts_with("hello", "hel")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"starts_with("hello", "xyz")"#), "false");
+        assert_eq!(eval_expr_str(&p, r#"ends_with("hello", "llo")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"ends_with("hello", "xyz")"#), "false");
+    }
+
+    #[test]
+    fn builtin_contains() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"contains("hello world", "world")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"contains("hello world", "xyz")"#), "false");
+    }
+
+    #[test]
+    fn builtin_index_of() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"index_of("hello", "ll")"#), "2");
+        assert_eq!(eval_expr_str(&p, r#"index_of("hello", "xyz")"#), "-1");
+    }
+
+    #[test]
+    fn builtin_abs() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "abs(5)"), "5");
+    }
+
+    #[test]
+    fn builtin_min_max() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "min(3, 7)"), "3");
+        assert_eq!(eval_expr_str(&p, "max(3, 7)"), "7");
+    }
+
+    #[test]
+    fn builtin_floor() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "floor(3.7)"), "3");
+        assert_eq!(eval_expr_str(&p, "floor(3.2)"), "3");
+    }
+
+    #[test]
+    fn builtin_pow() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "pow(2, 10)"), "1024");
+    }
+
+    #[test]
+    fn builtin_len_on_list() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "len(list(1, 2, 3))"), "3");
+        assert_eq!(eval_expr_str(&p, "len(list())"), "0");
+    }
+
+    #[test]
+    fn builtin_base64_encode() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"base64_encode("hello")"#), r#""aGVsbG8=""#);
+    }
+
+    #[test]
+    fn builtin_digit_value() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"digit_value("5")"#), "5");
+        assert_eq!(eval_expr_str(&p, r#"digit_value("a")"#), "-1");
+    }
+
+    #[test]
+    fn builtin_is_digit_char() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"is_digit_char("7")"#), "true");
+        assert_eq!(eval_expr_str(&p, r#"is_digit_char("x")"#), "false");
+    }
+
+    #[test]
+    fn builtin_char_code_and_from_char_code() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"char_code("A")"#), "65");
+        assert_eq!(eval_expr_str(&p, "from_char_code(65)"), r#""A""#);
+    }
+
+    #[test]
+    fn builtin_bitwise_ops() {
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, "bit_and(12, 10)"), "8"); // 1100 & 1010 = 1000
+        assert_eq!(eval_expr_str(&p, "bit_or(12, 10)"), "14"); // 1100 | 1010 = 1110
+        assert_eq!(eval_expr_str(&p, "bit_xor(12, 10)"), "6"); // 1100 ^ 1010 = 0110
+        assert_eq!(eval_expr_str(&p, "bit_shl(1, 3)"), "8");   // 1 << 3 = 8
+        assert_eq!(eval_expr_str(&p, "bit_shr(8, 2)"), "2");   // 8 >> 2 = 2
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Let bindings and variable lookup
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn let_binding_and_return() {
+        let result = eval_fn_result("\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+", "double", "5");
+        assert_eq!(result, "10");
+    }
+
+    #[test]
+    fn let_multiple_bindings() {
+        let result = eval_fn_result("\
++fn compute (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +let product:Int = a * b
+  +let result:Int = sum + product
+  +return result
+", "compute", "a=3 b=4");
+        // sum=7, product=12, result=19
+        assert_eq!(result, "19");
+    }
+
+    #[test]
+    fn set_mutation() {
+        let result = eval_fn_result("\
++fn count_up ()->Int
+  +let i:Int = 0
+  +set i = i + 1
+  +set i = i + 1
+  +set i = i + 1
+  +return i
+", "count_up", "");
+        assert_eq!(result, "3");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // If/elif/else control flow
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn if_then_branch() {
+        let source = "\
++fn classify (x:Int)->String
+  +if x > 0
+    +return \"positive\"
+  +else
+    +return \"non-positive\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "classify", "5"), "\"positive\"");
+        assert_eq!(eval_fn_result(source, "classify", "0"), "\"non-positive\"");
+    }
+
+    #[test]
+    fn if_elif_else() {
+        let source = "\
++fn describe (x:Int)->String
+  +if x > 0
+    +return \"positive\"
+  +elif x == 0
+    +return \"zero\"
+  +else
+    +return \"negative\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "describe", "5"), "\"positive\"");
+        assert_eq!(eval_fn_result(source, "describe", "0"), "\"zero\"");
+        assert_eq!(eval_fn_result(source, "describe", "-3"), "\"negative\"");
+    }
+
+    #[test]
+    fn nested_if() {
+        let source = "\
++fn size (x:Int)->String
+  +if x > 0
+    +if x > 100
+      +return \"big\"
+    +else
+      +return \"small\"
+    +end
+  +else
+    +return \"non-positive\"
+  +end
+";
+        assert_eq!(eval_fn_result(source, "size", "200"), "\"big\"");
+        assert_eq!(eval_fn_result(source, "size", "50"), "\"small\"");
+        assert_eq!(eval_fn_result(source, "size", "-1"), "\"non-positive\"");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Pattern matching on union types
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn match_on_union() {
+        let source = "\
++type Shape = Circle(Float) | Rect(Float, Float) | Point
+
++fn area (s:Shape)->Float
+  +match s
+  +case Circle(r)
+    +return r * r * 3.14
+  +case Rect(w, h)
+    +return w * h
+  +case Point
+    +return 0.0
+  +end
+";
+        let program = build_program(source);
+        // Test with Circle(5.0)
+        let input = parser::parse_test_input(0, "Circle(5.0)").unwrap();
+        let result = eval_call_with_input(&program, "area", &input).unwrap();
+        let f: f64 = result.parse().unwrap();
+        assert!((f - 78.5).abs() < 0.01, "Circle area: {result}");
+
+        // Test with Rect(3.0, 4.0)
+        let input = parser::parse_test_input(0, "Rect(3.0, 4.0)").unwrap();
+        let result = eval_call_with_input(&program, "area", &input).unwrap();
+        let f: f64 = result.parse().unwrap();
+        assert!((f - 12.0).abs() < 0.01, "Rect area: {result}");
+    }
+
+    #[test]
+    fn match_wildcard() {
+        let source = "\
++type Color = Red | Green | Blue
+
++fn is_red (c:Color)->Bool
+  +match c
+  +case Red
+    +return true
+  +case _
+    +return false
+  +end
+";
+        let program = build_program(source);
+        let input = parser::parse_test_input(0, "Red").unwrap();
+        let result = eval_call_with_input(&program, "is_red", &input).unwrap();
+        assert_eq!(result, "true");
+
+        let input = parser::parse_test_input(0, "Blue").unwrap();
+        let result = eval_call_with_input(&program, "is_red", &input).unwrap();
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn match_recursive_type() {
+        let source = "\
++type Expr = Literal(Int) | Add(Expr, Expr)
+
++fn eval_expr (e:Expr)->Int
+  +match e
+  +case Literal(val)
+    +return val
+  +case Add(left, right)
+    +let l:Int = eval_expr(left)
+    +let r:Int = eval_expr(right)
+    +return l + r
+  +end
+";
+        let program = build_program(source);
+        // Add(Literal(2), Literal(3)) should be 5
+        let input = parser::parse_test_input(0, "Add(Literal(2), Literal(3))").unwrap();
+        let result = eval_call_with_input(&program, "eval_expr", &input).unwrap();
+        assert_eq!(result, "5");
+
+        // Add(Literal(1), Add(Literal(2), Literal(3))) should be 6
+        let input = parser::parse_test_input(0, "Add(Literal(1), Add(Literal(2), Literal(3)))").unwrap();
+        let result = eval_call_with_input(&program, "eval_expr", &input).unwrap();
+        assert_eq!(result, "6");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Check statements (success and failure)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_passes() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +check small x < 100 ~err_too_large
+  +return x
+";
+        // [fail] functions wrap successful returns in Ok
+        assert_eq!(eval_fn_result(source, "validate", "50"), "Ok(50)");
+    }
+
+    #[test]
+    fn check_fails_first() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+";
+        let result = eval_fn_result(source, "validate", "-5");
+        assert!(result.contains("Err") && result.contains("err_negative"),
+            "expected Err(err_negative), got: {result}");
+    }
+
+    #[test]
+    fn check_fails_second() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +check small x < 100 ~err_too_large
+  +return x
+";
+        let result = eval_fn_result(source, "validate", "200");
+        assert!(result.contains("Err") && result.contains("err_too_large"),
+            "expected Err(err_too_large), got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Function calls with error propagation ([fail] effect)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn function_call_chain() {
+        let source = "\
++fn double (x:Int)->Int
+  +let r:Int = x * 2
+  +return r
+
++fn quadruple (x:Int)->Int
+  +let d:Int = double(x)
+  +let r:Int = double(d)
+  +return r
+";
+        assert_eq!(eval_fn_result(source, "quadruple", "5"), "20");
+    }
+
+    #[test]
+    fn function_call_with_check_propagation() {
+        // When a [fail] function calls another [fail] function that fails,
+        // the error should propagate via the +call binding
+        let source = "\
++fn validate_positive (x:Int)->Result<Int> [fail]
+  +check pos x > 0 ~err_negative
+  +return x
+
++fn process (x:Int)->Result<Int> [fail]
+  +call val:Int = validate_positive(x)
+  +let result:Int = val * 2
+  +return result
+";
+        assert_eq!(eval_fn_result(source, "process", "5"), "Ok(10)");
+        let result = eval_fn_result(source, "process", "-1");
+        assert!(result.contains("Err"), "expected Err propagation, got: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Struct construction and field access
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn struct_create_and_access() {
+        let source = "\
++type Point = x:Int, y:Int
+
++fn get_x (p:Point)->Int
+  +return p.x
+
++fn make_point ()->Point
+  +let p:Point = {x: 10, y: 20}
+  +return p
+";
+        let result = eval_fn_result(source, "make_point", "");
+        // Field order in HashMap is not deterministic, check both fields present
+        assert!(result.contains("x: 10"), "expected x: 10 in {result}");
+        assert!(result.contains("y: 20"), "expected y: 20 in {result}");
+        assert_eq!(eval_fn_result(source, "get_x", "x=5 y=10"), "5");
+    }
+
+    #[test]
+    fn struct_field_access_in_expression() {
+        let source = "\
++type Rect = width:Int, height:Int
+
++fn area (r:Rect)->Int
+  +let a:Int = r.width * r.height
+  +return a
+";
+        assert_eq!(eval_fn_result(source, "area", "width=3 height=4"), "12");
+    }
+
+    #[test]
+    fn struct_nested_field_access() {
+        let source = "\
++type Inner = value:Int
++type Outer = inner:Inner, label:String
+
++fn get_value (o:Outer)->Int
+  +return o.inner.value
+";
+        assert_eq!(eval_fn_result(source, "get_value", r#"inner={value: 42} label="test""#), "42");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // While loops
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn while_loop_counter() {
+        let source = "\
++fn count_to (n:Int)->Int
+  +let i:Int = 0
+  +while i < n
+    +set i = i + 1
+  +end
+  +return i
+";
+        assert_eq!(eval_fn_result(source, "count_to", "5"), "5");
+        assert_eq!(eval_fn_result(source, "count_to", "0"), "0");
+    }
+
+    #[test]
+    fn while_loop_accumulator() {
+        let source = "\
++fn sum_to (n:Int)->Int
+  +let total:Int = 0
+  +let i:Int = 1
+  +while i <= n
+    +set total = total + i
+    +set i = i + 1
+  +end
+  +return total
+";
+        assert_eq!(eval_fn_result(source, "sum_to", "10"), "55");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // String concat with mixed types
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn concat_mixed_types() {
+        let p = ast::Program::default();
+        // concat coerces non-strings to string via Display
+        assert_eq!(eval_expr_str(&p, r#"concat("count: ", 42)"#), r#""count: 42""#);
+        assert_eq!(eval_expr_str(&p, r#"concat("flag: ", true)"#), r#""flag: true""#);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Error cases for builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_get_out_of_bounds() {
+        let p = ast::Program::default();
+        let expr = parser::parse_expr_pub(0, "get(list(1, 2), 5)").unwrap();
+        let result = eval_inline_expr(&p, &expr);
+        assert!(result.is_err(), "expected error for out-of-bounds get");
+    }
+
+    #[test]
+    fn builtin_char_at_out_of_bounds() {
+        let p = ast::Program::default();
+        let expr = parser::parse_expr_pub(0, r#"char_at("hi", 10)"#).unwrap();
+        let result = eval_inline_expr(&p, &expr);
+        assert!(result.is_err(), "expected error for out-of-bounds char_at");
+    }
+
+    #[test]
+    fn builtin_to_int_invalid() {
+        let p = ast::Program::default();
+        let expr = parser::parse_expr_pub(0, r#"to_int("not_a_number")"#).unwrap();
+        let result = eval_inline_expr(&p, &expr);
+        assert!(result.is_err(), "expected error for invalid to_int");
+    }
 }
