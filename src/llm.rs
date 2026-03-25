@@ -221,6 +221,8 @@ impl OpenAiBackend {
 
         let chunk_timeout = Duration::from_secs(120); // 2 min max silence between chunks
         let mut response = response;
+        let mut chunk_count: u64 = 0;
+        let stream_start = std::time::Instant::now();
         loop {
             let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
                 Ok(Ok(Some(chunk))) => chunk,
@@ -228,6 +230,7 @@ impl OpenAiBackend {
                 Ok(Err(error)) => return Err(anyhow!(LlmError::Streaming(format!("failed to read streaming response chunk: {error}")))),
                 Err(_) => return Err(anyhow!(LlmError::Streaming("streaming response stalled (no data for 120s)".to_string()))),
             };
+            chunk_count += 1;
             raw_buf.extend_from_slice(&chunk);
 
             // Convert as much valid UTF-8 as possible from the front of
@@ -276,6 +279,7 @@ impl OpenAiBackend {
                         if let Some(reasoning) = choice.delta.reasoning_content {
                             if !in_thinking {
                                 in_thinking = true;
+                                eprintln!("[llm:thinking] started (+{}ms, {} chunks)", stream_start.elapsed().as_millis(), chunk_count);
                                 print!("[thinking] ");
                             }
                             print!("{reasoning}");
@@ -287,6 +291,7 @@ impl OpenAiBackend {
                         if let Some(content) = choice.delta.content {
                             if in_thinking {
                                 in_thinking = false;
+                                eprintln!("[llm:content] thinking done ({}chars), content starting (+{}ms)", thinking_text.len(), stream_start.elapsed().as_millis());
                                 println!();
                                 print!("[code] ");
                             }
@@ -303,6 +308,7 @@ impl OpenAiBackend {
 
         stdout.flush().ok();
         println!();
+        eprintln!("[llm:done] {} chunks in {}ms, thinking={}chars content={}chars", chunk_count, stream_start.elapsed().as_millis(), thinking_text.len(), content_text.len());
         Ok(build_output(thinking_text, content_text))
     }
 
