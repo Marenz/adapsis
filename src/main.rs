@@ -707,8 +707,8 @@ async fn main() -> Result<()> {
                 let s = session::Session::load(session_path)?;
                 println!(
                     "Loaded: revision {}, {} mutations",
-                    s.revision,
-                    s.mutations.len()
+                    s.meta.revision,
+                    s.meta.mutations.len()
                 );
                 s
             } else {
@@ -724,7 +724,7 @@ async fn main() -> Result<()> {
             if !lib_state.loaded_modules.is_empty() {
                 sess.program.rebuild_function_index();
             }
-            sess.library_state = Some(lib_state);
+            sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
             let initial_runtime = sess.runtime.clone();
 
@@ -938,11 +938,11 @@ async fn main() -> Result<()> {
                     // Add event as tool message — AI decides whether to act
                     let messages = {
                         let mut session = trigger_session.lock().await;
-                        session.chat_messages.push(crate::session::ChatMessage {
+                        session.meta.chat_messages.push(crate::session::ChatMessage {
                             role: "tool".to_string(),
                             content: event_message.clone(),
                         });
-                        session.chat_messages.iter().map(|m| match m.role.as_str() {
+                        session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
                             "system" => llm::ChatMessage::system(m.content.clone()),
                             "assistant" => llm::ChatMessage::assistant(&m.content),
                             _ => llm::ChatMessage::user(m.content.clone()),
@@ -975,7 +975,7 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                 }
-                                session.chat_messages.push(crate::session::ChatMessage {
+                                session.meta.chat_messages.push(crate::session::ChatMessage {
                                     role: "assistant".to_string(),
                                     content: format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()),
                                 });
@@ -990,7 +990,7 @@ async fn main() -> Result<()> {
 
             // Autonomous mode: inject goal as the first message after startup
             // Skip if session already has chat history (e.g. after !opencode restart)
-            let session_has_history = shared_session.lock().await.chat_messages.len() > 1;
+            let session_has_history = shared_session.lock().await.meta.chat_messages.len() > 1;
             // Autonomous loop: always runs. If --autonomous is given, use it as the
             // initial goal. Otherwise, check the roadmap — if there are undone items,
             // continue working on them automatically.

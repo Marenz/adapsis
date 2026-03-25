@@ -618,7 +618,7 @@ mod tests {
         // This test verifies that session.apply() calls persist logic
         let mut session = crate::session::Session::new();
         // Give it a library state
-        session.library_state = Some(LibraryState::new());
+        session.meta.library_state = Some(LibraryState::new());
 
         let source = "!module TestPersist\n+fn check ()->Int\n  +return 1\n";
         let result = session.apply(source);

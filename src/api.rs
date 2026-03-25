@@ -91,7 +91,7 @@ pub async fn mutate(
                 rt.shared_vars = session.runtime.shared_vars.clone();
             }
             Json(MutateResponse {
-                revision: session.revision,
+                revision: session.meta.revision,
                 results: results
                     .into_iter()
                     .map(|(message, success)| MutationResult { message, success })
@@ -99,7 +99,7 @@ pub async fn mutate(
             })
         }
         Err(e) => Json(MutateResponse {
-            revision: session.revision,
+            revision: session.meta.revision,
             results: vec![MutationResult {
                 message: format!("error: {e}"),
                 success: false,
@@ -256,7 +256,7 @@ pub async fn eval_fn(
         }
     }
 
-    match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.revision) {
+    match eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
         Ok((result, compiled)) => {
             // re-acquire session for recording (we may have dropped it above for async)
             session.record_eval(&ev.function_name, &req.input, &result);
@@ -332,7 +332,7 @@ pub async fn test_fn(
                         let program = session.program.clone();
                         let fn_name = test.function_name.clone();
                         let case = case.clone();
-                        let mocks = session.io_mocks.clone();
+                        let mocks = session.meta.io_mocks.clone();
                         let routes = session.runtime.http_routes.clone();
                         let sender = sender.clone();
 
@@ -347,13 +347,13 @@ pub async fn test_fn(
                     } else {
                         // No IO sender — fall back to mock-only execution
                         eval::eval_test_case_with_mocks(
-                            &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
+                            &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
                         )
                     }
                 } else {
                     // Sync function — run directly
                     eval::eval_test_case_with_mocks(
-                        &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
+                        &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
                     )
                 };
 
@@ -415,7 +415,7 @@ pub async fn query(
     } else if let Some(task_id) = parse_inspect_task_query(req.query.trim()) {
         format_inspect_task(&config.task_registry, &config.snapshot_registry, task_id)
     } else if req.query.trim() == "?library" {
-        crate::library::query_library(&session.program, session.library_state.as_ref())
+        crate::library::query_library(&session.program, session.meta.library_state.as_ref())
     } else {
         let table = typeck::build_symbol_table(&session.program);
         typeck::handle_query(&session.program, &table, &req.query, &session.runtime.http_routes)
@@ -468,7 +468,7 @@ pub struct PlanStepResponse {
 
 pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse> {
     let session = session.lock().await;
-    let plan = session.plan.iter().map(|s| PlanStepResponse {
+    let plan = session.meta.plan.iter().map(|s| PlanStepResponse {
         description: s.description.clone(),
         status: match s.status {
             crate::session::PlanStatus::Pending => "pending",
@@ -477,14 +477,14 @@ pub async fn status(State(session): State<SharedSession>) -> Json<StatusResponse
             crate::session::PlanStatus::Failed => "failed",
         }.to_string(),
     }).collect();
-    let roadmap = session.roadmap.iter().map(|r| RoadmapItemResponse {
+    let roadmap = session.meta.roadmap.iter().map(|r| RoadmapItemResponse {
         description: r.description.clone(),
         done: r.done,
     }).collect();
     Json(StatusResponse {
-        revision: session.revision,
-        mutations: session.mutations.len(),
-        history_entries: session.history.len(),
+        revision: session.meta.revision,
+        mutations: session.meta.mutations.len(),
+        history_entries: session.meta.history.len(),
         plan,
         roadmap,
         functions: session
@@ -523,8 +523,8 @@ pub async fn history(
     let limit = req.limit.unwrap_or(20);
     Json(HistoryResponse {
         formatted: session.format_recent_history(limit),
-        mutations: session.mutations.clone(),
-        history: session.history.clone(),
+        mutations: session.meta.mutations.clone(),
+        history: session.meta.history.clone(),
     })
 }
 
@@ -547,12 +547,12 @@ pub async fn rewind(
     let mut session = session.lock().await;
     match session.rewind_to(req.revision) {
         Ok(()) => Json(RewindResponse {
-            revision: session.revision,
+            revision: session.meta.revision,
             success: true,
             message: format!("rewound to revision {}", req.revision),
         }),
         Err(e) => Json(RewindResponse {
-            revision: session.revision,
+            revision: session.meta.revision,
             success: false,
             message: format!("{e}"),
         }),
@@ -729,7 +729,7 @@ pub async fn program(State(session): State<SharedSession>) -> Json<ProgramRespon
     }).collect();
 
     Json(ProgramResponse {
-        revision: session.revision,
+        revision: session.meta.revision,
         types,
         functions,
         modules,
@@ -958,13 +958,13 @@ pub async fn ask(
     // Build messages from conversation history
     let mut messages = {
         let mut session = config.session.lock().await;
-        if session.chat_messages.is_empty() {
-            session.chat_messages.push(crate::session::ChatMessage {
+        if session.meta.chat_messages.is_empty() {
+            session.meta.chat_messages.push(crate::session::ChatMessage {
                 role: "system".to_string(),
                 content: system_prompt,
             });
         }
-        let (plan_ctx, needs_plan) = build_plan_context(&session.plan);
+        let (plan_ctx, needs_plan) = build_plan_context(&session.meta.plan);
         let plan_hint = if needs_plan {
             "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
         } else { "" };
@@ -976,11 +976,11 @@ pub async fn ask(
             req.message,
             plan_hint
         );
-        session.chat_messages.push(crate::session::ChatMessage {
+        session.meta.chat_messages.push(crate::session::ChatMessage {
             role: "user".to_string(),
             content: context,
         });
-        session.chat_messages.iter().map(|m| match m.role.as_str() {
+        session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
             "system" => crate::llm::ChatMessage::system(m.content.clone()),
             "assistant" => crate::llm::ChatMessage::assistant(&m.content),
             _ => crate::llm::ChatMessage::user(m.content.clone()),
@@ -1073,8 +1073,8 @@ pub async fn ask(
                 // Handle !undo and !plan before apply
                 let has_undo = ops.iter().any(|op| matches!(op, crate::parser::Operation::Undo));
                 if has_undo {
-                    if session.revision > 0 {
-                        let prev = session.revision - 1;
+                    if session.meta.revision > 0 {
+                        let prev = session.meta.revision - 1;
                         match session.rewind_to(prev) {
                             Ok(()) => iter_results.push(MutationResult { message: format!("Undone to rev {prev}"), success: true }),
                             Err(e) => { iter_has_errors = true; iter_results.push(MutationResult { message: format!("Undo: {e}"), success: false }); }
@@ -1085,7 +1085,7 @@ pub async fn ask(
                     if let crate::parser::Operation::Plan(action) = op {
                         match action {
                             crate::parser::PlanAction::Set(steps) => {
-                                session.plan = steps.iter().map(|s| crate::session::PlanStep {
+                                session.meta.plan = steps.iter().map(|s| crate::session::PlanStep {
                                     description: s.clone(),
                                     status: crate::session::PlanStatus::Pending,
                                 }).collect();
@@ -1093,20 +1093,20 @@ pub async fn ask(
                             }
                             crate::parser::PlanAction::Progress(n) => {
                                 let idx = n.saturating_sub(1);
-                                if let Some(step) = session.plan.get_mut(idx) {
+                                if let Some(step) = session.meta.plan.get_mut(idx) {
                                     step.status = crate::session::PlanStatus::Done;
                                     iter_results.push(MutationResult { message: format!("Step {n} done: {}", step.description), success: true });
                                 }
                             }
                             crate::parser::PlanAction::Fail(n) => {
                                 let idx = n.saturating_sub(1);
-                                if let Some(step) = session.plan.get_mut(idx) {
+                                if let Some(step) = session.meta.plan.get_mut(idx) {
                                     step.status = crate::session::PlanStatus::Failed;
                                     iter_results.push(MutationResult { message: format!("Step {n} failed: {}", step.description), success: true });
                                 }
                             }
                             crate::parser::PlanAction::Show => {
-                                let plan_str = session.plan.iter().enumerate().map(|(i, s)| {
+                                let plan_str = session.meta.plan.iter().enumerate().map(|(i, s)| {
                                     let icon = match s.status {
                                         crate::session::PlanStatus::Pending => "[ ]",
                                         crate::session::PlanStatus::InProgress => "[~]",
@@ -1167,7 +1167,7 @@ pub async fn ask(
                                         let program = session.program.clone();
                                         let fn_name = test.function_name.clone();
                                         let case = case.clone();
-                                        let mocks = session.io_mocks.clone();
+                                        let mocks = session.meta.io_mocks.clone();
                                         let routes = session.runtime.http_routes.clone();
                                         let sender = sender.clone();
                                         drop(session);
@@ -1178,12 +1178,12 @@ pub async fn ask(
                                         result
                                     } else {
                                         crate::eval::eval_test_case_with_mocks(
-                                            &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
+                                            &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
                                         )
                                     }
                                 } else {
                                     crate::eval::eval_test_case_with_mocks(
-                                        &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
+                                        &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
                                     )
                                 };
                                 match case_result {
@@ -1260,7 +1260,7 @@ pub async fn ask(
                                     session = config.session.lock().await;
                                 }
                             } else {
-                                match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.revision) {
+                                match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
                                     Ok((result, compiled)) => {
                                         let tag = if compiled { " [compiled]" } else { "" };
                                         let msg = format!("eval {}() = {result}{tag}", ev.function_name);
@@ -1289,7 +1289,7 @@ pub async fn ask(
                             } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
                                 format_inspect_task(&config.task_registry, &config.snapshot_registry, tid)
                             } else if query.trim() == "?library" {
-                                crate::library::query_library(&session.program, session.library_state.as_ref())
+                                crate::library::query_library(&session.program, session.meta.library_state.as_ref())
                             } else {
                                 let table = crate::typeck::build_symbol_table(&session.program);
                                 crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
@@ -1328,7 +1328,7 @@ pub async fn ask(
                                         };
                                         match crate::eval::eval_compiled_or_interpreted_cached(
                                             &session.program, &fn_name, &input_expr,
-                                            Some(&watch_jit_cache), session.revision,
+                                            Some(&watch_jit_cache), session.meta.revision,
                                         ) {
                                             Ok((r, _)) => r,
                                             Err(e) => format!("error: {e}"),
@@ -1460,21 +1460,21 @@ pub async fn ask(
                                 let conflicts = branch.merge_into(&mut session);
                                 if conflicts.is_empty() {
                                     eprintln!("[agent:{agent_name}] merged successfully");
-                                    session.chat_messages.push(crate::session::ChatMessage {
+                                    session.meta.chat_messages.push(crate::session::ChatMessage {
                                         role: "system".to_string(),
                                         content: format!("Agent '{agent_name}' completed and merged successfully."),
                                     });
-                                    if let Some(s) = session.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                    if let Some(s) = session.meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
                                         s.status = "merged".to_string();
                                         s.message = "completed and merged".to_string();
                                     }
                                 } else {
                                     eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
-                                    session.chat_messages.push(crate::session::ChatMessage {
+                                    session.meta.chat_messages.push(crate::session::ChatMessage {
                                         role: "system".to_string(),
                                         content: format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
                                     });
-                                    if let Some(s) = session.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                    if let Some(s) = session.meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
                                         s.status = "conflict".to_string();
                                         s.message = conflicts.join("; ");
                                     }
@@ -1487,7 +1487,7 @@ pub async fn ask(
                             });
 
                             session = config.session.lock().await;
-                            session.agent_log.push(crate::session::AgentStatus {
+                            session.meta.agent_log.push(crate::session::AgentStatus {
                                 name: name.clone(),
                                 task: task.chars().take(100).collect(),
                                 scope: scope.clone(),
@@ -1631,15 +1631,15 @@ pub async fn ask(
         let mut session = config.session.lock().await;
         let summary = format!("{}\n{}", reply_text.chars().take(200).collect::<String>(),
             all_results.iter().map(|r| format!("{}: {}", if r.success {"OK"} else {"ERR"}, r.message)).collect::<Vec<_>>().join("\n"));
-        session.chat_messages.push(crate::session::ChatMessage {
+        session.meta.chat_messages.push(crate::session::ChatMessage {
             role: "assistant".to_string(), content: summary,
         });
-        if session.chat_messages.len() > 50 {
-            let system = session.chat_messages[0].clone();
-            let start = session.chat_messages.len() - 49;
-            let keep: Vec<_> = session.chat_messages[start..].to_vec();
-            session.chat_messages = vec![system];
-            session.chat_messages.extend(keep);
+        if session.meta.chat_messages.len() > 50 {
+            let system = session.meta.chat_messages[0].clone();
+            let start = session.meta.chat_messages.len() - 49;
+            let keep: Vec<_> = session.meta.chat_messages[start..].to_vec();
+            session.meta.chat_messages = vec![system];
+            session.meta.chat_messages.extend(keep);
         }
     }
 
@@ -1782,7 +1782,7 @@ pub struct OpenCodeResponse {
 /// Build the full router with LLM support.
 pub async fn agents(State(session): State<SharedSession>) -> Json<Vec<crate::session::AgentStatus>> {
     let session = session.lock().await;
-    Json(session.agent_log.clone())
+    Json(session.meta.agent_log.clone())
 }
 
 /// SSE streaming version of /api/ask — streams events as they happen.
@@ -1815,12 +1815,12 @@ pub async fn ask_stream(
 
         let mut messages = {
             let mut session = config_clone.session.lock().await;
-            if session.chat_messages.is_empty() {
-                session.chat_messages.push(crate::session::ChatMessage {
+            if session.meta.chat_messages.is_empty() {
+                session.meta.chat_messages.push(crate::session::ChatMessage {
                     role: "system".to_string(), content: system_prompt,
                 });
             }
-            let (plan_ctx, needs_plan) = build_plan_context(&session.plan);
+            let (plan_ctx, needs_plan) = build_plan_context(&session.meta.plan);
             let plan_hint = if needs_plan {
                 "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
             } else { "" };
@@ -1829,10 +1829,10 @@ pub async fn ask_stream(
                 crate::validator::program_summary_compact(&session.program),
                 plan_ctx, req.message, plan_hint);
             log_activity(&config_clone.log_file, "user", &context).await;
-            session.chat_messages.push(crate::session::ChatMessage {
+            session.meta.chat_messages.push(crate::session::ChatMessage {
                 role: "user".to_string(), content: context,
             });
-            session.chat_messages.iter().map(|m| match m.role.as_str() {
+            session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
                 "system" => crate::llm::ChatMessage::system(m.content.clone()),
                 "assistant" => crate::llm::ChatMessage::assistant(&m.content),
                 _ => crate::llm::ChatMessage::user(m.content.clone()),
@@ -1960,19 +1960,19 @@ pub async fn ask_stream(
                         if let crate::parser::Operation::Plan(action) = op {
                             match action {
                                 crate::parser::PlanAction::Set(steps) => {
-                                    session.plan = steps.iter().map(|s| crate::session::PlanStep {
+                                    session.meta.plan = steps.iter().map(|s| crate::session::PlanStep {
                                         description: s.clone(), status: crate::session::PlanStatus::Pending,
                                     }).collect();
-                                    let plan_json: Vec<serde_json::Value> = session.plan.iter().map(|s| {
+                                    let plan_json: Vec<serde_json::Value> = session.meta.plan.iter().map(|s| {
                                         serde_json::json!({"description": s.description, "status": format!("{:?}", s.status).to_lowercase()})
                                     }).collect();
                                     let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
                                     let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Plan: {} steps", steps.len()), "success": true})).await;
                                 }
                                 crate::parser::PlanAction::Progress(n) => {
-                                    if let Some(step) = session.plan.get_mut(n.saturating_sub(1)) {
+                                    if let Some(step) = session.meta.plan.get_mut(n.saturating_sub(1)) {
                                         step.status = crate::session::PlanStatus::Done;
-                                        let plan_json: Vec<serde_json::Value> = session.plan.iter().map(|s| {
+                                        let plan_json: Vec<serde_json::Value> = session.meta.plan.iter().map(|s| {
                                             serde_json::json!({"description": s.description, "status": format!("{:?}", s.status).to_lowercase()})
                                         }).collect();
                                         let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
@@ -2029,7 +2029,7 @@ pub async fn ask_stream(
                                             let program = session.program.clone();
                                             let fn_name = test.function_name.clone();
                                             let case = case.clone();
-                                            let mocks = session.io_mocks.clone();
+                                            let mocks = session.meta.io_mocks.clone();
                                             let routes = session.runtime.http_routes.clone();
                                             let sender = sender.clone();
                                             drop(session);
@@ -2040,12 +2040,12 @@ pub async fn ask_stream(
                                             result
                                         } else {
                                             crate::eval::eval_test_case_with_mocks(
-                                                &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
+                                                &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
                                             )
                                         }
                                     } else {
                                         crate::eval::eval_test_case_with_mocks(
-                                            &session.program, &test.function_name, case, &session.io_mocks, &session.runtime.http_routes,
+                                            &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
                                         )
                                     };
                                     match case_result {
@@ -2135,7 +2135,7 @@ pub async fn ask_stream(
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": "async not available", "function": ev.function_name, "success": false})).await;
                                     }
                                 } else {
-                                    match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config_clone.jit_cache), session.revision) {
+                                    match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config_clone.jit_cache), session.meta.revision) {
                                         Ok((result, compiled)) => {
                                             let tag = if compiled { " [compiled]" } else { "" };
                                             feedback_details.push(format!("eval {}() = {result}{tag}", ev.function_name));
@@ -2162,7 +2162,7 @@ pub async fn ask_stream(
                                 } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
                                     format_inspect_task(&config_clone.task_registry, &config_clone.snapshot_registry, tid)
                                 } else if query.trim() == "?library" {
-                                    crate::library::query_library(&session.program, session.library_state.as_ref())
+                                    crate::library::query_library(&session.program, session.meta.library_state.as_ref())
                                 } else {
                                     let table = crate::typeck::build_symbol_table(&session.program);
                                     crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
@@ -2253,15 +2253,15 @@ pub async fn ask_stream(
                             }
                             crate::parser::Operation::Mock { operation, patterns, response } => {
                                 let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                                session.io_mocks.push(crate::session::IoMock {
+                                session.meta.io_mocks.push(crate::session::IoMock {
                                     operation: operation.clone(), patterns: patterns.clone(), response: response.clone(),
                                 });
                                 feedback_details.push(format!("mock: {operation} {pattern_display}"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} {pattern_display}"), "success": true})).await;
                             }
                             crate::parser::Operation::Unmock => {
-                                let count = session.io_mocks.len();
-                                session.io_mocks.clear();
+                                let count = session.meta.io_mocks.len();
+                                session.meta.io_mocks.clear();
                                 feedback_details.push(format!("cleared {count} mocks"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("cleared {count} mocks"), "success": true})).await;
                             }
@@ -2286,7 +2286,7 @@ pub async fn ask_stream(
                                 // Get existing OpenCode session ID to continue building on top
                                 let oc_session_id = {
                                     let s = config_clone.session.lock().await;
-                                    s.opencode_session_id.clone()
+                                    s.meta.opencode_session_id.clone()
                                 };
 
                                 let recent_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2368,8 +2368,8 @@ pub async fn ask_stream(
                                                         // Capture session ID for reuse
                                                         if let Some(sid) = event.get("sessionID").and_then(|s| s.as_str()) {
                                                             let mut s = config_clone.session.lock().await;
-                                                            if s.opencode_session_id.as_deref() != Some(sid) {
-                                                                s.opencode_session_id = Some(sid.to_string());
+                                                            if s.meta.opencode_session_id.as_deref() != Some(sid) {
+                                                                s.meta.opencode_session_id = Some(sid.to_string());
                                                                 eprintln!("[opencode] session ID: {sid}");
                                                             }
                                                         }
@@ -2396,7 +2396,7 @@ pub async fn ask_stream(
                                             // Clear session ID
                                             {
                                                 let mut s = config_clone.session.lock().await;
-                                                s.opencode_session_id = None;
+                                                s.meta.opencode_session_id = None;
                                             }
                                             // Retry without --session/--fork
                                             let recent_for_retry = recent_lines.clone();
@@ -2439,8 +2439,8 @@ pub async fn ask_stream(
                                                             // Capture new session ID
                                                             if let Some(sid) = event.get("sessionID").and_then(|s| s.as_str()) {
                                                                 let mut s = config_clone.session.lock().await;
-                                                                if s.opencode_session_id.is_none() {
-                                                                    s.opencode_session_id = Some(sid.to_string());
+                                                                if s.meta.opencode_session_id.is_none() {
+                                                                    s.meta.opencode_session_id = Some(sid.to_string());
                                                                 }
                                                             }
                                                             let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -2623,7 +2623,7 @@ pub async fn ask_stream(
                             } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
                                 format_inspect_task(&config_clone.task_registry, &config_clone.snapshot_registry, tid)
                             } else if query.trim() == "?library" {
-                                crate::library::query_library(&session.program, session.library_state.as_ref())
+                                crate::library::query_library(&session.program, session.meta.library_state.as_ref())
                             } else if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
                                 let msgs = session.peek_messages("main");
                                 if msgs.is_empty() { "No messages.".to_string() }
@@ -2672,11 +2672,11 @@ pub async fn ask_stream(
             // Build plan status summary for feedback
             let plan_summary = {
                 let session = config_clone.session.lock().await;
-                let in_progress: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::InProgress)).collect();
-                let pending: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending)).collect();
-                let failed: Vec<_> = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Failed)).collect();
-                let total = session.plan.len();
-                let done = session.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Done)).count();
+                let in_progress: Vec<_> = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::InProgress)).collect();
+                let pending: Vec<_> = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending)).collect();
+                let failed: Vec<_> = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Failed)).collect();
+                let total = session.meta.plan.len();
+                let done = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Done)).count();
                 if total == 0 {
                     "No plan set. Create one with !plan set.".to_string()
                 } else if pending.is_empty() && in_progress.is_empty() && failed.is_empty() {

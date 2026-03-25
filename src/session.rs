@@ -73,11 +73,10 @@ pub enum HistoryEntry {
     },
 }
 
-/// A Forge session — program state + mutation log + working history.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Session {
-    /// Current program state
-    pub program: ast::Program,
+/// Session metadata — mutation log, working history, conversation, and configuration.
+/// Separated from the core program AST and runtime for Tier 3 modularity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMeta {
     /// Append-only mutation log
     pub mutations: Vec<MutationEntry>,
     /// Working history (evals, tests, queries)
@@ -101,19 +100,47 @@ pub struct Session {
     /// Agent message bus: agent_name → inbox of pending messages
     #[serde(default)]
     pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
-
     /// OpenCode session ID — reused across !opencode calls to maintain context
     #[serde(default)]
     pub opencode_session_id: Option<String>,
     /// IO mock table: (operation, url_pattern) -> response. Used during !test.
     #[serde(default)]
     pub io_mocks: Vec<IoMock>,
-    /// Runtime state (Tier 2): HTTP routes, shared variables. Serialized with session.
-    #[serde(default)]
-    pub runtime: RuntimeState,
     /// Library state — tracks loaded modules and errors. Not serialized.
     #[serde(skip)]
     pub library_state: Option<crate::library::LibraryState>,
+}
+
+impl SessionMeta {
+    pub fn new() -> Self {
+        Self {
+            mutations: Vec::new(),
+            history: Vec::new(),
+            revision: 0,
+            sources: Vec::new(),
+            chat_messages: Vec::new(),
+            agent_log: Vec::new(),
+            roadmap: Vec::new(),
+            plan: Vec::new(),
+            agent_mailbox: HashMap::new(),
+            opencode_session_id: None,
+            io_mocks: Vec::new(),
+            library_state: None,
+        }
+    }
+}
+
+/// A Forge session — program state + runtime + metadata.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Session {
+    /// Current program state
+    pub program: ast::Program,
+    /// Runtime state (Tier 2): HTTP routes, shared variables. Serialized with session.
+    #[serde(default)]
+    pub runtime: RuntimeState,
+    /// Session metadata: mutation log, history, conversation, mocks, etc.
+    #[serde(flatten)]
+    pub meta: SessionMeta,
 }
 
 /// A long-term roadmap item.
@@ -256,7 +283,7 @@ impl AgentBranch {
             name: name.to_string(),
             scope,
             task: task.to_string(),
-            fork_revision: session.revision,
+            fork_revision: session.meta.revision,
             program: session.program.clone(),
             mutations: Vec::new(),
             runtime_state,
@@ -351,19 +378,8 @@ impl Session {
     pub fn new() -> Self {
         Self {
             program: ast::Program::default(),
-            mutations: Vec::new(),
-            chat_messages: Vec::new(),
-            agent_log: Vec::new(),
-            plan: Vec::new(),
-            history: Vec::new(),
-            revision: 0,
-            sources: Vec::new(),
-            agent_mailbox: HashMap::new(),
-            opencode_session_id: None,
-            io_mocks: Vec::new(),
-            roadmap: Vec::new(),
             runtime: RuntimeState::default(),
-            library_state: None,
+            meta: SessionMeta::new(),
         }
     }
 
@@ -375,7 +391,7 @@ impl Session {
             content: content.to_string(),
             timestamp: now(),
         };
-        self.agent_mailbox
+        self.meta.agent_mailbox
             .entry(to.to_string())
             .or_default()
             .push(msg);
@@ -383,12 +399,12 @@ impl Session {
 
     /// Drain all pending messages for an agent.
     pub fn drain_messages(&mut self, agent_name: &str) -> Vec<AgentMessage> {
-        self.agent_mailbox.remove(agent_name).unwrap_or_default()
+        self.meta.agent_mailbox.remove(agent_name).unwrap_or_default()
     }
 
     /// Peek at pending messages without removing them.
     pub fn peek_messages(&self, agent_name: &str) -> &[AgentMessage] {
-        self.agent_mailbox
+        self.meta.agent_mailbox
             .get(agent_name)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
@@ -630,7 +646,7 @@ impl Session {
                                     &self.program,
                                     &test.function_name,
                                     case,
-                                    &self.io_mocks,
+                                    &self.meta.io_mocks,
                                     &self.runtime.http_routes,
                                 ) {
                                     Ok(msg) => {
@@ -715,7 +731,7 @@ impl Session {
                             &self.program,
                             &test.function_name,
                             case,
-                            &self.io_mocks,
+                            &self.meta.io_mocks,
                             &self.runtime.http_routes,
                         ) {
                             Ok(msg) => results.push((format!("PASS: {msg}"), true)),
@@ -736,7 +752,7 @@ impl Session {
                 }
                 parser::Operation::Plan(action) => match action {
                     parser::PlanAction::Set(steps) => {
-                        self.plan = steps
+                        self.meta.plan = steps
                             .iter()
                             .map(|s| PlanStep {
                                 description: s.clone(),
@@ -746,20 +762,20 @@ impl Session {
                         results.push((format!("Plan: {} steps", steps.len()), true));
                     }
                     parser::PlanAction::Progress(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Done;
                             results.push((format!("Step {n} done"), true));
                         }
                     }
                     parser::PlanAction::Fail(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Failed;
                             results.push((format!("Step {n} failed"), true));
                         }
                     }
                     parser::PlanAction::Show => {
                         let plan_str = self
-                            .plan
+                            .meta.plan
                             .iter()
                             .enumerate()
                             .map(|(i, s)| {
@@ -790,7 +806,7 @@ impl Session {
                     response,
                 } => {
                     let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                    self.io_mocks.push(IoMock {
+                    self.meta.io_mocks.push(IoMock {
                         operation: operation.clone(),
                         patterns: patterns.clone(),
                         response: response.clone(),
@@ -804,8 +820,8 @@ impl Session {
                     ));
                 }
                 parser::Operation::Unmock => {
-                    let count = self.io_mocks.len();
-                    self.io_mocks.clear();
+                    let count = self.meta.io_mocks.len();
+                    self.meta.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
                 }
                 parser::Operation::Route { method, path, handler_fn } => {
@@ -858,24 +874,24 @@ impl Session {
         };
 
         if any_definition {
-            self.revision += 1;
-            self.mutations.push(MutationEntry {
-                revision: self.revision,
+            self.meta.revision += 1;
+            self.meta.mutations.push(MutationEntry {
+                revision: self.meta.revision,
                 timestamp: now(),
                 source: source.to_string(),
                 summary,
                 success,
             });
-            self.sources.push(source.to_string());
+            self.meta.sources.push(source.to_string());
 
             // Persist affected modules to the library
             let affected = crate::library::affected_module_names(&operations);
-            eprintln!("[library] apply: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.library_state.is_some());
+            eprintln!("[library] apply: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.meta.library_state.is_some());
             if success && !affected.is_empty() {
                 crate::library::persist_affected_modules(
                     &self.program,
                     &affected,
-                    self.library_state.as_ref(),
+                    self.meta.library_state.as_ref(),
                 );
             }
         }
@@ -918,7 +934,7 @@ impl Session {
                                     &self.program,
                                     &test.function_name,
                                     case,
-                                    &self.io_mocks,
+                                    &self.meta.io_mocks,
                                     sender.clone(),
                                     &self.runtime.http_routes,
                                 )
@@ -928,7 +944,7 @@ impl Session {
                                     &self.program,
                                     &test.function_name,
                                     case,
-                                    &self.io_mocks,
+                                    &self.meta.io_mocks,
                                     &self.runtime.http_routes,
                                 )
                             }
@@ -937,7 +953,7 @@ impl Session {
                                 &self.program,
                                 &test.function_name,
                                 case,
-                                &self.io_mocks,
+                                &self.meta.io_mocks,
                                 &self.runtime.http_routes,
                             )
                         };
@@ -959,7 +975,7 @@ impl Session {
                 | parser::Operation::Query(_) => {}
                 parser::Operation::Plan(action) => match action {
                     parser::PlanAction::Set(steps) => {
-                        self.plan = steps
+                        self.meta.plan = steps
                             .iter()
                             .map(|s| PlanStep {
                                 description: s.clone(),
@@ -969,20 +985,20 @@ impl Session {
                         results.push((format!("Plan: {} steps", steps.len()), true));
                     }
                     parser::PlanAction::Progress(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Done;
                             results.push((format!("Step {n} done"), true));
                         }
                     }
                     parser::PlanAction::Fail(n) => {
-                        if let Some(step) = self.plan.get_mut(n.saturating_sub(1)) {
+                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
                             step.status = PlanStatus::Failed;
                             results.push((format!("Step {n} failed"), true));
                         }
                     }
                     parser::PlanAction::Show => {
                         let plan_str = self
-                            .plan
+                            .meta.plan
                             .iter()
                             .enumerate()
                             .map(|(i, s)| {
@@ -1013,7 +1029,7 @@ impl Session {
                     response,
                 } => {
                     let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                    self.io_mocks.push(IoMock {
+                    self.meta.io_mocks.push(IoMock {
                         operation: operation.clone(),
                         patterns: patterns.clone(),
                         response: response.clone(),
@@ -1027,8 +1043,8 @@ impl Session {
                     ));
                 }
                 parser::Operation::Unmock => {
-                    let count = self.io_mocks.len();
-                    self.io_mocks.clear();
+                    let count = self.meta.io_mocks.len();
+                    self.meta.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
                 }
                 parser::Operation::Route { method, path, handler_fn } => {
@@ -1081,24 +1097,24 @@ impl Session {
         };
 
         if any_definition {
-            self.revision += 1;
-            self.mutations.push(MutationEntry {
-                revision: self.revision,
+            self.meta.revision += 1;
+            self.meta.mutations.push(MutationEntry {
+                revision: self.meta.revision,
                 timestamp: now(),
                 source: source.to_string(),
                 summary,
                 success,
             });
-            self.sources.push(source.to_string());
+            self.meta.sources.push(source.to_string());
 
             // Persist affected modules to the library
             let affected = crate::library::affected_module_names(&operations);
-            eprintln!("[library] apply_async: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.library_state.is_some());
+            eprintln!("[library] apply_async: any_definition={any_definition} success={success} affected={affected:?} lib_state={}", self.meta.library_state.is_some());
             if success && !affected.is_empty() {
                 crate::library::persist_affected_modules(
                     &self.program,
                     &affected,
-                    self.library_state.as_ref(),
+                    self.meta.library_state.as_ref(),
                 );
             }
         }
@@ -1117,8 +1133,8 @@ impl Session {
 
     /// Record an eval in the working history.
     pub fn record_eval(&mut self, function: &str, input: &str, result: &str) {
-        self.history.push(HistoryEntry::Eval {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Eval {
+            revision: self.meta.revision,
             function: function.to_string(),
             input: input.to_string(),
             result: result.to_string(),
@@ -1133,8 +1149,8 @@ impl Session {
         failed: usize,
         details: Vec<String>,
     ) {
-        self.history.push(HistoryEntry::Test {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Test {
+            revision: self.meta.revision,
             function: function.to_string(),
             passed,
             failed,
@@ -1144,8 +1160,8 @@ impl Session {
 
     /// Record a query in the working history.
     pub fn record_query(&mut self, query: &str, response: &str) {
-        self.history.push(HistoryEntry::Query {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Query {
+            revision: self.meta.revision,
             query: query.to_string(),
             response: response.to_string(),
         });
@@ -1153,8 +1169,8 @@ impl Session {
 
     /// Record a trace in the working history.
     pub fn record_trace(&mut self, function: &str, steps: usize) {
-        self.history.push(HistoryEntry::Trace {
-            revision: self.revision,
+        self.meta.history.push(HistoryEntry::Trace {
+            revision: self.meta.revision,
             function: function.to_string(),
             steps,
         });
@@ -1162,17 +1178,17 @@ impl Session {
 
     /// Replay mutations up to a specific revision, reconstructing program state.
     pub fn rewind_to(&mut self, target_revision: usize) -> Result<()> {
-        if target_revision > self.sources.len() {
+        if target_revision > self.meta.sources.len() {
             return Err(anyhow!(
                 "revision {} doesn't exist (latest is {})",
                 target_revision,
-                self.sources.len()
+                self.meta.sources.len()
             ));
         }
 
         // Rebuild from scratch
         self.program = ast::Program::default();
-        for source in &self.sources[..target_revision] {
+        for source in &self.meta.sources[..target_revision] {
             let operations = parser::parse(source)?;
             for op in &operations {
                 match op {
@@ -1186,7 +1202,7 @@ impl Session {
                 }
             }
         }
-        self.revision = target_revision;
+        self.meta.revision = target_revision;
         Ok(())
     }
 
@@ -1196,8 +1212,8 @@ impl Session {
         out.push_str("=== Recent History ===\n");
 
         // Show last N mutations
-        let start = self.mutations.len().saturating_sub(max_entries);
-        for entry in &self.mutations[start..] {
+        let start = self.meta.mutations.len().saturating_sub(max_entries);
+        for entry in &self.meta.mutations[start..] {
             let status = if entry.success { "OK" } else { "ERR" };
             out.push_str(&format!(
                 "[rev {}] {} — {}\n",
@@ -1206,8 +1222,8 @@ impl Session {
         }
 
         // Show last N history entries
-        let start = self.history.len().saturating_sub(max_entries);
-        for entry in &self.history[start..] {
+        let start = self.meta.history.len().saturating_sub(max_entries);
+        for entry in &self.meta.history[start..] {
             match entry {
                 HistoryEntry::Eval {
                     revision,
@@ -1272,25 +1288,25 @@ impl Session {
     fn handle_roadmap(&mut self, action: &parser::RoadmapAction) -> (String, bool) {
         match action {
             parser::RoadmapAction::Show => {
-                let items = self.roadmap.iter().enumerate().map(|(i, item)| {
+                let items = self.meta.roadmap.iter().enumerate().map(|(i, item)| {
                     format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
                 }).collect::<Vec<_>>().join("\n");
                 (if items.is_empty() { "Roadmap is empty.".to_string() } else { format!("Roadmap:\n{items}") }, true)
             }
             parser::RoadmapAction::Add(desc) => {
-                self.roadmap.push(RoadmapItem { description: desc.clone(), done: false });
-                (format!("Roadmap: added \"{}\" (#{}).", desc, self.roadmap.len()), true)
+                self.meta.roadmap.push(RoadmapItem { description: desc.clone(), done: false });
+                (format!("Roadmap: added \"{}\" (#{}).", desc, self.meta.roadmap.len()), true)
             }
             parser::RoadmapAction::Done(n) => {
-                if let Some(item) = self.roadmap.get_mut(n.saturating_sub(1)) {
+                if let Some(item) = self.meta.roadmap.get_mut(n.saturating_sub(1)) {
                     item.done = true;
                     (format!("Roadmap: #{n} done."), true)
                 } else { (format!("Roadmap: #{n} not found."), false) }
             }
             parser::RoadmapAction::Remove(n) => {
                 let idx = n.saturating_sub(1);
-                if idx < self.roadmap.len() {
-                    let removed = self.roadmap.remove(idx);
+                if idx < self.meta.roadmap.len() {
+                    let removed = self.meta.roadmap.remove(idx);
                     (format!("Roadmap: removed \"{}\".", removed.description), true)
                 } else { (format!("Roadmap: #{n} not found."), false) }
             }
