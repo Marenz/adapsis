@@ -820,3 +820,430 @@ pub fn is_io_builtin(name: &str) -> bool {
         .iter()
         .any(|b| b.name == name || b.aliases.contains(&name))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Registry non-empty and well-formed
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtins_registry_not_empty() {
+        assert!(!BUILTINS.is_empty(), "BUILTINS should not be empty");
+        assert!(!IO_BUILTINS.is_empty(), "IO_BUILTINS should not be empty");
+        assert!(!QUERIES.is_empty(), "QUERIES should not be empty");
+        assert!(!ACTIONS.is_empty(), "ACTIONS should not be empty");
+    }
+
+    #[test]
+    fn builtins_have_names_and_descriptions() {
+        for b in BUILTINS {
+            assert!(!b.name.is_empty(), "builtin name should not be empty");
+            assert!(
+                !b.short.is_empty(),
+                "builtin '{}' should have a short description",
+                b.name
+            );
+        }
+    }
+
+    #[test]
+    fn io_builtins_have_names_and_descriptions() {
+        for b in IO_BUILTINS {
+            assert!(!b.name.is_empty(), "IO builtin name should not be empty");
+            assert!(
+                !b.short.is_empty(),
+                "IO builtin '{}' should have a short description",
+                b.name
+            );
+        }
+    }
+
+    #[test]
+    fn queries_have_names() {
+        for q in QUERIES {
+            assert!(!q.name.is_empty(), "query name should not be empty");
+            assert!(
+                q.name.starts_with('?'),
+                "query '{}' should start with ?",
+                q.name
+            );
+        }
+    }
+
+    #[test]
+    fn actions_have_names() {
+        for a in ACTIONS {
+            assert!(!a.name.is_empty(), "action name should not be empty");
+            assert!(
+                a.name.starts_with('!'),
+                "action '{}' should start with !",
+                a.name
+            );
+        }
+    }
+
+    #[test]
+    fn no_duplicate_builtin_names() {
+        let mut seen = std::collections::HashSet::new();
+        for b in BUILTINS {
+            assert!(seen.insert(b.name), "duplicate builtin: {}", b.name);
+        }
+    }
+
+    #[test]
+    fn no_duplicate_io_builtin_names() {
+        let mut seen = std::collections::HashSet::new();
+        for b in IO_BUILTINS {
+            assert!(seen.insert(b.name), "duplicate IO builtin: {}", b.name);
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Specific builtins are registered
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn core_string_builtins_registered() {
+        for name in &[
+            "concat",
+            "len",
+            "substring",
+            "split",
+            "join",
+            "trim",
+            "starts_with",
+            "ends_with",
+            "contains",
+            "index_of",
+            "char_at",
+        ] {
+            assert!(
+                is_builtin(name),
+                "core string builtin '{name}' should be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn core_math_builtins_registered() {
+        for name in &["abs", "min", "max", "pow", "floor", "sqrt"] {
+            assert!(
+                is_builtin(name),
+                "core math builtin '{name}' should be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn core_list_builtins_registered() {
+        for name in &["list", "push", "get", "join"] {
+            assert!(
+                is_builtin(name),
+                "core list builtin '{name}' should be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn core_conversion_builtins_registered() {
+        for name in &["to_string", "to_int", "to_hex"] {
+            assert!(
+                is_builtin(name),
+                "core conversion builtin '{name}' should be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn core_bitwise_builtins_registered() {
+        for name in &[
+            "bit_and",
+            "bit_or",
+            "bit_xor",
+            "bit_not",
+            "shl",
+            "shr",
+            "left_rotate",
+        ] {
+            assert!(
+                is_builtin(name),
+                "core bitwise builtin '{name}' should be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn result_constructors_registered() {
+        assert!(is_builtin("Ok"), "Ok should be registered");
+        assert!(is_builtin("Err"), "Err should be registered");
+        assert!(is_builtin("Some"), "Some should be registered");
+    }
+
+    #[test]
+    fn regex_builtins_registered() {
+        assert!(is_builtin("regex_match"));
+        assert!(is_builtin("regex_replace"));
+    }
+
+    #[test]
+    fn json_builtins_registered() {
+        assert!(is_builtin("json_get"));
+        assert!(is_builtin("json_array_len"));
+        assert!(is_builtin("json_escape"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // IO builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn io_builtins_registered() {
+        for name in &[
+            "http_get",
+            "http_post",
+            "shell_exec",
+            "file_read",
+            "file_write",
+            "llm_call",
+            "sleep",
+            "print",
+            "println",
+        ] {
+            assert!(
+                is_io_builtin(name),
+                "IO builtin '{name}' should be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_builtins_registered() {
+        for name in &[
+            "tcp_connect",
+            "tcp_listen",
+            "tcp_accept",
+            "tcp_read",
+            "tcp_write",
+            "tcp_close",
+        ] {
+            assert!(
+                is_io_builtin(name),
+                "TCP builtin '{name}' should be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn io_builtins_are_also_builtins() {
+        // is_builtin should return true for IO builtins too
+        for name in &["http_get", "shell_exec", "llm_call"] {
+            assert!(
+                is_builtin(name),
+                "IO builtin '{name}' should also return true for is_builtin"
+            );
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // is_builtin / is_io_builtin lookup
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn is_builtin_false_for_unknown() {
+        assert!(!is_builtin("nonexistent_function"));
+        assert!(!is_builtin(""));
+        assert!(!is_builtin("my_custom_fn"));
+    }
+
+    #[test]
+    fn is_io_builtin_false_for_sync_builtins() {
+        assert!(!is_io_builtin("concat"));
+        assert!(!is_io_builtin("len"));
+        assert!(!is_io_builtin("abs"));
+    }
+
+    #[test]
+    fn is_io_builtin_false_for_unknown() {
+        assert!(!is_io_builtin("nonexistent"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Alias lookup
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn aliases_work_for_is_builtin() {
+        // substring has alias "substr"
+        assert!(is_builtin("substr"), "alias 'substr' should resolve");
+        // to_string has alias "str"
+        assert!(is_builtin("str"), "alias 'str' should resolve");
+        // to_int has aliases "parse_int", "int"
+        assert!(is_builtin("parse_int"), "alias 'parse_int' should resolve");
+        assert!(is_builtin("int"), "alias 'int' should resolve");
+    }
+
+    #[test]
+    fn aliases_included_in_all_builtin_names() {
+        let names = all_builtin_names();
+        assert!(
+            names.contains(&"substr"),
+            "all_builtin_names should include alias 'substr'"
+        );
+        assert!(
+            names.contains(&"str"),
+            "all_builtin_names should include alias 'str'"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // all_builtin_names
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn all_builtin_names_includes_sync_and_io() {
+        let names = all_builtin_names();
+        // Sync builtins
+        assert!(names.contains(&"concat"));
+        assert!(names.contains(&"len"));
+        // IO builtins
+        assert!(names.contains(&"http_get"));
+        assert!(names.contains(&"shell_exec"));
+    }
+
+    #[test]
+    fn all_builtin_names_no_empty_entries() {
+        let names = all_builtin_names();
+        for name in &names {
+            assert!(
+                !name.is_empty(),
+                "all_builtin_names should not contain empty strings"
+            );
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Builtin categories
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn builtin_categories_correct() {
+        let concat = BUILTINS.iter().find(|b| b.name == "concat").unwrap();
+        assert!(
+            concat.category == BuiltinCategory::String,
+            "concat should be String category"
+        );
+
+        let abs = BUILTINS.iter().find(|b| b.name == "abs").unwrap();
+        assert!(
+            abs.category == BuiltinCategory::Math,
+            "abs should be Math category"
+        );
+
+        let list = BUILTINS.iter().find(|b| b.name == "list").unwrap();
+        assert!(
+            list.category == BuiltinCategory::List,
+            "list should be List category"
+        );
+
+        let bit_and = BUILTINS.iter().find(|b| b.name == "bit_and").unwrap();
+        assert!(
+            bit_and.category == BuiltinCategory::Bitwise,
+            "bit_and should be Bitwise category"
+        );
+
+        let to_string = BUILTINS.iter().find(|b| b.name == "to_string").unwrap();
+        assert!(
+            to_string.category == BuiltinCategory::Conversion,
+            "to_string should be Conversion category"
+        );
+
+        let ok = BUILTINS.iter().find(|b| b.name == "Ok").unwrap();
+        assert!(
+            ok.category == BuiltinCategory::Result,
+            "Ok should be Result category"
+        );
+
+        let regex_match = BUILTINS.iter().find(|b| b.name == "regex_match").unwrap();
+        assert!(
+            regex_match.category == BuiltinCategory::Regex,
+            "regex_match should be Regex category"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // format_for_prompt
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn format_for_prompt_includes_all_sections() {
+        let prompt = format_for_prompt();
+        assert!(
+            prompt.contains("### Built-in Functions"),
+            "should have builtins section"
+        );
+        assert!(
+            prompt.contains("### IO Functions"),
+            "should have IO section"
+        );
+        assert!(
+            prompt.contains("### Queries"),
+            "should have queries section"
+        );
+        assert!(
+            prompt.contains("### Commands"),
+            "should have commands section"
+        );
+    }
+
+    #[test]
+    fn format_for_prompt_includes_specific_builtins() {
+        let prompt = format_for_prompt();
+        assert!(prompt.contains("concat"), "prompt should mention concat");
+        assert!(
+            prompt.contains("http_get"),
+            "prompt should mention http_get"
+        );
+        assert!(
+            prompt.contains("?symbols"),
+            "prompt should mention ?symbols"
+        );
+        assert!(prompt.contains("!eval"), "prompt should mention !eval");
+    }
+
+    #[test]
+    fn format_for_prompt_includes_aliases() {
+        let prompt = format_for_prompt();
+        assert!(prompt.contains("substr"), "prompt should show substr alias");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Specific action/query registration
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn key_actions_registered() {
+        let action_names: Vec<&str> = ACTIONS.iter().map(|a| a.name).collect();
+        assert!(action_names.contains(&"!eval"));
+        assert!(action_names.contains(&"!test"));
+        assert!(action_names.contains(&"!module"));
+        assert!(action_names.contains(&"!remove"));
+        assert!(action_names.contains(&"!replace"));
+        assert!(action_names.contains(&"!plan"));
+        assert!(action_names.contains(&"!roadmap"));
+        assert!(action_names.contains(&"!done"));
+        assert!(action_names.contains(&"!mock"));
+        assert!(action_names.contains(&"!unmock"));
+    }
+
+    #[test]
+    fn key_queries_registered() {
+        let query_names: Vec<&str> = QUERIES.iter().map(|q| q.name).collect();
+        assert!(query_names.contains(&"?symbols"));
+        assert!(query_names.contains(&"?source"));
+        assert!(query_names.contains(&"?deps"));
+        assert!(query_names.contains(&"?tasks"));
+    }
+}
