@@ -52,6 +52,15 @@ impl AppConfig {
             rt.roadmap = session.meta.roadmap.clone();
         }
     }
+
+    /// Sync runtime changes (roadmap, shared_vars) back into the session shim.
+    /// Call after eval/test that may have called roadmap_add/roadmap_done builtins.
+    pub fn sync_runtime_to_session(&self, session: &mut Session) {
+        if let Ok(rt) = self.runtime.read() {
+            session.meta.roadmap = rt.roadmap.clone();
+            session.runtime.shared_vars = rt.shared_vars.clone();
+        }
+    }
 }
 
 /// Thread-safe session manager: maps session IDs to independent Program instances.
