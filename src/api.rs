@@ -26,6 +26,19 @@ use crate::validator;
 
 pub type SharedSession = Arc<Mutex<Session>>;
 
+impl AppConfig {
+    /// Sync the independent tier locks from the session shim.
+    /// Call after any mutation that modifies the session (apply, store_test, plan updates, etc).
+    pub async fn sync_tiers_from_session(&self, session: &Session) {
+        *self.program.write().await = session.program.clone();
+        *self.meta.lock().await = session.meta.clone();
+        if let Ok(mut rt) = self.runtime.write() {
+            rt.shared_vars = session.runtime.shared_vars.clone();
+            rt.http_routes = session.runtime.http_routes.clone();
+        }
+    }
+}
+
 /// Thread-safe session manager: maps session IDs to independent Program instances.
 /// The "main" session uses the existing `session` field in AppConfig; additional
 /// sessions are stored here with isolated Program state.
@@ -99,18 +112,9 @@ pub async fn mutate(
     // Mutate still uses the session shim — it calls apply_async which needs
     // &mut self access to program+meta+runtime. After mutation, sync the tiers.
     let mut session = config.session.lock().await;
-    match session.apply_async(&req.source, config.io_sender.as_ref()).await {
+     match session.apply_async(&req.source, config.io_sender.as_ref()).await {
         Ok(results) => {
-            // Sync all tiers from session after mutation
-            *config.program.write().await = session.program.clone();
-            {
-                let mut meta = config.meta.lock().await;
-                *meta = session.meta.clone();
-            }
-            if let Ok(mut rt) = config.runtime.write() {
-                rt.shared_vars = session.runtime.shared_vars.clone();
-                rt.http_routes = session.runtime.http_routes.clone();
-            }
+            config.sync_tiers_from_session(&session).await;
             Json(MutateResponse {
                 revision: session.meta.revision,
                 results: results
@@ -1242,16 +1246,7 @@ pub async fn ask(
                 if has_mutations {
                     match session.apply(&code) {
                         Ok(res) => {
-                            // Sync all tiers from session after mutation
-                            *config.program.write().await = session.program.clone();
-                            {
-                                let mut meta = config.meta.lock().await;
-                                *meta = session.meta.clone();
-                            }
-                            if let Ok(mut rt) = config.runtime.write() {
-                                rt.shared_vars = session.runtime.shared_vars.clone();
-                                rt.http_routes = session.runtime.http_routes.clone();
-                            }
+                            config.sync_tiers_from_session(&session).await;
                             for (msg, ok) in res {
                                 eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
                                 if !ok { iter_has_errors = true; }
@@ -2124,16 +2119,7 @@ pub async fn ask_stream(
                     if has_mutations {
                         match session.apply(&code) {
                             Ok(res) => {
-                                // Sync all tiers from session after mutation
-                                *config_clone.program.write().await = session.program.clone();
-                                {
-                                    let mut meta = config_clone.meta.lock().await;
-                                    *meta = session.meta.clone();
-                                }
-                                if let Ok(mut rt) = config_clone.runtime.write() {
-                                    rt.shared_vars = session.runtime.shared_vars.clone();
-                                    rt.http_routes = session.runtime.http_routes.clone();
-                                }
+                                config_clone.sync_tiers_from_session(&session).await;
                                 for (msg, ok) in &res {
                                     if !*ok { has_errors = true; }
                                     feedback_details.push(format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}));
@@ -2686,9 +2672,7 @@ pub async fn ask_stream(
                                                     let mut session = config_clone.session.lock().await;
                                                     session.program = config_clone.program.read().await.clone();
                                                     session.meta = config_clone.meta.lock().await.clone();
-                                                    if let Ok(rt) = config_clone.runtime.read() {
-                                                        session.runtime = rt.clone();
-                                                    }
+                                                    if let Ok(rt) = config_clone.runtime.read() { session.runtime = rt.clone(); }
                                                     if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
                                                         let _ = session.save(std::path::Path::new(&path));
                                                     }
