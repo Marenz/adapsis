@@ -2681,9 +2681,14 @@ pub async fn ask_stream(
                                             Ok(b) if b.status.success() => {
                                                 log_activity(&config_clone.log_file, "opencode-restart", "rebuild successful, attempting restart").await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
-                                                // Save session before restart
+                                                // Save session before restart — sync tiers first
                                                 {
-                                                    let session = config_clone.session.lock().await;
+                                                    let mut session = config_clone.session.lock().await;
+                                                    session.program = config_clone.program.read().await.clone();
+                                                    session.meta = config_clone.meta.lock().await.clone();
+                                                    if let Ok(rt) = config_clone.runtime.read() {
+                                                        session.runtime = rt.clone();
+                                                    }
                                                     if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
                                                         let _ = session.save(std::path::Path::new(&path));
                                                     }
