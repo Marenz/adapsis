@@ -158,6 +158,8 @@ pub struct WhileDecl {
 pub struct EvalMutation {
     pub function_name: String,
     pub input: Expr,
+    /// When set, evaluate this expression directly instead of calling function_name.
+    pub inline_expr: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -1173,7 +1175,26 @@ impl<'a> Parser<'a> {
 
         if let Some(rest) = text.strip_prefix("!eval") {
             let rest = rest.trim();
-            // Parse: !eval function_name arg1 arg2  OR  !eval function_name key=val key=val
+
+            // First, try to parse the entire argument as an inline expression.
+            // This handles cases like: !eval 1 + 2, !eval concat("a", "b"), !eval len("hello")
+            // We accept it as inline if it parses as a complete expression AND is not
+            // a bare identifier (which would be the existing "!eval func_name" syntax).
+            if !rest.is_empty() {
+                if let Ok(expr) = parse_expr(line.number, rest) {
+                    let is_bare_ident = matches!(&expr, Expr::Ident(_));
+                    if !is_bare_ident {
+                        self.index += 1;
+                        return Ok(Operation::Eval(EvalMutation {
+                            function_name: String::new(),
+                            input: Expr::StructLiteral(vec![]),
+                            inline_expr: Some(expr),
+                        }));
+                    }
+                }
+            }
+
+            // Fall back to current behavior: function_name + arguments
             let (fn_name, input_text) = rest.split_once(' ').unwrap_or((rest, ""));
             let input = if input_text.trim().is_empty() {
                 Expr::StructLiteral(vec![])
@@ -1184,6 +1205,7 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Eval(EvalMutation {
                 function_name: fn_name.to_string(),
                 input,
+                inline_expr: None,
             }));
         }
 
@@ -1747,6 +1769,11 @@ fn parse_expr(line: usize, input: &str) -> Result<Expr> {
         );
     }
     Ok(expr)
+}
+
+/// Public wrapper for `parse_expr` — used by the API to parse inline `!eval` expressions.
+pub fn parse_expr_pub(line: usize, input: &str) -> Result<Expr> {
+    parse_expr(line, input)
 }
 
 #[derive(Clone, Debug)]

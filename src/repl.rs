@@ -101,10 +101,21 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
         if is_forge {
             // For direct Forge code, use /api/mutate or specific endpoints
             if input.starts_with("!eval ") {
-                let rest = &input[6..];
-                let (func, args) = rest.split_once(' ').unwrap_or((rest, ""));
+                let rest = &input[6..].trim();
+                // Try parsing as inline expression first
+                let is_inline = if let Ok(parsed) = crate::parser::parse_expr_pub(0, rest) {
+                    !matches!(parsed, crate::parser::Expr::Ident(_))
+                } else {
+                    false
+                };
+                let req_json = if is_inline {
+                    serde_json::json!({"function": "", "expression": rest})
+                } else {
+                    let (func, args) = rest.split_once(' ').unwrap_or((rest, ""));
+                    serde_json::json!({"function": func, "input": args})
+                };
                 match client.post(format!("{api_url}/api/eval"))
-                    .json(&serde_json::json!({"function": func, "input": args}))
+                    .json(&req_json)
                     .send().await
                 {
                     Ok(resp) => {

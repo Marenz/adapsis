@@ -419,16 +419,24 @@ async fn main() -> Result<()> {
                         }
                     }
                     parser::Operation::Eval(ev) => {
-                        match eval::eval_compiled_or_interpreted(
-                            &program,
-                            &ev.function_name,
-                            &ev.input,
-                        ) {
-                            Ok((result, compiled)) => {
-                                let tag = if compiled { " [compiled]" } else { "" };
-                                println!("  eval {}(...) = {result}{tag}", ev.function_name);
+                        if let Some(ref expr) = ev.inline_expr {
+                            // Inline expression: evaluate directly
+                            match eval::eval_inline_expr(&program, expr) {
+                                Ok(val) => println!("  = {val}"),
+                                Err(e) => eprintln!("  EVAL ERROR: {e}"),
                             }
-                            Err(e) => eprintln!("  EVAL ERROR: {e}"),
+                        } else {
+                            match eval::eval_compiled_or_interpreted(
+                                &program,
+                                &ev.function_name,
+                                &ev.input,
+                            ) {
+                                Ok((result, compiled)) => {
+                                    let tag = if compiled { " [compiled]" } else { "" };
+                                    println!("  eval {}(...) = {result}{tag}", ev.function_name);
+                                }
+                                Err(e) => eprintln!("  EVAL ERROR: {e}"),
+                            }
                         }
                     }
                     parser::Operation::Query(query) => {
@@ -1228,12 +1236,27 @@ async fn main() -> Result<()> {
         }
         Command::Eval { expr, api } => {
             let parts = expr.join(" ");
-            let (func, input) = parts.split_once(' ').unwrap_or((&parts, ""));
+            // Try parsing as inline expression first; if it succeeds and isn't
+            // a bare identifier (which is the existing func-name syntax), send
+            // it as an inline expression.
+            let is_inline = if let Ok(parsed) = parser::parse_expr_pub(0, &parts) {
+                !matches!(parsed, parser::Expr::Ident(_))
+            } else {
+                false
+            };
             let client = reqwest::Client::new();
-            let resp: serde_json::Value = client
-                .post(format!("{api}/api/eval"))
-                .json(&serde_json::json!({ "function": func, "input": input }))
-                .send().await?.json().await?;
+            let resp: serde_json::Value = if is_inline {
+                client
+                    .post(format!("{api}/api/eval"))
+                    .json(&serde_json::json!({ "function": "", "expression": parts }))
+                    .send().await?.json().await?
+            } else {
+                let (func, input) = parts.split_once(' ').unwrap_or((&parts, ""));
+                client
+                    .post(format!("{api}/api/eval"))
+                    .json(&serde_json::json!({ "function": func, "input": input }))
+                    .send().await?.json().await?
+            };
             let result = resp.get("result").and_then(|r| r.as_str()).unwrap_or("(none)");
             let success = resp.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
             let compiled = resp.get("compiled").and_then(|c| c.as_bool()).unwrap_or(false);

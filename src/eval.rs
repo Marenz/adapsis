@@ -506,6 +506,12 @@ pub fn eval_call_with_input(
     }
 }
 
+/// Evaluate an inline expression directly (not a function call).
+/// Used for `!eval 1 + 2`, `!eval concat("a", "b")`, etc.
+pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<Value> {
+    eval_parser_expr_with_program(expr, program)
+}
+
 /// Evaluate a test case against a function in the program.
 /// Bind test input values to function parameters.
 /// Handles three cases:
@@ -2430,6 +2436,19 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                 }
                 return eval_function_body(program, &func.body, &mut env);
             }
+            // Try as builtin function (concat, len, to_string, etc.)
+            // Skip Ok/Err/Some/None — these are handled by eval_parser_expr_standalone
+            // with special parser-level semantics (e.g. Err(bare_ident) as error labels).
+            if crate::builtins::is_builtin(&name)
+                && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+            {
+                let eval_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_program(a, program))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut env = Env::new();
+                return eval_builtin_or_user(program, &name, eval_args, &mut env);
+            }
             // Fall through to standalone (handles union constructors, Ok, Err)
             eval_parser_expr_standalone(expr)
         }
@@ -3667,6 +3686,229 @@ mod tests {
         let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
         assert!(result.is_ok(), "builtin positional strings: {:?}", result);
         assert_eq!(result.unwrap().0, "\"foobar\"");
+    }
+
+    // ── Inline expression eval (!eval <expr>) ─────────────────────────
+
+    #[test]
+    fn test_eval_inline_arithmetic() {
+        let program = ast::Program::default();
+        let source = "!eval 1 + 2";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some(), "should be inline expression");
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 1+2: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "3");
+    }
+
+    #[test]
+    fn test_eval_inline_multiply_add() {
+        let program = ast::Program::default();
+        let source = "!eval 3 * 4 + 1";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 3*4+1: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "13");
+    }
+
+    #[test]
+    fn test_eval_inline_string_literal() {
+        let program = ast::Program::default();
+        let source = r#"!eval "hello""#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline string: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "\"hello\"");
+    }
+
+    #[test]
+    fn test_eval_inline_numeric_literal() {
+        let program = ast::Program::default();
+        let source = "!eval 42";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 42: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "42");
+    }
+
+    #[test]
+    fn test_eval_inline_boolean() {
+        let program = ast::Program::default();
+        let source = "!eval true";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline true: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "true");
+    }
+
+    #[test]
+    fn test_eval_inline_comparison() {
+        let program = ast::Program::default();
+        let source = "!eval 3 > 2";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline 3>2: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "true");
+    }
+
+    #[test]
+    fn test_eval_inline_concat_call() {
+        let program = ast::Program::default();
+        let source = r#"!eval concat("hello", " ", "world")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline concat: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "\"hello world\"");
+    }
+
+    #[test]
+    fn test_eval_inline_len_call() {
+        let program = ast::Program::default();
+        let source = r#"!eval len("hello")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline len: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "5");
+    }
+
+    #[test]
+    fn test_eval_inline_nested_calls() {
+        let program = ast::Program::default();
+        let source = r#"!eval len(concat("a", "b"))"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline nested calls: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "2");
+    }
+
+    #[test]
+    fn test_eval_inline_struct_literal() {
+        let program = ast::Program::default();
+        let source = r#"!eval {name: "alice", age: 25}"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline struct: {:?}", result);
+        let val = result.unwrap();
+        // Struct should contain the fields
+        match val {
+            Value::Struct(_, fields) => {
+                assert!(matches!(fields.get("name"), Some(Value::String(s)) if s == "alice"), "expected name=alice");
+                assert!(matches!(fields.get("age"), Some(Value::Int(25))), "expected age=25");
+            }
+            _ => panic!("expected struct, got {val}"),
+        }
+    }
+
+    #[test]
+    fn test_eval_inline_list_creation() {
+        let program = ast::Program::default();
+        let source = "!eval list(1, 2, 3)";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline list: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_eval_inline_user_function_call() {
+        // Inline expression calling a user-defined function
+        let source = "\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = "!eval double(5)";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_ok(), "inline user fn call: {:?}", result);
+        assert_eq!(format!("{}", result.unwrap()), "10");
+    }
+
+    #[test]
+    fn test_eval_func_name_still_works() {
+        // Existing !eval func_name syntax should still work
+        let source = "\
++fn greet ()->String
+  +return \"hello\"
+";
+        let program = build_program(source);
+        let eval_source = "!eval greet";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_none(), "bare function name should not be inline");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "bare function name: {:?}", result);
+        assert_eq!(result.unwrap().0, "\"hello\"");
+    }
+
+    #[test]
+    fn test_eval_func_with_args_still_works() {
+        // Existing !eval func_name arg1 arg2 syntax should still work
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let result:Int = a + b
+  +return result
+";
+        let program = build_program(source);
+        let eval_source = "!eval add 3 4";
+        let ops = parser::parse(eval_source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_none(), "func + args should not be inline");
+        let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
+        assert!(result.is_ok(), "func with args: {:?}", result);
+        assert_eq!(result.unwrap().0, "7");
     }
 
     // ── Side-effect checks for function calls in test params ──────────

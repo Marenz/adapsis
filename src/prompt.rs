@@ -301,6 +301,25 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
 !eval eval_expr Add(Literal(1), Mul(Literal(2), Literal(3)))
 </code>
 
+### Inline Expression Eval
+`!eval` also accepts inline expressions (not just function names):
+```
+!eval 1 + 2                        — arithmetic → 3
+!eval 3 * 4 + 1                    — precedence → 13
+!eval concat("hello", " ", "world") — builtin call → "hello world"
+!eval len("test")                  — builtin call → 4
+!eval 3 > 2                        — comparison → true
+!eval len(concat("a", "b"))        — nested calls → 2
+!eval {name: "alice", age: 25}     — struct literal
+!eval list(1, 2, 3)                — list creation → [1, 2, 3]
+!eval "hello"                      — string literal → "hello"
+!eval 42                           — numeric literal → 42
+!eval true                         — boolean literal → true
+!eval double(5)                    — user function call (if defined)
+```
+If the argument parses as a complete expression, it is evaluated directly.
+Otherwise, it falls back to the existing `!eval func_name args` behavior.
+
 When the runtime reports errors, fix them with targeted !replace operations or by regenerating the affected function.
 
 ## Important Workflow Notes
@@ -407,7 +426,7 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 **Adapsis-level (instant):**
 - Define types, functions, modules
 - Write and run tests (`!test`)
-- Evaluate functions (`!eval`)
+- Evaluate functions (`!eval func_name args`) or inline expressions (`!eval 1 + 2`)
 - Query program state (`?symbols`, `?source`, `?deps`, `?tasks`, `?inspect task N`, `?inbox`)
 - Manage plans (`!plan set/done/fail`)
 - Spawn sub-agents (`!agent name --scope <scope> task`)
