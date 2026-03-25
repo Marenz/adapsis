@@ -1308,3 +1308,623 @@ fn query_routes(http_routes: &[crate::ast::HttpRoute]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{parser, validator};
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    /// Parse and validate Adapsis source into a Program.
+    fn build_program(source: &str) -> Program {
+        let ops = parser::parse(source).expect("parse failed");
+        let mut program = Program::default();
+        for op in &ops {
+            match op {
+                parser::Operation::Test(_) | parser::Operation::Eval(_) => {}
+                _ => {
+                    validator::apply_and_validate(&mut program, op).expect("validation failed");
+                }
+            }
+        }
+        program.rebuild_function_index();
+        program
+    }
+
+    /// Build program + type-check a specific function. Returns errors.
+    fn check(source: &str, fn_name: &str) -> Vec<String> {
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let func = program
+            .get_function(fn_name)
+            .unwrap_or_else(|| panic!("function `{fn_name}` not found"));
+        check_function(&table, func)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 1. Symbol table construction
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn symbol_table_registers_types() {
+        let program = build_program("+type User = id:Int, name:String");
+        let table = build_symbol_table(&program);
+        let info = table.resolve_type("User").expect("User type not found");
+        assert!(!info.is_union);
+        assert_eq!(info.fields.len(), 2);
+        assert_eq!(info.fields[0].0, "id");
+        assert_eq!(info.fields[1].0, "name");
+    }
+
+    #[test]
+    fn symbol_table_registers_unions() {
+        let program = build_program("+type Color = Red | Green | Blue");
+        let table = build_symbol_table(&program);
+        let info = table.resolve_type("Color").expect("Color type not found");
+        assert!(info.is_union);
+        assert_eq!(info.variants.len(), 3);
+        assert_eq!(info.variants[0].0, "Red");
+        assert_eq!(info.variants[1].0, "Green");
+        assert_eq!(info.variants[2].0, "Blue");
+    }
+
+    #[test]
+    fn symbol_table_registers_union_with_payloads() {
+        let program = build_program("+type Shape = Circle(Float) | Rect(Float, Float) | Point");
+        let table = build_symbol_table(&program);
+        let info = table.resolve_type("Shape").unwrap();
+        assert!(info.is_union);
+        assert_eq!(info.variants[0].0, "Circle");
+        assert_eq!(info.variants[0].1.len(), 1); // one Float payload
+        assert_eq!(info.variants[1].0, "Rect");
+        assert_eq!(info.variants[1].1.len(), 2); // two Float payloads
+        assert_eq!(info.variants[2].0, "Point");
+        assert!(info.variants[2].1.is_empty());
+    }
+
+    #[test]
+    fn symbol_table_registers_functions() {
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let sig = table.resolve_function("add").expect("add not found");
+        assert_eq!(sig.params.len(), 2);
+        assert_eq!(sig.params[0].0, "a");
+        assert!(matches!(sig.params[0].1, Type::Int));
+        assert!(matches!(sig.return_type, Type::Int));
+        assert!(sig.effects.is_empty());
+    }
+
+    #[test]
+    fn symbol_table_registers_effects() {
+        let source = "\
++fn fetch (url:String)->String [io,async]
+  +return url
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let sig = table.resolve_function("fetch").unwrap();
+        assert_eq!(sig.effects.len(), 2);
+        assert!(sig.effects.contains(&Effect::Io));
+        assert!(sig.effects.contains(&Effect::Async));
+    }
+
+    #[test]
+    fn symbol_table_module_functions_qualified() {
+        let source = "\
+!module Math
++fn add (a:Int, b:Int)->Int
+  +return a + b
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        // Should be registered as Math.add
+        assert!(table.resolve_function("Math.add").is_some());
+        // Also registered as bare add for internal resolution
+        assert!(table.resolve_function("add").is_some());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 2. Type checking: struct field access
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_struct_field_access_ok() {
+        let errors = check(
+            "\
++type User = name:String, age:Int
+
++fn get_name (u:User)->String
+  +return u.name
+",
+            "get_name",
+        );
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn check_struct_field_wrong_return_type() {
+        let errors = check(
+            "\
++type User = name:String, age:Int
+
++fn get_name (u:User)->Int
+  +return u.name
+",
+            "get_name",
+        );
+        // u.name is String but return type is Int — should flag mismatch
+        assert!(
+            !errors.is_empty(),
+            "expected type mismatch error for String vs Int"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("mismatch")),
+            "errors: {errors:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 3. Type checking: function call argument count
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_call_correct_arg_count() {
+        let errors = check(
+            "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
+
++fn use_add ()->Int
+  +call result:Int = add(1, 2)
+  +return result
+",
+            "use_add",
+        );
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn check_call_wrong_arg_count() {
+        let errors = check(
+            "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
+
++fn use_add ()->Int
+  +call result:Int = add(1)
+  +return result
+",
+            "use_add",
+        );
+        assert!(!errors.is_empty(), "expected arg count mismatch");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("expects 2 arguments, got 1")),
+            "errors: {errors:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 4. Type checking: let binding type mismatch
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_let_type_ok() {
+        let errors = check(
+            "\
++fn make_msg ()->String
+  +let msg:String = \"hello\"
+  +return msg
+",
+            "make_msg",
+        );
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn check_let_type_mismatch() {
+        let errors = check(
+            "\
++fn bad ()->String
+  +let x:String = 42
+  +return x
+",
+            "bad",
+        );
+        assert!(!errors.is_empty(), "expected type mismatch in let");
+        assert!(
+            errors.iter().any(|e| e.contains("type mismatch")),
+            "errors: {errors:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 5. Type checking: return type mismatch
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_return_type_mismatch() {
+        let errors = check(
+            "\
++fn bad ()->Int
+  +return \"hello\"
+",
+            "bad",
+        );
+        assert!(!errors.is_empty(), "expected return type mismatch");
+        assert!(
+            errors.iter().any(|e| e.contains("return type mismatch")),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn check_return_result_inner_type_ok() {
+        // Returning an Int from a Result<Int> function should be fine (auto-wrap)
+        let errors = check(
+            "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check pos x > 0 ~err_neg
+  +return x
+",
+            "validate",
+        );
+        assert!(
+            errors.is_empty(),
+            "expected no errors for Result<Int> returning Int, got: {errors:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 6. Type checking: check condition must be Bool
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_condition_is_bool() {
+        let errors = check(
+            "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check pos x > 0 ~err_neg
+  +return x
+",
+            "validate",
+        );
+        // x > 0 is Bool — should be fine
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 7. Type checking: set variable type mismatch
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_set_type_ok() {
+        let errors = check(
+            "\
++fn inc ()->Int
+  +let x:Int = 0
+  +set x = x + 1
+  +return x
+",
+            "inc",
+        );
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn check_set_type_mismatch() {
+        let errors = check(
+            "\
++fn bad ()->Int
+  +let x:Int = 0
+  +set x = \"hello\"
+  +return x
+",
+            "bad",
+        );
+        assert!(!errors.is_empty(), "expected set type mismatch");
+        assert!(
+            errors.iter().any(|e| e.contains("type mismatch in set")),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn check_set_undefined_variable() {
+        let errors = check(
+            "\
++fn bad ()->Int
+  +set x = 42
+  +return 0
+",
+            "bad",
+        );
+        assert!(!errors.is_empty(), "expected undefined variable error");
+        assert!(
+            errors.iter().any(|e| e.contains("undefined variable")),
+            "errors: {errors:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 8. Type checking: while condition must be Bool
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_while_condition_ok() {
+        let errors = check(
+            "\
++fn count ()->Int
+  +let i:Int = 0
+  +while i < 10
+    +set i = i + 1
+  +end
+  +return i
+",
+            "count",
+        );
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 9. Call graph construction
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn call_graph_basic() {
+        let source = "\
++fn double (x:Int)->Int
+  +return x * 2
+
++fn quadruple (x:Int)->Int
+  +call d:Int = double(x)
+  +call r:Int = double(d)
+  +return r
+";
+        let program = build_program(source);
+        let graph = build_call_graph(&program);
+        let callees = graph
+            .callees
+            .get("quadruple")
+            .expect("quadruple not in graph");
+        assert!(
+            callees.contains(&"double".to_string()),
+            "quadruple should call double"
+        );
+    }
+
+    #[test]
+    fn call_graph_no_calls() {
+        let source = "\
++fn identity (x:Int)->Int
+  +return x
+";
+        let program = build_program(source);
+        let graph = build_call_graph(&program);
+        let callees = graph.callees.get("identity").unwrap();
+        assert!(callees.is_empty(), "identity should call nothing");
+    }
+
+    #[test]
+    fn call_graph_module_functions() {
+        let source = "\
+!module Math
++fn add (a:Int, b:Int)->Int
+  +return a + b
++fn sum3 (a:Int, b:Int, c:Int)->Int
+  +call ab:Int = add(a, b)
+  +call result:Int = add(ab, c)
+  +return result
+";
+        let program = build_program(source);
+        let graph = build_call_graph(&program);
+        let callees = graph
+            .callees
+            .get("Math.sum3")
+            .expect("Math.sum3 not in graph");
+        assert!(!callees.is_empty(), "sum3 should call add");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 10. Expression reconstruction
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn reconstruct_literal_int() {
+        let expr = Expr::Literal(Literal::Int(42));
+        assert_eq!(reconstruct_expr(&expr), "42");
+    }
+
+    #[test]
+    fn reconstruct_literal_string() {
+        let expr = Expr::Literal(Literal::String("hello world".to_string()));
+        assert_eq!(reconstruct_expr(&expr), "\"hello world\"");
+    }
+
+    #[test]
+    fn reconstruct_literal_bool() {
+        assert_eq!(
+            reconstruct_expr(&Expr::Literal(Literal::Bool(true))),
+            "true"
+        );
+        assert_eq!(
+            reconstruct_expr(&Expr::Literal(Literal::Bool(false))),
+            "false"
+        );
+    }
+
+    #[test]
+    fn reconstruct_field_access() {
+        let expr = Expr::FieldAccess {
+            base: Box::new(Expr::Identifier("user".to_string())),
+            field: "name".to_string(),
+        };
+        assert_eq!(reconstruct_expr(&expr), "user.name");
+    }
+
+    #[test]
+    fn reconstruct_binary_expr() {
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Identifier("a".to_string())),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal(Literal::Int(1))),
+        };
+        assert_eq!(reconstruct_expr(&expr), "a+1");
+    }
+
+    #[test]
+    fn reconstruct_call_expr() {
+        let expr = Expr::Call(CallExpr {
+            callee: "concat".to_string(),
+            args: vec![
+                Expr::Literal(Literal::String("hello".to_string())),
+                Expr::Literal(Literal::String(" world".to_string())),
+            ],
+        });
+        assert_eq!(reconstruct_expr(&expr), r#"concat("hello", " world")"#);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 11. Query handling (handle_query)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn query_symbols_lists_types_and_functions() {
+        let source = "\
++type Point = x:Int, y:Int
+
++fn origin ()->Point
+  +return {x: 0, y: 0}
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "?symbols", &[]);
+        assert!(result.contains("Point"), "should list Point type: {result}");
+        assert!(
+            result.contains("origin"),
+            "should list origin function: {result}"
+        );
+    }
+
+    #[test]
+    fn query_callees() {
+        let source = "\
++fn double (x:Int)->Int
+  +return x * 2
+
++fn quad (x:Int)->Int
+  +call d:Int = double(x)
+  +call r:Int = double(d)
+  +return r
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "?callees quad", &[]);
+        assert!(
+            result.contains("double"),
+            "quad should call double: {result}"
+        );
+    }
+
+    #[test]
+    fn query_empty() {
+        let program = Program::default();
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "", &[]);
+        assert_eq!(result, "empty query");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 12. Result<T> and Option<T> generic type validation
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn types_compatible_result_match() {
+        let table = SymbolTable::default();
+        let r1 = Type::Result(Box::new(Type::Int));
+        let r2 = Type::Result(Box::new(Type::Int));
+        assert!(types_compatible(&r1, &r2, &table));
+    }
+
+    #[test]
+    fn types_compatible_result_mismatch() {
+        let table = SymbolTable::default();
+        let r1 = Type::Result(Box::new(Type::Int));
+        let r2 = Type::Result(Box::new(Type::String));
+        assert!(!types_compatible(&r1, &r2, &table));
+    }
+
+    #[test]
+    fn types_compatible_option_match() {
+        let table = SymbolTable::default();
+        let o1 = Type::Option(Box::new(Type::String));
+        let o2 = Type::Option(Box::new(Type::String));
+        assert!(types_compatible(&o1, &o2, &table));
+    }
+
+    #[test]
+    fn types_compatible_list_match() {
+        let table = SymbolTable::default();
+        let l1 = Type::List(Box::new(Type::Int));
+        let l2 = Type::List(Box::new(Type::Int));
+        assert!(types_compatible(&l1, &l2, &table));
+    }
+
+    #[test]
+    fn types_compatible_list_mismatch() {
+        let table = SymbolTable::default();
+        let l1 = Type::List(Box::new(Type::Int));
+        let l2 = Type::List(Box::new(Type::String));
+        assert!(!types_compatible(&l1, &l2, &table));
+    }
+
+    #[test]
+    fn types_compatible_int_float_coercion() {
+        let table = SymbolTable::default();
+        assert!(types_compatible(&Type::Int, &Type::Float, &table));
+        assert!(types_compatible(&Type::Float, &Type::Int, &table));
+    }
+
+    #[test]
+    fn types_incompatible_int_string() {
+        let table = SymbolTable::default();
+        assert!(!types_compatible(&Type::Int, &Type::String, &table));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 13. collect_callees_from_stmts
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn collect_callees_none() {
+        let source = "\
++fn identity (x:Int)->Int
+  +return x
+";
+        let program = build_program(source);
+        let func = program.get_function("identity").unwrap();
+        let callees = collect_callees_from_stmts(&func.body);
+        assert!(callees.is_empty());
+    }
+
+    #[test]
+    fn collect_callees_from_call() {
+        let source = "\
++fn double (x:Int)->Int
+  +return x * 2
++fn use_double (x:Int)->Int
+  +call r:Int = double(x)
+  +return r
+";
+        let program = build_program(source);
+        let func = program.get_function("use_double").unwrap();
+        let callees = collect_callees_from_stmts(&func.body);
+        assert!(callees.contains(&"double".to_string()));
+    }
+}
