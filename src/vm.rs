@@ -669,6 +669,38 @@ pub fn execute(
     run_loop(&mut state, program)
 }
 
+/// Resume a suspended VM after an async IO operation completes.
+/// Pushes the IO result onto the stack and continues execution.
+pub fn resume(mut vm_state: VmState, io_result: Value, program: &ast::Program) -> Result<VmResult> {
+    vm_state.stack.push(io_result);
+    run_loop(&mut vm_state, program)
+}
+
+/// Execute a compiled function with async IO support.
+/// When the VM suspends for IO, calls `io_handler` to perform the operation,
+/// then resumes. Loops until execution completes.
+pub fn execute_with_io(
+    compiled: &CompiledFunction,
+    args: Vec<Value>,
+    program: &ast::Program,
+    io_handler: &dyn Fn(&str, &[Value]) -> Result<Value>,
+) -> Result<Value> {
+    let mut result = execute(compiled, args, program)?;
+    loop {
+        match result {
+            VmResult::Done(val) => return Ok(val),
+            VmResult::Await {
+                op_name,
+                args,
+                vm_state,
+            } => {
+                let io_result = io_handler(&op_name, &args)?;
+                result = resume(vm_state, io_result, program)?;
+            }
+        }
+    }
+}
+
 /// The main execution loop. Processes instructions until Return or AwaitIo.
 fn run_loop(state: &mut VmState, program: &ast::Program) -> Result<VmResult> {
     loop {
