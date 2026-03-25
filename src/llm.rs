@@ -124,6 +124,17 @@ impl ChatMessage {
     }
 }
 
+/// Incremental chunk from the LLM streaming response.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// AI is thinking (reasoning_content)
+    Thinking(String),
+    /// AI is writing content
+    Content(String),
+    /// Stream completed — final assembled output
+    Done(LlmOutput),
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmOutput {
     pub text: String,
@@ -312,6 +323,132 @@ impl OpenAiBackend {
         Ok(build_output(thinking_text, content_text))
     }
 
+    /// Stream SSE chunks into an mpsc channel, sending `StreamChunk::Thinking`,
+    /// `StreamChunk::Content` incrementally and `StreamChunk::Done` when the
+    /// stream completes.  Returns an error only if the HTTP request itself fails
+    /// before any chunks are produced.  Errors during the stream are reported as
+    /// a `Done` with the error propagated.
+    async fn stream_to_channel(
+        &self,
+        http: &Client,
+        request: &LlmRequest,
+        chunk_tx: tokio::sync::mpsc::Sender<StreamChunk>,
+    ) -> Result<()> {
+        let req = http
+            .post(self.endpoint())
+            .json(&self.request_body(request, true));
+        let response = self.send_request(req, "failed to send streaming chat completion request").await?;
+
+        let mut raw_buf: Vec<u8> = Vec::new();
+        let mut thinking_text = String::new();
+        let mut content_text = String::new();
+        let mut in_thinking = false;
+
+        let chunk_timeout = Duration::from_secs(120);
+        let mut response = response;
+        let mut chunk_count: u64 = 0;
+        let stream_start = std::time::Instant::now();
+        loop {
+            let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    return Err(anyhow!(LlmError::Streaming(format!(
+                        "failed to read streaming response chunk: {error}"
+                    ))));
+                }
+                Err(_) => {
+                    return Err(anyhow!(LlmError::Streaming(
+                        "streaming response stalled (no data for 120s)".to_string()
+                    )));
+                }
+            };
+            chunk_count += 1;
+            raw_buf.extend_from_slice(&chunk);
+
+            let valid_up_to = match std::str::from_utf8(&raw_buf) {
+                Ok(_) => raw_buf.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            if valid_up_to == 0 {
+                continue;
+            }
+
+            let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
+            let mut last_event_end = 0;
+            let mut search_from = 0;
+            while let Some(pos) = text[search_from..].find("\n\n") {
+                last_event_end = search_from + pos + 2;
+                search_from = last_event_end;
+            }
+            if last_event_end == 0 {
+                continue;
+            }
+
+            let events_str = &text[..last_event_end];
+            for event in events_str.split("\n\n") {
+                if event.is_empty() {
+                    continue;
+                }
+                for data in sse_data_lines(event) {
+                    if data == "[DONE]" {
+                        let output = build_output(thinking_text, content_text);
+                        let _ = chunk_tx.send(StreamChunk::Done(output)).await;
+                        return Ok(());
+                    }
+
+                    let parsed: ChatCompletionChunk = serde_json::from_str(&data)
+                        .map_err(|error| {
+                            anyhow!(LlmError::Streaming(format!(
+                                "failed to parse SSE chunk: {error}; chunk={data}"
+                            )))
+                        })?;
+
+                    for choice in parsed.choices {
+                        if let Some(reasoning) = choice.delta.reasoning_content {
+                            if !in_thinking {
+                                in_thinking = true;
+                                debug!(
+                                    "[llm:thinking] started (+{}ms, {} chunks)",
+                                    stream_start.elapsed().as_millis(),
+                                    chunk_count
+                                );
+                            }
+                            thinking_text.push_str(&reasoning);
+                            let _ = chunk_tx.send(StreamChunk::Thinking(reasoning)).await;
+                        }
+
+                        if let Some(content) = choice.delta.content {
+                            if in_thinking {
+                                in_thinking = false;
+                                debug!(
+                                    "[llm:content] thinking done ({}chars), content starting (+{}ms)",
+                                    thinking_text.len(),
+                                    stream_start.elapsed().as_millis()
+                                );
+                            }
+                            content_text.push_str(&content);
+                            let _ = chunk_tx.send(StreamChunk::Content(content)).await;
+                        }
+                    }
+                }
+            }
+
+            raw_buf.drain(..last_event_end);
+        }
+
+        debug!(
+            "[llm:done] {} chunks in {}ms, thinking={}chars content={}chars",
+            chunk_count,
+            stream_start.elapsed().as_millis(),
+            thinking_text.len(),
+            content_text.len()
+        );
+        let output = build_output(thinking_text, content_text);
+        let _ = chunk_tx.send(StreamChunk::Done(output)).await;
+        Ok(())
+    }
+
     async fn generate_non_streaming(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput> {
         let req = http
             .post(self.endpoint())
@@ -397,6 +534,80 @@ impl LlmClient<OpenAiBackend> {
             max_tokens,
         }
     }
+
+    /// Start a streaming LLM request and return a channel receiver.
+    ///
+    /// Chunks arrive as `StreamChunk::Thinking` / `StreamChunk::Content`
+    /// incrementally.  The final message is always `StreamChunk::Done` with the
+    /// fully assembled `LlmOutput`.
+    ///
+    /// The HTTP connection + SSE parsing runs in a spawned task.  The returned
+    /// receiver delivers chunks as they arrive — callers can forward them to
+    /// SSE immediately.
+    ///
+    /// Retry logic: the initial HTTP request is retried up to MAX_LLM_RETRIES
+    /// times with exponential backoff (same as `generate()`).  Once the stream
+    /// begins producing chunks, mid-stream errors surface as the channel closing
+    /// without a `Done` message (callers should treat this as an error).
+    pub async fn generate_streaming(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        info!(
+            "LLM streaming request: {} messages, temp={}, max_tokens={}",
+            messages.len(),
+            self.temperature,
+            self.max_tokens
+        );
+
+        let request = LlmRequest {
+            messages,
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+        };
+
+        // Establish the HTTP connection with retries (this part is synchronous
+        // with respect to the caller).  Once we have a connected response,
+        // spawn the SSE reader task.
+        let mut last_err = None;
+        for attempt in 0..MAX_LLM_RETRIES {
+            let req = self.http
+                .post(self.backend.endpoint())
+                .json(&self.backend.request_body(&request, true));
+            match self.backend.send_request(req, "failed to send streaming chat completion request").await {
+                Ok(response) => {
+                    // Connection established.  Spawn the SSE reader.
+                    let (tx, rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
+                    tokio::spawn(stream_sse_to_channel(response, tx));
+                    return Ok(rx);
+                }
+                Err(e) => {
+                    let Some(llm_error) = e.downcast_ref::<LlmError>() else {
+                        return Err(e);
+                    };
+                    if llm_error.is_retryable() && attempt + 1 < MAX_LLM_RETRIES {
+                        let delay = llm_error
+                            .retry_after()
+                            .unwrap_or_else(|| default_retry_delay(attempt, llm_error));
+                        warn!(
+                            "[llm:retry] attempt {}/{} in {}ms: {}",
+                            attempt + 2,
+                            MAX_LLM_RETRIES,
+                            delay.as_millis(),
+                            llm_error
+                        );
+                        tokio::time::sleep(delay).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            anyhow!("LLM streaming request failed after {MAX_LLM_RETRIES} retries")
+        }))
+    }
 }
 
 #[allow(dead_code)]
@@ -481,6 +692,125 @@ where
         }
         Err(last_err.unwrap_or_else(|| anyhow!("LLM request failed after {MAX_LLM_RETRIES} retries")))
     }
+}
+
+/// Spawned task: read SSE events from an already-connected HTTP response and
+/// forward them as `StreamChunk` values.  Sends `Done` at the end.
+async fn stream_sse_to_channel(
+    mut response: Response,
+    tx: tokio::sync::mpsc::Sender<StreamChunk>,
+) {
+    let mut raw_buf: Vec<u8> = Vec::new();
+    let mut thinking_text = String::new();
+    let mut content_text = String::new();
+    let mut in_thinking = false;
+
+    let chunk_timeout = Duration::from_secs(120);
+    let stream_start = std::time::Instant::now();
+    let mut chunk_count: u64 = 0;
+
+    loop {
+        let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => {
+                warn!("streaming response read error: {error}");
+                break;
+            }
+            Err(_) => {
+                warn!("streaming response stalled (no data for 120s)");
+                break;
+            }
+        };
+        chunk_count += 1;
+        raw_buf.extend_from_slice(&chunk);
+
+        let valid_up_to = match std::str::from_utf8(&raw_buf) {
+            Ok(_) => raw_buf.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        if valid_up_to == 0 {
+            continue;
+        }
+
+        let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
+        let mut last_event_end = 0;
+        let mut search_from = 0;
+        while let Some(pos) = text[search_from..].find("\n\n") {
+            last_event_end = search_from + pos + 2;
+            search_from = last_event_end;
+        }
+        if last_event_end == 0 {
+            continue;
+        }
+
+        let events_str = &text[..last_event_end];
+        let mut done = false;
+        for event in events_str.split("\n\n") {
+            if event.is_empty() {
+                continue;
+            }
+            for data in sse_data_lines(event) {
+                if data == "[DONE]" {
+                    let output = build_output(thinking_text.clone(), content_text.clone());
+                    let _ = tx.send(StreamChunk::Done(output)).await;
+                    done = true;
+                    break;
+                }
+
+                let Ok(parsed) = serde_json::from_str::<ChatCompletionChunk>(&data) else {
+                    warn!("failed to parse SSE chunk: {data}");
+                    continue;
+                };
+
+                for choice in parsed.choices {
+                    if let Some(reasoning) = choice.delta.reasoning_content {
+                        if !in_thinking {
+                            in_thinking = true;
+                            debug!(
+                                "[llm:thinking] started (+{}ms, {} chunks)",
+                                stream_start.elapsed().as_millis(),
+                                chunk_count
+                            );
+                        }
+                        thinking_text.push_str(&reasoning);
+                        if tx.send(StreamChunk::Thinking(reasoning)).await.is_err() {
+                            return; // receiver dropped
+                        }
+                    }
+
+                    if let Some(content) = choice.delta.content {
+                        if in_thinking {
+                            in_thinking = false;
+                        }
+                        content_text.push_str(&content);
+                        if tx.send(StreamChunk::Content(content)).await.is_err() {
+                            return; // receiver dropped
+                        }
+                    }
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        if done {
+            return;
+        }
+
+        raw_buf.drain(..last_event_end);
+    }
+
+    // Stream ended without [DONE] marker — send what we have.
+    debug!(
+        "[llm:done] {} chunks in {}ms, thinking={}chars content={}chars",
+        chunk_count,
+        stream_start.elapsed().as_millis(),
+        thinking_text.len(),
+        content_text.len()
+    );
+    let output = build_output(thinking_text, content_text);
+    let _ = tx.send(StreamChunk::Done(output)).await;
 }
 
 fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
