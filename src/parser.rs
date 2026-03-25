@@ -4402,4 +4402,1074 @@ mod tests {
             _ => panic!("expected positional StructLiteral, got {e:?}"),
         }
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 9. Module parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_empty() {
+        // Module with no body (next line is a non-module operation)
+        let source = "\
+!module Empty
+!eval greet
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Empty");
+                assert!(m.body.is_empty());
+            }
+            _ => panic!("expected Module"),
+        }
+        assert!(matches!(&ops[1], Operation::Eval(_)));
+    }
+
+    #[test]
+    fn module_with_shared_var() {
+        let source = "\
+!module Counter
++shared count:Int = 0
++fn increment ()->Int
+  +set count = count + 1
+  +return count
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Counter");
+                // +shared and +fn should NOT both be in body unless +shared is recognized
+                // Actually +shared is recognized inside modules (see parser code line 516-520)
+                // But the check is: !next.text.starts_with("+fn") && !starts_with("+type") && !starts_with("+shared")
+                // So +shared IS collected. Let's verify:
+                assert_eq!(m.body.len(), 2);
+                assert!(matches!(&m.body[0], Operation::SharedVar(_)));
+                assert!(matches!(&m.body[1], Operation::Function(_)));
+            }
+            _ => panic!("expected Module, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_with_multiple_types_and_functions() {
+        let source = "\
+!module Data
++type Point = x:Int, y:Int
++type Color = Red | Green | Blue
++fn origin ()->Point
+  +return {x: 0, y: 0}
++fn default_color ()->Color
+  +return Red
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Data");
+                assert_eq!(m.body.len(), 4);
+                assert!(matches!(&m.body[0], Operation::Type(_)));
+                assert!(matches!(&m.body[1], Operation::Type(_)));
+                assert!(matches!(&m.body[2], Operation::Function(_)));
+                assert!(matches!(&m.body[3], Operation::Function(_)));
+            }
+            _ => panic!("expected Module, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_qualified_function_call_expr() {
+        // Module.func(x) parses as Call { callee: FieldAccess { Ident("Module"), "func" }, args }
+        let e = parse_expr_pub(0, "Math.add(1, 2)").unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert_eq!(args.len(), 2);
+                match *callee {
+                    Expr::FieldAccess { base, field } => {
+                        assert!(matches!(*base, Expr::Ident(ref n) if n == "Math"));
+                        assert_eq!(field, "add");
+                    }
+                    _ => panic!("expected FieldAccess in callee"),
+                }
+            }
+            _ => panic!("expected Call, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn module_qualified_call_in_statement() {
+        let op = parse_one("+call result:Int = Math.add(a, b)");
+        match op {
+            Operation::Call(decl) => {
+                assert_eq!(decl.name, "result");
+                match decl.expr {
+                    Expr::Call { callee, args } => {
+                        assert_eq!(args.len(), 2);
+                        assert!(matches!(*callee, Expr::FieldAccess { .. }));
+                    }
+                    _ => panic!("expected Call expr"),
+                }
+            }
+            _ => panic!("expected Call op, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn module_qualified_in_let() {
+        let op = parse_one("+let p:Point = Geometry.origin()");
+        match op {
+            Operation::Let(decl) => {
+                assert_eq!(decl.name, "p");
+                match decl.expr {
+                    Expr::Call { callee, .. } => match *callee {
+                        Expr::FieldAccess { base, field } => {
+                            assert!(matches!(*base, Expr::Ident(ref n) if n == "Geometry"));
+                            assert_eq!(field, "origin");
+                        }
+                        _ => panic!("expected FieldAccess in callee"),
+                    },
+                    _ => panic!("expected Call expr"),
+                }
+            }
+            _ => panic!("expected Let, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 10. Route parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn route_put() {
+        let op = parse_one(r#"+route PUT "/api/users" -> update_user"#);
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "PUT");
+                assert_eq!(path, "/api/users");
+                assert_eq!(handler_fn, "update_user");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_delete() {
+        let op = parse_one(r#"+route DELETE "/api/users" -> delete_user"#);
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "DELETE");
+                assert_eq!(path, "/api/users");
+                assert_eq!(handler_fn, "delete_user");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_method_lowercased_gets_uppercased() {
+        let op = parse_one(r#"+route get "/health" -> health"#);
+        match op {
+            Operation::Route { method, .. } => {
+                assert_eq!(method, "GET");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_unquoted_path() {
+        // Paths can be unquoted too
+        let op = parse_one("+route GET /api/status -> get_status");
+        match op {
+            Operation::Route {
+                method,
+                path,
+                handler_fn,
+            } => {
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/api/status");
+                assert_eq!(handler_fn, "get_status");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn route_with_complex_path() {
+        let op = parse_one(r#"+route POST "/webhook/telegram/v2" -> handle_v2"#);
+        match op {
+            Operation::Route {
+                path, handler_fn, ..
+            } => {
+                assert_eq!(path, "/webhook/telegram/v2");
+                assert_eq!(handler_fn, "handle_v2");
+            }
+            _ => panic!("expected Route, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 11. Shared variable parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn shared_string_default() {
+        let op = parse_one(r#"+shared label:String = "default""#);
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "label");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "String"));
+                assert!(matches!(decl.default, Expr::String(ref s) if s == "default"));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_bool_default() {
+        let op = parse_one("+shared running:Bool = false");
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "running");
+                assert!(matches!(decl.ty, TypeExpr::Named(ref n) if n == "Bool"));
+                assert!(matches!(decl.default, Expr::Bool(false)));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_with_generic_type() {
+        let op = parse_one("+shared items:List<String> = list()");
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "items");
+                match &decl.ty {
+                    TypeExpr::Generic { name, args } => {
+                        assert_eq!(name, "List");
+                        assert_eq!(args.len(), 1);
+                    }
+                    _ => panic!("expected Generic type"),
+                }
+                assert!(matches!(decl.default, Expr::Call { .. }));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_with_struct_literal_default() {
+        let op = parse_one(r#"+shared config:Config = {host: "localhost", port: 8080}"#);
+        match op {
+            Operation::SharedVar(decl) => {
+                assert_eq!(decl.name, "config");
+                assert!(matches!(decl.default, Expr::StructLiteral(_)));
+            }
+            _ => panic!("expected SharedVar, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 12. Edit operations parsing (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn replace_with_multiple_statements() {
+        let source = "\
+!replace validate.s1
+  +check age input.age >= 0 AND input.age <= 150 ~err_age_range
+  +check name len(input.name) > 0 ~err_empty_name
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Replace(r) => {
+                assert_eq!(r.target, "validate.s1");
+                assert_eq!(r.body.len(), 2);
+                assert!(matches!(r.body[0], Operation::Check(_)));
+                assert!(matches!(r.body[1], Operation::Check(_)));
+            }
+            _ => panic!("expected Replace, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_with_let_and_return() {
+        let source = "\
+!replace my_func.s2
+  +let result:Int = x * 2 + 1
+  +return result
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Replace(r) => {
+                assert_eq!(r.target, "my_func.s2");
+                assert_eq!(r.body.len(), 2);
+                assert!(matches!(r.body[0], Operation::Let(_)));
+                assert!(matches!(r.body[1], Operation::Return(_)));
+            }
+            _ => panic!("expected Replace, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_module() {
+        let op = parse_one("!remove MyModule");
+        match op {
+            Operation::Remove(target) => assert_eq!(target, "MyModule"),
+            _ => panic!("expected Remove, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_type() {
+        let op = parse_one("!remove UserType");
+        match op {
+            Operation::Remove(target) => assert_eq!(target, "UserType"),
+            _ => panic!("expected Remove, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_route() {
+        let op = parse_one("!remove route POST /api/ask");
+        match op {
+            Operation::RemoveRoute { method, path } => {
+                assert_eq!(method, "POST");
+                assert_eq!(path, "/api/ask");
+            }
+            _ => panic!("expected RemoveRoute, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_route_lowercased_method() {
+        let op = parse_one("!remove route get /health");
+        match op {
+            Operation::RemoveRoute { method, path } => {
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/health");
+            }
+            _ => panic!("expected RemoveRoute, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn unroute_shorthand() {
+        let op = parse_one("!unroute GET /api/status");
+        match op {
+            Operation::RemoveRoute { method, path } => {
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/api/status");
+            }
+            _ => panic!("expected RemoveRoute, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn move_single_function() {
+        let op = parse_one("!move validate Utils");
+        match op {
+            Operation::Move {
+                function_names,
+                target_module,
+            } => {
+                assert_eq!(function_names, vec!["validate"]);
+                assert_eq!(target_module, "Utils");
+            }
+            _ => panic!("expected Move, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn move_multiple_functions() {
+        let op = parse_one("!move add subtract multiply Math");
+        match op {
+            Operation::Move {
+                function_names,
+                target_module,
+            } => {
+                assert_eq!(function_names, vec!["add", "subtract", "multiply"]);
+                assert_eq!(target_module, "Math");
+            }
+            _ => panic!("expected Move, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 13. Multi-line type definitions (extended)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn multiline_type_three_lines() {
+        let source = "\
++type Config = host:String
+  port:Int
+  debug:Bool
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Config");
+                match decl.body {
+                    TypeBody::Struct(fields) => {
+                        assert_eq!(fields.len(), 3);
+                        assert_eq!(fields[0].name, "host");
+                        assert_eq!(fields[1].name, "port");
+                        assert_eq!(fields[2].name, "debug");
+                    }
+                    _ => panic!("expected Struct, got {:?}", decl.body),
+                }
+            }
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn multiline_type_stops_at_blank_line() {
+        let source = "\
++type Point = x:Int
+  y:Int
+
++fn origin ()->Point
+  +return {x: 0, y: 0}
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::Type(decl) => {
+                assert_eq!(decl.name, "Point");
+                match &decl.body {
+                    TypeBody::Struct(fields) => assert_eq!(fields.len(), 2),
+                    _ => panic!("expected Struct"),
+                }
+            }
+            _ => panic!("expected Type"),
+        }
+        assert!(matches!(&ops[1], Operation::Function(_)));
+    }
+
+    #[test]
+    fn multiline_type_stops_at_plus_operation() {
+        let source = "\
++type State = count:Int
+  name:String
++fn reset ()->State
+  +return {count: 0, name: \"none\"}
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::Type(decl) => match &decl.body {
+                TypeBody::Struct(fields) => assert_eq!(fields.len(), 2),
+                _ => panic!("expected Struct"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn multiline_type_with_leading_comma_stripped() {
+        // Continuation lines that start with comma get the comma stripped
+        let source = "\
++type Config = host:String
+  , port:Int
+  , debug:Bool
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Struct(fields) => {
+                    assert_eq!(fields.len(), 3);
+                    assert_eq!(fields[0].name, "host");
+                    assert_eq!(fields[1].name, "port");
+                    assert_eq!(fields[2].name, "debug");
+                }
+                _ => panic!("expected Struct"),
+            },
+            _ => panic!("expected Type, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 14. Union types with various payload counts
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn union_zero_payload_only() {
+        let op = parse_one("+type Direction = North | South | East | West");
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 4);
+                    for v in &variants {
+                        assert!(v.payload.is_empty(), "{} should have no payload", v.name);
+                    }
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn union_mixed_payload_counts() {
+        let op = parse_one(
+            "+type Value = Null | Bool(Bool) | Pair(String, Int) | Triple(Int, Int, Int)",
+        );
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 4);
+                    assert_eq!(variants[0].name, "Null");
+                    assert_eq!(variants[0].payload.len(), 0);
+                    assert_eq!(variants[1].name, "Bool");
+                    assert_eq!(variants[1].payload.len(), 1);
+                    assert_eq!(variants[2].name, "Pair");
+                    assert_eq!(variants[2].payload.len(), 2);
+                    assert_eq!(variants[3].name, "Triple");
+                    assert_eq!(variants[3].payload.len(), 3);
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn union_with_generic_payload() {
+        let op = parse_one("+type Container = Empty | Single(String) | Many(List<String>)");
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 3);
+                    assert_eq!(variants[2].name, "Many");
+                    assert_eq!(variants[2].payload.len(), 1);
+                    match &variants[2].payload[0] {
+                        TypeExpr::Generic { name, args } => {
+                            assert_eq!(name, "List");
+                            assert_eq!(args.len(), 1);
+                        }
+                        _ => panic!("expected Generic payload"),
+                    }
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    #[test]
+    fn union_single_variant_needs_pipe() {
+        // A single variant requires | to distinguish from struct syntax
+        // Wrap(Int) without | is not valid union syntax
+        let op = parse_one("+type Wrapper = Wrap(Int) | None");
+        match op {
+            Operation::Type(decl) => match decl.body {
+                TypeBody::Union(variants) => {
+                    assert_eq!(variants.len(), 2);
+                    assert_eq!(variants[0].name, "Wrap");
+                    assert_eq!(variants[0].payload.len(), 1);
+                    assert_eq!(variants[1].name, "None");
+                    assert!(variants[1].payload.is_empty());
+                }
+                _ => panic!("expected Union"),
+            },
+            _ => panic!("expected Type"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 15. Effect combinations
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fn_single_effect_io() {
+        let source = "\
++fn read_file (path:String)->String [io]
+  +return path
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects, vec!["io"]);
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_single_effect_fail() {
+        let source = "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check pos x > 0 ~err
+  +return x
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects, vec!["fail"]);
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_io_async_combination() {
+        let source = "\
++fn fetch (url:String)->String [io,async]
+  +await data:String = http_get(url)
+  +return data
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects.len(), 2);
+                assert!(decl.effects.contains(&"io".to_string()));
+                assert!(decl.effects.contains(&"async".to_string()));
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_io_async_fail_combination() {
+        let source = "\
++fn safe_fetch (url:String)->Result<String> [io,async,fail]
+  +check valid len(url) > 0 ~err_empty
+  +await data:String = http_get(url)
+  +return data
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects.len(), 3);
+                assert!(decl.effects.contains(&"io".to_string()));
+                assert!(decl.effects.contains(&"async".to_string()));
+                assert!(decl.effects.contains(&"fail".to_string()));
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn fn_all_common_effects() {
+        let source = "\
++fn do_everything ()->String [io,async,fail,mut,rand]
+  +return \"done\"
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Function(decl) => {
+                assert_eq!(decl.effects.len(), 5);
+                for eff in &["io", "async", "fail", "mut", "rand"] {
+                    assert!(
+                        decl.effects.contains(&eff.to_string()),
+                        "missing effect: {eff}"
+                    );
+                }
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 16. Plan and Roadmap parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn plan_show() {
+        let op = parse_one("!plan");
+        assert!(matches!(op, Operation::Plan(PlanAction::Show)));
+    }
+
+    #[test]
+    fn plan_set_with_continuation_lines() {
+        let source = "\
+!plan set
+Define types
+Write functions
+Add tests
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Plan(PlanAction::Set(steps)) => {
+                assert_eq!(steps.len(), 3);
+                assert_eq!(steps[0], "Define types");
+                assert_eq!(steps[1], "Write functions");
+                assert_eq!(steps[2], "Add tests");
+            }
+            _ => panic!("expected Plan Set, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_set_strips_numbering() {
+        let source = "\
+!plan set
+1. First step
+2. Second step
+3. Third step
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Plan(PlanAction::Set(steps)) => {
+                assert_eq!(steps.len(), 3);
+                assert_eq!(steps[0], "First step");
+                assert_eq!(steps[1], "Second step");
+                assert_eq!(steps[2], "Third step");
+            }
+            _ => panic!("expected Plan Set, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_done() {
+        let op = parse_one("!plan done 2");
+        match op {
+            Operation::Plan(PlanAction::Progress(n)) => assert_eq!(n, 2),
+            _ => panic!("expected Plan Progress, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_fail() {
+        let op = parse_one("!plan fail 3");
+        match op {
+            Operation::Plan(PlanAction::Fail(n)) => assert_eq!(n, 3),
+            _ => panic!("expected Plan Fail, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn roadmap_show() {
+        let op = parse_one("!roadmap");
+        assert!(matches!(op, Operation::Roadmap(RoadmapAction::Show)));
+
+        let op = parse_one("!roadmap show");
+        assert!(matches!(op, Operation::Roadmap(RoadmapAction::Show)));
+    }
+
+    #[test]
+    fn roadmap_add() {
+        let op = parse_one("!roadmap add Implement user authentication");
+        match op {
+            Operation::Roadmap(RoadmapAction::Add(desc)) => {
+                assert_eq!(desc, "Implement user authentication");
+            }
+            _ => panic!("expected Roadmap Add, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn roadmap_done() {
+        let op = parse_one("!roadmap done 1");
+        match op {
+            Operation::Roadmap(RoadmapAction::Done(n)) => assert_eq!(n, 1),
+            _ => panic!("expected Roadmap Done, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn roadmap_remove() {
+        let op = parse_one("!roadmap remove 2");
+        match op {
+            Operation::Roadmap(RoadmapAction::Remove(n)) => assert_eq!(n, 2),
+            _ => panic!("expected Roadmap Remove, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 17. Agent parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn agent_basic() {
+        let op = parse_one("!agent test write tests for all functions");
+        match op {
+            Operation::Agent { name, scope, task } => {
+                assert_eq!(name, "test");
+                assert_eq!(scope, "full"); // default scope
+                assert_eq!(task, "write tests for all functions");
+            }
+            _ => panic!("expected Agent, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_with_bare_scope() {
+        let op = parse_one("!agent refactor --scope read-only reorganize code");
+        match op {
+            Operation::Agent { name, scope, task } => {
+                assert_eq!(name, "refactor");
+                assert_eq!(scope, "read-only");
+                assert_eq!(task, "reorganize code");
+            }
+            _ => panic!("expected Agent, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_with_quoted_scope() {
+        let op = parse_one(r#"!agent crypto --scope "module Crypto" rewrite encryption"#);
+        match op {
+            Operation::Agent { name, scope, task } => {
+                assert_eq!(name, "crypto");
+                assert_eq!(scope, "module Crypto");
+                assert_eq!(task, "rewrite encryption");
+            }
+            _ => panic!("expected Agent, got {op:?}"),
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 18. Error recovery — parser produces clear error messages
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn error_module_missing_name() {
+        let err = parse("!module").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("expected module name"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_replace_missing_target() {
+        let err = parse("!replace\n  +return 1\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("expected replace target"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_remove_missing_target() {
+        let err = parse("!remove").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("!remove requires a target"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_remove_route_missing_path() {
+        let err = parse("!remove route POST").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("!remove route requires METHOD and path"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_move_needs_at_least_two_args() {
+        let err = parse("!move validate").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("!move function_name(s) ModuleName"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_route_missing_arrow() {
+        let err = parse(r#"+route POST "/api/test""#).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("->"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_route_missing_handler() {
+        let err = parse(r#"+route POST "/api/test" ->"#).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("handler function name"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_shared_missing_equals() {
+        let err = parse("+shared count:Int").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("name:Type = expr"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_shared_missing_type() {
+        let err = parse("+shared count = 0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("name:Type"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_unroute_missing_path() {
+        let err = parse("!unroute GET").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("!unroute requires METHOD and path"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_test_missing_function_name() {
+        let err = parse("!test\n  +with 1 -> expect 2\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("function name"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_expr_incomplete_binary() {
+        let err = parse_expr_pub(0, "1 +");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn error_expr_unmatched_paren() {
+        let err = parse_expr_pub(0, "(1 + 2");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn error_expr_empty_input() {
+        let err = parse_expr_pub(0, "");
+        assert!(err.is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // 19. Miscellaneous edge cases
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn opencode_command() {
+        let op = parse_one("!opencode Add a new builtin for file reading");
+        match op {
+            Operation::OpenCode(desc) => {
+                assert_eq!(desc.trim(), "Add a new builtin for file reading");
+            }
+            _ => panic!("expected OpenCode, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn unmock_command() {
+        let op = parse_one("!unmock");
+        assert!(matches!(op, Operation::Unmock));
+    }
+
+    #[test]
+    fn undo_command() {
+        let op = parse_one("!undo");
+        assert!(matches!(op, Operation::Undo));
+    }
+
+    #[test]
+    fn message_command() {
+        let op = parse_one("!msg worker Start processing the queue");
+        match op {
+            Operation::Message { to, content } => {
+                assert_eq!(to, "worker");
+                assert_eq!(content, "Start processing the queue");
+            }
+            _ => panic!("expected Message, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn mock_with_multiple_patterns() {
+        let op = parse_one(r#"!mock http_get "http://a.com" "http://b.com" -> "response""#);
+        match op {
+            Operation::Mock {
+                operation,
+                patterns,
+                response,
+            } => {
+                assert_eq!(operation, "http_get");
+                assert_eq!(patterns.len(), 2);
+                assert_eq!(patterns[0], "http://a.com");
+                assert_eq!(patterns[1], "http://b.com");
+                assert_eq!(response, "response");
+            }
+            _ => panic!("expected Mock, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn query_source() {
+        let op = parse_one("?source MyModule.my_func");
+        match op {
+            Operation::Query(q) => assert_eq!(q, "?source MyModule.my_func"),
+            _ => panic!("expected Query, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn query_deps() {
+        let op = parse_one("?deps");
+        match op {
+            Operation::Query(q) => assert_eq!(q, "?deps"),
+            _ => panic!("expected Query, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn test_with_after_assertion() {
+        let source = "\
+!test setup
+  +with -> expect contains(\"ready\")
+  +after routes contains \"/chat\"
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.cases.len(), 1);
+                assert_eq!(test.cases[0].after_checks.len(), 1);
+                assert_eq!(test.cases[0].after_checks[0].target, "routes");
+                assert_eq!(test.cases[0].after_checks[0].matcher, "contains");
+                assert_eq!(test.cases[0].after_checks[0].value, "/chat");
+            }
+            _ => panic!("expected Test, got {op:?}"),
+        }
+    }
+
+    #[test]
+    fn test_starts_with_matcher_parse() {
+        let source = "\
+!test greet
+  +with name=\"alice\" -> expect starts_with(\"Hello\")
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.cases.len(), 1);
+                match &test.cases[0].matcher {
+                    Some(TestMatcher::StartsWith(s)) => assert_eq!(s, "Hello"),
+                    _ => panic!("expected StartsWith matcher"),
+                }
+            }
+            _ => panic!("expected Test"),
+        }
+    }
+
+    #[test]
+    fn test_err_matcher_parse() {
+        let source = "\
+!test validate
+  +with x=-1 -> expect Err(\"negative\")
+";
+        let op = parse_one(source);
+        match op {
+            Operation::Test(test) => {
+                assert_eq!(test.cases.len(), 1);
+                match &test.cases[0].matcher {
+                    Some(TestMatcher::ErrContaining(s)) => assert_eq!(s, "negative"),
+                    _ => panic!(
+                        "expected ErrContaining matcher, got {:?}",
+                        test.cases[0].matcher
+                    ),
+                }
+            }
+            _ => panic!("expected Test"),
+        }
+    }
 }
