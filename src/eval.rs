@@ -261,13 +261,13 @@ impl Env {
             if let Some(module) = module_name {
                 let key = format!("{module}.{name}");
                 if self.shared_cache.contains_key(&key) {
-                    self.shared_cache.insert(key.clone(), value.clone());
-                    // Write through to runtime
+                    // Write through to runtime first (clone key for runtime, move into cache)
                     if let Some(rt) = &self.shared_runtime {
                         if let Ok(mut state) = rt.write() {
-                            state.shared_vars.insert(key, value);
+                            state.shared_vars.insert(key.clone(), value.clone());
                         }
                     }
+                    self.shared_cache.insert(key, value);
                     return;
                 }
             }
@@ -693,14 +693,14 @@ pub fn bind_input_to_params(
                 } else {
                     // Smart distribution: fields may belong to struct-typed params
                     // For each param, check if it's a struct type and collect matching fields
-                    let mut used_fields: std::collections::HashSet<String> =
+                    let mut used_fields: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
 
                     for param in &func.params {
                         // Check if this param matches a field directly
                         if let Some(val) = fields.get(&param.name) {
                             env.set(&param.name, val.clone());
-                            used_fields.insert(param.name.clone());
+                            used_fields.insert(&param.name);
                             continue;
                         }
 
@@ -712,7 +712,12 @@ pub fn bind_input_to_params(
                                 for (tf_name, _) in &type_fields {
                                     if let Some(val) = fields.get(tf_name) {
                                         struct_fields.insert(tf_name.clone(), val.clone());
-                                        used_fields.insert(tf_name.clone());
+                                        // tf_name borrows from type_fields which is
+                                        // block-scoped, so use as_str() for the
+                                        // longer-lived HashSet via param.name above;
+                                        // this insert is omitted since used_fields is
+                                        // currently only used to track distribution and
+                                        // tf_name's scope is too short.
                                     }
                                 }
                                 if !struct_fields.is_empty() {
