@@ -35,6 +35,9 @@ pub struct RuntimeState {
     /// Pending commands queued by IO builtins (watch_start, agent_spawn) for API-layer processing.
     #[serde(skip)]
     pub pending_commands: Vec<String>,
+    /// IO mocks mirror for builtin access during eval. Synced with SessionMeta.io_mocks.
+    #[serde(skip)]
+    pub io_mocks: Vec<IoMock>,
 }
 
 /// Thread-safe handle to the runtime state.
@@ -1473,6 +1476,11 @@ fn format_expr(expr: &parser::Expr) -> String {
         }
         parser::Expr::Cast { expr: inner, .. } => format_expr(inner),
     }
+}
+
+/// Public wrapper for `reconstruct_expect` — used by `test_run` IO builtin in coroutine.rs.
+pub fn reconstruct_expect_pub(expected: &str, matcher: Option<&str>) -> String {
+    reconstruct_expect(expected, matcher)
 }
 
 /// Reconstruct the `expect` portion of a +with line from stored data.

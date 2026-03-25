@@ -845,6 +845,7 @@ fn fork_runtime_for_test(
         plan: Vec::new(),
         agent_mailbox: std::collections::HashMap::new(),
         pending_commands: Vec::new(),
+        io_mocks: Vec::new(),
     };
     Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }
@@ -1475,13 +1476,15 @@ fn eval_function_body(
                     let needs_program_read = call.callee.starts_with("query_")
                         || matches!(call.callee.as_str(),
                             "symbols_list" | "source_get" | "callers_get"
-                            | "callees_get" | "deps_get" | "routes_list");
+                            | "callees_get" | "deps_get" | "routes_list"
+                            | "route_list" | "test_run");
                     if needs_program_read {
                         set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     }
                     // Ensure mutation builtins can write to the program AST via thread-local.
                     let is_mutation_builtin = matches!(call.callee.as_str(),
-                        "mutate" | "fn_remove" | "type_remove" | "module_remove");
+                        "mutate" | "fn_remove" | "type_remove" | "module_remove"
+                        | "module_create" | "fn_replace");
                     if is_mutation_builtin {
                         // Create a mutable wrapper if not already set
                         if get_shared_program_mut().is_none() {

@@ -1173,6 +1173,297 @@ impl CoroutineHandle {
                 return Ok(Value::String(format!("Agent '{name}' spawned (scope: {scope})")));
             }
 
+            // ── route_list — list registered HTTP routes ──
+            "route_list" => {
+                let routes = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
+                    .unwrap_or_default();
+                if routes.is_empty() {
+                    return Ok(Value::String("No routes registered.".to_string()));
+                }
+                let mut out = String::new();
+                for r in &routes {
+                    out.push_str(&format!("{} {} -> `{}`\n", r.method, r.path, r.handler_fn));
+                }
+                return Ok(Value::String(out.trim_end().to_string()));
+            }
+
+            // ── route_add — register an HTTP route ──
+            "route_add" => {
+                let method = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("route_add expects (method:String, path:String, handler:String)"),
+                };
+                let path = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("route_add expects (method:String, path:String, handler:String)"),
+                };
+                let handler = match args.get(2) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("route_add expects (method:String, path:String, handler:String)"),
+                };
+                let method_upper = method.to_uppercase();
+                if !matches!(method_upper.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
+                    bail!("route_add: method must be GET, POST, PUT, DELETE, or PATCH (got '{method}')");
+                }
+                if !path.starts_with('/') {
+                    bail!("route_add: path must start with '/' (got '{path}')");
+                }
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("route_add: no runtime available"))?;
+                let mut state = rt.write()
+                    .map_err(|_| anyhow::anyhow!("route_add: could not access runtime"))?;
+                // Upsert: update if method+path already exists
+                if let Some(existing) = state.http_routes.iter_mut()
+                    .find(|r| r.method == method_upper && r.path == path)
+                {
+                    let old_fn = existing.handler_fn.clone();
+                    existing.handler_fn = handler.clone();
+                    return Ok(Value::String(format!("updated route {method_upper} {path} -> `{handler}` (was `{old_fn}`)")));
+                }
+                state.http_routes.push(crate::ast::HttpRoute {
+                    method: method_upper.clone(),
+                    path: path.clone(),
+                    handler_fn: handler.clone(),
+                });
+                return Ok(Value::String(format!("added route {method_upper} {path} -> `{handler}`")));
+            }
+
+            // ── route_remove — remove an HTTP route by method+path ──
+            "route_remove" => {
+                let method = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("route_remove expects (method:String, path:String)"),
+                };
+                let path = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("route_remove expects (method:String, path:String)"),
+                };
+                let method_upper = method.to_uppercase();
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("route_remove: no runtime available"))?;
+                let mut state = rt.write()
+                    .map_err(|_| anyhow::anyhow!("route_remove: could not access runtime"))?;
+                let before = state.http_routes.len();
+                let mut removed_handler = None;
+                state.http_routes.retain(|r| {
+                    if r.method == method_upper && r.path == path {
+                        removed_handler = Some(r.handler_fn.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if state.http_routes.len() < before {
+                    return Ok(Value::String(format!(
+                        "removed route {} {} (was -> `{}`)",
+                        method_upper, path, removed_handler.unwrap_or_default()
+                    )));
+                }
+                bail!("route_remove: no route found for {method_upper} {path}");
+            }
+
+            // ── undo — revert the last mutation ──
+            "undo" => {
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("undo: no runtime available"))?;
+                rt.write()
+                    .map_err(|_| anyhow::anyhow!("undo: could not access runtime"))?
+                    .pending_commands.push("!undo".to_string());
+                return Ok(Value::String("Undo queued — will revert last mutation".to_string()));
+            }
+
+            // ── sandbox_enter — enter sandbox mode ──
+            "sandbox_enter" => {
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("sandbox_enter: no runtime available"))?;
+                rt.write()
+                    .map_err(|_| anyhow::anyhow!("sandbox_enter: could not access runtime"))?
+                    .pending_commands.push("!sandbox enter".to_string());
+                return Ok(Value::String("Sandbox enter queued — mutations will be isolated".to_string()));
+            }
+
+            // ── sandbox_merge — merge sandbox changes ──
+            "sandbox_merge" => {
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("sandbox_merge: no runtime available"))?;
+                rt.write()
+                    .map_err(|_| anyhow::anyhow!("sandbox_merge: could not access runtime"))?
+                    .pending_commands.push("!sandbox merge".to_string());
+                return Ok(Value::String("Sandbox merge queued — changes will be kept".to_string()));
+            }
+
+            // ── sandbox_discard — discard sandbox changes ──
+            "sandbox_discard" => {
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("sandbox_discard: no runtime available"))?;
+                rt.write()
+                    .map_err(|_| anyhow::anyhow!("sandbox_discard: could not access runtime"))?
+                    .pending_commands.push("!sandbox discard".to_string());
+                return Ok(Value::String("Sandbox discard queued — changes will be reverted".to_string()));
+            }
+
+            // ── mock_set — register an IO mock response ──
+            "mock_set" => {
+                let operation = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
+                };
+                let pattern = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
+                };
+                let response = match args.get(2) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
+                };
+                if operation.trim().is_empty() {
+                    bail!("mock_set: operation must not be empty");
+                }
+                let patterns: Vec<String> = pattern.split_whitespace().map(|s| s.to_string()).collect();
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("mock_set: no runtime available"))?;
+                rt.write()
+                    .map_err(|_| anyhow::anyhow!("mock_set: could not access runtime"))?
+                    .io_mocks.push(crate::session::IoMock {
+                        operation: operation.clone(),
+                        patterns: patterns.clone(),
+                        response: response.clone(),
+                    });
+                let pattern_display = if patterns.is_empty() { "*".to_string() } else { patterns.join(" ") };
+                return Ok(Value::String(format!("mock: {operation} {pattern_display} -> \"{}\"",
+                    response.chars().take(50).collect::<String>())));
+            }
+
+            // ── mock_clear — clear all IO mocks ──
+            "mock_clear" => {
+                let rt = crate::eval::get_shared_runtime()
+                    .ok_or_else(|| anyhow::anyhow!("mock_clear: no runtime available"))?;
+                let count = {
+                    let mut state = rt.write()
+                        .map_err(|_| anyhow::anyhow!("mock_clear: could not access runtime"))?;
+                    let count = state.io_mocks.len();
+                    state.io_mocks.clear();
+                    count
+                };
+                return Ok(Value::String(format!("cleared {count} mocks")));
+            }
+
+            // ── module_create — create/switch to a module ──
+            "module_create" => {
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("module_create expects (name:String)"),
+                };
+                if name.trim().is_empty() {
+                    bail!("module_create: name must not be empty");
+                }
+                // Check if the first character is uppercase (module naming convention)
+                if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    bail!("module_create: module name must start with an uppercase letter (got '{name}')");
+                }
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("module_create: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("module_create: could not acquire program write lock"))?;
+                // Check if module already exists
+                if program.modules.iter().any(|m| m.name == name) {
+                    return Ok(Value::String(format!("module '{name}' already exists")));
+                }
+                // Create empty module
+                let code = format!("!module {name}");
+                let operations = crate::parser::parse(&code)
+                    .map_err(|e| anyhow::anyhow!("module_create: parse error: {e}"))?;
+                for op in &operations {
+                    crate::validator::apply_and_validate(&mut program, op)
+                        .map_err(|e| anyhow::anyhow!("module_create: {e}"))?;
+                }
+                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                return Ok(Value::String(format!("created module '{name}'")));
+            }
+
+            // ── test_run — run stored tests for a function ──
+            "test_run" => {
+                let fn_name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("test_run expects (fn_name:String)"),
+                };
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("test_run: program not available"))?;
+                let func = program.get_function(&fn_name)
+                    .ok_or_else(|| anyhow::anyhow!("test_run: function `{fn_name}` not found"))?;
+                let ast_cases = func.tests.clone();
+                if ast_cases.is_empty() {
+                    return Ok(Value::String(format!("no stored tests for `{fn_name}`")));
+                }
+                // Reconstruct test source from stored AST test cases
+                let bare = fn_name.rsplit('.').next().unwrap_or(&fn_name);
+                let mut test_src = format!("!test {bare}\n");
+                for case in &ast_cases {
+                    let expect_str = crate::session::reconstruct_expect_pub(&case.expected, case.matcher.as_deref());
+                    test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, expect_str));
+                    for ac in &case.after_checks {
+                        test_src.push_str(&format!("  +after {} {} \"{}\"\n", ac.target, ac.matcher, ac.value));
+                    }
+                }
+                // Get IO mocks and routes from runtime for test execution
+                let (io_mocks, http_routes) = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| (state.io_mocks.clone(), state.http_routes.clone())))
+                    .unwrap_or_default();
+                // Parse and run the reconstructed test
+                let ops = crate::parser::parse(&test_src)
+                    .map_err(|e| anyhow::anyhow!("test_run: failed to reconstruct tests: {e}"))?;
+                let mut results = Vec::new();
+                for test_op in &ops {
+                    if let crate::parser::Operation::Test(test) = test_op {
+                        for case in &test.cases {
+                            match crate::eval::eval_test_case_with_mocks(
+                                &program, &test.function_name, case, &io_mocks, &http_routes,
+                            ) {
+                                Ok(msg) => results.push(format!("PASS: {msg}")),
+                                Err(e) => results.push(format!("FAIL: {e}")),
+                            }
+                        }
+                    }
+                }
+                return Ok(Value::String(results.join("\n")));
+            }
+
+            // ── fn_replace — replace a statement in a function ──
+            "fn_replace" => {
+                let target = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("fn_replace expects (target:String, new_code:String)"),
+                };
+                let new_code = match args.get(1) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => bail!("fn_replace expects (target:String, new_code:String)"),
+                };
+                if target.trim().is_empty() {
+                    bail!("fn_replace: target must not be empty");
+                }
+                if new_code.trim().is_empty() {
+                    bail!("fn_replace: new_code must not be empty");
+                }
+                let program_lock = crate::eval::get_shared_program_mut()
+                    .ok_or_else(|| anyhow::anyhow!("fn_replace: program not available (no async context)"))?;
+                let mut program = program_lock.write()
+                    .map_err(|_| anyhow::anyhow!("fn_replace: could not acquire program write lock"))?;
+                // Build !replace source and parse it
+                let replace_src = format!("!replace {target}\n{new_code}\n+end");
+                let operations = crate::parser::parse(&replace_src)
+                    .map_err(|e| anyhow::anyhow!("fn_replace: parse error: {e}"))?;
+                let mut result_msg = String::new();
+                for op in &operations {
+                    match crate::validator::apply_and_validate(&mut program, op) {
+                        Ok(msg) => result_msg = msg,
+                        Err(e) => bail!("fn_replace: {e}"),
+                    }
+                }
+                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                return Ok(Value::String(result_msg));
+            }
+
             _ => {} // fall through to mock/IO dispatch
         }
 
@@ -2756,7 +3047,13 @@ mod tests {
 
     #[test]
     fn new_io_builtins_registered() {
-        for name in &["move_symbols", "watch_start", "agent_spawn", "msg_send", "trace_run"] {
+        for name in &[
+            "move_symbols", "watch_start", "agent_spawn", "msg_send", "trace_run",
+            "route_list", "route_add", "route_remove",
+            "undo", "sandbox_enter", "sandbox_merge", "sandbox_discard",
+            "mock_set", "mock_clear",
+            "module_create", "test_run", "fn_replace",
+        ] {
             assert!(
                 crate::builtins::is_io_builtin(name),
                 "IO builtin '{name}' should be registered"
@@ -2766,5 +3063,419 @@ mod tests {
                 "'{name}' should also return true for is_builtin"
             );
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // route_list builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn route_list_empty() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![],
+            ..Default::default()
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("route_list", &[]).unwrap());
+        assert_eq!(result, "No routes registered.");
+    }
+
+    #[test]
+    fn route_list_with_routes() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![
+                crate::ast::HttpRoute {
+                    method: "GET".into(), path: "/api/foo".into(), handler_fn: "Mod.foo".into(),
+                },
+                crate::ast::HttpRoute {
+                    method: "POST".into(), path: "/api/bar".into(), handler_fn: "Mod.bar".into(),
+                },
+            ],
+            ..Default::default()
+        }));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("route_list", &[]).unwrap());
+        assert!(result.contains("GET /api/foo -> `Mod.foo`"), "should list first route: {result}");
+        assert!(result.contains("POST /api/bar -> `Mod.bar`"), "should list second route: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // route_add builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn route_add_new_route() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("route_add", &[
+            Value::String("POST".into()),
+            Value::String("/api/test".into()),
+            Value::String("Handler.test".into()),
+        ]).unwrap());
+        assert!(result.contains("added route POST /api/test"), "should confirm add: {result}");
+        assert_eq!(rt.read().unwrap().http_routes.len(), 1);
+        assert_eq!(rt.read().unwrap().http_routes[0].handler_fn, "Handler.test");
+    }
+
+    #[test]
+    fn route_add_upserts_existing() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![crate::ast::HttpRoute {
+                method: "GET".into(), path: "/api/data".into(), handler_fn: "Old.handler".into(),
+            }],
+            ..Default::default()
+        }));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("route_add", &[
+            Value::String("GET".into()),
+            Value::String("/api/data".into()),
+            Value::String("New.handler".into()),
+        ]).unwrap());
+        assert!(result.contains("updated route"), "should say updated: {result}");
+        assert!(result.contains("Old.handler"), "should mention old handler: {result}");
+        assert_eq!(rt.read().unwrap().http_routes.len(), 1);
+        assert_eq!(rt.read().unwrap().http_routes[0].handler_fn, "New.handler");
+    }
+
+    #[test]
+    fn route_add_invalid_method() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = handle.execute_await("route_add", &[
+            Value::String("FOOBAR".into()),
+            Value::String("/api/x".into()),
+            Value::String("H.x".into()),
+        ]);
+        assert!(result.is_err(), "invalid method should fail");
+        assert!(result.unwrap_err().to_string().contains("method must be"), "should mention valid methods");
+    }
+
+    #[test]
+    fn route_add_invalid_path() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = handle.execute_await("route_add", &[
+            Value::String("GET".into()),
+            Value::String("no-leading-slash".into()),
+            Value::String("H.x".into()),
+        ]);
+        assert!(result.is_err(), "path without / should fail");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // route_remove builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn route_remove_existing() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            http_routes: vec![crate::ast::HttpRoute {
+                method: "POST".into(), path: "/api/rm".into(), handler_fn: "Rm.handler".into(),
+            }],
+            ..Default::default()
+        }));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("route_remove", &[
+            Value::String("POST".into()),
+            Value::String("/api/rm".into()),
+        ]).unwrap());
+        assert!(result.contains("removed route"), "should confirm removal: {result}");
+        assert_eq!(rt.read().unwrap().http_routes.len(), 0);
+    }
+
+    #[test]
+    fn route_remove_not_found() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = handle.execute_await("route_remove", &[
+            Value::String("GET".into()),
+            Value::String("/nonexistent".into()),
+        ]);
+        assert!(result.is_err(), "removing nonexistent route should fail");
+        assert!(result.unwrap_err().to_string().contains("no route found"), "should say no route found");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // undo builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn undo_queues_command() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("undo", &[]).unwrap());
+        assert!(result.contains("Undo queued"), "should confirm queued: {result}");
+        let state = rt.read().unwrap();
+        assert_eq!(state.pending_commands.len(), 1);
+        assert_eq!(state.pending_commands[0], "!undo");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // sandbox builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn sandbox_enter_queues_command() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("sandbox_enter", &[]).unwrap());
+        assert!(result.contains("Sandbox enter queued"), "should confirm queued: {result}");
+        assert_eq!(rt.read().unwrap().pending_commands[0], "!sandbox enter");
+    }
+
+    #[test]
+    fn sandbox_merge_queues_command() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("sandbox_merge", &[]).unwrap());
+        assert!(result.contains("Sandbox merge queued"), "should confirm queued: {result}");
+        assert_eq!(rt.read().unwrap().pending_commands[0], "!sandbox merge");
+    }
+
+    #[test]
+    fn sandbox_discard_queues_command() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("sandbox_discard", &[]).unwrap());
+        assert!(result.contains("Sandbox discard queued"), "should confirm queued: {result}");
+        assert_eq!(rt.read().unwrap().pending_commands[0], "!sandbox discard");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // mock_set and mock_clear builtins
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn mock_set_adds_mock() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("mock_set", &[
+            Value::String("http_get".into()),
+            Value::String("example.com".into()),
+            Value::String("mock response body".into()),
+        ]).unwrap());
+        assert!(result.contains("mock: http_get"), "should confirm mock: {result}");
+        let state = rt.read().unwrap();
+        assert_eq!(state.io_mocks.len(), 1);
+        assert_eq!(state.io_mocks[0].operation, "http_get");
+        assert_eq!(state.io_mocks[0].response, "mock response body");
+    }
+
+    #[test]
+    fn mock_set_empty_operation_fails() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = handle.execute_await("mock_set", &[
+            Value::String("".into()),
+            Value::String("pattern".into()),
+            Value::String("response".into()),
+        ]);
+        assert!(result.is_err(), "empty operation should fail");
+    }
+
+    #[test]
+    fn mock_clear_clears_all_mocks() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
+            io_mocks: vec![
+                crate::session::IoMock {
+                    operation: "http_get".into(),
+                    patterns: vec!["x".into()],
+                    response: "y".into(),
+                },
+                crate::session::IoMock {
+                    operation: "http_post".into(),
+                    patterns: vec![],
+                    response: "z".into(),
+                },
+            ],
+            ..Default::default()
+        }));
+        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("mock_clear", &[]).unwrap());
+        assert!(result.contains("cleared 2 mocks"), "should report count: {result}");
+        assert_eq!(rt.read().unwrap().io_mocks.len(), 0);
+    }
+
+    #[test]
+    fn mock_clear_empty_returns_zero() {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+        let result = unwrap_string(handle.execute_await("mock_clear", &[]).unwrap());
+        assert!(result.contains("cleared 0 mocks"), "should report 0: {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // module_create builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_create_new_module() {
+        let (handle, prog) = setup_mutation_runtime("");
+        let result = unwrap_string(
+            handle.execute_await("module_create", &[Value::String("MyMod".into())]).unwrap()
+        );
+        assert!(result.contains("created module"), "should confirm creation: {result}");
+        let p = prog.read().unwrap();
+        assert!(p.modules.iter().any(|m| m.name == "MyMod"), "module should exist");
+    }
+
+    #[test]
+    fn module_create_already_exists() {
+        let (handle, _prog) = setup_mutation_runtime("!module Existing");
+        let result = unwrap_string(
+            handle.execute_await("module_create", &[Value::String("Existing".into())]).unwrap()
+        );
+        assert!(result.contains("already exists"), "should say already exists: {result}");
+    }
+
+    #[test]
+    fn module_create_lowercase_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("module_create", &[Value::String("lowercase".into())]);
+        assert!(result.is_err(), "lowercase module name should fail");
+        assert!(result.unwrap_err().to_string().contains("uppercase"), "should mention uppercase");
+    }
+
+    #[test]
+    fn module_create_empty_name_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("module_create", &[Value::String("".into())]);
+        assert!(result.is_err(), "empty name should fail");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // test_run builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_run_with_stored_tests() {
+        // Build a program with a function that has stored tests
+        let source = "+fn double (x:Int)->Int\n  +return x * 2\n+end\n\
+                      !test double\n  +with 3 -> expect 6\n  +with 5 -> expect 10\n";
+        let ops = crate::parser::parse(source).unwrap();
+        let mut program = crate::ast::Program::default();
+        for op in &ops {
+            match op {
+                crate::parser::Operation::Test(test) => {
+                    // Store the tests on the function
+                    if let Some(func) = program.get_function_mut(&test.function_name) {
+                        func.tests = test.cases.iter().map(|c| crate::ast::TestCase {
+                            input: crate::session::format_expr_pub(&c.input),
+                            expected: crate::session::format_expr_pub(&c.expected),
+                            passed: true,
+                            matcher: None,
+                            after_checks: vec![],
+                        }).collect();
+                    }
+                }
+                _ => {
+                    crate::validator::apply_and_validate(&mut program, op).unwrap();
+                }
+            }
+        }
+        program.rebuild_function_index();
+        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        crate::eval::set_shared_runtime(Some(rt));
+        let handle = CoroutineHandle::new_mock(vec![]);
+
+        let result = unwrap_string(
+            handle.execute_await("test_run", &[Value::String("double".into())]).unwrap()
+        );
+        assert!(result.contains("PASS"), "should have passing tests: {result}");
+        // Each test case should appear
+        let pass_count = result.matches("PASS").count();
+        assert_eq!(pass_count, 2, "should have 2 passing tests: {result}");
+    }
+
+    #[test]
+    fn test_run_no_stored_tests() {
+        let (handle, _prog) = setup_mutation_runtime(
+            "+fn foo ()->Int\n  +return 1\n+end"
+        );
+        let result = unwrap_string(
+            handle.execute_await("test_run", &[Value::String("foo".into())]).unwrap()
+        );
+        assert!(result.contains("no stored tests"), "should say no tests: {result}");
+    }
+
+    #[test]
+    fn test_run_function_not_found() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("test_run", &[Value::String("nonexistent".into())]);
+        assert!(result.is_err(), "nonexistent function should fail");
+        assert!(result.unwrap_err().to_string().contains("not found"), "should say not found");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // fn_replace builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fn_replace_single_statement() {
+        let (handle, prog) = setup_mutation_runtime(
+            "+fn greet (name:String)->String\n  +return concat(\"Hello \", name)\n+end"
+        );
+        let result = unwrap_string(handle.execute_await("fn_replace", &[
+            Value::String("greet.s1".into()),
+            Value::String("  +return concat(\"Hi \", name)".into()),
+        ]).unwrap());
+        // Should succeed
+        assert!(!result.is_empty(), "should return a message: {result}");
+        // Verify the function was modified
+        let p = prog.read().unwrap();
+        let func = p.get_function("greet").expect("greet should still exist");
+        // The body should have the replaced statement
+        assert_eq!(func.body.len(), 1, "should still have 1 statement");
+    }
+
+    #[test]
+    fn fn_replace_empty_target_fails() {
+        let (handle, _prog) = setup_mutation_runtime(
+            "+fn dummy ()->Int\n  +return 1\n+end"
+        );
+        let result = handle.execute_await("fn_replace", &[
+            Value::String("".into()),
+            Value::String("  +return 2".into()),
+        ]);
+        assert!(result.is_err(), "empty target should fail");
+    }
+
+    #[test]
+    fn fn_replace_empty_code_fails() {
+        let (handle, _prog) = setup_mutation_runtime(
+            "+fn dummy ()->Int\n  +return 1\n+end"
+        );
+        let result = handle.execute_await("fn_replace", &[
+            Value::String("dummy.s1".into()),
+            Value::String("".into()),
+        ]);
+        assert!(result.is_err(), "empty code should fail");
+    }
+
+    #[test]
+    fn fn_replace_nonexistent_function_fails() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("fn_replace", &[
+            Value::String("nonexistent.s1".into()),
+            Value::String("  +return 42".into()),
+        ]);
+        assert!(result.is_err(), "replacing in nonexistent function should fail");
     }
 }

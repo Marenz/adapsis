@@ -690,6 +690,134 @@ pub static IO_BUILTINS: &[Builtin] = &[
                Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    Builtin {
+        name: "route_list",
+        aliases: &[],
+        short: "list all registered HTTP routes: route_list() -> String",
+        long: "Returns all registered HTTP routes as a formatted string, one per line. \
+               Each line shows: METHOD /path -> `Handler.func`. \
+               Returns 'No routes registered.' if none exist. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "route_add",
+        aliases: &[],
+        short: "register an HTTP route: route_add(method, path, handler) -> String",
+        long: "Registers an HTTP route mapping a method+path to an Adapsis function handler. \
+               Takes `(method:String, path:String, handler:String)`. \
+               Method is GET, POST, PUT, DELETE, or PATCH. Path must start with '/'. \
+               Handler is a qualified function name like 'Module.func'. \
+               Upserts: updates existing route if method+path already registered. \
+               Returns confirmation like 'added route GET /api/foo -> `Module.func`'. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "route_remove",
+        aliases: &[],
+        short: "remove an HTTP route: route_remove(method, path) -> String",
+        long: "Removes an HTTP route by method and path. \
+               Takes `(method:String, path:String)`. \
+               Returns confirmation like 'removed route GET /api/foo (was -> `Module.func`)'. \
+               Fails if no route found for the given method+path. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "undo",
+        aliases: &[],
+        short: "revert the last mutation: undo() -> String",
+        long: "Queues an undo operation that reverts the last mutation. \
+               Same as `!undo` command. The undo is processed by the API layer \
+               after the current eval completes. \
+               Returns confirmation that the undo has been queued. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "sandbox_enter",
+        aliases: &[],
+        short: "enter sandbox mode: sandbox_enter() -> String",
+        long: "Queues entry into sandbox mode where mutations are isolated. \
+               Same as `!sandbox enter`. The sandbox is activated by the API layer \
+               after the current eval completes. Use sandbox_merge() to keep changes \
+               or sandbox_discard() to revert. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "sandbox_merge",
+        aliases: &[],
+        short: "merge sandbox changes: sandbox_merge() -> String",
+        long: "Queues merging of sandbox changes into the main program state. \
+               Same as `!sandbox merge`. Processed by the API layer after eval completes. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "sandbox_discard",
+        aliases: &[],
+        short: "discard sandbox changes: sandbox_discard() -> String",
+        long: "Queues discarding of sandbox changes, reverting to the state before sandbox was entered. \
+               Same as `!sandbox discard`. Processed by the API layer after eval completes. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "mock_set",
+        aliases: &[],
+        short: "register an IO mock: mock_set(operation, pattern, response) -> String",
+        long: "Registers a mock IO response for testing. Same as `!mock`. \
+               Takes `(operation:String, pattern:String, response:String)`. \
+               Operation is the IO builtin name (e.g. 'http_get', 'llm_call'). \
+               Pattern is matched against arguments (space-separated for multiple arg positions). \
+               Response is the value returned when the mock matches. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "mock_clear",
+        aliases: &[],
+        short: "clear all IO mocks: mock_clear() -> String",
+        long: "Clears all registered IO mocks. Same as `!unmock`. \
+               Returns 'cleared N mocks'. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "module_create",
+        aliases: &[],
+        short: "create a module: module_create(name) -> String",
+        long: "Creates a new module or confirms it already exists. Same as `!module Name`. \
+               Takes `(name:String)`. Name must start with an uppercase letter. \
+               Returns 'created module Name' on success, or 'module Name already exists'. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "test_run",
+        aliases: &[],
+        short: "run stored tests: test_run(fn_name) -> String",
+        long: "Runs all stored tests for a function. Same as `!test`. \
+               Takes `(fn_name:String)` — fully-qualified name like 'Module.func'. \
+               Returns test results as a string with PASS/FAIL for each test case. \
+               Returns 'no stored tests for fn_name' if none exist. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "fn_replace",
+        aliases: &[],
+        short: "replace a statement: fn_replace(target, new_code) -> String",
+        long: "Replaces a statement in a function. Same as `!replace`. \
+               Takes `(target:String, new_code:String)`. \
+               Target is like 'Module.func.s1' (statement 1 of Module.func). \
+               new_code is valid Adapsis code for the replacement statement(s). \
+               Returns confirmation or fails with validation error. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).

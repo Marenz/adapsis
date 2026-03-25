@@ -616,6 +616,9 @@ They allow self-modifying programs that can add, replace, or remove functions, t
 - `+await result:String = fn_remove("Module.func")` — remove a function by fully-qualified name. Returns "Removed Module.func" on success.
 - `+await result:String = type_remove("Module.MyType")` — remove a type by name. Returns "Removed Module.MyType" on success.
 - `+await result:String = module_remove("Module")` — remove an entire module and all its contents. Returns "Removed module Module" on success.
+- `+await result:String = module_create("MyModule")` — create a new module (or confirm it exists). Name must start with uppercase. Returns "created module 'MyModule'" on success.
+- `+await result:String = fn_replace("Module.func.s1", "+return x * 2")` — replace a statement in a function. Target is like "Module.func.s1" (1-indexed). new_code is valid Adapsis code. Returns confirmation.
+- `+await result:String = test_run("Module.func")` — run all stored tests for a function. Returns PASS/FAIL results for each test case.
 
 `mutate` is the most general — it can do everything the others do and more (add functions, define types, create modules). The remove builtins are convenience wrappers.
 
@@ -642,7 +645,7 @@ Example:
 
 ### Programmatic Command Builtins
 
-These IO builtins are programmatic equivalents of `!move`, `!watch`, `!agent`, `!msg`, and `!trace` commands.
+These IO builtins are programmatic equivalents of `!move`, `!watch`, `!agent`, `!msg`, `!trace`, `!undo`, `!sandbox`, `!mock`/`!unmock`, and route commands.
 They allow Adapsis code to perform these operations via `+await` instead of using `!`-commands directly.
 
 - `+await result:String = move_symbols(symbols, target_module)` — move comma-separated symbol names (functions, types, modules) into a target module. Updates all call sites automatically. Same as `!move sym1 sym2 Module`.
@@ -650,6 +653,15 @@ They allow Adapsis code to perform these operations via `+await` instead of usin
 - `+await result:String = agent_spawn(name, scope, task)` — spawn a background agent with the given name, scope, and task. Same as `!agent name --scope scope task`. Scope: \"read-only\", \"new-only\", \"module X\", \"full\".
 - `+await result:String = msg_send(target, message)` — send a message to an agent or \"main\". Same as `!msg target message`. The recipient sees it in `?inbox`.
 - `+await result:String = trace_run(fn_name, args)` — run a function with step-by-step tracing. Same as `!trace fn_name args`. Returns the trace output as a formatted String. `args` is the input expression text (empty string for no args).
+- `+await result:String = route_list()` — list all registered HTTP routes. Returns one route per line: `METHOD /path -> \`handler\``. Returns 'No routes registered.' if none.
+- `+await result:String = route_add(method, path, handler)` — register an HTTP route. Method is GET/POST/PUT/DELETE/PATCH, path starts with '/', handler is 'Module.func'. Upserts if route already exists.
+- `+await result:String = route_remove(method, path)` — remove an HTTP route by method+path. Fails if not found.
+- `+await result:String = undo()` — revert the last mutation. Same as `!undo`. Queued for processing after eval completes.
+- `+await result:String = sandbox_enter()` — enter sandbox mode. Same as `!sandbox enter`. Mutations are isolated until merge or discard.
+- `+await result:String = sandbox_merge()` — merge sandbox changes. Same as `!sandbox merge`. Keeps all mutations made in sandbox.
+- `+await result:String = sandbox_discard()` — discard sandbox changes. Same as `!sandbox discard`. Reverts to pre-sandbox state.
+- `+await result:String = mock_set(operation, pattern, response)` — register an IO mock. Same as `!mock`. Operation is the IO name (e.g. 'http_get'), pattern matches arguments, response is the return value.
+- `+await result:String = mock_clear()` — clear all IO mocks. Same as `!unmock`. Returns 'cleared N mocks'.
 
 Example:
 ```
@@ -666,6 +678,19 @@ Example:
 +fn notify_agent (agent:String, msg:String)->String [io,async]
   +await r:String = msg_send(agent, msg)
   +return r
++end
+
++fn add_endpoint ()->String [io,async]
+  +await r:String = route_add("POST", "/api/greet", "Greet.handle")
+  +return r
++end
+
++fn safe_experiment ()->String [io,async]
+  +await r1:String = sandbox_enter()
+  +await r2:String = mutate("+fn risky ()->Int\n  +return 42\n+end")
+  +await r3:String = test_run("risky")
+  +await r4:String = sandbox_merge()
+  +return concat(r1, " | ", r2, " | ", r3, " | ", r4)
 +end
 ```
 
