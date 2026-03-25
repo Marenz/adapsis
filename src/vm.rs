@@ -182,6 +182,7 @@ pub struct CompiledFunction {
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::ast;
 
@@ -778,7 +779,7 @@ fn run_loop(
             Op::PushInt(n) => state.stack.push(Value::Int(*n)),
             Op::PushFloat(f) => state.stack.push(Value::Float(*f)),
             Op::PushBool(b) => state.stack.push(Value::Bool(*b)),
-            Op::PushString(s) => state.stack.push(Value::String(s.clone())),
+            Op::PushString(s) => state.stack.push(Value::String(Arc::from(s.as_str()))),
             Op::PushUnit => state.stack.push(Value::None),
 
             // ── Locals ───────────────────────────────────────────────
@@ -1021,9 +1022,11 @@ fn run_loop(
                 let mut fields = HashMap::new();
                 for name in field_names.iter().rev() {
                     let val = pop_stack(&mut state.stack)?;
-                    fields.insert(name.clone(), val);
+                    fields.insert(Arc::from(name.as_str()), val);
                 }
-                state.stack.push(Value::Struct(String::new(), fields));
+                state
+                    .stack
+                    .push(Value::Struct(Arc::from(""), Arc::new(fields)));
             }
             Op::GetField(field) => {
                 let field = field.clone();
@@ -1031,7 +1034,7 @@ fn run_loop(
                 match val {
                     Value::Struct(_, ref map) => {
                         let field_val = map
-                            .get(&field)
+                            .get(field.as_str())
                             .ok_or_else(|| anyhow::anyhow!("field `{field}` not found on struct"))?
                             .clone();
                         state.stack.push(field_val);
@@ -1046,7 +1049,7 @@ fn run_loop(
                     items.push(pop_stack(&mut state.stack)?);
                 }
                 items.reverse();
-                state.stack.push(Value::List(items));
+                state.stack.push(Value::List(Arc::new(items)));
             }
 
             // ── Result / Option constructors ─────────────────────────
@@ -1058,7 +1061,7 @@ fn run_loop(
                 let val = pop_stack(&mut state.stack)?;
                 let msg = match val {
                     Value::String(s) => s,
-                    other => format!("{other}"),
+                    other => format!("{other}").into(),
                 };
                 state.stack.push(Value::Err(msg));
             }
@@ -1080,7 +1083,7 @@ fn run_loop(
                 }
                 payload.reverse();
                 state.stack.push(Value::Union {
-                    variant: variant_name,
+                    variant: Arc::from(variant_name.as_str()),
                     payload,
                 });
             }
@@ -1091,7 +1094,7 @@ fn run_loop(
                     Value::Union {
                         ref variant,
                         ref payload,
-                    } if variant == variant_name => {
+                    } if variant.as_ref() == variant_name.as_str() => {
                         // Push bindings onto stack (in order), then push true
                         for i in 0..binding_count.min(payload.len()) {
                             state.stack.push(payload[i].clone());
@@ -1138,9 +1141,9 @@ fn binary_arith(
         (Value::Int(a), Value::Float(b)) => Value::Float(float_op(*a as f64, *b)),
         (Value::Float(a), Value::Int(b)) => Value::Float(float_op(*a, *b as f64)),
         // String concatenation for Add
-        (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}")),
-        (Value::String(a), other) => Value::String(format!("{a}{other}")),
-        (other, Value::String(b)) => Value::String(format!("{other}{b}")),
+        (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}").into()),
+        (Value::String(a), other) => Value::String(format!("{a}{other}").into()),
+        (other, Value::String(b)) => Value::String(format!("{other}{b}").into()),
         _ => bail!("arithmetic: unsupported types {lhs} and {rhs}"),
     };
     stack.push(result);
@@ -1681,7 +1684,7 @@ mod tests {
             vec![Value::Int(-1)],
         );
         assert!(
-            matches!(val, Value::Err(ref msg) if msg == "err_negative"),
+            matches!(val, Value::Err(ref msg) if &**msg == "err_negative"),
             "expected Err(err_negative), got {val}"
         );
     }
@@ -1713,10 +1716,10 @@ mod tests {
   +return msg
 "#,
             "greet",
-            vec![Value::String("world".to_string())],
+            vec![Value::String("world".into())],
         );
         match val {
-            Value::String(s) => assert_eq!(s, "hello world"),
+            Value::String(s) => assert_eq!(&*s, "hello world"),
             _ => panic!("expected String, got {val}"),
         }
     }
@@ -1730,7 +1733,7 @@ mod tests {
   +return n
 "#,
             "str_len",
-            vec![Value::String("hello".to_string())],
+            vec![Value::String("hello".into())],
         );
         assert!(matches!(val, Value::Int(5)), "expected 5, got {val}");
     }
@@ -1828,7 +1831,7 @@ mod tests {
         let compiled = compile_function(func, &program).unwrap();
         let result = execute(
             &compiled,
-            vec![Value::String("http://example.com".to_string())],
+            vec![Value::String("http://example.com".into())],
             &program,
         )
         .unwrap();
@@ -1852,14 +1855,9 @@ mod tests {
         );
         let func = program.get_function("greet").unwrap();
         let compiled = compile_function(func, &program).unwrap();
-        let result = execute(
-            &compiled,
-            vec![Value::String("world".to_string())],
-            &program,
-        )
-        .unwrap();
+        let result = execute(&compiled, vec![Value::String("world".into())], &program).unwrap();
         match result {
-            VmResult::Done(Value::String(s)) => assert_eq!(s, "hello world"),
+            VmResult::Done(Value::String(s)) => assert_eq!(&*s, "hello world"),
             other => panic!("expected Done(String), got {:?}", other),
         }
     }
@@ -1877,15 +1875,12 @@ mod tests {
         let compiled = compile_function(func, &program).unwrap();
         let result = execute(
             &compiled,
-            vec![
-                Value::String("foo".to_string()),
-                Value::String("bar".to_string()),
-            ],
+            vec![Value::String("foo".into()), Value::String("bar".into())],
             &program,
         )
         .unwrap();
         match result {
-            VmResult::Done(Value::String(s)) => assert_eq!(s, "foo bar"),
+            VmResult::Done(Value::String(s)) => assert_eq!(&*s, "foo bar"),
             other => panic!("expected Done(String), got {:?}", other),
         }
     }

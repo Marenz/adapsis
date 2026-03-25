@@ -3720,7 +3720,7 @@ async fn adapsis_route_dispatch(
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
         let mut env = eval::Env::new_with_interner(&program.interner);
         env.populate_shared_from_program(&program);
-        let input = eval::Value::String(body_str);
+        let input = eval::Value::String(body_str.into());
         eval::bind_input_to_params(&program, func, &input, &mut env);
         eval::eval_function_body_pub(&program, &func.body, &mut env)
     })
@@ -3738,7 +3738,7 @@ async fn adapsis_route_dispatch(
             // Extract the raw string for HTTP response (no JSON quoting).
             // Infer content-type from the response body.
             let response_body = match &val {
-                eval::Value::String(s) => s.clone(),
+                eval::Value::String(s) => s.to_string(),
                 other => format!("{other}"),
             };
             let content_type = {
