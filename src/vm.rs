@@ -621,6 +621,416 @@ impl<'a> Compiler<'a> {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// VM Interpreter: execute compiled bytecode
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Result of VM execution — either a completed value or an async suspension.
+#[derive(Debug, Clone)]
+pub enum VmResult {
+    /// Execution completed with a return value.
+    Done(Value),
+    /// Execution suspended for an async IO operation.
+    /// The caller should perform the IO, then resume by providing the result.
+    Await {
+        op_name: String,
+        args: Vec<Value>,
+        /// The saved VM state, ready to resume after IO completes.
+        vm_state: VmState,
+    },
+}
+
+/// Execute a compiled function with the given arguments.
+///
+/// For synchronous functions, returns `VmResult::Done(value)`.
+/// For functions that hit an `AwaitIo` instruction, returns `VmResult::Await`
+/// with the suspended state so the caller can perform IO and resume.
+pub fn execute(
+    compiled: &CompiledFunction,
+    args: Vec<Value>,
+    program: &ast::Program,
+) -> Result<VmResult> {
+    let mut state = VmState {
+        function_name: compiled.name.clone(),
+        ip: 0,
+        bytecode: compiled.bytecode.clone(),
+        locals: vec![Value::None; compiled.local_count.max(args.len())],
+        stack: Vec::with_capacity(32),
+        call_stack: Vec::new(),
+    };
+
+    // Load arguments into local slots
+    for (i, arg) in args.into_iter().enumerate() {
+        if i < state.locals.len() {
+            state.locals[i] = arg;
+        }
+    }
+
+    run_loop(&mut state, program)
+}
+
+/// The main execution loop. Processes instructions until Return or AwaitIo.
+fn run_loop(state: &mut VmState, program: &ast::Program) -> Result<VmResult> {
+    loop {
+        if state.ip >= state.bytecode.len() {
+            // Fell off the end — return unit
+            return Ok(VmResult::Done(Value::None));
+        }
+
+        let op = state.bytecode[state.ip].clone();
+        state.ip += 1;
+
+        match op {
+            // ── Literals ─────────────────────────────────────────────
+            Op::PushInt(n) => state.stack.push(Value::Int(n)),
+            Op::PushFloat(f) => state.stack.push(Value::Float(f)),
+            Op::PushBool(b) => state.stack.push(Value::Bool(b)),
+            Op::PushString(s) => state.stack.push(Value::String(s)),
+            Op::PushUnit => state.stack.push(Value::None),
+
+            // ── Locals ───────────────────────────────────────────────
+            Op::LoadLocal(slot) => {
+                let val = state.locals.get(slot).cloned().unwrap_or(Value::None);
+                state.stack.push(val);
+            }
+            Op::StoreLocal(slot) => {
+                let val = pop_stack(&mut state.stack)?;
+                // Grow locals if needed
+                while state.locals.len() <= slot {
+                    state.locals.push(Value::None);
+                }
+                state.locals[slot] = val;
+            }
+
+            // ── Arithmetic ───────────────────────────────────────────
+            Op::Add => binary_arith(&mut state.stack, |a, b| a + b, |a, b| a + b)?,
+            Op::Sub => binary_arith(&mut state.stack, |a, b| a - b, |a, b| a - b)?,
+            Op::Mul => binary_arith(&mut state.stack, |a, b| a * b, |a, b| a * b)?,
+            Op::Div => {
+                let rhs = pop_stack(&mut state.stack)?;
+                let lhs = pop_stack(&mut state.stack)?;
+                match (&lhs, &rhs) {
+                    (Value::Int(a), Value::Int(b)) => {
+                        if *b == 0 {
+                            bail!("division by zero");
+                        }
+                        state.stack.push(Value::Int(a / b));
+                    }
+                    (Value::Float(a), Value::Float(b)) => {
+                        state.stack.push(Value::Float(a / b));
+                    }
+                    (Value::Int(a), Value::Float(b)) => {
+                        state.stack.push(Value::Float(*a as f64 / b));
+                    }
+                    (Value::Float(a), Value::Int(b)) => {
+                        if *b == 0 {
+                            bail!("division by zero");
+                        }
+                        state.stack.push(Value::Float(a / *b as f64));
+                    }
+                    _ => bail!("Div: unsupported types {lhs} / {rhs}"),
+                }
+            }
+            Op::Mod => {
+                let rhs = pop_stack(&mut state.stack)?;
+                let lhs = pop_stack(&mut state.stack)?;
+                match (&lhs, &rhs) {
+                    (Value::Int(a), Value::Int(b)) => {
+                        if *b == 0 {
+                            bail!("modulo by zero");
+                        }
+                        state.stack.push(Value::Int(a % b));
+                    }
+                    _ => bail!("Mod: unsupported types"),
+                }
+            }
+
+            // ── Comparison ───────────────────────────────────────────
+            Op::Eq => binary_cmp(
+                &mut state.stack,
+                |a, b| a == b,
+                |a, b| (a - b).abs() < f64::EPSILON,
+            )?,
+            Op::Neq => binary_cmp(
+                &mut state.stack,
+                |a, b| a != b,
+                |a, b| (a - b).abs() >= f64::EPSILON,
+            )?,
+            Op::Lt => binary_cmp(&mut state.stack, |a, b| a < b, |a, b| a < b)?,
+            Op::Lte => binary_cmp(&mut state.stack, |a, b| a <= b, |a, b| a <= b)?,
+            Op::Gt => binary_cmp(&mut state.stack, |a, b| a > b, |a, b| a > b)?,
+            Op::Gte => binary_cmp(&mut state.stack, |a, b| a >= b, |a, b| a >= b)?,
+
+            // ── Boolean logic ────────────────────────────────────────
+            Op::And => {
+                let b = pop_bool(&mut state.stack)?;
+                let a = pop_bool(&mut state.stack)?;
+                state.stack.push(Value::Bool(a && b));
+            }
+            Op::Or => {
+                let b = pop_bool(&mut state.stack)?;
+                let a = pop_bool(&mut state.stack)?;
+                state.stack.push(Value::Bool(a || b));
+            }
+            Op::Not => {
+                let v = pop_bool(&mut state.stack)?;
+                state.stack.push(Value::Bool(!v));
+            }
+            Op::Negate => {
+                let v = pop_stack(&mut state.stack)?;
+                match v {
+                    Value::Int(n) => state.stack.push(Value::Int(-n)),
+                    Value::Float(f) => state.stack.push(Value::Float(-f)),
+                    _ => bail!("Negate: unsupported type {v}"),
+                }
+            }
+
+            // ── Function calls ───────────────────────────────────────
+            Op::Call(name, argc) => {
+                let mut call_args = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    call_args.push(pop_stack(&mut state.stack)?);
+                }
+                call_args.reverse(); // arguments were pushed left-to-right
+
+                // Compile and execute the callee
+                let func = program
+                    .get_function(&name)
+                    .ok_or_else(|| anyhow::anyhow!("vm: function `{name}` not found"))?;
+                let callee_compiled = compile_function(func, program)?;
+                match execute(&callee_compiled, call_args, program)? {
+                    VmResult::Done(val) => state.stack.push(val),
+                    VmResult::Await {
+                        op_name,
+                        args,
+                        vm_state,
+                    } => {
+                        // Propagate suspension up
+                        // Save current state on call stack
+                        return Ok(VmResult::Await {
+                            op_name,
+                            args,
+                            vm_state,
+                        });
+                    }
+                }
+            }
+            Op::CallBuiltin(name, argc) => {
+                let mut call_args = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    call_args.push(pop_stack(&mut state.stack)?);
+                }
+                call_args.reverse();
+
+                let mut env = crate::eval::Env::new();
+                let result =
+                    crate::eval::eval_builtin_or_user(program, &name, call_args, &mut env)?;
+                state.stack.push(result);
+            }
+            Op::AwaitIo(op_name, argc) => {
+                let mut io_args = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    io_args.push(pop_stack(&mut state.stack)?);
+                }
+                io_args.reverse();
+
+                // Suspend execution — caller must perform IO and resume
+                return Ok(VmResult::Await {
+                    op_name,
+                    args: io_args,
+                    vm_state: state.clone(),
+                });
+            }
+
+            // ── Control flow ─────────────────────────────────────────
+            Op::Return => {
+                let val = pop_stack(&mut state.stack)?;
+                if state.call_stack.is_empty() {
+                    return Ok(VmResult::Done(val));
+                }
+                // Return to caller frame
+                let frame = state.call_stack.pop().unwrap();
+                state.ip = frame.return_ip;
+                state.bytecode = frame.return_bytecode;
+                state.locals.truncate(frame.locals_base);
+                state.stack.push(val);
+            }
+            Op::Jump(target) => {
+                state.ip = target;
+            }
+            Op::BranchIf(target) => {
+                let cond = pop_bool(&mut state.stack)?;
+                if cond {
+                    state.ip = target;
+                }
+            }
+            Op::BranchIfNot(target) => {
+                let cond = pop_bool(&mut state.stack)?;
+                if !cond {
+                    state.ip = target;
+                }
+            }
+
+            // ── Stack manipulation ───────────────────────────────────
+            Op::Pop => {
+                pop_stack(&mut state.stack)?;
+            }
+            Op::Dup => {
+                let val = state
+                    .stack
+                    .last()
+                    .ok_or_else(|| anyhow::anyhow!("Dup: empty stack"))?
+                    .clone();
+                state.stack.push(val);
+            }
+
+            // ── Struct / composite ───────────────────────────────────
+            Op::MakeStruct(ref field_names) => {
+                let mut fields = HashMap::new();
+                for name in field_names.iter().rev() {
+                    let val = pop_stack(&mut state.stack)?;
+                    fields.insert(name.clone(), val);
+                }
+                state.stack.push(Value::Struct(String::new(), fields));
+            }
+            Op::GetField(ref field) => {
+                let val = pop_stack(&mut state.stack)?;
+                match val {
+                    Value::Struct(_, ref map) => {
+                        let field_val = map
+                            .get(field)
+                            .ok_or_else(|| anyhow::anyhow!("field `{field}` not found on struct"))?
+                            .clone();
+                        state.stack.push(field_val);
+                    }
+                    _ => bail!("GetField: expected struct, got {val}"),
+                }
+            }
+            Op::MakeList(count) => {
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    items.push(pop_stack(&mut state.stack)?);
+                }
+                items.reverse();
+                state.stack.push(Value::List(items));
+            }
+
+            // ── Result / Option constructors ─────────────────────────
+            Op::PushOk => {
+                let val = pop_stack(&mut state.stack)?;
+                state.stack.push(Value::Ok(Box::new(val)));
+            }
+            Op::PushErr => {
+                let val = pop_stack(&mut state.stack)?;
+                let msg = match val {
+                    Value::String(s) => s,
+                    other => format!("{other}"),
+                };
+                state.stack.push(Value::Err(msg));
+            }
+            Op::PushSome => {
+                let val = pop_stack(&mut state.stack)?;
+                state.stack.push(Value::Ok(Box::new(val)));
+            }
+            Op::PushNone => {
+                state.stack.push(Value::None);
+            }
+
+            // ── Union / variant ops ──────────────────────────────────
+            Op::PushVariant(ref variant_name, count) => {
+                let mut payload = Vec::with_capacity(count);
+                for _ in 0..count {
+                    payload.push(pop_stack(&mut state.stack)?);
+                }
+                payload.reverse();
+                state.stack.push(Value::Union {
+                    variant: variant_name.clone(),
+                    payload,
+                });
+            }
+            Op::MatchVariant(ref variant_name, binding_count) => {
+                let val = pop_stack(&mut state.stack)?;
+                match val {
+                    Value::Union {
+                        ref variant,
+                        ref payload,
+                    } if variant == variant_name => {
+                        // Push bindings onto stack (in order), then push true
+                        for i in 0..binding_count.min(payload.len()) {
+                            state.stack.push(payload[i].clone());
+                        }
+                        state.stack.push(Value::Bool(true));
+                    }
+                    _ => {
+                        // No match — push false (no bindings)
+                        state.stack.push(Value::Bool(false));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Stack helpers ────────────────────────────────────────────────────
+
+fn pop_stack(stack: &mut Vec<Value>) -> Result<Value> {
+    stack
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("vm: stack underflow"))
+}
+
+fn pop_bool(stack: &mut Vec<Value>) -> Result<bool> {
+    match pop_stack(stack)? {
+        Value::Bool(b) => Ok(b),
+        Value::Int(n) => Ok(n != 0), // truthy: non-zero
+        other => bail!("vm: expected Bool, got {other}"),
+    }
+}
+
+/// Binary arithmetic on Int or Float values.
+fn binary_arith(
+    stack: &mut Vec<Value>,
+    int_op: impl Fn(i64, i64) -> i64,
+    float_op: impl Fn(f64, f64) -> f64,
+) -> Result<()> {
+    let rhs = pop_stack(stack)?;
+    let lhs = pop_stack(stack)?;
+    let result = match (&lhs, &rhs) {
+        (Value::Int(a), Value::Int(b)) => Value::Int(int_op(*a, *b)),
+        (Value::Float(a), Value::Float(b)) => Value::Float(float_op(*a, *b)),
+        (Value::Int(a), Value::Float(b)) => Value::Float(float_op(*a as f64, *b)),
+        (Value::Float(a), Value::Int(b)) => Value::Float(float_op(*a, *b as f64)),
+        // String concatenation for Add
+        (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}")),
+        (Value::String(a), other) => Value::String(format!("{a}{other}")),
+        (other, Value::String(b)) => Value::String(format!("{other}{b}")),
+        _ => bail!("arithmetic: unsupported types {lhs} and {rhs}"),
+    };
+    stack.push(result);
+    Ok(())
+}
+
+/// Binary comparison on Int, Float, or String values.
+fn binary_cmp(
+    stack: &mut Vec<Value>,
+    int_cmp: impl Fn(i64, i64) -> bool,
+    float_cmp: impl Fn(f64, f64) -> bool,
+) -> Result<()> {
+    let rhs = pop_stack(stack)?;
+    let lhs = pop_stack(stack)?;
+    let result = match (&lhs, &rhs) {
+        (Value::Int(a), Value::Int(b)) => int_cmp(*a, *b),
+        (Value::Float(a), Value::Float(b)) => float_cmp(*a, *b),
+        (Value::Int(a), Value::Float(b)) => float_cmp(*a as f64, *b),
+        (Value::Float(a), Value::Int(b)) => float_cmp(*a, *b as f64),
+        (Value::Bool(a), Value::Bool(b)) => int_cmp(*a as i64, *b as i64),
+        (Value::String(a), Value::String(b)) => int_cmp(a.cmp(b) as i64, 0),
+        _ => bail!("comparison: unsupported types {lhs} and {rhs}"),
+    };
+    stack.push(Value::Bool(result));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,5 +1375,312 @@ mod tests {
             .bytecode
             .iter()
             .any(|op| matches!(op, Op::LoadLocal(1))));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // VM Execution tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// Compile and execute a function, returning the result Value.
+    fn exec_fn(source: &str, fn_name: &str, args: Vec<Value>) -> Value {
+        let program = build_program(source);
+        let func = program
+            .get_function(fn_name)
+            .unwrap_or_else(|| panic!("function `{fn_name}` not found"));
+        let compiled = compile_function(func, &program).expect("compilation failed");
+        match execute(&compiled, args, &program).expect("execution failed") {
+            VmResult::Done(val) => val,
+            VmResult::Await { .. } => panic!("unexpected Await result"),
+        }
+    }
+
+    #[test]
+    fn exec_double() {
+        let val = exec_fn(
+            "\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+",
+            "double",
+            vec![Value::Int(5)],
+        );
+        assert!(matches!(val, Value::Int(10)), "expected 10, got {val}");
+    }
+
+    #[test]
+    fn exec_add() {
+        let val = exec_fn(
+            "\
++fn add (a:Int, b:Int)->Int
+  +return a + b
+",
+            "add",
+            vec![Value::Int(3), Value::Int(4)],
+        );
+        assert!(matches!(val, Value::Int(7)), "expected 7, got {val}");
+    }
+
+    #[test]
+    fn exec_arithmetic_compound() {
+        let val = exec_fn(
+            "\
++fn calc (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +let product:Int = a * b
+  +let result:Int = sum + product
+  +return result
+",
+            "calc",
+            vec![Value::Int(3), Value::Int(4)],
+        );
+        // sum=7, product=12, result=19
+        assert!(matches!(val, Value::Int(19)), "expected 19, got {val}");
+    }
+
+    #[test]
+    fn exec_if_else_positive() {
+        let source = "\
++fn classify (x:Int)->Int
+  +if x >= 0
+    +return 1
+  +else
+    +return 0
+  +end
+";
+        let val = exec_fn(source, "classify", vec![Value::Int(5)]);
+        assert!(
+            matches!(val, Value::Int(1)),
+            "expected 1 for positive, got {val}"
+        );
+
+        let val = exec_fn(source, "classify", vec![Value::Int(-3)]);
+        assert!(
+            matches!(val, Value::Int(0)),
+            "expected 0 for negative, got {val}"
+        );
+    }
+
+    #[test]
+    fn exec_while_loop() {
+        let val = exec_fn(
+            "\
++fn count_to (n:Int)->Int
+  +let i:Int = 0
+  +while i < n
+    +set i = i + 1
+  +end
+  +return i
+",
+            "count_to",
+            vec![Value::Int(5)],
+        );
+        assert!(matches!(val, Value::Int(5)), "expected 5, got {val}");
+    }
+
+    #[test]
+    fn exec_while_loop_sum() {
+        let val = exec_fn(
+            "\
++fn sum_to (n:Int)->Int
+  +let total:Int = 0
+  +let i:Int = 1
+  +while i <= n
+    +set total = total + i
+    +set i = i + 1
+  +end
+  +return total
+",
+            "sum_to",
+            vec![Value::Int(10)],
+        );
+        assert!(matches!(val, Value::Int(55)), "expected 55, got {val}");
+    }
+
+    #[test]
+    fn exec_check_pass() {
+        let val = exec_fn(
+            "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+",
+            "validate",
+            vec![Value::Int(42)],
+        );
+        // Check passed — returns the raw value (not wrapped in Ok by VM)
+        assert!(matches!(val, Value::Int(42)), "expected 42, got {val}");
+    }
+
+    #[test]
+    fn exec_check_fail() {
+        let val = exec_fn(
+            "\
++fn validate (x:Int)->Result<Int> [fail]
+  +check positive x > 0 ~err_negative
+  +return x
+",
+            "validate",
+            vec![Value::Int(-1)],
+        );
+        assert!(
+            matches!(val, Value::Err(ref msg) if msg == "err_negative"),
+            "expected Err(err_negative), got {val}"
+        );
+    }
+
+    #[test]
+    fn exec_user_function_call() {
+        let val = exec_fn(
+            "\
++fn double (x:Int)->Int
+  +return x * 2
+
++fn quadruple (x:Int)->Int
+  +call d:Int = double(x)
+  +call r:Int = double(d)
+  +return r
+",
+            "quadruple",
+            vec![Value::Int(5)],
+        );
+        assert!(matches!(val, Value::Int(20)), "expected 20, got {val}");
+    }
+
+    #[test]
+    fn exec_builtin_concat() {
+        let val = exec_fn(
+            r#"
++fn greet (name:String)->String
+  +let msg:String = concat("hello ", name)
+  +return msg
+"#,
+            "greet",
+            vec![Value::String("world".to_string())],
+        );
+        match val {
+            Value::String(s) => assert_eq!(s, "hello world"),
+            _ => panic!("expected String, got {val}"),
+        }
+    }
+
+    #[test]
+    fn exec_builtin_len() {
+        let val = exec_fn(
+            r#"
++fn str_len (s:String)->Int
+  +let n:Int = len(s)
+  +return n
+"#,
+            "str_len",
+            vec![Value::String("hello".to_string())],
+        );
+        assert!(matches!(val, Value::Int(5)), "expected 5, got {val}");
+    }
+
+    #[test]
+    fn exec_comparison_ops() {
+        let source = "\
++fn check_gt (a:Int, b:Int)->Int
+  +if a > b
+    +return 1
+  +else
+    +return 0
+  +end
+";
+        assert!(matches!(
+            exec_fn(source, "check_gt", vec![Value::Int(5), Value::Int(3)]),
+            Value::Int(1)
+        ));
+        assert!(matches!(
+            exec_fn(source, "check_gt", vec![Value::Int(1), Value::Int(3)]),
+            Value::Int(0)
+        ));
+    }
+
+    #[test]
+    fn exec_boolean_logic() {
+        let val = exec_fn(
+            "\
++fn both (a:Bool, b:Bool)->Bool
+  +if a AND b
+    +return true
+  +else
+    +return false
+  +end
+",
+            "both",
+            vec![Value::Bool(true), Value::Bool(true)],
+        );
+        assert!(matches!(val, Value::Bool(true)));
+
+        let val = exec_fn(
+            "\
++fn both (a:Bool, b:Bool)->Bool
+  +if a AND b
+    +return true
+  +else
+    +return false
+  +end
+",
+            "both",
+            vec![Value::Bool(true), Value::Bool(false)],
+        );
+        assert!(matches!(val, Value::Bool(false)));
+    }
+
+    #[test]
+    fn exec_constant_return() {
+        let val = exec_fn(
+            "\
++fn answer ()->Int
+  +return 42
+",
+            "answer",
+            vec![],
+        );
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn exec_float_arithmetic() {
+        let val = exec_fn(
+            "\
++fn add_f (a:Float, b:Float)->Float
+  +return a + b
+",
+            "add_f",
+            vec![Value::Float(1.5), Value::Float(2.5)],
+        );
+        match val {
+            Value::Float(f) => assert!((f - 4.0).abs() < 1e-10),
+            _ => panic!("expected Float, got {val}"),
+        }
+    }
+
+    #[test]
+    fn exec_await_io_suspends() {
+        let program = build_program(
+            "\
++fn fetch (url:String)->String [io,async]
+  +await data:String = http_get(url)
+  +return data
+",
+        );
+        let func = program.get_function("fetch").unwrap();
+        let compiled = compile_function(func, &program).unwrap();
+        let result = execute(
+            &compiled,
+            vec![Value::String("http://example.com".to_string())],
+            &program,
+        )
+        .unwrap();
+        match result {
+            VmResult::Await { op_name, args, .. } => {
+                assert_eq!(op_name, "http_get");
+                assert_eq!(args.len(), 1);
+            }
+            VmResult::Done(_) => panic!("expected Await, got Done"),
+        }
     }
 }

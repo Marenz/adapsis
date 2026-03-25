@@ -1521,7 +1521,7 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
     eval_builtin_or_user(program, &call.callee, args, env)
 }
 
-fn eval_builtin_or_user(
+pub fn eval_builtin_or_user(
     program: &ast::Program,
     callee: &str,
     args: Vec<Value>,
