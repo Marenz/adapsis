@@ -17,7 +17,6 @@ pub enum BuiltinCategory {
     List,
     Bitwise,
     Conversion,
-    State,
     Result,
     Regex,
     Io,
@@ -276,27 +275,6 @@ pub static BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::List,
     },
     // State
-    Builtin {
-        name: "state",
-        aliases: &[],
-        short: "create shared state handle",
-        long: "Creates a shared state handle initialized with one value. Use it when multiple functions or tasks need access to the same mutable value.",
-        category: BuiltinCategory::State,
-    },
-    Builtin {
-        name: "get_state",
-        aliases: &[],
-        short: "read shared state",
-        long: "Reads the current value from a StateHandle and returns a copy of it. Takes one StateHandle argument.",
-        category: BuiltinCategory::State,
-    },
-    Builtin {
-        name: "set_state",
-        aliases: &[],
-        short: "write shared state",
-        long: "Writes a new value into a StateHandle. Returns Int 0 on success.",
-        category: BuiltinCategory::State,
-    },
     // Result
     Builtin {
         name: "Ok",
