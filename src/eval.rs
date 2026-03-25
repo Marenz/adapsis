@@ -1535,7 +1535,7 @@ fn eval_function_body(
                     // Ensure mutation builtins can write to the program AST via thread-local.
                     let is_mutation_builtin = matches!(call.callee.as_str(),
                         "mutate" | "fn_remove" | "type_remove" | "module_remove"
-                        | "module_create" | "fn_replace");
+                        | "module_create" | "fn_replace" | "move_symbols");
                     if is_mutation_builtin {
                         // Create a mutable wrapper if not already set
                         if get_shared_program_mut().is_none() {
@@ -1657,6 +1657,22 @@ pub fn set_shared_program_mut(program: Option<std::sync::Arc<std::sync::RwLock<c
 /// mutation builtins (mutate, fn_remove, type_remove, module_remove) that need write access.
 pub fn get_shared_program_mut() -> Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>> {
     SHARED_PROGRAM_MUT.with(|s| s.borrow().clone())
+}
+
+/// Create a shared mutable program wrapper for use in `spawn_blocking` contexts.
+/// Returns the `Arc<RwLock<Program>>` so the caller can read back mutations after
+/// the blocking task completes. Pass `arc.clone()` to `set_shared_program_mut()`
+/// inside the `spawn_blocking` closure, then call `read_back_program_mutations()`
+/// after the task returns.
+pub fn make_shared_program_mut(program: &crate::ast::Program) -> std::sync::Arc<std::sync::RwLock<crate::ast::Program>> {
+    std::sync::Arc::new(std::sync::RwLock::new(program.clone()))
+}
+
+/// Read back a potentially-mutated program from the shared mutable wrapper.
+/// Returns `Some(program)` if the lock can be acquired, `None` on lock error.
+/// The caller should compare with the original program to detect mutations.
+pub fn read_back_program_mutations(program_mut: &std::sync::Arc<std::sync::RwLock<crate::ast::Program>>) -> Option<crate::ast::Program> {
+    program_mut.read().ok().map(|p| p.clone())
 }
 
 const MAX_CALL_DEPTH: usize = 256;
@@ -6273,5 +6289,172 @@ mod tests {
             );
         }
         println!();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // make_shared_program_mut / read_back_program_mutations
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn make_shared_program_mut_creates_writable_clone() {
+        let mut program = crate::ast::Program::default();
+        // Add a function to verify the clone works
+        let ops = crate::parser::parse("+fn hello ()->String\n  +return \"hi\"\n+end")
+            .expect("parse failed");
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        let shared = make_shared_program_mut(&program);
+
+        // Should be able to read the program
+        {
+            let p = shared.read().unwrap();
+            assert!(p.get_function("hello").is_some());
+        }
+
+        // Should be able to write to the program
+        {
+            let mut p = shared.write().unwrap();
+            p.functions.clear();
+            p.rebuild_function_index();
+        }
+
+        // Verify mutation took effect
+        {
+            let p = shared.read().unwrap();
+            assert!(p.get_function("hello").is_none());
+        }
+    }
+
+    #[test]
+    fn read_back_returns_mutated_state() {
+        let mut program = crate::ast::Program::default();
+        let ops = crate::parser::parse("+fn hello ()->String\n  +return \"hi\"\n+end")
+            .expect("parse failed");
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        let shared = make_shared_program_mut(&program);
+
+        // Mutate via the lock
+        {
+            let mut p = shared.write().unwrap();
+            let new_ops = crate::parser::parse("+fn goodbye ()->String\n  +return \"bye\"\n+end")
+                .expect("parse failed");
+            for op in &new_ops {
+                crate::validator::apply_and_validate(&mut p, op).unwrap();
+            }
+            p.rebuild_function_index();
+        }
+
+        // Read back should see the new function
+        let readback = read_back_program_mutations(&shared);
+        assert!(readback.is_some());
+        let p = readback.unwrap();
+        assert!(p.get_function("hello").is_some(), "original function should still exist");
+        assert!(p.get_function("goodbye").is_some(), "new function should exist after mutation");
+    }
+
+    #[test]
+    fn read_back_returns_original_when_no_mutation() {
+        let program = crate::ast::Program::default();
+        let shared = make_shared_program_mut(&program);
+
+        // No mutations performed
+        let readback = read_back_program_mutations(&shared);
+        assert!(readback.is_some(), "read_back should succeed even without mutations");
+        assert!(readback.unwrap().functions.is_empty(), "should return empty program");
+    }
+
+    #[test]
+    fn shared_program_mut_thread_local_roundtrip() {
+        let mut program = crate::ast::Program::default();
+        let ops = crate::parser::parse("+fn test_fn ()->Int\n  +return 42\n+end")
+            .expect("parse failed");
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        let shared = make_shared_program_mut(&program);
+        set_shared_program_mut(Some(shared.clone()));
+
+        // get_shared_program_mut should return the same Arc
+        let retrieved = get_shared_program_mut();
+        assert!(retrieved.is_some(), "should retrieve program_mut from thread-local");
+
+        // Mutate via the retrieved handle
+        {
+            let lock = retrieved.unwrap();
+            let mut p = lock.write().unwrap();
+            p.functions.clear();
+            p.rebuild_function_index();
+        }
+
+        // read_back from the original shared handle should see the mutation
+        let readback = read_back_program_mutations(&shared);
+        assert!(readback.is_some());
+        assert!(readback.unwrap().functions.is_empty(), "mutations should propagate through shared Arc");
+
+        // Clean up
+        set_shared_program_mut(None);
+    }
+
+    #[test]
+    fn move_symbols_in_mutation_builtin_list() {
+        // Verify that the is_mutation_builtin check in eval.rs includes move_symbols.
+        // This is a structural test — we check the eval path by calling through
+        // the actual code path (via the +await dispatch).
+        //
+        // We build a program with a function that does +await move_symbols(...),
+        // set only the read-only snapshot (no set_shared_program_mut), and verify
+        // that the eval.rs fallback creates the mutable wrapper automatically.
+        let source = "+fn helper ()->String\n  +return \"hi\"\n+end";
+        let ops = crate::parser::parse(source).expect("parse failed");
+        let mut program = crate::ast::Program::default();
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        // Set only read-only snapshot — mutation builtins need the fallback
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        set_shared_program_mut(None);
+
+        // Build a function that calls +await move_symbols("helper", "Utils")
+        let fn_source = "+fn do_move ()->String [io]\n  +await result:String = move_symbols(\"helper\", \"Utils\")\n  +return result\n+end";
+        let fn_ops = crate::parser::parse(fn_source).expect("parse fn failed");
+        for op in &fn_ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        // Create a mock handle — move_symbols doesn't go through IO dispatch,
+        // it's handled directly in execute_await, so a mock handle is fine
+        let handle = crate::coroutine::CoroutineHandle::new_mock(vec![]);
+        let mut env = Env::new();
+        env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+
+        // Set the program again with the new function
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        // The is_mutation_builtin check in eval.rs should create the mutable wrapper
+        // for move_symbols (it wouldn't before this fix)
+        let result = eval_function_body_pub(&program, &program.get_function("do_move").unwrap().body, &mut env);
+
+        // Should succeed — if move_symbols wasn't in the is_mutation_builtin list,
+        // it would fail with "program not available (no async context)"
+        assert!(result.is_ok(), "move_symbols should work via eval.rs mutation builtin fallback: {:?}", result.err());
+        let val = result.unwrap();
+        let val_str = format!("{val}");
+        assert!(val_str.contains("moved") || val_str.contains("Utils"),
+            "should confirm move: {val_str}");
+
+        // Clean up
+        set_shared_program(None);
+        set_shared_program_mut(None);
     }
 }
