@@ -1189,6 +1189,17 @@ fn build_plan_context(plan: &[crate::session::PlanStep]) -> (String, bool) {
     (format!("\nCurrent plan:\n{steps}\n"), all_done)
 }
 
+/// Format library load errors for inclusion in the AI context.
+/// Returns an empty string if there are no load errors.
+fn format_library_load_errors(meta: &crate::session::SessionMeta) -> String {
+    if let Some(ref lib_state) = meta.library_state {
+        if let Some(text) = lib_state.format_load_errors() {
+            return format!("\nWARNING — Library module load failures:\n{text}Use `+await result:String = library_reload(\"\")` or `+await result:String = library_reload(\"ModuleName\")` to retry.\n");
+        }
+    }
+    String::new()
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Operation dispatch helpers
 // ═══════════════════════════════════════════════════════════════════════
@@ -1433,10 +1444,12 @@ pub async fn ask(
         let plan_hint = if needs_plan {
             "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
         } else { "" };
+        let load_errors_ctx = format_library_load_errors(&session.meta);
         let context = format!(
-            "Working directory: {}\n{}{}\nUser: {}{}",
+            "Working directory: {}\n{}{}{}\nUser: {}{}",
             config.project_dir,
             crate::validator::program_summary_compact(&session.program),
+            load_errors_ctx,
             plan_ctx,
             req.message,
             plan_hint
@@ -2337,9 +2350,11 @@ pub async fn ask_stream(
             let plan_hint = if needs_plan {
                 "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
             } else { "" };
-            let context = format!("Working directory: {}\n{}{}\nUser: {}{}",
+            let load_errors_ctx = format_library_load_errors(&meta);
+            let context = format!("Working directory: {}\n{}{}{}\nUser: {}{}",
                 config_clone.project_dir,
                 program_summary,
+                load_errors_ctx,
                 plan_ctx, req.message, plan_hint);
             tx.log("user", &context).await;
             meta.chat_messages.push(crate::session::ChatMessage {
