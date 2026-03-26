@@ -369,6 +369,21 @@ impl Env {
         }
     }
 
+    /// Inherit shared variable state from a parent Env.
+    /// Used when creating a child Env for a nested function call so that
+    /// shared variables remain accessible even without a SharedRuntime
+    /// (e.g. during sync tests or CLI eval).
+    fn inherit_shared_from(&mut self, parent: &Env) {
+        if self.shared_cache.is_empty() && !parent.shared_cache.is_empty() {
+            self.shared_cache.clone_from(&parent.shared_cache);
+        }
+        if self.shared_runtime.is_none() {
+            if let Some(rt) = &parent.shared_runtime {
+                self.shared_runtime = Some(rt.clone());
+            }
+        }
+    }
+
     /// Push a new empty scope onto the stack.
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
@@ -712,11 +727,16 @@ pub fn eval_call_with_input(
     if let Some(func) = program.get_function(function_name) {
         let input_val = eval_parser_expr_standalone(input)?;
         let mut env = Env::new_with_shared_interner(&program.shared_interner);
+        env.populate_shared_from_program(program);
         bind_input_to_params(program, func, &input_val, &mut env);
 
         let returns_result = matches!(&func.return_type, ast::Type::Result(_));
 
-        return match eval_function_body(program, &func.body, &mut env) {
+        let qualified = program.qualify_function_name(function_name);
+        FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
+        let body_result = eval_function_body(program, &func.body, &mut env);
+        FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+        return match body_result {
             Ok(val) => {
                 let result = if returns_result {
                     match &val {
@@ -2569,6 +2589,9 @@ pub fn eval_builtin_or_user(
             // Try to find the function in the program and call it
             if let Some(func) = program.get_function(callee) {
                 let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
+                // Inherit shared variable state from caller so nested calls
+                // can access +shared vars even without a SharedRuntime.
+                call_env.inherit_shared_from(env);
                 for (param, arg) in func.params.iter().zip(args) {
                     call_env.set(&param.name, arg);
                 }
@@ -2576,8 +2599,12 @@ pub fn eval_builtin_or_user(
                 if let Some(handle) = env.get_raw("__coroutine_handle") {
                     call_env.set("__coroutine_handle", handle.clone());
                 }
-                // Track function name for task snapshot frames
-                FN_NAME_STACK.with(|s| s.borrow_mut().push(callee.to_string()));
+                // Qualify the function name so shared variable resolution can
+                // derive the correct module prefix from FN_NAME_STACK.
+                // Without this, intra-module calls like `B()` push bare "B"
+                // instead of "Module.B", making shared vars invisible.
+                let qualified = program.qualify_function_name(callee);
+                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
                 let result = eval_function_body(program, &func.body, &mut call_env);
                 FN_NAME_STACK.with(|s| s.borrow_mut().pop());
                 result
@@ -2865,7 +2892,12 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                         );
                     }
                     let mut env = Env::new_with_shared_interner(&program.shared_interner);
-                    return eval_function_body(program, &func.body, &mut env);
+                    env.populate_shared_from_program(program);
+                    let qualified = program.qualify_function_name(name);
+                    FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
+                    let result = eval_function_body(program, &func.body, &mut env);
+                    FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+                    return result;
                 }
             }
             // Fall through to standalone handling
@@ -2902,10 +2934,15 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
                 let mut env = Env::new_with_shared_interner(&program.shared_interner);
+                env.populate_shared_from_program(program);
                 for (param, arg) in func.params.iter().zip(eval_args) {
                     env.set(&param.name, arg);
                 }
-                return eval_function_body(program, &func.body, &mut env);
+                let qualified = program.qualify_function_name(&name);
+                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
+                let result = eval_function_body(program, &func.body, &mut env);
+                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+                return result;
             }
             // Try as builtin function (concat, len, to_string, etc.)
             // Skip Ok/Err/Some/None — these are handled by eval_parser_expr_standalone
@@ -2994,10 +3031,15 @@ fn eval_parser_expr_with_env(
             if let Some(func) = program.get_function(name) {
                 if func.params.is_empty() {
                     let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
+                    call_env.inherit_shared_from(env);
                     if let Some(handle) = env.get_raw("__coroutine_handle") {
                         call_env.set("__coroutine_handle", handle.clone());
                     }
-                    return eval_function_body(program, &func.body, &mut call_env);
+                    let qualified = program.qualify_function_name(name);
+                    FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
+                    let result = eval_function_body(program, &func.body, &mut call_env);
+                    FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+                    return result;
                 }
             }
             eval_parser_expr_standalone(expr)
@@ -3020,13 +3062,18 @@ fn eval_parser_expr_with_env(
                     .map(|a| eval_parser_expr_with_env(a, program, env))
                     .collect::<Result<Vec<_>>>()?;
                 let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
+                call_env.inherit_shared_from(env);
                 for (param, arg) in func.params.iter().zip(eval_args) {
                     call_env.set(&param.name, arg);
                 }
                 if let Some(handle) = env.get_raw("__coroutine_handle") {
                     call_env.set("__coroutine_handle", handle.clone());
                 }
-                return eval_function_body(program, &func.body, &mut call_env);
+                let qualified = program.qualify_function_name(&name);
+                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
+                let result = eval_function_body(program, &func.body, &mut call_env);
+                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+                return result;
             }
             if crate::builtins::is_builtin(&name)
                 && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
@@ -3437,20 +3484,23 @@ mod tests {
     fn extract_test_cases(source: &str) -> Vec<(String, parser::TestCase)> {
         let ops = parser::parse(source).expect("parse failed");
         let mut cases = Vec::new();
-        fn collect(ops: &[parser::Operation], cases: &mut Vec<(String, parser::TestCase)>) {
-            for op in ops {
-                match op {
-                    parser::Operation::Test(test) => {
+        for op in &ops {
+            if let parser::Operation::Test(test) = op {
+                for case in &test.cases {
+                    cases.push((test.function_name.clone(), case.clone()));
+                }
+            }
+            // Also extract tests embedded inside module bodies
+            if let parser::Operation::Module(m) = op {
+                for body_op in &m.body {
+                    if let parser::Operation::Test(test) = body_op {
                         for case in &test.cases {
                             cases.push((test.function_name.clone(), case.clone()));
                         }
                     }
-                    parser::Operation::Module(m) => collect(&m.body, cases),
-                    _ => {}
                 }
             }
         }
-        collect(&ops, &mut cases);
         cases
     }
 
@@ -3756,6 +3806,15 @@ mod tests {
         for op in &ops {
             match op {
                 parser::Operation::Test(test) => test_ops.push(test.clone()),
+                parser::Operation::Module(m) => {
+                    // Extract tests embedded inside module bodies
+                    for body_op in &m.body {
+                        if let parser::Operation::Test(test) = body_op {
+                            test_ops.push(test.clone());
+                        }
+                    }
+                    let _ = validator::apply_and_validate(&mut program, op);
+                }
                 parser::Operation::Mock { operation, patterns, response } => {
                     io_mocks.push(IoMock {
                         operation: operation.clone(),
@@ -8150,5 +8209,202 @@ mod tests {
     fn value_as_list_mut_returns_none_for_non_list() {
         let mut v = Value::Int(5);
         assert!(v.as_list_mut().is_none());
+    }
+
+    // ── Shared variable resolution in nested function calls ───────────
+
+    #[test]
+    fn shared_var_accessible_in_nested_call_during_test() {
+        // Function A calls function B, both in the same module.
+        // B accesses a shared variable. When testing A, B's shared
+        // variable access must still work.
+        let source = "\
+!module Counter
++shared count:Int = 10
++fn get_count ()->Int
+  +return count
++end
+
++fn doubled_count ()->Int
+  +return get_count() * 2
++end
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+
+        // Test via eval_function_body_named (mimics test runner)
+        let func = program.get_function("Counter.doubled_count").unwrap();
+        FN_NAME_STACK.with(|s| s.borrow_mut().push("Counter.doubled_count".to_string()));
+        let result = eval_function_body(&program, &func.body, &mut env).unwrap();
+        FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+
+        // get_count() is called unqualified from doubled_count —
+        // the fix qualifies it to "Counter.get_count" on FN_NAME_STACK
+        // so `count` resolves as "Counter.count" in the shared cache.
+        assert!(matches!(result, Value::Int(20)), "expected 20, got {result}");
+    }
+
+    #[test]
+    fn shared_var_nested_call_different_module_no_cross_leak() {
+        // Function in module A calls function in module B.
+        // Module B's function should see module B's shared vars,
+        // NOT module A's shared vars with the same name.
+        let source = "\
+!module Alpha
++shared val:Int = 100
+
++fn get_both ()->Int
+  +return val + Beta.get_val()
++end
+
+!module Beta
++shared val:Int = 5
+
++fn get_val ()->Int
+  +return val
++end
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+
+        let func = program.get_function("Alpha.get_both").unwrap();
+        FN_NAME_STACK.with(|s| s.borrow_mut().push("Alpha.get_both".to_string()));
+        let result = eval_function_body(&program, &func.body, &mut env).unwrap();
+        FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+
+        // Alpha.val=100 + Beta.val=5 = 105
+        assert!(matches!(result, Value::Int(105)), "expected 105, got {result}");
+    }
+
+    #[test]
+    fn shared_var_inaccessible_from_wrong_module() {
+        // A function in module A should NOT be able to access module B's
+        // shared variables via bare name.
+        let source = "\
+!module OnlyHere
++shared secret:Int = 42
++fn get_secret ()->Int
+  +return secret
++end
+
+!module Other
++fn try_access ()->Int
+  +return secret
++end
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+
+        let func = program.get_function("Other.try_access").unwrap();
+        FN_NAME_STACK.with(|s| s.borrow_mut().push("Other.try_access".to_string()));
+        let result = eval_function_body(&program, &func.body, &mut env);
+        FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+
+        // Should fail because "Other.secret" doesn't exist
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("undefined variable"), "Expected 'undefined variable' error, got: {err_msg}");
+    }
+
+    #[test]
+    fn qualify_function_name_returns_qualified_for_module_fn() {
+        let source = "\
+!module MyMod
++fn helper ()->Int
+  +return 1
++end
+";
+        let program = build_program(source);
+        assert_eq!(program.qualify_function_name("helper"), "MyMod.helper");
+    }
+
+    #[test]
+    fn qualify_function_name_returns_bare_for_top_level_fn() {
+        let source = "\
++fn top_level ()->Int
+  +return 1
++end
+";
+        let program = build_program(source);
+        assert_eq!(program.qualify_function_name("top_level"), "top_level");
+    }
+
+    #[test]
+    fn qualify_function_name_preserves_already_qualified() {
+        let source = "\
+!module Foo
++fn bar ()->Int
+  +return 1
++end
+";
+        let program = build_program(source);
+        assert_eq!(program.qualify_function_name("Foo.bar"), "Foo.bar");
+    }
+
+    #[test]
+    fn qualify_function_name_unknown_returns_as_is() {
+        let program = build_program("");
+        assert_eq!(program.qualify_function_name("nonexistent"), "nonexistent");
+    }
+
+    #[test]
+    fn shared_var_nested_call_via_eval_call_with_input() {
+        // Test the !eval path: eval_call_with_input should also
+        // support shared variables in nested function calls.
+        let source = "\
+!module Store
++shared price:Int = 50
++fn get_price ()->Int
+  +return price
++end
+
++fn total (qty:Int)->Int
+  +return get_price() * qty
++end
+
+!eval Store.total qty=3
+";
+        let program = build_program(source);
+        let input = parser::parse(source)
+            .unwrap()
+            .into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .unwrap();
+        let result = eval_call_with_input(&program, &input.function_name, &input.input).unwrap();
+        assert_eq!(result, "150");
+    }
+
+    #[test]
+    fn shared_var_deeply_nested_calls() {
+        // A calls B calls C, all accessing shared state
+        let source = "\
+!module Deep
++shared base:Int = 7
++fn c ()->Int
+  +return base
++end
+
++fn b ()->Int
+  +return c() + 1
++end
+
++fn a ()->Int
+  +return b() + 2
++end
+";
+        let program = build_program(source);
+        let mut env = Env::new();
+        env.populate_shared_from_program(&program);
+
+        let func = program.get_function("Deep.a").unwrap();
+        FN_NAME_STACK.with(|s| s.borrow_mut().push("Deep.a".to_string()));
+        let result = eval_function_body(&program, &func.body, &mut env).unwrap();
+        FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+
+        // base=7, c()=7, b()=8, a()=10
+        assert!(matches!(result, Value::Int(10)), "expected 10, got {result}");
     }
 }

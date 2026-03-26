@@ -83,10 +83,15 @@ Pure functions have no effect annotation.
 ### Shared Variables
 +shared name:Type = default_value
   Declare module-scoped mutable state. Must be inside a module.
+  Accessible by all functions in that module, including nested calls.
   Example:
   !module Counter
   +shared count:Int = 0
   +shared label:String = "default"
+  +fn get_count ()->Int
+    +return count
+  +fn doubled ()->Int
+    +return get_count() * 2
 
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
@@ -125,6 +130,7 @@ and you get a REJECTED message. Fix the replacement to pass all existing tests b
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
 For single-param functions, pass the value directly.
 For multi-param functions, use key=value pairs OR positional values (matched by order).
+`!test` blocks can appear inside `!module` between `+fn` definitions without breaking module context.
 
 !test double
   +with 5 -> expect 10

@@ -275,6 +275,12 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     m.shared_vars.push(converted);
                 }
             }
+            parser::Operation::Test(_) => {
+                // Tests inside a module body are skipped during validation —
+                // they're handled separately by the session/eval layer.
+                // The parser allows !test inside !module so that it doesn't
+                // break the module context for subsequent +fn definitions.
+            }
             parser::Operation::Module(nested) => bail!(
                 "nested module `{}` found inside module `{}` — check indentation",
                 nested.name,
@@ -1749,5 +1755,95 @@ mod tests {
         let result = apply_and_validate(&mut program, &rm_ops[0]);
         assert!(result.is_ok());
         assert_eq!(program.functions.len(), 0);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Module with embedded !test — validator should skip Test ops in body
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn apply_module_with_embedded_test_succeeds() {
+        // A module containing +fn and !test blocks should be applied
+        // successfully — the validator should skip Test operations in
+        // the module body without error.
+        let source = "\
+!module TestMod
+
++fn helper ()->Int
+  +return 42
+
+!test helper
+  +with -> expect 42
+
++fn other ()->Int
+  +return 7
+";
+        let ops = parser::parse(source).unwrap();
+        assert_eq!(ops.len(), 1, "parser should produce 1 Module operation");
+
+        let mut program = ast::Program::default();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(
+            result.is_ok(),
+            "module with embedded !test should validate: {:?}",
+            result
+        );
+
+        // Both functions should be in the module
+        assert_eq!(program.modules.len(), 1);
+        assert_eq!(program.modules[0].functions.len(), 2);
+        assert_eq!(program.modules[0].functions[0].name, "helper");
+        assert_eq!(program.modules[0].functions[1].name, "other");
+    }
+
+    #[test]
+    fn apply_module_rejects_unexpected_operations() {
+        // Operations other than +fn, +type, +shared, and !test should
+        // still be rejected inside a module body.
+        // (Note: !eval breaks the module body loop in the parser, so
+        // this tests that the parser correctly keeps !test but breaks
+        // on other ! commands.)
+        let source = "\
+!module BadMod
+
++fn f1 ()->Int
+  +return 1
+
+!eval f1
+";
+        let ops = parser::parse(source).unwrap();
+        // Parser should break on !eval, producing Module + Eval
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(&ops[0], parser::Operation::Module(_)));
+        assert!(matches!(&ops[1], parser::Operation::Eval(_)));
+    }
+
+    #[test]
+    fn apply_module_with_require_modules_and_embedded_test() {
+        // With require_modules=true, functions after !test inside a module
+        // should NOT be rejected. This was the original bug.
+        let source = "\
+!module StrictMod
+
++fn first ()->Int
+  +return 1
+
+!test first
+  +with -> expect 1
+
++fn second ()->Int
+  +return 2
+";
+        let ops = parser::parse(source).unwrap();
+        let mut program = ast::Program::default();
+        program.require_modules = true;
+
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(
+            result.is_ok(),
+            "module with !test should work in require_modules mode: {:?}",
+            result
+        );
+        assert_eq!(program.modules[0].functions.len(), 2);
     }
 }

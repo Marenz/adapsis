@@ -522,13 +522,10 @@ impl<'a> Parser<'a> {
                     self.index += 1; // Skip optional +end (backward compat)
                     break;
                 }
-                // +fn, +type, +shared, and !test belong inside a module.
-                // !test between function definitions should not break the module context.
-                // Blank lines are skipped.
-                if next.text.trim().is_empty() {
-                    self.index += 1;
-                    continue;
-                }
+                // +fn, +type, +shared, and !test belong inside a module — everything else is top-level.
+                // !test blocks between function definitions must NOT break the module context,
+                // otherwise subsequent +fn definitions after a !test would be rejected as
+                // "must be inside a module" when reloading library .ax files.
                 if !next.text.starts_with("+fn")
                     && !next.text.starts_with("+type")
                     && !next.text.starts_with("+shared")
@@ -5551,25 +5548,181 @@ Add tests
             _ => panic!("expected Test"),
         }
     }
-}
 
-#[cfg(test)]
-mod module_context_tests {
-    use super::*;
+    // ═════════════════════════════════════════════════════════════════════
+    // Module context preservation across !test blocks
+    // ═════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn test_between_functions_preserves_module_context() {
-        let source = "!module TestMod\n+fn foo ()->Int\n  +return 1\n+end\n\n!test TestMod.foo\n  +with -> expect 1\n\n+fn bar ()->Int\n  +return 2\n+end\n";
-        let ops = parse(source).unwrap();
-        assert_eq!(ops.len(), 1, "should be one Module operation");
-        if let Operation::Module(m) = &ops[0] {
-            assert_eq!(m.name, "TestMod");
-            assert_eq!(m.body.len(), 3, "module should contain foo, test, bar");
-            assert!(matches!(&m.body[0], Operation::Function(f) if f.name == "foo"));
-            assert!(matches!(&m.body[1], Operation::Test(t) if t.function_name == "TestMod.foo"));
-            assert!(matches!(&m.body[2], Operation::Function(f) if f.name == "bar"));
-        } else {
-            panic!("expected Module operation");
+    fn test_module_context_preserved_across_test_block() {
+        // !test between two +fn definitions inside !module should NOT
+        // break the module context. Both functions and the test should
+        // be inside the single ModuleDecl.
+        let source = "\
+!module MyMod
+
++fn foo ()->Int
+  +return 1
+
+!test foo
+  +with -> expect 1
+
++fn bar ()->Int
+  +return 2
+";
+        let ops = parse_ops(source);
+        assert_eq!(
+            ops.len(),
+            1,
+            "expected 1 operation (Module), got {}",
+            ops.len()
+        );
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "MyMod");
+                // Body should contain: Function(foo), Test(foo), Function(bar)
+                assert_eq!(
+                    m.body.len(),
+                    3,
+                    "expected 3 body operations, got {}",
+                    m.body.len()
+                );
+                assert!(matches!(&m.body[0], Operation::Function(f) if f.name == "foo"));
+                assert!(matches!(&m.body[1], Operation::Test(t) if t.function_name == "foo"));
+                assert!(matches!(&m.body[2], Operation::Function(f) if f.name == "bar"));
+            }
+            _ => panic!("expected Module, got {:?}", std::mem::discriminant(&ops[0])),
+        }
+    }
+
+    #[test]
+    fn test_module_context_multiple_tests_interleaved() {
+        // Multiple !test blocks interleaved with +fn definitions
+        // should all stay inside the module.
+        let source = "\
+!module Calc
+
++fn add (a:Int, b:Int)->Int
+  +return a + b
+
+!test add
+  +with a=1 b=2 -> expect 3
+
++fn mul (a:Int, b:Int)->Int
+  +return a * b
+
+!test mul
+  +with a=3 b=4 -> expect 12
+
++fn sub (a:Int, b:Int)->Int
+  +return a - b
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 1, "expected 1 Module operation");
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Calc");
+                // Body: add, test add, mul, test mul, sub
+                assert_eq!(m.body.len(), 5, "expected 5 body ops, got {}", m.body.len());
+                assert!(matches!(&m.body[0], Operation::Function(f) if f.name == "add"));
+                assert!(matches!(&m.body[1], Operation::Test(t) if t.function_name == "add"));
+                assert!(matches!(&m.body[2], Operation::Function(f) if f.name == "mul"));
+                assert!(matches!(&m.body[3], Operation::Test(t) if t.function_name == "mul"));
+                assert!(matches!(&m.body[4], Operation::Function(f) if f.name == "sub"));
+            }
+            _ => panic!("expected Module"),
+        }
+    }
+
+    #[test]
+    fn test_module_still_breaks_on_non_test_commands() {
+        // Other ! commands (not !test) should still break the module context.
+        let source = "\
+!module Foo
+
++fn func1 ()->Int
+  +return 1
+
+!eval func1
+";
+        let ops = parse_ops(source);
+        // Module should end before !eval, producing two operations
+        assert_eq!(ops.len(), 2, "expected 2 operations, got {}", ops.len());
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "Foo");
+                assert_eq!(m.body.len(), 1);
+                assert!(matches!(&m.body[0], Operation::Function(f) if f.name == "func1"));
+            }
+            _ => panic!("expected Module"),
+        }
+        assert!(matches!(&ops[1], Operation::Eval(_)));
+    }
+
+    #[test]
+    fn test_module_test_without_fn_after() {
+        // !test at end of module should be collected in module body
+        let source = "\
+!module EndTest
+
++fn greet (name:String)->String
+  +return concat(\"hello \", name)
+
+!test greet
+  +with name=\"world\" -> expect \"hello world\"
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "EndTest");
+                assert_eq!(m.body.len(), 2);
+                assert!(matches!(&m.body[0], Operation::Function(_)));
+                assert!(matches!(&m.body[1], Operation::Test(t) if t.function_name == "greet"));
+            }
+            _ => panic!("expected Module"),
+        }
+    }
+
+    #[test]
+    fn test_two_modules_with_tests() {
+        // Two separate modules, each with tests, should be parsed correctly.
+        let source = "\
+!module A
+
++fn a_func ()->Int
+  +return 1
+
+!test a_func
+  +with -> expect 1
+
+!module B
+
++fn b_func ()->Int
+  +return 2
+
+!test b_func
+  +with -> expect 2
+";
+        let ops = parse_ops(source);
+        assert_eq!(ops.len(), 2, "expected 2 Module operations");
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "A");
+                assert_eq!(m.body.len(), 2);
+                assert!(matches!(&m.body[0], Operation::Function(f) if f.name == "a_func"));
+                assert!(matches!(&m.body[1], Operation::Test(t) if t.function_name == "a_func"));
+            }
+            _ => panic!("expected Module A"),
+        }
+        match &ops[1] {
+            Operation::Module(m) => {
+                assert_eq!(m.name, "B");
+                assert_eq!(m.body.len(), 2);
+                assert!(matches!(&m.body[0], Operation::Function(f) if f.name == "b_func"));
+                assert!(matches!(&m.body[1], Operation::Test(t) if t.function_name == "b_func"));
+            }
+            _ => panic!("expected Module B"),
         }
     }
 }
