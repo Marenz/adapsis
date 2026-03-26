@@ -423,7 +423,7 @@ impl<'a> Parser<'a> {
                 || trimmed.starts_with("//")
                 || trimmed.starts_with('#')
                 || trimmed == "```"
-                || trimmed.starts_with("```forge")
+                || trimmed.starts_with("```adapsis")
                 || trimmed == "<code>"
                 || trimmed == "</code>"
             {

@@ -1,4 +1,4 @@
-// A Forge program that reads its own source code and counts its lines
+// An Adapsis program that reads its own source code and counts its lines
 
 +fn count_lines (text:String)->Int
   +let lines:List<String> = split(text, "\n")
@@ -8,6 +8,6 @@
 +fn main ()->Int [io,async]
   +await source:String = file_read("examples/self_read.ax")
   +let line_count:Int = count_lines(source)
-  +await ok:Int = file_write("/tmp/forge-self-read-result.txt", concat("This program has ", concat(to_string(line_count), " lines")))
+  +await ok:Int = file_write("/tmp/adapsis-self-read-result.txt", concat("This program has ", concat(to_string(line_count), " lines")))
   +return line_count
 +end

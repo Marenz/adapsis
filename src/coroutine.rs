@@ -4,7 +4,7 @@
 //! `+await` operations send IO requests to the runtime and block (async) until
 //! the result comes back. `+spawn` creates a new coroutine.
 //!
-//! The runtime bridges Forge's synchronous evaluator with tokio's async world
+//! The runtime bridges Adapsis's synchronous evaluator with tokio's async world
 //! using oneshot channels: the evaluator blocks on a channel receive, the
 //! runtime completes the IO and sends the result back.
 

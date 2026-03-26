@@ -1046,7 +1046,7 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
         // No <code> tags — scan for Forge operation lines in the full response.
         // Every Forge command starts with +, !, or ? (and `end` for module closing).
         // Extract contiguous blocks of such lines.
-        let mut forge_lines: Vec<String> = Vec::new();
+        let mut adapsis_lines: Vec<String> = Vec::new();
         let mut in_block = false;
         let mut block_is_greedy = false; // !plan set, !roadmap add, !opencode, +type eat continuation
         for line in clean_content.lines() {
@@ -1057,26 +1057,26 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
                 || line.starts_with("  ") || line.starts_with("\t")
                 || trimmed.starts_with("//")
             );
-            let is_forge = trimmed.starts_with('+') || trimmed.starts_with('!')
+            let is_adapsis = trimmed.starts_with('+') || trimmed.starts_with('!')
                 || trimmed.starts_with('?') || trimmed == "end" || trimmed == "!done"
                 || is_continuation
                 || (in_block && trimmed.is_empty());
-            if is_forge {
+            if is_adapsis {
                 // Check if this line starts a greedy block
                 if trimmed.starts_with("!plan set") || trimmed.starts_with("!roadmap add")
                     || trimmed.starts_with("!opencode") || trimmed.starts_with("+type") {
                     block_is_greedy = true;
                 } else if trimmed.starts_with('+') || trimmed.starts_with('!') || trimmed.starts_with('?') {
-                    block_is_greedy = false; // New forge line resets greedy
+                    block_is_greedy = false; // New adapsis line resets greedy
                 }
-                forge_lines.push(line.to_string());
+                adapsis_lines.push(line.to_string());
                 in_block = true;
             } else if in_block && !trimmed.is_empty() {
                 in_block = false;
                 block_is_greedy = false;
             }
         }
-        forge_lines.join("\n").trim().to_string()
+        adapsis_lines.join("\n").trim().to_string()
     };
 
     let full_text = if thinking.is_empty() {

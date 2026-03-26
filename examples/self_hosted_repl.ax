@@ -1,5 +1,5 @@
 // ============================================================
-// Self-Hosted Forge REPL — complete implementation in Forge
+// Self-Hosted Adapsis REPL — complete implementation in Adapsis
 // Supports: variables, expressions, +fn definitions, !eval,
 //           session persistence, AI-in-the-loop
 // ============================================================
@@ -445,7 +445,7 @@
   +await session_lines:List<String> = load_session(session_path)
   +let state:ProgramState = restore_state(session_lines)
   +let env:Env = restore_env(session_lines)
-  +await ok1:Int = println("=== Forge Self-Hosted REPL ===")
+  +await ok1:Int = println("=== Adapsis Self-Hosted REPL ===")
   +await ok2:Int = println("  Expressions: x=10+5  y=x*2  y")
   +await ok3:Int = println("  Functions:   +fn double(x:Int) = x*2")
   +await ok4:Int = println("  Eval:        !eval double(5)")
@@ -458,7 +458,7 @@
   +end
   +await ok8:Int = println("")
   +while true
-    +let prompt:String = concat("forge[", concat(to_string(state.revision), "]> "))
+    +let prompt:String = concat("adapsis[", concat(to_string(state.revision), "]> "))
     +await input:String = read_line(prompt)
     +if input == "/quit" OR input == "/exit"
       +await sv:Int = save_session(session_path, state, env)
@@ -536,6 +536,6 @@
 +end
 
 +fn main ()->Int [io,async]
-  +let result:Int = repl("/tmp/forge-session.txt", "localhost", 3000, "claude-opus-4-6-20250610")
+  +let result:Int = repl("/tmp/adapsis-session.txt", "localhost", 3000, "claude-opus-4-6-20250610")
   +return result
 +end

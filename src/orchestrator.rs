@@ -3,7 +3,7 @@ use tracing::info;
 
 use crate::ast;
 use crate::eval;
-use crate::events::{self, EventBus, ForgeEvent};
+use crate::events::{self, EventBus, AdapsisEvent};
 use crate::llm::{ChatMessage, LlmBackend, LlmClient};
 use crate::parser;
 use crate::prompt;
@@ -51,7 +51,7 @@ impl<B: LlmBackend> Orchestrator<B> {
         self
     }
 
-    fn emit(&self, event: ForgeEvent) {
+    fn emit(&self, event: AdapsisEvent) {
         if let Some(bus) = &self.event_bus {
             bus.send(event);
         }
@@ -71,7 +71,7 @@ impl<B: LlmBackend> Orchestrator<B> {
 
         for iteration in 1..=self.max_iterations {
             println!("--- Iteration {iteration}/{} ---", self.max_iterations);
-            self.emit(ForgeEvent::IterationStart {
+            self.emit(AdapsisEvent::IterationStart {
                 iteration,
                 max_iterations: self.max_iterations,
             });
@@ -81,27 +81,27 @@ impl<B: LlmBackend> Orchestrator<B> {
             println!(); // newline after streaming output
 
             if !output.thinking.is_empty() {
-                self.emit(ForgeEvent::Thinking {
+                self.emit(AdapsisEvent::Thinking {
                     text: output.thinking.clone(),
                 });
             }
 
             // Check if the model signals completion
             let code = if output.code.is_empty() {
-                extract_forge_code(&output.text)
+                extract_adapsis_code(&output.text)
             } else {
                 output.code.clone()
             };
 
             if !code.is_empty() {
-                self.emit(ForgeEvent::Code { text: code.clone() });
+                self.emit(AdapsisEvent::Code { text: code.clone() });
             }
 
             if code.trim() == "DONE" || code.trim().is_empty() {
                 println!("\n=== Model signals completion ===");
                 println!("{program}");
                 self.emit(events::snapshot_program(&program));
-                self.emit(ForgeEvent::Done);
+                self.emit(AdapsisEvent::Done);
                 return Ok(());
             }
 
@@ -114,7 +114,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                 Err(e) => {
                     let error_msg = format!("Parse error: {e}");
                     println!("  {error_msg}");
-                    self.emit(ForgeEvent::MutationError {
+                    self.emit(AdapsisEvent::MutationError {
                         message: error_msg.clone(),
                     });
                     let feedback = prompt::feedback_message(
@@ -170,7 +170,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             Ok(steps) => {
                                 for step in &steps {
                                     println!("    > {step}");
-                                    self.emit(ForgeEvent::TraceStep {
+                                    self.emit(AdapsisEvent::TraceStep {
                                         stmt_id: step.stmt_id.clone(),
                                         description: step.description.clone(),
                                         result: step.result.clone(),
@@ -189,7 +189,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             Err(e) => {
                                 let msg = format!("trace error: {e}");
                                 println!("    {msg}");
-                                self.emit(ForgeEvent::MutationError {
+                                self.emit(AdapsisEvent::MutationError {
                                     message: msg.clone(),
                                 });
                                 results.push((msg, false));
@@ -206,7 +206,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             Ok((result, compiled)) => {
                                 let tag = if compiled { " [compiled]" } else { "" };
                                 println!("{result}{tag}");
-                                self.emit(ForgeEvent::MutationOk {
+                                self.emit(AdapsisEvent::MutationOk {
                                     message: format!(
                                         "eval {}(...) = {result}",
                                         ev.function_name
@@ -220,7 +220,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             Err(e) => {
                                 let msg = format!("eval error: {e}");
                                 println!("{msg}");
-                                self.emit(ForgeEvent::MutationError {
+                                self.emit(AdapsisEvent::MutationError {
                                     message: msg.clone(),
                                 });
                                 results.push((msg, false));
@@ -237,7 +237,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             typeck::handle_query(&program, &table, query, &[])
                         };
                         println!("  Query `{query}`:\n{response}");
-                        self.emit(ForgeEvent::QueryResult {
+                        self.emit(AdapsisEvent::QueryResult {
                             query: query.clone(),
                             response: response.clone(),
                         });
@@ -246,7 +246,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => {
                             println!("  OK: {msg}");
-                            self.emit(ForgeEvent::MutationOk {
+                            self.emit(AdapsisEvent::MutationOk {
                                 message: msg.clone(),
                             });
                             results.push((msg, true));
@@ -254,7 +254,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                         Err(e) => {
                             let msg = format!("{e}");
                             println!("  ERROR: {msg}");
-                            self.emit(ForgeEvent::MutationError {
+                            self.emit(AdapsisEvent::MutationError {
                                 message: msg.clone(),
                             });
                             results.push((msg, false));
@@ -269,7 +269,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                 for func in &program.functions {
                     for error in typeck::check_function(&table, func) {
                         println!("  TYPE WARNING: {error}");
-                        self.emit(ForgeEvent::TypeWarning {
+                        self.emit(AdapsisEvent::TypeWarning {
                             message: error.clone(),
                         });
                         results.push((format!("type warning: {error}"), true));
@@ -279,7 +279,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                     for func in &module.functions {
                         for error in typeck::check_function(&table, func) {
                             println!("  TYPE WARNING: {error}");
-                            self.emit(ForgeEvent::TypeWarning {
+                            self.emit(AdapsisEvent::TypeWarning {
                                 message: error.clone(),
                             });
                             results.push((
@@ -305,7 +305,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                     match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
                         Ok(msg) => {
                             println!("    PASS [{i}]: {msg}");
-                            self.emit(ForgeEvent::TestPass {
+                            self.emit(AdapsisEvent::TestPass {
                                 function: test.function_name.clone(),
                                 index: i,
                                 message: msg.clone(),
@@ -315,7 +315,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                         Err(e) => {
                             let msg = format!("{e}");
                             println!("    FAIL [{i}]: {msg}");
-                            self.emit(ForgeEvent::TestFail {
+                            self.emit(AdapsisEvent::TestFail {
                                 function: test.function_name.clone(),
                                 index: i,
                                 message: msg.clone(),
@@ -336,7 +336,7 @@ impl<B: LlmBackend> Orchestrator<B> {
             );
             messages.push(ChatMessage::user(feedback));
 
-            self.emit(ForgeEvent::ProgramState {
+            self.emit(AdapsisEvent::ProgramState {
                 summary: validator::program_summary(&program),
             });
 
@@ -347,7 +347,7 @@ impl<B: LlmBackend> Orchestrator<B> {
 
         println!("\n=== Max iterations reached ===");
         println!("{program}");
-        self.emit(ForgeEvent::Done);
+        self.emit(AdapsisEvent::Done);
         Ok(())
     }
 
@@ -361,7 +361,7 @@ impl<B: LlmBackend> Orchestrator<B> {
 
         // Phase 1: Design
         println!("--- Phase 1: Design ---");
-        self.emit(ForgeEvent::IterationStart {
+        self.emit(AdapsisEvent::IterationStart {
             iteration: 1,
             max_iterations: self.max_iterations,
         });
@@ -378,19 +378,19 @@ impl<B: LlmBackend> Orchestrator<B> {
             println!();
 
             if !output.thinking.is_empty() {
-                self.emit(ForgeEvent::Thinking {
+                self.emit(AdapsisEvent::Thinking {
                     text: output.thinking.clone(),
                 });
             }
 
             let code = if output.code.is_empty() {
-                extract_forge_code(&output.text)
+                extract_adapsis_code(&output.text)
             } else {
                 output.code.clone()
             };
 
             if !code.is_empty() {
-                self.emit(ForgeEvent::Code { text: code.clone() });
+                self.emit(AdapsisEvent::Code { text: code.clone() });
             }
 
             messages.push(ChatMessage::assistant(&output.text));
@@ -400,7 +400,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                 Err(e) => {
                     let error_msg = format!("Parse error: {e}");
                     println!("  {error_msg}");
-                    self.emit(ForgeEvent::MutationError {
+                    self.emit(AdapsisEvent::MutationError {
                         message: error_msg.clone(),
                     });
                     let feedback = prompt::architect_design_feedback(
@@ -425,7 +425,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                     _ => match validator::apply_and_validate(&mut program, op) {
                         Ok(msg) => {
                             println!("  OK: {msg}");
-                            self.emit(ForgeEvent::MutationOk {
+                            self.emit(AdapsisEvent::MutationOk {
                                 message: msg.clone(),
                             });
                             results.push((msg, true));
@@ -433,7 +433,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                         Err(e) => {
                             let msg = format!("{e}");
                             println!("  ERROR: {msg}");
-                            self.emit(ForgeEvent::MutationError {
+                            self.emit(AdapsisEvent::MutationError {
                                 message: msg.clone(),
                             });
                             results.push((msg, false));
@@ -477,7 +477,7 @@ impl<B: LlmBackend> Orchestrator<B> {
 
         if !design_ok {
             println!("\n=== Design phase failed after 3 attempts ===");
-            self.emit(ForgeEvent::Done);
+            self.emit(AdapsisEvent::Done);
             return Ok(());
         }
 
@@ -507,7 +507,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                 fn_idx + 1,
                 all_functions.len()
             );
-            self.emit(ForgeEvent::IterationStart {
+            self.emit(AdapsisEvent::IterationStart {
                 iteration: fn_idx + 2,
                 max_iterations: all_functions.len() + 1,
             });
@@ -525,19 +525,19 @@ impl<B: LlmBackend> Orchestrator<B> {
                 println!();
 
                 if !output.thinking.is_empty() {
-                    self.emit(ForgeEvent::Thinking {
+                    self.emit(AdapsisEvent::Thinking {
                         text: output.thinking.clone(),
                     });
                 }
 
                 let code = if output.code.is_empty() {
-                    extract_forge_code(&output.text)
+                    extract_adapsis_code(&output.text)
                 } else {
                     output.code.clone()
                 };
 
                 if !code.is_empty() {
-                    self.emit(ForgeEvent::Code { text: code.clone() });
+                    self.emit(AdapsisEvent::Code { text: code.clone() });
                 }
 
                 if code.trim() == "DONE" {
@@ -551,7 +551,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                     Err(e) => {
                         let error_msg = format!("Parse error: {e}");
                         println!("  {error_msg}");
-                        self.emit(ForgeEvent::MutationError {
+                        self.emit(AdapsisEvent::MutationError {
                             message: error_msg.clone(),
                         });
                         let feedback = prompt::feedback_message(
@@ -597,7 +597,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             match validator::apply_and_validate(&mut program, op) {
                                 Ok(msg) => {
                                     println!("  OK: {msg}");
-                                    self.emit(ForgeEvent::MutationOk {
+                                    self.emit(AdapsisEvent::MutationOk {
                                         message: msg.clone(),
                                     });
                                     results.push((msg, true));
@@ -605,7 +605,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                                 Err(e) => {
                                     let msg = format!("{e}");
                                     println!("  ERROR: {msg}");
-                                    self.emit(ForgeEvent::MutationError {
+                                    self.emit(AdapsisEvent::MutationError {
                                         message: msg.clone(),
                                     });
                                     results.push((msg, false));
@@ -637,7 +637,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                         if func.name == *fn_name {
                             for error in typeck::check_function(&table, func) {
                                 println!("  TYPE WARNING: {error}");
-                                self.emit(ForgeEvent::TypeWarning {
+                                self.emit(AdapsisEvent::TypeWarning {
                                     message: error.clone(),
                                 });
                             }
@@ -655,7 +655,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                         match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
                             Ok(msg) => {
                                 println!("    PASS [{i}]: {msg}");
-                                self.emit(ForgeEvent::TestPass {
+                                self.emit(AdapsisEvent::TestPass {
                                     function: test.function_name.clone(),
                                     index: i,
                                     message: msg.clone(),
@@ -665,7 +665,7 @@ impl<B: LlmBackend> Orchestrator<B> {
                             Err(e) => {
                                 let msg = format!("{e}");
                                 println!("    FAIL [{i}]: {msg}");
-                                self.emit(ForgeEvent::TestFail {
+                                self.emit(AdapsisEvent::TestFail {
                                     function: test.function_name.clone(),
                                     index: i,
                                     message: msg.clone(),
@@ -701,13 +701,13 @@ impl<B: LlmBackend> Orchestrator<B> {
         println!("\n=== Architect mode complete ===");
         println!("{program}");
         self.emit(events::snapshot_program(&program));
-        self.emit(ForgeEvent::Done);
+        self.emit(AdapsisEvent::Done);
         Ok(())
     }
 }
 
-/// Try to extract Forge code from raw text when <code> tags are missing.
-fn extract_forge_code(text: &str) -> String {
+/// Try to extract Adapsis code from raw text when <code> tags are missing.
+fn extract_adapsis_code(text: &str) -> String {
     let mut code_lines = vec![];
     let mut in_code = false;
 

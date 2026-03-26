@@ -1,4 +1,4 @@
-// A simple tokenizer written in Forge.
+// A simple tokenizer written in Adapsis.
 // Splits an input string into a list of tokens.
 // Handles: identifiers, numbers, strings, operators, whitespace skipping.
 
