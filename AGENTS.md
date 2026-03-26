@@ -78,6 +78,7 @@ src/
   parser.rs      — Line-oriented parser (+, !, ? prefixes, +end blocks)
   validator.rs   — Parser→AST, mutations, !replace, !remove, !module merging
   eval.rs        — Tree-walking interpreter, builtins, test runner, +match on Result
+  intern.rs      — String interner (InternedId=u32) for variable/field/variant names
   compiler.rs    — Cranelift JIT (Int, Float, Bool, String, Struct, While, Match)
   coroutine.rs   — Async IO runtime (TCP, HTTP, files, shell, LLM, mocks, task registry)
   llm.rs         — LLM client (OpenAI-compatible, streaming, thinking mode, retries)
