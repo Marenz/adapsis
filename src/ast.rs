@@ -39,6 +39,12 @@ pub struct Program {
     /// are guaranteed cache hits (no allocation, no thread-local indirection).
     #[serde(skip)]
     pub interner: crate::intern::StringInterner,
+    /// Arc-backed snapshot of the interner for O(1) sharing with Env instances.
+    /// Rebuilt alongside `interner` by `rebuild_function_index()`.
+    /// Cloning this is an O(1) Arc reference-count bump instead of a full
+    /// HashMap + Vec clone.
+    #[serde(skip)]
+    pub shared_interner: crate::intern::SharedInterner,
     /// Pre-built set of all union variant names across all types and modules.
     /// Replaces the O(N×M) linear scan in `is_union_variant()` with O(1) HashSet lookup.
     /// Derived, not serialized — rebuilt by `rebuild_function_index()`.
@@ -74,6 +80,8 @@ impl Program {
         // Pre-intern all names in the AST so the evaluator's Env can be seeded
         // with a fully-populated interner (no allocations on the hot path).
         self.intern_all_names();
+        // Build the Arc-backed shared interner for O(1) Env creation.
+        self.shared_interner = self.interner.shared();
         // Pre-build the set of all union variant names for O(1) lookup.
         self.rebuild_union_variants();
     }

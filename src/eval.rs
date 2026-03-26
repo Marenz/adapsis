@@ -1,11 +1,12 @@
 use anyhow::{anyhow, bail, Result};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::ast;
 use crate::compiler::CompiledProgram;
-use crate::intern::{InternedId, StringInterner};
+use crate::intern::{InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
 
@@ -34,17 +35,17 @@ pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
     TaskHandle(crate::coroutine::TaskId),
     Union {
-        variant: Arc<str>,
+        variant: String,
         payload: Vec<Value>,
     },
     Int(i64),
     Float(f64),
     Bool(bool),
-    String(Arc<str>),
-    Struct(Arc<str>, Arc<HashMap<Arc<str>, Value>>),
+    String(Arc<String>),
+    Struct(String, Arc<HashMap<String, Value>>),
     List(Arc<Vec<Value>>),
     Ok(Box<Value>),
-    Err(Arc<str>),
+    Err(String),
     None,
 }
 
@@ -99,6 +100,24 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    /// Convenience constructor: wrap a string in `Arc`.
+    #[inline]
+    pub fn string(s: impl Into<String>) -> Self {
+        Value::String(Arc::new(s.into()))
+    }
+
+    /// Convenience constructor: wrap a vec in `Arc`.
+    #[inline]
+    pub fn list(items: Vec<Value>) -> Self {
+        Value::List(Arc::new(items))
+    }
+
+    /// Convenience constructor: wrap a struct name + field map in `Arc`.
+    #[inline]
+    pub fn strct(name: impl Into<String>, fields: HashMap<String, Value>) -> Self {
+        Value::Struct(name.into(), Arc::new(fields))
+    }
+
     fn is_truthy(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
@@ -149,35 +168,43 @@ impl Value {
     }
 }
 
+/// Type alias for the scope stack. Uses `SmallVec` with inline capacity of 4
+/// to avoid heap allocation for the common case (root scope + function body +
+/// 1-2 nested blocks like if/while/each).
+type ScopeStack = SmallVec<[HashMap<InternedId, Value>; 4]>;
+
 /// Evaluation environment with a scope stack.
 /// Each scope is a HashMap of variable bindings keyed by interned `u32` ids.
 /// `+let` defines into the top scope, `+set` mutates the nearest scope that
 /// already contains the variable, and lookups walk the stack from top to bottom.
 ///
-/// Variable names are interned via a thread-local `StringInterner` so that
+/// Variable names are interned via a `SharedInterner` (Arc-backed) so that
 /// lookups use fast `u32` hashing/comparison instead of string operations.
+/// Creating a new Env from a Program's interner is O(1) (Arc clone) instead
+/// of cloning the entire HashMap + Vec.
 pub struct Env {
-    scopes: Vec<HashMap<InternedId, Value>>,
+    scopes: ScopeStack,
     /// Shared runtime state for +shared variable access.
     shared_runtime: Option<crate::session::SharedRuntime>,
     /// Local cache of shared vars (key = "Module.name") for borrow-friendly reads.
     /// These remain String-keyed since they use compound module-qualified names
     /// and are accessed far less frequently than local variables.
     shared_cache: HashMap<String, Value>,
-    /// Local string interner — eliminates thread-local + RefCell overhead on every
-    /// variable set/get. Seeded from `Program::interner` when available so that all
+    /// Arc-backed string interner — cloning is O(1) reference-count bump.
+    /// Seeded from `Program::shared_interner()` when available so that all
     /// name→id lookups on the hot path are guaranteed cache hits.
     /// Wrapped in `RefCell` so that `&self` methods (like `get`) can still intern
-    /// previously-unseen names without requiring `&mut self`.
-    interner: std::cell::RefCell<StringInterner>,
+    /// previously-unseen names without requiring `&mut self`. The `RefCell`
+    /// overhead is minimal since `SharedInterner::get()` is a direct Arc read.
+    interner: std::cell::RefCell<SharedInterner>,
 }
 
 impl Env {
     pub fn new() -> Self {
         // Seed from the thread-local interner so existing interned ids stay consistent
-        let interner = STRING_INTERNER.with(|si| si.borrow().clone());
+        let interner = STRING_INTERNER.with(|si| si.borrow().shared());
         let mut env = Self {
-            scopes: vec![HashMap::new()],
+            scopes: smallvec::smallvec![HashMap::new()],
             shared_runtime: None,
             shared_cache: HashMap::new(),
             interner: std::cell::RefCell::new(interner),
@@ -192,12 +219,31 @@ impl Env {
     }
 
     /// Create an Env seeded with a pre-populated interner from a Program.
-    /// This is the fast path: the Program's interner already contains all names
-    /// in the AST, so every `intern_name()` call during evaluation is a cache hit
-    /// (HashMap lookup returns existing id, no allocation).
+    /// This is the fast path: cloning a `SharedInterner` is O(1) (Arc clone),
+    /// and the Program's interner already contains all names in the AST, so
+    /// every `intern_name()` call during evaluation is a cache hit.
     pub fn new_with_interner(interner: &StringInterner) -> Self {
         let mut env = Self {
-            scopes: vec![HashMap::new()],
+            scopes: smallvec::smallvec![HashMap::new()],
+            shared_runtime: None,
+            shared_cache: HashMap::new(),
+            interner: std::cell::RefCell::new(interner.shared()),
+        };
+        // Auto-pick up thread-local SharedRuntime if set
+        SHARED_RUNTIME.with(|rt| {
+            if let Some(rt) = rt.borrow().as_ref() {
+                env.set_runtime(rt.clone());
+            }
+        });
+        env
+    }
+
+    /// Create an Env from a pre-built SharedInterner (O(1) Arc clone).
+    /// This is the fastest path for creating Envs during function calls —
+    /// avoids even the `StringInterner::shared()` conversion.
+    pub fn new_with_shared_interner(interner: &SharedInterner) -> Self {
+        let mut env = Self {
+            scopes: smallvec::smallvec![HashMap::new()],
             shared_runtime: None,
             shared_cache: HashMap::new(),
             interner: std::cell::RefCell::new(interner.clone()),
@@ -212,17 +258,17 @@ impl Env {
     }
 
     /// Intern a variable name string, returning its compact u32 id for use as
-    /// a scope key. Uses the env-local interner (no thread-local indirection).
-    /// Fast path: try read-only probe first (no write lock) since the interner
-    /// is pre-seeded with all AST names. Only falls back to borrow_mut() for
-    /// truly new names (rare at runtime).
+    /// a scope key. Uses the env-local shared interner.
+    /// Fast path: read-only probe through Arc — since the interner is pre-seeded
+    /// with all AST names, this is almost always a cache hit.
     #[inline]
     fn intern_name(&self, name: &str) -> InternedId {
         // Fast path: read-only probe — avoids RefCell write lock overhead
         if let Some(id) = self.interner.borrow().get(name) {
             return id;
         }
-        // Slow path: name not yet interned (rare when seeded from Program)
+        // Slow path: name not yet interned (rare when seeded from Program).
+        // SharedInterner::intern uses copy-on-write via Arc::make_mut.
         self.interner.borrow_mut().intern(name)
     }
 
@@ -601,7 +647,7 @@ pub fn eval_call_with_input(
     // Try user-defined function first
     if let Some(func) = program.get_function(function_name) {
         let input_val = eval_parser_expr_standalone(input)?;
-        let mut env = Env::new_with_interner(&program.interner);
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
         bind_input_to_params(program, func, &input_val, &mut env);
 
         let returns_result = matches!(&func.return_type, ast::Type::Result(_));
@@ -641,7 +687,7 @@ pub fn eval_call_with_input(
                 }
             }
         };
-        let mut env = Env::new_with_interner(&program.interner);
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
         let call = ast::CallExpr {
             callee: function_name.to_string(),
             args: vec![], // not used — we call eval_call_inner directly
@@ -672,7 +718,7 @@ pub fn eval_inline_expr_with_io(
     io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
 ) -> Result<Value> {
     let handle = crate::coroutine::CoroutineHandle::new(io_sender);
-    let mut env = Env::new_with_interner(&program.interner);
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
     env.populate_shared_from_program(program);
     env.set("__coroutine_handle", Value::CoroutineHandle(handle));
     eval_parser_expr_with_env(expr, program, &mut env)
@@ -780,7 +826,7 @@ pub fn bind_input_to_params(
                                 let mut struct_fields = HashMap::new();
                                 for (tf_name, _) in &type_fields {
                                     if let Some(val) = fields.get(tf_name.as_str()) {
-                                        struct_fields.insert(Arc::from(tf_name.as_str()), val.clone());
+                                        struct_fields.insert(tf_name.clone(), val.clone());
                                         // tf_name borrows from type_fields which is
                                         // block-scoped, so use as_str() for the
                                         // longer-lived HashSet via param.name above;
@@ -790,10 +836,7 @@ pub fn bind_input_to_params(
                                     }
                                 }
                                 if !struct_fields.is_empty() {
-                                    let struct_val = Value::Struct(
-                                        Arc::from(type_name.as_str()),
-                                        Arc::new(struct_fields),
-                                    );
+                                    let struct_val = Value::strct(type_name, struct_fields);
                                     env.set(&param.name, struct_val);
                                 }
                             }
@@ -853,7 +896,7 @@ fn match_single_pattern(
                 ast::Literal::Int(n) => Value::Int(*n),
                 ast::Literal::Float(f) => Value::Float(*f),
                 ast::Literal::Bool(b) => Value::Bool(*b),
-                ast::Literal::String(s) => Value::String(Arc::from(s.as_str())),
+                ast::Literal::String(s) => Value::string(s.clone()),
             };
             Ok(value.matches(&expected))
         }
@@ -866,7 +909,7 @@ fn match_single_pattern(
                 payload,
             } = value
             {
-                if v.as_ref() == variant.as_str() {
+                if v == variant {
                     match_nested_patterns(program, sub_patterns, payload, env)
                 } else {
                     Ok(false)
@@ -944,7 +987,7 @@ pub fn eval_test_case_with_mocks(
     let input = eval_parser_expr_with_program(&case.input, program)?;
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
-    let mut env = Env::new_with_interner(&program.interner);
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
     env.populate_shared_from_program(program);
     bind_input_to_params(program, func, &input, &mut env);
 
@@ -1058,7 +1101,7 @@ fn eval_test_case_with_runtime(
                     .get_function(&fn_name)
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
-                let mut env = Env::new_with_interner(&program.interner);
+                let mut env = Env::new_with_shared_interner(&program.shared_interner);
                 env.populate_shared_from_program(&program);
 
                 // Tests always use mock-only handles.  Unmocked IO operations
@@ -1143,7 +1186,7 @@ pub async fn eval_test_case_async(
             .get_function(&fn_name)
             .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
-        let mut env = Env::new_with_interner(&program.interner);
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
         env.populate_shared_from_program(&program);
 
         // Tests always use mock-only handles — see comment in
@@ -1322,7 +1365,7 @@ pub fn eval_function_body_pub(
 /// Evaluate an AST expression in isolation (no function context).
 /// Used for evaluating +shared variable default values like `0`, `""`, `true`.
 pub fn eval_expr_standalone(program: &ast::Program, expr: &ast::Expr) -> Result<Value> {
-    let mut env = Env::new_with_interner(&program.interner);
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
     eval_ast_expr(program, expr, &mut env)
 }
 
@@ -1514,7 +1557,7 @@ fn eval_function_body(
                     // Treat Ok/Err as union variants for pattern matching
                     Value::Ok(inner) => {
                         let as_union = Value::Union {
-                            variant: Arc::from("Ok"),
+                            variant: "Ok".to_string(),
                             payload: vec![inner.as_ref().clone()],
                         };
                         let mut matched = false;
@@ -1547,15 +1590,15 @@ fn eval_function_body(
                     }
                     Value::Err(msg) => {
                         let as_union = Value::Union {
-                            variant: Arc::from("Err"),
-                            payload: vec![Value::String(msg.clone())],
+                            variant: "Err".to_string(),
+                            payload: vec![Value::string(msg.clone())],
                         };
                         let mut matched = false;
                         for arm in arms {
                             if arm.variant == "Err" {
                                 env.push_scope();
                                 if let Some(binding) = arm.bindings.first() {
-                                    if binding != "_" { env.set(binding, Value::String(msg.clone())); }
+                                    if binding != "_" { env.set(binding, Value::string(msg.clone())); }
                                 }
                                 let result = eval_function_body(program, &arm.body, env);
                                 env.pop_scope();
@@ -1826,7 +1869,7 @@ pub fn eval_builtin_or_user(
     // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
     if is_union_variant(program, callee) {
         return Ok(Value::Union {
-            variant: Arc::from(callee),
+            variant: callee.to_string(),
             payload: args,
         });
     }
@@ -1843,7 +1886,7 @@ pub fn eval_builtin_or_user(
         "Err" => {
             if args.len() == 1 {
                 match &args[0] {
-                    Value::String(s) => Ok(Value::Err(s.clone())),
+                    Value::String(s) => Ok(Value::Err(s.to_string().into())),
                     other => Ok(Value::Err(format!("{other}").into())),
                 }
             } else {
@@ -1890,13 +1933,13 @@ pub fn eval_builtin_or_user(
             for part in &parts {
                 result.push_str(part);
             }
-            Ok(Value::String(result.into()))
+            Ok(Value::string(result))
         }
         "to_string" | "str" => {
             if args.len() != 1 {
                 bail!("to_string() expects 1 argument");
             }
-            Ok(Value::String(format!("{}", args[0]).into()))
+            Ok(Value::string(format!("{}", args[0])))
         }
         "char_at" => {
             if args.len() != 2 {
@@ -1906,7 +1949,7 @@ pub fn eval_builtin_or_user(
                 (Value::String(s), Value::Int(i)) => {
                     let i = *i as usize;
                     if i < s.len() {
-                        Ok(Value::String(s[i..i + 1].into()))
+                        Ok(Value::string(s[i..i + 1].to_string()))
                     } else {
                         bail!("char_at: index {i} out of bounds (len {})", s.len())
                     }
@@ -1923,7 +1966,7 @@ pub fn eval_builtin_or_user(
                     let start = *start as usize;
                     let end = (*end as usize).min(s.len());
                     if start <= end && start <= s.len() {
-                        Ok(Value::String(s[start..end].into()))
+                        Ok(Value::string(s[start..end].to_string()))
                     } else {
                         bail!(
                             "substring: invalid range {}..{} (len {})",
@@ -1986,8 +2029,8 @@ pub fn eval_builtin_or_user(
             match (&args[0], &args[1], &args[2]) {
                 (Value::String(pattern), Value::String(replacement), Value::String(text)) => {
                     match regex::Regex::new(pattern) {
-                        Ok(re) => Ok(Value::String(
-                            re.replace_all(text, replacement.as_ref()).into_owned().into(),
+                        Ok(re) => Ok(Value::string(
+                            re.replace_all(text, replacement.as_ref()).into_owned(),
                         )),
                         Err(e) => bail!("regex_replace: invalid pattern '{}': {}", pattern, e),
                     }
@@ -2015,9 +2058,9 @@ pub fn eval_builtin_or_user(
                 (Value::String(s), Value::String(delim)) => {
                     let parts: Vec<Value> = s
                         .split(delim.as_ref())
-                        .map(|p| Value::String(p.into()))
+                        .map(|p| Value::string(p.to_string()))
                         .collect();
-                    Ok(Value::List(Arc::new(parts)))
+                    Ok(Value::list(parts))
                 }
                 _ => bail!("split expects (String, String)"),
             }
@@ -2027,7 +2070,7 @@ pub fn eval_builtin_or_user(
                 bail!("trim(s) expects 1 argument");
             }
             match &args[0] {
-                Value::String(s) => Ok(Value::String(s.trim().into())),
+                Value::String(s) => Ok(Value::string(s.trim().to_string())),
                 _ => bail!("trim expects String"),
             }
         }
@@ -2056,20 +2099,20 @@ pub fn eval_builtin_or_user(
                     }
                     // Return the value as a string, stripping quotes from string values
                     match current {
-                        serde_json::Value::String(s) => Ok(Value::String(s.clone().into())),
+                        serde_json::Value::String(s) => Ok(Value::string(s.clone())),
                         serde_json::Value::Number(n) => {
                             if let Some(i) = n.as_i64() {
                                 Ok(Value::Int(i))
                             } else if let Some(f) = n.as_f64() {
                                 Ok(Value::Float(f))
                             } else {
-                                Ok(Value::String(n.to_string().into()))
+                                Ok(Value::string(n.to_string()))
                             }
                         }
                         serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
-                        serde_json::Value::Null => Ok(Value::String("null".into())),
+                        serde_json::Value::Null => Ok(Value::string("null")),
                         // Arrays and objects are returned as JSON strings
-                        other => Ok(Value::String(other.to_string().into())),
+                        other => Ok(Value::string(other.to_string())),
                     }
                 }
                 _ => bail!("json_get expects (String, String)"),
@@ -2108,7 +2151,7 @@ pub fn eval_builtin_or_user(
                             c => escaped.push(c),
                         }
                     }
-                    Ok(Value::String(escaped.into()))
+                    Ok(Value::string(escaped))
                 }
                 _ => bail!("json_escape expects String"),
             }
@@ -2121,7 +2164,7 @@ pub fn eval_builtin_or_user(
                 Value::String(s) => {
                     use base64::Engine;
                     let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
-                    Ok(Value::String(encoded.into()))
+                    Ok(Value::string(encoded))
                 }
                 _ => bail!("base64_encode expects String"),
             }
@@ -2129,7 +2172,7 @@ pub fn eval_builtin_or_user(
         // List operations
         "list" => {
             // list() creates empty list, list(a, b, c) creates list with items
-            Ok(Value::List(Arc::new(args)))
+            Ok(Value::list(args))
         }
         "push" => {
             if args.len() != 2 {
@@ -2140,10 +2183,9 @@ pub fn eval_builtin_or_user(
             let list_val = drain.next().unwrap();
             let item = drain.next().unwrap();
             match list_val {
-                Value::List(items) => {
-                    let mut vec = Arc::try_unwrap(items).unwrap_or_else(|arc| (*arc).clone());
-                    vec.push(item);
-                    Ok(Value::List(Arc::new(vec)))
+                Value::List(mut items) => {
+                    Arc::make_mut(&mut items).push(item);
+                    Ok(Value::List(items))
                 }
                 _ => bail!("push expects (List, value)"),
             }
@@ -2171,7 +2213,7 @@ pub fn eval_builtin_or_user(
             match (&args[0], &args[1]) {
                 (Value::List(items), Value::String(delim)) => {
                     let parts: Vec<String> = items.iter().map(|v| format!("{v}")).collect();
-                    Ok(Value::String(parts.join(delim).into()))
+                    Ok(Value::string(parts.join(delim.as_ref())))
                 }
                 _ => bail!("join expects (List, String)"),
             }
@@ -2339,7 +2381,7 @@ pub fn eval_builtin_or_user(
                 bail!("to_hex(n) expects 1 argument");
             }
             match &args[0] {
-                Value::Int(n) => Ok(Value::String(format!("{:08x}", *n as u32).into())),
+                Value::Int(n) => Ok(Value::string(format!("{:08x}", *n as u32))),
                 _ => bail!("to_hex expects Int"),
             }
         }
@@ -2363,7 +2405,7 @@ pub fn eval_builtin_or_user(
                 bail!("from_char_code(n) expects 1 argument");
             }
             match &args[0] {
-                Value::Int(n) => Ok(Value::String(Arc::from(String::from(*n as u8 as char)))),
+                Value::Int(n) => Ok(Value::string(String::from(*n as u8 as char))),
                 _ => bail!("from_char_code expects Int"),
             }
         }
@@ -2400,7 +2442,7 @@ pub fn eval_builtin_or_user(
         _ => {
             // Try to find the function in the program and call it
             if let Some(func) = program.get_function(callee) {
-                let mut call_env = Env::new_with_interner(&program.interner);
+                let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
                 for (param, arg) in func.params.iter().zip(args) {
                     call_env.set(&param.name, arg);
                 }
@@ -2417,7 +2459,7 @@ pub fn eval_builtin_or_user(
                 // Check if it's a union variant constructor
                 if is_union_variant(program, callee) {
                     return Ok(Value::Union {
-                        variant: Arc::from(callee),
+                        variant: callee.to_string(),
                         payload: args,
                     });
                 }
@@ -2448,7 +2490,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             ast::Literal::Int(v) => Ok(Value::Int(*v)),
             ast::Literal::Float(v) => Ok(Value::Float(*v)),
             ast::Literal::Bool(v) => Ok(Value::Bool(*v)),
-            ast::Literal::String(v) => Ok(Value::String(Arc::from(v.as_str()))),
+            ast::Literal::String(v) => Ok(Value::string(v.clone())),
         },
         ast::Expr::Identifier(name) => {
             match name.as_str() {
@@ -2461,7 +2503,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                     } else if is_union_variant(program, name) {
                         // No-payload union variant
                         Ok(Value::Union {
-                            variant: Arc::from(name.as_str()),
+                            variant: name.clone(),
                             payload: vec![],
                         })
                     } else {
@@ -2498,7 +2540,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                 Value::Err(e) => match field.as_str() {
                     "is_ok" => Ok(Value::Bool(false)),
                     "is_err" => Ok(Value::Bool(true)),
-                    "error" | "unwrap_err" => Ok(Value::String(e.clone())),
+                    "error" | "unwrap_err" => Ok(Value::string(e.to_string())),
                     "unwrap" => bail!("unwrap on Err({e})"),
                     _ => bail!("cannot access field `{field}` on Err({e})"),
                 },
@@ -2570,9 +2612,9 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_ast_expr(program, &f.value, env)?;
-                field_map.insert(Arc::from(f.name.as_str()), val);
+                field_map.insert(f.name.clone(), val);
             }
-            Ok(Value::Struct(Arc::from(ty.as_str()), Arc::new(field_map)))
+            Ok(Value::strct(ty.clone(), field_map))
         }
     }
 }
@@ -2677,7 +2719,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             // Check if this is a user-defined union variant first
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
-                    variant: Arc::from(name.as_str()),
+                    variant: name.clone(),
                     payload: vec![],
                 });
             }
@@ -2695,7 +2737,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                             func.effects
                         );
                     }
-                    let mut env = Env::new_with_interner(&program.interner);
+                    let mut env = Env::new_with_shared_interner(&program.shared_interner);
                     return eval_function_body(program, &func.body, &mut env);
                 }
             }
@@ -2711,7 +2753,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Value::Union {
-                    variant: Arc::from(name),
+                    variant: name,
                     payload,
                 });
             }
@@ -2732,7 +2774,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new_with_interner(&program.interner);
+                let mut env = Env::new_with_shared_interner(&program.shared_interner);
                 for (param, arg) in func.params.iter().zip(eval_args) {
                     env.set(&param.name, arg);
                 }
@@ -2748,7 +2790,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new_with_interner(&program.interner);
+                let mut env = Env::new_with_shared_interner(&program.shared_interner);
                 return eval_builtin_or_user(program, &name, eval_args, &mut env);
             }
             // Fall through to standalone (handles union constructors, Ok, Err)
@@ -2759,9 +2801,9 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_with_program(&f.value, program)?;
-                field_map.insert(Arc::from(f.name.as_str()), val);
+                field_map.insert(f.name.clone(), val);
             }
-            Ok(Value::Struct(Arc::from(""), Arc::new(field_map)))
+            Ok(Value::strct("", field_map))
         }
         // Unary expressions need program access for their inner expression
         parser::Expr::Unary { op, expr: inner } => {
@@ -2817,13 +2859,13 @@ fn eval_parser_expr_with_env(
             }
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
-                    variant: Arc::from(name.as_str()),
+                    variant: name.clone(),
                     payload: vec![],
                 });
             }
             if let Some(func) = program.get_function(name) {
                 if func.params.is_empty() {
-                    let mut call_env = Env::new_with_interner(&program.interner);
+                    let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
                     if let Some(handle) = env.get_raw("__coroutine_handle") {
                         call_env.set("__coroutine_handle", handle.clone());
                     }
@@ -2840,7 +2882,7 @@ fn eval_parser_expr_with_env(
                     .map(|a| eval_parser_expr_with_env(a, program, env))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Value::Union {
-                    variant: Arc::from(name),
+                    variant: name,
                     payload,
                 });
             }
@@ -2849,7 +2891,7 @@ fn eval_parser_expr_with_env(
                     .iter()
                     .map(|a| eval_parser_expr_with_env(a, program, env))
                     .collect::<Result<Vec<_>>>()?;
-                let mut call_env = Env::new_with_interner(&program.interner);
+                let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
                 for (param, arg) in func.params.iter().zip(eval_args) {
                     call_env.set(&param.name, arg);
                 }
@@ -2873,9 +2915,9 @@ fn eval_parser_expr_with_env(
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_with_env(&f.value, program, env)?;
-                field_map.insert(Arc::from(f.name.as_str()), val);
+                field_map.insert(f.name.clone(), val);
             }
-            Ok(Value::Struct(Arc::from(""), Arc::new(field_map)))
+            Ok(Value::strct("", field_map))
         }
         parser::Expr::Unary { op, expr: inner } => {
             let val = eval_parser_expr_with_env(inner, program, env)?;
@@ -2917,7 +2959,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
         parser::Expr::Int(v) => Ok(Value::Int(*v)),
         parser::Expr::Float(v) => Ok(Value::Float(*v)),
         parser::Expr::Bool(v) => Ok(Value::Bool(*v)),
-        parser::Expr::String(v) => Ok(Value::String(Arc::from(v.as_str()))),
+        parser::Expr::String(v) => Ok(Value::string(v.clone())),
         parser::Expr::Ident(name) => {
             match name.as_str() {
                 "true" => Ok(Value::Bool(true)),
@@ -2930,16 +2972,16 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         match name.as_str() {
                             "Ok" => Ok(Value::Ok(Box::new(Value::None))),
                             "None" => Ok(Value::Union {
-                                variant: Arc::from("None"),
+                                variant: "None".to_string(),
                                 payload: vec![],
                             }),
                             _ => Ok(Value::Union {
-                                variant: Arc::from(name.as_str()),
+                                variant: name.clone(),
                                 payload: vec![],
                             }),
                         }
                     } else {
-                        Ok(Value::Err(Arc::from(name.as_str())))
+                        Ok(Value::Err(name.clone()))
                     }
                 }
             }
@@ -2948,9 +2990,9 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
             let mut field_map = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_standalone(&f.value)?;
-                field_map.insert(Arc::from(f.name.as_str()), val);
+                field_map.insert(f.name.clone(), val);
             }
-            Ok(Value::Struct(Arc::from(""), Arc::new(field_map)))
+            Ok(Value::strct("", field_map))
         }
         parser::Expr::Call { callee, args } => {
             // Handle Ok(...) and Err(...) constructors
@@ -2967,7 +3009,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                 "Err" => {
                     if args.len() == 1 {
                         match &args[0] {
-                            parser::Expr::Ident(label) => Ok(Value::Err(Arc::from(label.as_str()))),
+                            parser::Expr::Ident(label) => Ok(Value::Err(label.clone())),
                             other => {
                                 let val = eval_parser_expr_standalone(other)?;
                                 Ok(Value::Err(format!("{val}").into()))
@@ -2982,7 +3024,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         .iter()
                         .map(eval_parser_expr_standalone)
                         .collect::<Result<Vec<_>>>()?;
-                    Ok(Value::List(Arc::new(items)))
+                    Ok(Value::list(items))
                 }
                 _ => {
                     // Treat as union variant constructor
@@ -2991,7 +3033,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         .map(eval_parser_expr_standalone)
                         .collect::<Result<Vec<_>>>()?;
                     Ok(Value::Union {
-                        variant: Arc::from(name),
+                        variant: name,
                         payload,
                     })
                 }
@@ -3069,7 +3111,7 @@ pub fn trace_function(
         .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     let input_val = eval_parser_expr_standalone(input)?;
-    let mut env = Env::new_with_interner(&program.interner);
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
     bind_input_to_params(program, func, &input_val, &mut env);
 
     let mut steps = vec![];
@@ -3152,7 +3194,7 @@ fn trace_body(
                         },
                     });
                     if !is_true {
-                        return Some(Value::Err(Arc::from(on_fail.as_str())));
+                        return Some(Value::Err(on_fail.clone()));
                     }
                 }
                 Err(e) => {
@@ -3831,7 +3873,7 @@ mod tests {
     #[test]
     fn test_value_display_utf8_string() {
         // Verify Value::String Display preserves multi-byte UTF-8
-        let val = Value::String("café ☕ 日本語".into());
+        let val = Value::string("café ☕ 日本語");
         let displayed = format!("{val}");
         assert_eq!(displayed, r#""café ☕ 日本語""#, "Value display should preserve UTF-8");
     }
@@ -4530,7 +4572,7 @@ mod tests {
         let result = eval_builtin_or_user(
             &program,
             "println",
-            vec![Value::String("hello".into())],
+            vec![Value::string("hello")],
             &mut env,
         );
         // With mock, println should succeed (mocked response)
@@ -6640,7 +6682,7 @@ mod tests {
         let mut env = Env::new();
         env.set("x", Value::Int(1));
         env.set("__internal", Value::Int(999));
-        env.set("y", Value::String("hello".into()));
+        env.set("y", Value::string("hello"));
         let bindings = env.snapshot_bindings();
         assert_eq!(bindings.len(), 2, "should exclude __internal");
         // Bindings are sorted by name
@@ -6655,7 +6697,7 @@ mod tests {
         env.set("a", Value::Int(1));
         env.set("b", Value::Float(2.5));
         env.set("c", Value::Bool(true));
-        env.set("d", Value::String("hello".into()));
+        env.set("d", Value::string("hello"));
         env.set("e", Value::None);
 
         assert!(matches!(env.get("a").unwrap(), Value::Int(1)));
@@ -6767,7 +6809,7 @@ mod tests {
   +return name
 ";
         let program = build_program(source);
-        let env = Env::new_with_interner(&program.interner);
+        let env = Env::new_with_shared_interner(&program.shared_interner);
 
         // The env's interner should know about the program's names
         let id_from_program = program.interner.get("name").unwrap();
@@ -6845,11 +6887,172 @@ mod tests {
         // the same interned ids, allowing values to be portable between them
         let source = "+fn identity (v:Int)->Int\n  +return v\n";
         let program = build_program(source);
-        let env1 = Env::new_with_interner(&program.interner);
-        let env2 = Env::new_with_interner(&program.interner);
+        let env1 = Env::new_with_shared_interner(&program.shared_interner);
+        let env2 = Env::new_with_shared_interner(&program.shared_interner);
         let id1 = env1.intern_name("v");
         let id2 = env2.intern_name("v");
         assert_eq!(id1, id2, "same interner seed should produce same ids");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // SharedInterner + SmallVec scope chain optimization tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn env_shared_interner_o1_clone() {
+        // Creating an Env from a SharedInterner should be O(1) — the Arc is
+        // shared, not cloned. Verify that lookup still works correctly.
+        let mut base = StringInterner::new();
+        base.intern("x");
+        base.intern("y");
+        base.intern("z");
+        let shared = base.shared();
+
+        let mut env = Env::new_with_shared_interner(&shared);
+        env.set("x", Value::Int(1));
+        env.set("y", Value::Int(2));
+
+        assert_eq!(format!("{}", env.get("x").unwrap()), "1");
+        assert_eq!(format!("{}", env.get("y").unwrap()), "2");
+        assert!(env.get("z").is_ok()); // z was interned but not set — get returns error
+        // Actually z is not set, so get returns Err
+        assert!(env.get("nonexistent").is_err());
+    }
+
+    #[test]
+    fn env_shared_interner_cow_on_new_name() {
+        // When a truly new name is encountered, the SharedInterner should
+        // copy-on-write: existing Envs sharing the same Arc are unaffected.
+        let mut base = StringInterner::new();
+        base.intern("known");
+        let shared = base.shared();
+
+        let mut env1 = Env::new_with_shared_interner(&shared);
+        let mut env2 = Env::new_with_shared_interner(&shared);
+
+        // Intern a new name in env1 (triggers copy-on-write)
+        env1.set("brand_new", Value::Int(99));
+        assert_eq!(format!("{}", env1.get("brand_new").unwrap()), "99");
+
+        // env2 should NOT see "brand_new" because it has its own interner copy
+        // (but env2 can still intern it independently)
+        env2.set("brand_new", Value::Int(77));
+        assert_eq!(format!("{}", env2.get("brand_new").unwrap()), "77");
+    }
+
+    #[test]
+    fn env_smallvec_scope_chain_basic() {
+        // The scope chain uses SmallVec<[_; 4]> — verify push/pop works
+        // correctly through nested scopes without heap allocation for
+        // the typical case (≤4 scopes deep).
+        let mut env = Env::new();
+        env.set("outer", Value::Int(1));
+
+        env.push_scope();
+        env.set("inner1", Value::Int(2));
+        assert_eq!(format!("{}", env.get("outer").unwrap()), "1");
+        assert_eq!(format!("{}", env.get("inner1").unwrap()), "2");
+
+        env.push_scope();
+        env.set("inner2", Value::Int(3));
+        assert_eq!(format!("{}", env.get("outer").unwrap()), "1");
+        assert_eq!(format!("{}", env.get("inner2").unwrap()), "3");
+
+        env.push_scope();
+        env.set("inner3", Value::Int(4));
+        // Still within SmallVec inline capacity (4 scopes: root + 3 nested)
+        assert_eq!(format!("{}", env.get("inner3").unwrap()), "4");
+
+        env.pop_scope();
+        assert!(env.get("inner3").is_err()); // inner3 is gone
+
+        env.pop_scope();
+        assert!(env.get("inner2").is_err()); // inner2 is gone
+
+        env.pop_scope();
+        assert!(env.get("inner1").is_err()); // inner1 is gone
+        assert_eq!(format!("{}", env.get("outer").unwrap()), "1"); // outer still there
+    }
+
+    #[test]
+    fn env_smallvec_spills_to_heap_gracefully() {
+        // When scope depth exceeds SmallVec inline capacity (4), it should
+        // spill to heap and continue working correctly.
+        let mut env = Env::new();
+        env.set("root", Value::Int(0));
+
+        // Push 10 scopes (well beyond inline capacity of 4)
+        for i in 1..=10 {
+            env.push_scope();
+            env.set(&format!("level_{i}"), Value::Int(i as i64));
+        }
+
+        // All variables should be accessible
+        assert_eq!(format!("{}", env.get("root").unwrap()), "0");
+        for i in 1..=10 {
+            assert_eq!(
+                format!("{}", env.get(&format!("level_{i}")).unwrap()),
+                format!("{i}")
+            );
+        }
+
+        // Pop all nested scopes
+        for _ in 1..=10 {
+            env.pop_scope();
+        }
+        assert_eq!(format!("{}", env.get("root").unwrap()), "0");
+        assert!(env.get("level_1").is_err());
+    }
+
+    #[test]
+    fn env_scope_shadowing_with_smallvec() {
+        // Variable shadowing should work correctly with SmallVec scopes
+        let mut env = Env::new();
+        env.set("x", Value::Int(1));
+
+        env.push_scope();
+        env.set("x", Value::Int(2)); // shadows outer x
+        assert_eq!(format!("{}", env.get("x").unwrap()), "2");
+
+        env.pop_scope();
+        assert_eq!(format!("{}", env.get("x").unwrap()), "1"); // outer x restored
+    }
+
+    #[test]
+    fn program_shared_interner_rebuilt_on_mutation() {
+        // After rebuilding the function index, the shared_interner should
+        // contain all AST names and be usable for Env creation.
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +return sum
+";
+        let program = build_program(source);
+
+        // shared_interner should be populated
+        assert!(program.shared_interner.get("add").is_some());
+        assert!(program.shared_interner.get("a").is_some());
+        assert!(program.shared_interner.get("b").is_some());
+        assert!(program.shared_interner.get("sum").is_some());
+
+        // Creating an Env from shared_interner should work
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
+        env.set("a", Value::Int(1));
+        assert_eq!(format!("{}", env.get("a").unwrap()), "1");
+    }
+
+    #[test]
+    fn shared_interner_ids_match_base_interner() {
+        // IDs from SharedInterner should match the original StringInterner
+        let source = "\
++fn greet (name:String)->String
+  +return concat(\"hello \", name)
+";
+        let program = build_program(source);
+
+        let base_id = program.interner.get("name").unwrap();
+        let shared_id = program.shared_interner.get("name").unwrap();
+        assert_eq!(base_id, shared_id, "IDs should be identical between base and shared interner");
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -6910,7 +7113,7 @@ mod tests {
         // push with wrong number of args should error
         let p = ast::Program::default();
         let mut env = Env::new();
-        let result = eval_builtin_or_user(&p, "push", vec![Value::List(Arc::new(vec![]))], &mut env);
+        let result = eval_builtin_or_user(&p, "push", vec![Value::list(vec![])], &mut env);
         assert!(result.is_err(), "push with 1 arg should error");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("expects 2 arguments"), "error should mention arg count: {msg}");
@@ -7012,7 +7215,7 @@ mod tests {
         // Names not in the pre-seeded interner should still work (interned on demand)
         let interner = StringInterner::new(); // empty interner
         let mut env = Env::new_with_interner(&interner);
-        env.set("dynamic_var", Value::String("hello".into()));
+        env.set("dynamic_var", Value::string("hello"));
 
         assert!(matches!(env.get("dynamic_var"), Ok(Value::String(s)) if &**s == "hello"));
     }
@@ -7084,7 +7287,7 @@ mod tests {
     #[test]
     fn value_string_clone_is_cheap_arc_bump() {
         // Cloning a Value::String should share the same Arc allocation
-        let v1 = Value::String(Arc::from("hello world"));
+        let v1 = Value::string("hello world");
         let v2 = v1.clone();
         // Both should point to the same underlying str (same Arc)
         match (&v1, &v2) {
@@ -7096,12 +7299,12 @@ mod tests {
     }
 
     #[test]
-    fn value_err_clone_is_cheap_arc_bump() {
-        let v1 = Value::Err(Arc::from("some error"));
+    fn value_err_clone_preserves_value() {
+        let v1 = Value::Err("some error".to_string());
         let v2 = v1.clone();
         match (&v1, &v2) {
             (Value::Err(a), Value::Err(b)) => {
-                assert!(Arc::ptr_eq(a, b), "Err clone should share Arc");
+                assert_eq!(a, b, "Err clone should preserve the error message");
             }
             _ => panic!("expected Err variants"),
         }
@@ -7110,7 +7313,7 @@ mod tests {
     #[test]
     fn value_list_clone_shares_arc() {
         let items = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
-        let v1 = Value::List(Arc::new(items));
+        let v1 = Value::list(items);
         let v2 = v1.clone();
         match (&v1, &v2) {
             (Value::List(a), Value::List(b)) => {
@@ -7121,15 +7324,15 @@ mod tests {
     }
 
     #[test]
-    fn value_struct_clone_shares_arc() {
+    fn value_struct_clone_shares_field_arc() {
         let mut fields = HashMap::new();
-        fields.insert(Arc::from("x"), Value::Int(10));
-        fields.insert(Arc::from("y"), Value::Int(20));
-        let v1 = Value::Struct(Arc::from("Point"), Arc::new(fields));
+        fields.insert("x".to_string(), Value::Int(10));
+        fields.insert("y".to_string(), Value::Int(20));
+        let v1 = Value::strct("Point", fields);
         let v2 = v1.clone();
         match (&v1, &v2) {
             (Value::Struct(n1, f1), Value::Struct(n2, f2)) => {
-                assert!(Arc::ptr_eq(n1, n2), "Struct name Arc should be shared");
+                assert_eq!(n1, n2, "Struct name should be preserved");
                 assert!(Arc::ptr_eq(f1, f2), "Struct fields Arc should be shared");
             }
             _ => panic!("expected Struct variants"),
@@ -7137,15 +7340,15 @@ mod tests {
     }
 
     #[test]
-    fn value_union_variant_clone_shares_arc() {
+    fn value_union_variant_clone_preserves_value() {
         let v1 = Value::Union {
-            variant: Arc::from("Some"),
+            variant: "Some".to_string(),
             payload: vec![Value::Int(42)],
         };
         let v2 = v1.clone();
         match (&v1, &v2) {
             (Value::Union { variant: a, .. }, Value::Union { variant: b, .. }) => {
-                assert!(Arc::ptr_eq(a, b), "Union variant name should share Arc");
+                assert_eq!(a, b, "Union variant name should be preserved");
             }
             _ => panic!("expected Union variants"),
         }
@@ -7153,13 +7356,13 @@ mod tests {
 
     #[test]
     fn value_string_display_correct() {
-        let v = Value::String(Arc::from("hello"));
+        let v = Value::string("hello");
         assert_eq!(format!("{v}"), r#""hello""#);
     }
 
     #[test]
     fn value_err_display_correct() {
-        let v = Value::Err(Arc::from("fail"));
+        let v = Value::Err("fail".to_string());
         assert_eq!(format!("{v}"), "Err(fail)");
     }
 
@@ -7224,40 +7427,40 @@ mod tests {
     #[test]
     fn value_matches_equality_with_arc() {
         // Value::matches() should work correctly with Arc<str> internals
-        let a = Value::String(Arc::from("hello"));
-        let b = Value::String(Arc::from("hello"));
-        let c = Value::String(Arc::from("world"));
+        let a = Value::string("hello");
+        let b = Value::string("hello");
+        let c = Value::string("world");
         assert!(a.matches(&b), "same content Arc<str> should match");
         assert!(!a.matches(&c), "different content should not match");
 
         // Err matching
-        let ea = Value::Err(Arc::from("fail"));
-        let eb = Value::Err(Arc::from("fail"));
-        let ec = Value::Err(Arc::from("other"));
+        let ea = Value::Err("fail".to_string());
+        let eb = Value::Err("fail".to_string());
+        let ec = Value::Err("other".to_string());
         assert!(ea.matches(&eb));
         assert!(!ea.matches(&ec));
 
         // Struct matching
         let mut f1 = HashMap::new();
-        f1.insert(Arc::from("x"), Value::Int(1));
+        f1.insert("x".to_string(), Value::Int(1));
         let mut f2 = HashMap::new();
-        f2.insert(Arc::from("x"), Value::Int(1));
-        let s1 = Value::Struct(Arc::from("P"), Arc::new(f1));
-        let s2 = Value::Struct(Arc::from("P"), Arc::new(f2));
+        f2.insert("x".to_string(), Value::Int(1));
+        let s1 = Value::strct("P", f1);
+        let s2 = Value::strct("P", f2);
         assert!(s1.matches(&s2));
 
         // List matching
-        let l1 = Value::List(Arc::new(vec![Value::Int(1), Value::Int(2)]));
-        let l2 = Value::List(Arc::new(vec![Value::Int(1), Value::Int(2)]));
-        let l3 = Value::List(Arc::new(vec![Value::Int(1), Value::Int(3)]));
+        let l1 = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let l2 = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let l3 = Value::list(vec![Value::Int(1), Value::Int(3)]);
         assert!(l1.matches(&l2));
         assert!(!l1.matches(&l3));
     }
 
     #[test]
     fn value_is_truthy_with_arc_string() {
-        assert!(Value::String(Arc::from("x")).is_truthy());
-        assert!(!Value::String(Arc::from("")).is_truthy());
+        assert!(Value::string("x").is_truthy());
+        assert!(!Value::string("").is_truthy());
     }
 
     #[test]

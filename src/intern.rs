@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Interned string identifier. A `u32` index into the `StringInterner` table.
 /// Using `u32` instead of `usize` saves 4 bytes per key on 64-bit platforms
@@ -78,6 +79,81 @@ impl StringInterner {
     /// Whether the interner is empty.
     pub fn is_empty(&self) -> bool {
         self.strings.is_empty()
+    }
+
+    /// Freeze this interner into a shared, cheaply-cloneable `SharedInterner`.
+    /// The returned handle wraps the data in `Arc` so cloning is O(1).
+    pub fn shared(&self) -> SharedInterner {
+        SharedInterner {
+            inner: Arc::new(self.clone()),
+        }
+    }
+}
+
+/// A cheaply-cloneable interner handle backed by `Arc<StringInterner>`.
+///
+/// Cloning a `SharedInterner` is an O(1) reference-count bump — no HashMap or
+/// Vec allocation — making it suitable for passing into every `Env` created
+/// during function calls without copying the entire interner.
+///
+/// Read-only lookups (`get`, `resolve`) go straight through the shared data.
+/// If a truly new name needs to be interned at runtime (rare when the Program
+/// interner pre-seeds all AST names), call `intern()` which performs
+/// copy-on-write: the first mutation clones the inner `StringInterner` so that
+/// other holders of the same `Arc` are unaffected.
+#[derive(Debug, Clone)]
+pub struct SharedInterner {
+    inner: Arc<StringInterner>,
+}
+
+impl SharedInterner {
+    /// Create a new empty shared interner.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(StringInterner::new()),
+        }
+    }
+
+    /// Look up the id for a string without interning it.
+    /// Returns `None` if the string has not been interned.
+    #[inline]
+    pub fn get(&self, s: &str) -> Option<InternedId> {
+        self.inner.get(s)
+    }
+
+    /// Look up the string for a given interned id.
+    #[inline]
+    pub fn resolve(&self, id: InternedId) -> Option<&str> {
+        self.inner.resolve(id)
+    }
+
+    /// Intern a new string, using copy-on-write semantics.
+    /// If the string already exists, returns its id with no allocation.
+    /// If it's truly new, clones the inner interner (once) and inserts.
+    #[inline]
+    pub fn intern(&mut self, s: &str) -> InternedId {
+        // Fast path: already interned — no write needed
+        if let Some(id) = self.inner.get(s) {
+            return id;
+        }
+        // Slow path: copy-on-write — clone inner if shared, then insert
+        Arc::make_mut(&mut self.inner).intern(s)
+    }
+
+    /// The number of interned strings.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Whether the interner is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+impl Default for SharedInterner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -207,5 +283,70 @@ mod tests {
         assert_eq!(id_c, 2);
         assert_eq!(extended.len(), 3);
         assert_eq!(base.len(), 2); // base unchanged
+    }
+
+    // --- SharedInterner tests ---
+
+    #[test]
+    fn test_shared_interner_basic() {
+        let mut base = StringInterner::new();
+        base.intern("hello");
+        base.intern("world");
+
+        let shared = base.shared();
+        assert_eq!(shared.get("hello"), Some(0));
+        assert_eq!(shared.get("world"), Some(1));
+        assert_eq!(shared.get("missing"), None);
+        assert_eq!(shared.resolve(0), Some("hello"));
+        assert_eq!(shared.resolve(1), Some("world"));
+        assert_eq!(shared.len(), 2);
+    }
+
+    #[test]
+    fn test_shared_interner_clone_is_cheap() {
+        let mut base = StringInterner::new();
+        for i in 0..100 {
+            base.intern(&format!("var_{i}"));
+        }
+        let shared1 = base.shared();
+        let shared2 = shared1.clone(); // Should be O(1) Arc clone
+
+        // Both see the same data
+        assert_eq!(shared1.get("var_0"), shared2.get("var_0"));
+        assert_eq!(shared1.get("var_99"), shared2.get("var_99"));
+        assert_eq!(shared1.len(), shared2.len());
+    }
+
+    #[test]
+    fn test_shared_interner_copy_on_write() {
+        let mut base = StringInterner::new();
+        let id_a = base.intern("a");
+        let id_b = base.intern("b");
+
+        let shared_original = base.shared();
+        let mut shared_clone = shared_original.clone();
+
+        // Intern existing name — no copy-on-write needed
+        assert_eq!(shared_clone.intern("a"), id_a);
+
+        // Intern new name — triggers copy-on-write
+        let id_c = shared_clone.intern("c");
+        assert_eq!(id_c, 2);
+        assert_eq!(shared_clone.resolve(id_c), Some("c"));
+        assert_eq!(shared_clone.len(), 3);
+
+        // Original is unaffected
+        assert_eq!(shared_original.get("c"), None);
+        assert_eq!(shared_original.len(), 2);
+        // But existing ids still work in both
+        assert_eq!(shared_original.resolve(id_a), Some("a"));
+        assert_eq!(shared_original.resolve(id_b), Some("b"));
+    }
+
+    #[test]
+    fn test_shared_interner_default() {
+        let shared = SharedInterner::default();
+        assert!(shared.is_empty());
+        assert_eq!(shared.len(), 0);
     }
 }

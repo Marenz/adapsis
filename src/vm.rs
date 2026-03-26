@@ -182,7 +182,6 @@ pub struct CompiledFunction {
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::ast;
 
@@ -779,7 +778,7 @@ fn run_loop(
             Op::PushInt(n) => state.stack.push(Value::Int(*n)),
             Op::PushFloat(f) => state.stack.push(Value::Float(*f)),
             Op::PushBool(b) => state.stack.push(Value::Bool(*b)),
-            Op::PushString(s) => state.stack.push(Value::String(Arc::from(s.as_str()))),
+            Op::PushString(s) => state.stack.push(Value::string(s.clone())),
             Op::PushUnit => state.stack.push(Value::None),
 
             // ── Locals ───────────────────────────────────────────────
@@ -944,7 +943,7 @@ fn run_loop(
                 let name_str = interner
                     .resolve(name_id)
                     .ok_or_else(|| anyhow::anyhow!("vm: unknown interned id {name_id}"))?;
-                let mut env = crate::eval::Env::new_with_interner(&program.interner);
+                let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
                 let result =
                     crate::eval::eval_builtin_or_user(program, name_str, call_args, &mut env)?;
                 state.stack.push(result);
@@ -1022,11 +1021,9 @@ fn run_loop(
                 let mut fields = HashMap::new();
                 for name in field_names.iter().rev() {
                     let val = pop_stack(&mut state.stack)?;
-                    fields.insert(Arc::from(name.as_str()), val);
+                    fields.insert(name.clone(), val);
                 }
-                state
-                    .stack
-                    .push(Value::Struct(Arc::from(""), Arc::new(fields)));
+                state.stack.push(Value::strct("", fields));
             }
             Op::GetField(field) => {
                 let field = field.clone();
@@ -1049,7 +1046,7 @@ fn run_loop(
                     items.push(pop_stack(&mut state.stack)?);
                 }
                 items.reverse();
-                state.stack.push(Value::List(Arc::new(items)));
+                state.stack.push(Value::list(items));
             }
 
             // ── Result / Option constructors ─────────────────────────
@@ -1060,8 +1057,8 @@ fn run_loop(
             Op::PushErr => {
                 let val = pop_stack(&mut state.stack)?;
                 let msg = match val {
-                    Value::String(s) => s,
-                    other => format!("{other}").into(),
+                    Value::String(s) => s.to_string(),
+                    other => format!("{other}"),
                 };
                 state.stack.push(Value::Err(msg));
             }
@@ -1083,7 +1080,7 @@ fn run_loop(
                 }
                 payload.reverse();
                 state.stack.push(Value::Union {
-                    variant: Arc::from(variant_name.as_str()),
+                    variant: variant_name.clone(),
                     payload,
                 });
             }
@@ -1094,7 +1091,7 @@ fn run_loop(
                     Value::Union {
                         ref variant,
                         ref payload,
-                    } if variant.as_ref() == variant_name.as_str() => {
+                    } if variant == variant_name => {
                         // Push bindings onto stack (in order), then push true
                         for i in 0..binding_count.min(payload.len()) {
                             state.stack.push(payload[i].clone());
@@ -1141,9 +1138,9 @@ fn binary_arith(
         (Value::Int(a), Value::Float(b)) => Value::Float(float_op(*a as f64, *b)),
         (Value::Float(a), Value::Int(b)) => Value::Float(float_op(*a, *b as f64)),
         // String concatenation for Add
-        (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}").into()),
-        (Value::String(a), other) => Value::String(format!("{a}{other}").into()),
-        (other, Value::String(b)) => Value::String(format!("{other}{b}").into()),
+        (Value::String(a), Value::String(b)) => Value::string(format!("{a}{b}")),
+        (Value::String(a), other) => Value::string(format!("{a}{other}")),
+        (other, Value::String(b)) => Value::string(format!("{other}{b}")),
         _ => bail!("arithmetic: unsupported types {lhs} and {rhs}"),
     };
     stack.push(result);
@@ -1716,7 +1713,7 @@ mod tests {
   +return msg
 "#,
             "greet",
-            vec![Value::String("world".into())],
+            vec![Value::string("world")],
         );
         match val {
             Value::String(s) => assert_eq!(&*s, "hello world"),
@@ -1733,7 +1730,7 @@ mod tests {
   +return n
 "#,
             "str_len",
-            vec![Value::String("hello".into())],
+            vec![Value::string("hello")],
         );
         assert!(matches!(val, Value::Int(5)), "expected 5, got {val}");
     }
@@ -1831,7 +1828,7 @@ mod tests {
         let compiled = compile_function(func, &program).unwrap();
         let result = execute(
             &compiled,
-            vec![Value::String("http://example.com".into())],
+            vec![Value::string("http://example.com")],
             &program,
         )
         .unwrap();
@@ -1855,7 +1852,7 @@ mod tests {
         );
         let func = program.get_function("greet").unwrap();
         let compiled = compile_function(func, &program).unwrap();
-        let result = execute(&compiled, vec![Value::String("world".into())], &program).unwrap();
+        let result = execute(&compiled, vec![Value::string("world")], &program).unwrap();
         match result {
             VmResult::Done(Value::String(s)) => assert_eq!(&*s, "hello world"),
             other => panic!("expected Done(String), got {:?}", other),
@@ -1875,7 +1872,7 @@ mod tests {
         let compiled = compile_function(func, &program).unwrap();
         let result = execute(
             &compiled,
-            vec![Value::String("foo".into()), Value::String("bar".into())],
+            vec![Value::string("foo"), Value::string("bar")],
             &program,
         )
         .unwrap();
@@ -2047,7 +2044,7 @@ mod tests {
         let compiled = compile_function(func, &program).unwrap();
         let result = execute(
             &compiled,
-            vec![Value::String("http://example.com".into())],
+            vec![Value::string("http://example.com")],
             &program,
         )
         .unwrap();
