@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Result};
+use std::collections::HashMap;
 
 use crate::ast;
 use crate::parser;
@@ -209,6 +210,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
+            fn_index: HashMap::new(),
         });
     }
     let mod_idx = existing_idx.unwrap_or(program.modules.len() - 1);
@@ -1063,7 +1065,11 @@ fn resolve_union_types_in_stmts(
 fn is_builtin_name(name: &str) -> bool {
     crate::builtins::is_builtin(name)
 }
-fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str) -> Result<String> {
+pub fn apply_move(
+    program: &mut ast::Program,
+    names: &[String],
+    target_module: &str,
+) -> Result<String> {
     let mut moved = Vec::new();
     let mut not_found = Vec::new();
     let mut funcs_to_move = Vec::new();
@@ -1141,6 +1147,7 @@ fn apply_move(program: &mut ast::Program, names: &[String], target_module: &str)
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
+            fn_index: HashMap::new(),
         });
     }
     let target = program

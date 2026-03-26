@@ -1,10 +1,12 @@
 use anyhow::{anyhow, bail, Result};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::ast;
 use crate::compiler::CompiledProgram;
+use crate::intern::{self, InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
 
@@ -18,21 +20,32 @@ pub fn new_jit_cache() -> JitCache {
 }
 
 /// A runtime value during evaluation.
+///
+/// **Performance notes**: Struct field keys, struct type names, and union variant
+/// names use `InternedId` (u32) instead of `String` for fast hash + comparison.
+/// `List` uses `Arc<Vec<Value>>` and `Struct` uses `Arc<HashMap<InternedId, Value>>`
+/// — compound values are read far more often than they are mutated.
+///
+/// `Arc` (rather than `Rc`) is required because `Value`s are sent across thread
+/// boundaries via `tokio::task::spawn_blocking` in the async evaluation paths.
+///
+/// To resolve interned IDs back to strings (e.g. for Display), use the
+/// thread-local display interner installed by `intern::set_display_interner()`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
     TaskHandle(crate::coroutine::TaskId),
     Union {
-        variant: String,
+        variant: InternedId,
         payload: Vec<Value>,
     },
     Int(i64),
     Float(f64),
     Bool(bool),
-    String(String),
-    Struct(String, HashMap<String, Value>),
-    List(Vec<Value>),
+    String(Arc<String>),
+    Struct(InternedId, Arc<HashMap<InternedId, Value>>),
+    List(Arc<Vec<Value>>),
     Ok(Box<Value>),
     Err(String),
     None,
@@ -45,12 +58,14 @@ impl fmt::Display for Value {
             Value::Float(v) => write!(f, "{v}"),
             Value::Bool(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "\"{v}\""),
-            Value::Struct(name, fields) => {
+            Value::Struct(name_id, fields) => {
+                let name = intern::resolve_display(*name_id);
                 write!(f, "{name}{{")?;
-                for (i, (k, v)) in fields.iter().enumerate() {
+                for (i, (k_id, v)) in fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
+                    let k = intern::resolve_display(*k_id);
                     write!(f, "{k}: {v}")?;
                 }
                 write!(f, "}}")
@@ -69,10 +84,11 @@ impl fmt::Display for Value {
             Value::Err(msg) => write!(f, "Err({msg})"),
             Value::None => write!(f, "None"),
             Value::Union { variant, payload } => {
+                let variant_name = intern::resolve_display(*variant);
                 if payload.is_empty() {
-                    write!(f, "{variant}")
+                    write!(f, "{variant_name}")
                 } else {
-                    write!(f, "{variant}(")?;
+                    write!(f, "{variant_name}(")?;
                     for (i, v) in payload.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
@@ -89,6 +105,76 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    /// Convenience constructor: wrap a string in `Arc`.
+    #[inline]
+    pub fn string(s: impl Into<String>) -> Self {
+        Value::String(Arc::new(s.into()))
+    }
+
+    /// Convenience constructor: wrap a vec in `Arc`.
+    #[inline]
+    pub fn list(items: Vec<Value>) -> Self {
+        Value::List(Arc::new(items))
+    }
+
+    /// Convenience constructor: wrap a struct name + field map in `Arc`.
+    /// Accepts string keys and interns them via the thread-local display interner.
+    #[inline]
+    pub fn strct(name: impl AsRef<str>, fields: HashMap<String, Value>) -> Self {
+        let name_id = intern::intern_display(name.as_ref());
+        let interned_fields: HashMap<InternedId, Value> = fields
+            .into_iter()
+            .map(|(k, v)| (intern::intern_display(&k), v))
+            .collect();
+        Value::Struct(name_id, Arc::new(interned_fields))
+    }
+
+    /// Convenience constructor: create a struct from pre-interned field keys.
+    /// This is the fast path — no string interning overhead.
+    #[inline]
+    pub fn strct_interned(name_id: InternedId, fields: HashMap<InternedId, Value>) -> Self {
+        Value::Struct(name_id, Arc::new(fields))
+    }
+
+    /// Borrow the inner string slice, if this is a `String` variant.
+    #[inline]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the inner slice, if this is a `List` variant.
+    #[inline]
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self {
+            Value::List(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Get a mutable reference to the inner `Vec`, cloning the `Arc` if needed (CoW).
+    #[inline]
+    pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
+        match self {
+            Value::List(v) => Some(Arc::make_mut(v)),
+            _ => None,
+        }
+    }
+
+    /// Look up a field on a struct value by string name, resolving via the
+    /// thread-local display interner.
+    pub fn get_field(&self, field: &str) -> Option<&Value> {
+        match self {
+            Value::Struct(_, fields) => {
+                let id = intern::intern_display(field);
+                fields.get(&id)
+            }
+            _ => None,
+        }
+    }
+
     fn is_truthy(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
@@ -114,15 +200,17 @@ impl Value {
             (Value::Err(a), Value::Err(b)) => a == b,
             (Value::None, Value::None) => true,
             (Value::Struct(n1, f1), Value::Struct(n2, f2)) => {
-                // Allow empty name to match any struct name
-                (n1.is_empty() || n2.is_empty() || n1 == n2)
+                // Allow empty-string name (interned) to match any struct name.
+                // InternedId comparison is O(1) — just integer equality.
+                let empty_id = intern::intern_display("");
+                (n1 == &empty_id || n2 == &empty_id || n1 == n2)
                     && f1.len() == f2.len()
                     && f1
                         .iter()
                         .all(|(k, v)| f2.get(k).is_some_and(|v2| v.matches(v2)))
             }
             (Value::List(a), Value::List(b)) => {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.matches(y))
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.matches(y))
             }
             (
                 Value::Union {
@@ -139,24 +227,46 @@ impl Value {
     }
 }
 
+/// Type alias for the scope stack. Uses `SmallVec` with inline capacity of 4
+/// to avoid heap allocation for the common case (root scope + function body +
+/// 1-2 nested blocks like if/while/each).
+type ScopeStack = SmallVec<[HashMap<InternedId, Value>; 4]>;
+
 /// Evaluation environment with a scope stack.
-/// Each scope is a HashMap of variable bindings. `+let` defines into the
-/// top scope, `+set` mutates the nearest scope that already contains the
-/// variable, and lookups walk the stack from top to bottom.
+/// Each scope is a HashMap of variable bindings keyed by interned `u32` ids.
+/// `+let` defines into the top scope, `+set` mutates the nearest scope that
+/// already contains the variable, and lookups walk the stack from top to bottom.
+///
+/// Variable names are interned via a `SharedInterner` (Arc-backed) so that
+/// lookups use fast `u32` hashing/comparison instead of string operations.
+/// Creating a new Env from a Program's interner is O(1) (Arc clone) instead
+/// of cloning the entire HashMap + Vec.
 pub struct Env {
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: ScopeStack,
     /// Shared runtime state for +shared variable access.
     shared_runtime: Option<crate::session::SharedRuntime>,
     /// Local cache of shared vars (key = "Module.name") for borrow-friendly reads.
+    /// These remain String-keyed since they use compound module-qualified names
+    /// and are accessed far less frequently than local variables.
     shared_cache: HashMap<String, Value>,
+    /// Arc-backed string interner — cloning is O(1) reference-count bump.
+    /// Seeded from `Program::shared_interner()` when available so that all
+    /// name→id lookups on the hot path are guaranteed cache hits.
+    /// Wrapped in `RefCell` so that `&self` methods (like `get`) can still intern
+    /// previously-unseen names without requiring `&mut self`. The `RefCell`
+    /// overhead is minimal since `SharedInterner::get()` is a direct Arc read.
+    interner: std::cell::RefCell<SharedInterner>,
 }
 
 impl Env {
     pub fn new() -> Self {
+        // Seed from the thread-local interner so existing interned ids stay consistent
+        let interner = STRING_INTERNER.with(|si| si.borrow().shared());
         let mut env = Self {
-            scopes: vec![HashMap::new()],
+            scopes: smallvec::smallvec![HashMap::new()],
             shared_runtime: None,
             shared_cache: HashMap::new(),
+            interner: std::cell::RefCell::new(interner),
         };
         // Auto-pick up thread-local SharedRuntime if set
         SHARED_RUNTIME.with(|rt| {
@@ -165,6 +275,71 @@ impl Env {
             }
         });
         env
+    }
+
+    /// Create an Env seeded with a pre-populated interner from a Program.
+    /// This is the fast path: cloning a `SharedInterner` is O(1) (Arc clone),
+    /// and the Program's interner already contains all names in the AST, so
+    /// every `intern_name()` call during evaluation is a cache hit.
+    pub fn new_with_interner(interner: &StringInterner) -> Self {
+        let mut env = Self {
+            scopes: smallvec::smallvec![HashMap::new()],
+            shared_runtime: None,
+            shared_cache: HashMap::new(),
+            interner: std::cell::RefCell::new(interner.shared()),
+        };
+        // Auto-pick up thread-local SharedRuntime if set
+        SHARED_RUNTIME.with(|rt| {
+            if let Some(rt) = rt.borrow().as_ref() {
+                env.set_runtime(rt.clone());
+            }
+        });
+        env
+    }
+
+    /// Create an Env from a pre-built SharedInterner (O(1) Arc clone).
+    /// This is the fastest path for creating Envs during function calls —
+    /// avoids even the `StringInterner::shared()` conversion.
+    pub fn new_with_shared_interner(interner: &SharedInterner) -> Self {
+        let mut env = Self {
+            scopes: smallvec::smallvec![HashMap::new()],
+            shared_runtime: None,
+            shared_cache: HashMap::new(),
+            interner: std::cell::RefCell::new(interner.clone()),
+        };
+        // Auto-pick up thread-local SharedRuntime if set
+        SHARED_RUNTIME.with(|rt| {
+            if let Some(rt) = rt.borrow().as_ref() {
+                env.set_runtime(rt.clone());
+            }
+        });
+        env
+    }
+
+    /// Intern a variable name string, returning its compact u32 id for use as
+    /// a scope key. Uses the env-local shared interner.
+    /// Fast path: read-only probe through Arc — since the interner is pre-seeded
+    /// with all AST names, this is almost always a cache hit.
+    #[inline]
+    fn intern_name(&self, name: &str) -> InternedId {
+        // Fast path: read-only probe — avoids RefCell write lock overhead
+        if let Some(id) = self.interner.borrow().get(name) {
+            return id;
+        }
+        // Slow path: name not yet interned (rare when seeded from Program).
+        // SharedInterner::intern uses copy-on-write via Arc::make_mut.
+        self.interner.borrow_mut().intern(name)
+    }
+
+    /// Resolve an interned id back to its string. Used for error messages
+    /// and debug display.
+    #[inline]
+    fn resolve_name(&self, id: InternedId) -> String {
+        self.interner
+            .borrow()
+            .resolve(id)
+            .unwrap_or("<unknown>")
+            .to_string()
     }
 
     /// Attach shared runtime state for +shared variable access.
@@ -208,10 +383,21 @@ impl Env {
     /// Define a new variable in the current (top) scope.
     /// Used by `+let` and parameter binding.
     pub fn set(&mut self, name: &str, value: Value) {
+        let id = self.intern_name(name);
         self.scopes
             .last_mut()
             .expect("scope stack empty")
-            .insert(name.to_string(), value);
+            .insert(id, value);
+    }
+
+    /// Define a variable in the current scope using a pre-interned id.
+    /// This is the fast path — no string→id conversion needed.
+    #[inline]
+    pub fn set_id(&mut self, id: InternedId, value: Value) {
+        self.scopes
+            .last_mut()
+            .expect("scope stack empty")
+            .insert(id, value);
     }
 
     /// Mutate an existing variable: walk scopes top-to-bottom, update the
@@ -219,9 +405,10 @@ impl Env {
     /// shared vars (keyed by "Module.name"). If still not found, insert into
     /// the top scope (same as `set`). Used by `+set`.
     fn set_existing(&mut self, name: &str, value: Value) {
+        let id = self.intern_name(name);
         for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                scope.insert(name.to_string(), value);
+            if scope.contains_key(&id) {
+                scope.insert(id, value);
                 return;
             }
         }
@@ -234,13 +421,13 @@ impl Env {
             if let Some(module) = module_name {
                 let key = format!("{module}.{name}");
                 if self.shared_cache.contains_key(&key) {
-                    self.shared_cache.insert(key.clone(), value.clone());
-                    // Write through to runtime
+                    // Write through to runtime first (clone key for runtime, move into cache)
                     if let Some(rt) = &self.shared_runtime {
                         if let Ok(mut state) = rt.write() {
-                            state.shared_vars.insert(key, value);
+                            state.shared_vars.insert(key.clone(), value.clone());
                         }
                     }
+                    self.shared_cache.insert(key, value);
                     return;
                 }
             }
@@ -252,8 +439,9 @@ impl Env {
     /// Look up a variable by walking scopes from top to bottom.
     /// Falls back to shared vars cache (keyed by "Module.name") if not found locally.
     fn get(&self, name: &str) -> Result<&Value> {
+        let id = self.intern_name(name);
         for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.get(name) {
+            if let Some(val) = scope.get(&id) {
                 return Ok(val);
             }
         }
@@ -273,10 +461,22 @@ impl Env {
         Err(anyhow!("undefined variable `{name}`"))
     }
 
+    /// Look up a variable using a pre-interned id. Fast path — no string interning.
+    #[inline]
+    fn get_id(&self, id: InternedId) -> Option<&Value> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(val) = scope.get(&id) {
+                return Some(val);
+            }
+        }
+        None
+    }
+
     /// Raw lookup (returns Option) — used for special variables like __coroutine_handle.
     fn get_raw(&self, name: &str) -> Option<&Value> {
+        let id = self.intern_name(name);
         for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.get(name) {
+            if let Some(val) = scope.get(&id) {
                 return Some(val);
             }
         }
@@ -291,12 +491,13 @@ impl Env {
         let mut result = Vec::new();
         // Walk from top (innermost) to bottom (outermost) so shadowed names are skipped.
         for scope in self.scopes.iter().rev() {
-            for (name, val) in scope {
+            for (id, val) in scope {
+                let name = self.resolve_name(*id);
                 if name.starts_with("__") {
                     continue;
                 }
-                if seen.insert(name.clone()) {
-                    result.push((name.clone(), format!("{val}")));
+                if seen.insert(*id) {
+                    result.push((name, format!("{val}")));
                 }
             }
         }
@@ -347,6 +548,8 @@ pub fn eval_compiled_or_interpreted_cached(
     cache: Option<&JitCache>,
     revision: usize,
 ) -> Result<(String, bool)> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     // If it's a builtin, use eval_call_with_input directly
     if program.get_function(function_name).is_none() && crate::builtins::is_builtin(function_name) {
         let result = eval_call_with_input(program, function_name, input)?;
@@ -452,7 +655,8 @@ fn input_to_vm_args(input: &parser::Expr, func: &ast::FunctionDecl) -> Result<Ve
         Value::Struct(_, ref fields) => {
             let mut args = Vec::new();
             for param in &func.params {
-                if let Some(val) = fields.get(&param.name) {
+                let pid = intern::intern_display(&param.name);
+                if let Some(val) = fields.get(&pid) {
                     args.push(val.clone());
                 } else {
                     bail!("missing argument for parameter `{}`", param.name);
@@ -502,10 +706,12 @@ pub fn eval_call_with_input(
     function_name: &str,
     input: &parser::Expr,
 ) -> Result<String> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     // Try user-defined function first
     if let Some(func) = program.get_function(function_name) {
         let input_val = eval_parser_expr_standalone(input)?;
-        let mut env = Env::new();
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
         bind_input_to_params(program, func, &input_val, &mut env);
 
         let returns_result = matches!(&func.return_type, ast::Type::Result(_));
@@ -545,7 +751,7 @@ pub fn eval_call_with_input(
                 }
             }
         };
-        let mut env = Env::new();
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
         let call = ast::CallExpr {
             callee: function_name.to_string(),
             args: vec![], // not used — we call eval_call_inner directly
@@ -563,7 +769,60 @@ pub fn eval_call_with_input(
 /// Evaluate an inline expression directly (not a function call).
 /// Used for `!eval 1 + 2`, `!eval concat("a", "b")`, etc.
 pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<Value> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     eval_parser_expr_with_program(expr, program)
+}
+
+/// Evaluate an inline expression with IO support via a coroutine handle.
+/// When the expression contains IO builtin calls (shell_exec, http_get, etc.),
+/// they are executed through the coroutine runtime automatically.
+/// Must be called from within a `spawn_blocking` context (not a tokio async task).
+pub fn eval_inline_expr_with_io(
+    program: &ast::Program,
+    expr: &parser::Expr,
+    io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+) -> Result<Value> {
+    let handle = crate::coroutine::CoroutineHandle::new(io_sender);
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
+    env.populate_shared_from_program(program);
+    env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    eval_parser_expr_with_env(expr, program, &mut env)
+}
+
+/// Check if a parser expression contains any IO builtin calls.
+/// Used to determine if inline `!eval` needs async execution.
+pub fn expr_contains_io_builtin(expr: &parser::Expr) -> bool {
+    match expr {
+        parser::Expr::Call { callee, args } => {
+            let name = parser_callee_name(callee);
+            if crate::builtins::is_io_builtin(&name) {
+                return true;
+            }
+            // Check if any argument sub-expressions contain IO builtins
+            args.iter().any(expr_contains_io_builtin)
+        }
+        parser::Expr::Binary { left, right, .. } => {
+            expr_contains_io_builtin(left) || expr_contains_io_builtin(right)
+        }
+        parser::Expr::Unary { expr: inner, .. } => {
+            expr_contains_io_builtin(inner)
+        }
+        parser::Expr::FieldAccess { base, .. } => {
+            expr_contains_io_builtin(base)
+        }
+        parser::Expr::StructLiteral(fields) => {
+            fields.iter().any(|f| expr_contains_io_builtin(&f.value))
+        }
+        parser::Expr::Cast { expr: inner, .. } => {
+            expr_contains_io_builtin(inner)
+        }
+        parser::Expr::Int(_)
+        | parser::Expr::Float(_)
+        | parser::Expr::Bool(_)
+        | parser::Expr::String(_)
+        | parser::Expr::Ident(_) => false,
+    }
 }
 
 /// Evaluate a test case against a function in the program.
@@ -584,42 +843,55 @@ pub fn bind_input_to_params(
             // Single struct-typed param — pass the whole struct
             env.set(&func.params[0].name, input.clone());
             // Also expose fields directly for field access (e.g., input.name)
-            for (k, v) in fields {
-                env.set(k, v.clone());
+            for (k_id, v) in fields.iter() {
+                let k = intern::resolve_display(*k_id);
+                env.set(&k, v.clone());
             }
         }
         (Value::Struct(_, fields), _) => {
             // Multi-param function with struct input (key=value pairs)
             // First, check if all fields directly match param names
-            let all_match = func.params.iter().all(|p| fields.contains_key(&p.name));
+            let all_match = func
+                .params
+                .iter()
+                .all(|p| {
+                    let pid = intern::intern_display(&p.name);
+                    fields.contains_key(&pid)
+                });
 
             if all_match {
                 // Direct match: a=3 b=4 for (a:Int, b:Int)
                 for param in &func.params {
-                    if let Some(val) = fields.get(&param.name) {
+                    let pid = intern::intern_display(&param.name);
+                    if let Some(val) = fields.get(&pid) {
                         env.set(&param.name, val.clone());
                     }
                 }
             } else {
                 // Check for positional fields (_0, _1, ...) from space-separated args
-                let is_positional = fields.keys().any(|k| k.starts_with('_') && k[1..].parse::<usize>().is_ok());
+                let is_positional = fields.keys().any(|k| {
+                    let s = intern::resolve_display(*k);
+                    s.starts_with('_') && s[1..].parse::<usize>().is_ok()
+                });
                 if is_positional && fields.len() == func.params.len() {
                     for (i, param) in func.params.iter().enumerate() {
-                        if let Some(val) = fields.get(&format!("_{i}")) {
+                        let pos_id = intern::intern_display(&format!("_{i}"));
+                        if let Some(val) = fields.get(&pos_id) {
                             env.set(&param.name, val.clone());
                         }
                     }
                 } else {
                     // Smart distribution: fields may belong to struct-typed params
                     // For each param, check if it's a struct type and collect matching fields
-                    let mut used_fields: std::collections::HashSet<String> =
+                    let mut used_fields: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
 
                     for param in &func.params {
                         // Check if this param matches a field directly
-                        if let Some(val) = fields.get(&param.name) {
+                        let pid = intern::intern_display(&param.name);
+                        if let Some(val) = fields.get(&pid) {
                             env.set(&param.name, val.clone());
-                            used_fields.insert(param.name.clone());
+                            used_fields.insert(&param.name);
                             continue;
                         }
 
@@ -627,15 +899,18 @@ pub fn bind_input_to_params(
                         if let ast::Type::Struct(type_name) = &param.ty {
                             if let Some(type_fields) = get_struct_fields(program, type_name) {
                                 // Collect input fields that match this struct's fields
-                                let mut struct_fields = HashMap::new();
+                                let mut struct_fields: HashMap<InternedId, Value> = HashMap::new();
                                 for (tf_name, _) in &type_fields {
-                                    if let Some(val) = fields.get(tf_name) {
-                                        struct_fields.insert(tf_name.clone(), val.clone());
-                                        used_fields.insert(tf_name.clone());
+                                    let tf_id = intern::intern_display(tf_name);
+                                    if let Some(val) = fields.get(&tf_id) {
+                                        struct_fields.insert(tf_id, val.clone());
                                     }
                                 }
                                 if !struct_fields.is_empty() {
-                                    let struct_val = Value::Struct(type_name.clone(), struct_fields);
+                                    let struct_val = Value::strct_interned(
+                                        intern::intern_display(type_name),
+                                        struct_fields,
+                                    );
                                     env.set(&param.name, struct_val);
                                 }
                             }
@@ -654,29 +929,11 @@ pub fn bind_input_to_params(
     }
 }
 
-/// Check if a name is a union variant constructor.
+/// Check if a name is a union variant. Uses the pre-built HashSet on Program
+/// for O(1) lookup instead of scanning all type declarations.
+#[inline]
 fn is_union_variant(program: &ast::Program, name: &str) -> bool {
-    for td in &program.types {
-        if let ast::TypeDecl::TaggedUnion(u) = td {
-            for variant in &u.variants {
-                if variant.name == name {
-                    return true;
-                }
-            }
-        }
-    }
-    for module in &program.modules {
-        for td in &module.types {
-            if let ast::TypeDecl::TaggedUnion(u) = td {
-                for variant in &u.variants {
-                    if variant.name == name {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    program.is_union_variant(name)
 }
 
 /// Check if nested patterns match the payload values, binding variables on success.
@@ -713,7 +970,7 @@ fn match_single_pattern(
                 ast::Literal::Int(n) => Value::Int(*n),
                 ast::Literal::Float(f) => Value::Float(*f),
                 ast::Literal::Bool(b) => Value::Bool(*b),
-                ast::Literal::String(s) => Value::String(s.clone()),
+                ast::Literal::String(s) => Value::string(s.clone()),
             };
             Ok(value.matches(&expected))
         }
@@ -726,7 +983,7 @@ fn match_single_pattern(
                 payload,
             } = value
             {
-                if v == variant {
+                if intern::resolve_display(*v) == *variant {
                     match_nested_patterns(program, sub_patterns, payload, env)
                 } else {
                     Ok(false)
@@ -785,6 +1042,8 @@ pub fn eval_test_case_with_mocks(
     mocks: &[crate::session::IoMock],
     http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     let func = program
         .get_function(function_name)
         .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
@@ -804,7 +1063,7 @@ pub fn eval_test_case_with_mocks(
     let input = eval_parser_expr_with_program(&case.input, program)?;
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
-    let mut env = Env::new();
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
     env.populate_shared_from_program(program);
     bind_input_to_params(program, func, &input, &mut env);
 
@@ -843,6 +1102,11 @@ fn fork_runtime_for_test(
         shared_vars,
         roadmap: Vec::new(),
         plan: Vec::new(),
+        agent_mailbox: std::collections::HashMap::new(),
+        pending_commands: Vec::new(),
+        io_mocks: Vec::new(),
+        library_errors: Vec::new(),
+        library_load_errors: Vec::new(),
     };
     Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }
@@ -906,11 +1170,19 @@ fn eval_test_case_with_runtime(
             let forked_rt_for_blocking = forked_rt_clone;
             let eval_result = tokio::task::spawn_blocking(move || {
                 set_shared_runtime(forked_rt_for_blocking);
+                // Set program snapshot so query builtins (symbols_list, source_get,
+                // etc.) work inside test execution.
+                set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                // Install the display interner on this worker thread so that
+                // bind_input_to_params can resolve InternedIds ↔ strings
+                // (intern::resolve_display / intern::intern_display use a
+                // thread-local interner that is empty on freshly spawned threads).
+                intern::set_display_interner(&program.shared_interner);
                 let func = program
                     .get_function(&fn_name)
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
-                let mut env = Env::new();
+                let mut env = Env::new_with_shared_interner(&program.shared_interner);
                 env.populate_shared_from_program(&program);
 
                 // Tests always use mock-only handles.  Unmocked IO operations
@@ -922,7 +1194,10 @@ fn eval_test_case_with_runtime(
                 env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
                 bind_input_to_params(&program, func, &input, &mut env);
-                let result = eval_function_body(&program, &func.body, &mut env);
+                // Use eval_function_body_named so FN_NAME_STACK is populated
+                // with the qualified function name — required for +shared
+                // variable resolution in Env::get()/set_existing().
+                let result = eval_function_body_named(&program, &fn_name, &func.body, &mut env);
                 let msg = check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
 
                 // Check +after assertions
@@ -970,6 +1245,11 @@ pub async fn eval_test_case_async(
         return eval_test_case_with_mocks(program, function_name, case, mocks, http_routes);
     }
 
+    // Install the display interner on the calling thread so
+    // eval_parser_expr_with_program can resolve/intern names correctly
+    // (it uses intern::intern_display which needs the thread-local interner).
+    intern::set_display_interner(&program.shared_interner);
+
     let input = eval_parser_expr_with_program(&case.input, program)?;
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
@@ -987,12 +1267,20 @@ pub async fn eval_test_case_async(
         // Use a forked RuntimeState for test isolation — shared vars are fresh
         // copies from program defaults, not the live runtime.
         set_shared_runtime(forked_rt);
+        // Set program snapshot so query builtins (symbols_list, source_get,
+        // etc.) work inside async test execution.
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        // Install the display interner on this worker thread so that
+        // bind_input_to_params can resolve InternedIds ↔ strings
+        // (intern::resolve_display / intern::intern_display use a
+        // thread-local interner that is empty on freshly spawned threads).
+        intern::set_display_interner(&program.shared_interner);
 
         let func = program
             .get_function(&fn_name)
             .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
 
-        let mut env = Env::new();
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
         env.populate_shared_from_program(&program);
 
         // Tests always use mock-only handles — see comment in
@@ -1002,7 +1290,10 @@ pub async fn eval_test_case_async(
 
         bind_input_to_params(&program, func, &input, &mut env);
 
-        let result = eval_function_body(&program, &func.body, &mut env);
+        // Use eval_function_body_named so FN_NAME_STACK is populated
+        // with the qualified function name — required for +shared
+        // variable resolution in Env::get()/set_existing().
+        let result = eval_function_body_named(&program, &fn_name, &func.body, &mut env);
         let msg = check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
 
         // Check +after assertions
@@ -1044,7 +1335,7 @@ fn check_test_result(
         Err(err) => {
             // Check failures produce Err with the label
             let err_str = err.to_string();
-            Value::Err(err_str)
+            Value::Err(err_str.into())
         }
     };
 
@@ -1054,9 +1345,9 @@ fn check_test_result(
         // content when the value is a String or Ok(String), avoiding the
         // Display quotes that wrap String values.
         let raw_text = match &actual {
-            Value::String(s) => s.clone(),
+            Value::String(s) => s.as_ref().clone(),
             Value::Ok(inner) => match inner.as_ref() {
-                Value::String(s) => s.clone(),
+                Value::String(s) => s.as_ref().clone(),
                 other => format!("{other}"),
             },
             other => format!("{other}"),
@@ -1171,7 +1462,7 @@ pub fn eval_function_body_pub(
 /// Evaluate an AST expression in isolation (no function context).
 /// Used for evaluating +shared variable default values like `0`, `""`, `true`.
 pub fn eval_expr_standalone(program: &ast::Program, expr: &ast::Expr) -> Result<Value> {
-    let mut env = Env::new();
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
     eval_ast_expr(program, expr, &mut env)
 }
 
@@ -1230,7 +1521,7 @@ fn eval_function_body(
                         }
                         Err(e) => {
                             if let Some(binding) = binding {
-                                env.set(&binding.name, Value::Err(e.to_string()));
+                                env.set(&binding.name, Value::Err(e.to_string().into()));
                             }
                         }
                     }
@@ -1286,7 +1577,7 @@ fn eval_function_body(
                 let iter_val = eval_ast_expr(program, iterator, env)?;
                 match iter_val {
                     Value::List(items) => {
-                        for item in items {
+                        for item in items.iter().cloned() {
                             env.push_scope();
                             env.set(&binding.name, item);
                             let result = eval_function_body(program, each_body, env);
@@ -1314,8 +1605,9 @@ fn eval_function_body(
                 match &val {
                     Value::Union { variant, payload } => {
                         let mut matched = false;
+                        let variant_str = intern::resolve_display(*variant);
                         for arm in arms {
-                            if arm.variant == *variant {
+                            if arm.variant == variant_str {
                                 env.push_scope();
                                 // Exact variant match — bind payload values
                                 for (i, binding) in arm.bindings.iter().enumerate() {
@@ -1357,12 +1649,15 @@ fn eval_function_body(
                             }
                         }
                         if !matched {
-                            bail!("+match: no arm matched variant `{variant}`");
+                            bail!("+match: no arm matched variant `{variant_str}`");
                         }
                     }
                     // Treat Ok/Err as union variants for pattern matching
                     Value::Ok(inner) => {
-                        let as_union = Value::Union { variant: "Ok".to_string(), payload: vec![inner.as_ref().clone()] };
+                        let as_union = Value::Union {
+                            variant: intern::intern_display("Ok"),
+                            payload: vec![inner.as_ref().clone()],
+                        };
                         let mut matched = false;
                         for arm in arms {
                             if arm.variant == "Ok" {
@@ -1392,13 +1687,16 @@ fn eval_function_body(
                         if !matched { bail!("+match: no arm matched Ok"); }
                     }
                     Value::Err(msg) => {
-                        let as_union = Value::Union { variant: "Err".to_string(), payload: vec![Value::String(msg.clone())] };
+                        let as_union = Value::Union {
+                            variant: intern::intern_display("Err"),
+                            payload: vec![Value::string(msg.clone())],
+                        };
                         let mut matched = false;
                         for arm in arms {
                             if arm.variant == "Err" {
                                 env.push_scope();
                                 if let Some(binding) = arm.bindings.first() {
-                                    if binding != "_" { env.set(binding, Value::String(msg.clone())); }
+                                    if binding != "_" { env.set(binding, Value::string(msg.clone())); }
                                 }
                                 let result = eval_function_body(program, &arm.body, env);
                                 env.pop_scope();
@@ -1461,6 +1759,29 @@ fn eval_function_body(
                         .iter()
                         .map(|a| eval_ast_expr(program, a, env))
                         .collect::<Result<Vec<_>>>()?;
+                    // Ensure query builtins can access the program AST via thread-local.
+                    // Check both query_* prefixed names and their aliases (symbols_list,
+                    // source_get, callers_get, callees_get, deps_get, routes_list).
+                    let needs_program_read = call.callee.starts_with("query_")
+                        || matches!(call.callee.as_str(),
+                            "symbols_list" | "source_get" | "callers_get"
+                            | "callees_get" | "deps_get" | "routes_list"
+                            | "route_list" | "test_run");
+                    if needs_program_read {
+                        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    }
+                    // Ensure mutation builtins can write to the program AST via thread-local.
+                    let is_mutation_builtin = matches!(call.callee.as_str(),
+                        "mutate" | "fn_remove" | "type_remove" | "module_remove"
+                        | "module_create" | "fn_replace" | "move_symbols");
+                    if is_mutation_builtin {
+                        // Create a mutable wrapper if not already set
+                        if get_shared_program_mut().is_none() {
+                            set_shared_program_mut(Some(std::sync::Arc::new(
+                                std::sync::RwLock::new(program.clone()),
+                            )));
+                        }
+                    }
                     let result = handle.execute_await(&call.callee, &args)?;
                     env.set(name, result);
                 }
@@ -1532,6 +1853,15 @@ std::thread_local! {
     /// Thread-local SharedRuntime so newly-created Env instances automatically
     /// have access to +shared variables without explicit plumbing.
     static SHARED_RUNTIME: std::cell::RefCell<Option<crate::session::SharedRuntime>> = std::cell::RefCell::new(None);
+    /// Thread-local Program snapshot for query builtins (query_symbols, query_source, etc.)
+    /// that need access to the AST from within coroutine IO dispatch.
+    static SHARED_PROGRAM: std::cell::RefCell<Option<std::sync::Arc<crate::ast::Program>>> = std::cell::RefCell::new(None);
+    /// Thread-local mutable Program reference for mutation builtins (mutate, fn_remove, etc.)
+    /// that need write access to the AST from within coroutine IO dispatch.
+    static SHARED_PROGRAM_MUT: std::cell::RefCell<Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>>> = std::cell::RefCell::new(None);
+    /// Thread-local string interner for variable name interning.
+    /// Env uses this to convert string names to u32 ids for fast scope lookups.
+    static STRING_INTERNER: std::cell::RefCell<StringInterner> = std::cell::RefCell::new(StringInterner::new());
 }
 
 /// Set the thread-local SharedRuntime for +shared variable access.
@@ -1544,6 +1874,46 @@ pub fn set_shared_runtime(rt: Option<crate::session::SharedRuntime>) {
 /// roadmap builtins that need access to runtime state.
 pub fn get_shared_runtime() -> Option<crate::session::SharedRuntime> {
     SHARED_RUNTIME.with(|s| s.borrow().clone())
+}
+
+/// Set the thread-local Program snapshot for query builtins.
+/// Call this alongside set_shared_runtime before spawn_blocking eval tasks.
+pub fn set_shared_program(program: Option<std::sync::Arc<crate::ast::Program>>) {
+    SHARED_PROGRAM.with(|s| *s.borrow_mut() = program);
+}
+
+/// Get the thread-local Program snapshot (if set). Used by coroutine.rs for
+/// query builtins (query_symbols, query_source, etc.) that need AST access.
+pub fn get_shared_program() -> Option<std::sync::Arc<crate::ast::Program>> {
+    SHARED_PROGRAM.with(|s| s.borrow().clone())
+}
+
+/// Set the thread-local mutable Program reference for mutation builtins.
+/// Call this alongside set_shared_runtime before spawn_blocking eval tasks.
+pub fn set_shared_program_mut(program: Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>>) {
+    SHARED_PROGRAM_MUT.with(|s| *s.borrow_mut() = program);
+}
+
+/// Get the thread-local mutable Program reference (if set). Used by coroutine.rs for
+/// mutation builtins (mutate, fn_remove, type_remove, module_remove) that need write access.
+pub fn get_shared_program_mut() -> Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>> {
+    SHARED_PROGRAM_MUT.with(|s| s.borrow().clone())
+}
+
+/// Create a shared mutable program wrapper for use in `spawn_blocking` contexts.
+/// Returns the `Arc<RwLock<Program>>` so the caller can read back mutations after
+/// the blocking task completes. Pass `arc.clone()` to `set_shared_program_mut()`
+/// inside the `spawn_blocking` closure, then call `read_back_program_mutations()`
+/// after the task returns.
+pub fn make_shared_program_mut(program: &crate::ast::Program) -> std::sync::Arc<std::sync::RwLock<crate::ast::Program>> {
+    std::sync::Arc::new(std::sync::RwLock::new(program.clone()))
+}
+
+/// Read back a potentially-mutated program from the shared mutable wrapper.
+/// Returns `Some(program)` if the lock can be acquired, `None` on lock error.
+/// The caller should compare with the original program to detect mutations.
+pub fn read_back_program_mutations(program_mut: &std::sync::Arc<std::sync::RwLock<crate::ast::Program>>) -> Option<crate::ast::Program> {
+    program_mut.read().ok().map(|p| p.clone())
 }
 
 const MAX_CALL_DEPTH: usize = 256;
@@ -1597,7 +1967,7 @@ pub fn eval_builtin_or_user(
     // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
     if is_union_variant(program, callee) {
         return Ok(Value::Union {
-            variant: callee.to_string(),
+            variant: intern::intern_display(callee),
             payload: args,
         });
     }
@@ -1614,11 +1984,11 @@ pub fn eval_builtin_or_user(
         "Err" => {
             if args.len() == 1 {
                 match &args[0] {
-                    Value::String(s) => Ok(Value::Err(s.clone())),
-                    other => Ok(Value::Err(format!("{other}"))),
+                    Value::String(s) => Ok(Value::Err(s.as_ref().clone().into())),
+                    other => Ok(Value::Err(format!("{other}").into())),
                 }
             } else {
-                Ok(Value::Err("unknown".to_string()))
+                Ok(Value::Err("unknown".into()))
             }
         }
         "Some" => {
@@ -1639,20 +2009,35 @@ pub fn eval_builtin_or_user(
             }
         }
         "concat" => {
-            let mut result = String::new();
+            // Pre-calculate total length to avoid repeated reallocations.
+            // For non-String values we format them into a small buffer first
+            // so we can measure before the final allocation.
+            let mut parts: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(args.len());
+            let mut total_len = 0usize;
             for arg in &args {
                 match arg {
-                    Value::String(s) => result.push_str(s),
-                    other => result.push_str(&format!("{other}")),
+                    Value::String(s) => {
+                        total_len += s.len();
+                        parts.push(std::borrow::Cow::Borrowed(s.as_ref()));
+                    }
+                    other => {
+                        let formatted = format!("{other}");
+                        total_len += formatted.len();
+                        parts.push(std::borrow::Cow::Owned(formatted));
+                    }
                 }
             }
-            Ok(Value::String(result))
+            let mut result = String::with_capacity(total_len);
+            for part in &parts {
+                result.push_str(part);
+            }
+            Ok(Value::string(result))
         }
         "to_string" | "str" => {
             if args.len() != 1 {
                 bail!("to_string() expects 1 argument");
             }
-            Ok(Value::String(format!("{}", args[0])))
+            Ok(Value::string(format!("{}", args[0])))
         }
         "char_at" => {
             if args.len() != 2 {
@@ -1662,7 +2047,7 @@ pub fn eval_builtin_or_user(
                 (Value::String(s), Value::Int(i)) => {
                     let i = *i as usize;
                     if i < s.len() {
-                        Ok(Value::String(s[i..i + 1].to_string()))
+                        Ok(Value::string(s[i..i + 1].to_string()))
                     } else {
                         bail!("char_at: index {i} out of bounds (len {})", s.len())
                     }
@@ -1679,7 +2064,7 @@ pub fn eval_builtin_or_user(
                     let start = *start as usize;
                     let end = (*end as usize).min(s.len());
                     if start <= end && start <= s.len() {
-                        Ok(Value::String(s[start..end].to_string()))
+                        Ok(Value::string(s[start..end].to_string()))
                     } else {
                         bail!(
                             "substring: invalid range {}..{} (len {})",
@@ -1698,7 +2083,7 @@ pub fn eval_builtin_or_user(
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(prefix)) => {
-                    Ok(Value::Bool(s.starts_with(prefix.as_str())))
+                    Ok(Value::Bool(s.starts_with(prefix.as_ref())))
                 }
                 _ => bail!("starts_with expects (String, String)"),
             }
@@ -1709,7 +2094,7 @@ pub fn eval_builtin_or_user(
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(suffix)) => {
-                    Ok(Value::Bool(s.ends_with(suffix.as_str())))
+                    Ok(Value::Bool(s.ends_with(suffix.as_ref())))
                 }
                 _ => bail!("ends_with expects (String, String)"),
             }
@@ -1719,7 +2104,7 @@ pub fn eval_builtin_or_user(
                 bail!("contains(s, substr) expects 2 arguments");
             }
             match (&args[0], &args[1]) {
-                (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_str()))),
+                (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_ref()))),
                 _ => bail!("contains expects (String, String)"),
             }
         }
@@ -1742,8 +2127,8 @@ pub fn eval_builtin_or_user(
             match (&args[0], &args[1], &args[2]) {
                 (Value::String(pattern), Value::String(replacement), Value::String(text)) => {
                     match regex::Regex::new(pattern) {
-                        Ok(re) => Ok(Value::String(
-                            re.replace_all(text, replacement.as_str()).into_owned(),
+                        Ok(re) => Ok(Value::string(
+                            re.replace_all(text, replacement.as_ref()).into_owned(),
                         )),
                         Err(e) => bail!("regex_replace: invalid pattern '{}': {}", pattern, e),
                     }
@@ -1756,7 +2141,7 @@ pub fn eval_builtin_or_user(
                 bail!("index_of(s, substr) expects 2 arguments");
             }
             match (&args[0], &args[1]) {
-                (Value::String(s), Value::String(sub)) => match s.find(sub.as_str()) {
+                (Value::String(s), Value::String(sub)) => match s.find(sub.as_ref()) {
                     Some(i) => Ok(Value::Int(i as i64)),
                     None => Ok(Value::Int(-1)),
                 },
@@ -1770,10 +2155,10 @@ pub fn eval_builtin_or_user(
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(delim)) => {
                     let parts: Vec<Value> = s
-                        .split(delim.as_str())
-                        .map(|p| Value::String(p.to_string()))
+                        .split(delim.as_ref())
+                        .map(|p| Value::string(p.to_string()))
                         .collect();
-                    Ok(Value::List(parts))
+                    Ok(Value::list(parts))
                 }
                 _ => bail!("split expects (String, String)"),
             }
@@ -1783,7 +2168,7 @@ pub fn eval_builtin_or_user(
                 bail!("trim(s) expects 1 argument");
             }
             match &args[0] {
-                Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                Value::String(s) => Ok(Value::string(s.trim().to_string())),
                 _ => bail!("trim expects String"),
             }
         }
@@ -1812,20 +2197,20 @@ pub fn eval_builtin_or_user(
                     }
                     // Return the value as a string, stripping quotes from string values
                     match current {
-                        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+                        serde_json::Value::String(s) => Ok(Value::string(s.clone())),
                         serde_json::Value::Number(n) => {
                             if let Some(i) = n.as_i64() {
                                 Ok(Value::Int(i))
                             } else if let Some(f) = n.as_f64() {
                                 Ok(Value::Float(f))
                             } else {
-                                Ok(Value::String(n.to_string()))
+                                Ok(Value::string(n.to_string()))
                             }
                         }
                         serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
-                        serde_json::Value::Null => Ok(Value::String("null".to_string())),
+                        serde_json::Value::Null => Ok(Value::string("null")),
                         // Arrays and objects are returned as JSON strings
-                        other => Ok(Value::String(other.to_string())),
+                        other => Ok(Value::string(other.to_string())),
                     }
                 }
                 _ => bail!("json_get expects (String, String)"),
@@ -1864,7 +2249,7 @@ pub fn eval_builtin_or_user(
                             c => escaped.push(c),
                         }
                     }
-                    Ok(Value::String(escaped))
+                    Ok(Value::string(escaped))
                 }
                 _ => bail!("json_escape expects String"),
             }
@@ -1877,7 +2262,7 @@ pub fn eval_builtin_or_user(
                 Value::String(s) => {
                     use base64::Engine;
                     let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
-                    Ok(Value::String(encoded))
+                    Ok(Value::string(encoded))
                 }
                 _ => bail!("base64_encode expects String"),
             }
@@ -1885,17 +2270,20 @@ pub fn eval_builtin_or_user(
         // List operations
         "list" => {
             // list() creates empty list, list(a, b, c) creates list with items
-            Ok(Value::List(args))
+            Ok(Value::list(args))
         }
         "push" => {
             if args.len() != 2 {
                 bail!("push(list, item) expects 2 arguments");
             }
-            match &args[0] {
-                Value::List(items) => {
-                    let mut new_items = items.clone();
-                    new_items.push(args[1].clone());
-                    Ok(Value::List(new_items))
+            // Move args out to avoid cloning the list — args is owned Vec<Value>.
+            let mut drain = args.into_iter();
+            let list_val = drain.next().unwrap();
+            let item = drain.next().unwrap();
+            match list_val {
+                Value::List(mut items) => {
+                    Arc::make_mut(&mut items).push(item);
+                    Ok(Value::List(items))
                 }
                 _ => bail!("push expects (List, value)"),
             }
@@ -1923,7 +2311,7 @@ pub fn eval_builtin_or_user(
             match (&args[0], &args[1]) {
                 (Value::List(items), Value::String(delim)) => {
                     let parts: Vec<String> = items.iter().map(|v| format!("{v}")).collect();
-                    Ok(Value::String(parts.join(delim)))
+                    Ok(Value::string(parts.join(delim.as_ref())))
                 }
                 _ => bail!("join expects (List, String)"),
             }
@@ -2091,7 +2479,7 @@ pub fn eval_builtin_or_user(
                 bail!("to_hex(n) expects 1 argument");
             }
             match &args[0] {
-                Value::Int(n) => Ok(Value::String(format!("{:08x}", *n as u32))),
+                Value::Int(n) => Ok(Value::string(format!("{:08x}", *n as u32))),
                 _ => bail!("to_hex expects Int"),
             }
         }
@@ -2115,7 +2503,7 @@ pub fn eval_builtin_or_user(
                 bail!("from_char_code(n) expects 1 argument");
             }
             match &args[0] {
-                Value::Int(n) => Ok(Value::String(String::from(*n as u8 as char))),
+                Value::Int(n) => Ok(Value::string(String::from(*n as u8 as char))),
                 _ => bail!("from_char_code expects Int"),
             }
         }
@@ -2152,7 +2540,7 @@ pub fn eval_builtin_or_user(
         _ => {
             // Try to find the function in the program and call it
             if let Some(func) = program.get_function(callee) {
-                let mut call_env = Env::new();
+                let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
                 for (param, arg) in func.params.iter().zip(args) {
                     call_env.set(&param.name, arg);
                 }
@@ -2169,12 +2557,16 @@ pub fn eval_builtin_or_user(
                 // Check if it's a union variant constructor
                 if is_union_variant(program, callee) {
                     return Ok(Value::Union {
-                        variant: callee.to_string(),
+                        variant: intern::intern_display(callee),
                         payload: args,
                     });
                 }
-                // Check if it's an IO builtin called without +await
+                // Check if it's an IO builtin — execute via coroutine handle if available
                 if crate::builtins::is_io_builtin(callee) {
+                    if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+                        let handle = handle.clone();
+                        return handle.execute_await(callee, &args);
+                    }
                     bail!(
                         "`{callee}` is an async IO operation, use: +await result:String = {callee}({})",
                         args.iter().enumerate().map(|(i, _)| format!("arg{i}")).collect::<Vec<_>>().join(", ")
@@ -2196,7 +2588,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             ast::Literal::Int(v) => Ok(Value::Int(*v)),
             ast::Literal::Float(v) => Ok(Value::Float(*v)),
             ast::Literal::Bool(v) => Ok(Value::Bool(*v)),
-            ast::Literal::String(v) => Ok(Value::String(v.clone())),
+            ast::Literal::String(v) => Ok(Value::string(v.clone())),
         },
         ast::Expr::Identifier(name) => {
             match name.as_str() {
@@ -2209,7 +2601,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                     } else if is_union_variant(program, name) {
                         // No-payload union variant
                         Ok(Value::Union {
-                            variant: name.clone(),
+                            variant: intern::intern_display(name),
                             payload: vec![],
                         })
                     } else {
@@ -2220,9 +2612,10 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
         }
         ast::Expr::FieldAccess { base, field } => {
             let base_val = eval_ast_expr(program, base, env)?;
+            let field_id = intern::intern_display(field);
             match &base_val {
                 Value::Struct(_, fields) => fields
-                    .get(field)
+                    .get(&field_id)
                     .cloned()
                     .ok_or_else(|| anyhow!("field `{field}` not found on {base_val}")),
                 Value::Ok(inner) => {
@@ -2235,7 +2628,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                             // Transparent field access on Ok values
                             match inner.as_ref() {
                                 Value::Struct(_, fields) => fields
-                                    .get(field)
+                                    .get(&field_id)
                                     .cloned()
                                     .ok_or_else(|| anyhow!("field `{field}` not found")),
                                 _ => bail!("cannot access field `{field}` on {base_val}"),
@@ -2246,7 +2639,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                 Value::Err(e) => match field.as_str() {
                     "is_ok" => Ok(Value::Bool(false)),
                     "is_err" => Ok(Value::Bool(true)),
-                    "error" | "unwrap_err" => Ok(Value::String(e.clone())),
+                    "error" | "unwrap_err" => Ok(Value::string(e.to_string())),
                     "unwrap" => bail!("unwrap on Err({e})"),
                     _ => bail!("cannot access field `{field}` on Err({e})"),
                 },
@@ -2315,12 +2708,12 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             }
         }
         ast::Expr::StructInit { ty, fields } => {
-            let mut field_map = HashMap::new();
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
                 let val = eval_ast_expr(program, &f.value, env)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::Struct(ty.clone(), field_map))
+            Ok(Value::strct_interned(intern::intern_display(ty), field_map))
         }
     }
 }
@@ -2425,7 +2818,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             // Check if this is a user-defined union variant first
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
-                    variant: name.clone(),
+                    variant: intern::intern_display(name),
                     payload: vec![],
                 });
             }
@@ -2443,7 +2836,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                             func.effects
                         );
                     }
-                    let mut env = Env::new();
+                    let mut env = Env::new_with_shared_interner(&program.shared_interner);
                     return eval_function_body(program, &func.body, &mut env);
                 }
             }
@@ -2459,7 +2852,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Value::Union {
-                    variant: name,
+                    variant: intern::intern_display(&name),
                     payload,
                 });
             }
@@ -2480,7 +2873,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new();
+                let mut env = Env::new_with_shared_interner(&program.shared_interner);
                 for (param, arg) in func.params.iter().zip(eval_args) {
                     env.set(&param.name, arg);
                 }
@@ -2496,7 +2889,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .iter()
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new();
+                let mut env = Env::new_with_shared_interner(&program.shared_interner);
                 return eval_builtin_or_user(program, &name, eval_args, &mut env);
             }
             // Fall through to standalone (handles union constructors, Ok, Err)
@@ -2504,12 +2897,13 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
         }
         // StructLiteral needs program access so field values can call user functions
         parser::Expr::StructLiteral(fields) => {
-            let mut field_map = HashMap::new();
+            let empty_id = intern::intern_display("");
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_with_program(&f.value, program)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::Struct(String::new(), field_map))
+            Ok(Value::strct_interned(empty_id, field_map))
         }
         // Unary expressions need program access for their inner expression
         parser::Expr::Unary { op, expr: inner } => {
@@ -2549,12 +2943,124 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
     }
 }
 
+/// Like `eval_parser_expr_with_program`, but threads an environment through
+/// so that `__coroutine_handle` is available to IO builtin calls.
+/// Used by `eval_inline_expr_with_io` for `!eval shell_exec(...)` etc.
+fn eval_parser_expr_with_env(
+    expr: &parser::Expr,
+    program: &ast::Program,
+    env: &mut Env,
+) -> Result<Value> {
+    match expr {
+        parser::Expr::Ident(name) => {
+            // Check env first (for variables bound by the caller)
+            if let Ok(val) = env.get(name) {
+                return Ok(val.clone());
+            }
+            if is_union_variant(program, name) {
+                return Ok(Value::Union {
+                    variant: intern::intern_display(name),
+                    payload: vec![],
+                });
+            }
+            if let Some(func) = program.get_function(name) {
+                if func.params.is_empty() {
+                    let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
+                    if let Some(handle) = env.get_raw("__coroutine_handle") {
+                        call_env.set("__coroutine_handle", handle.clone());
+                    }
+                    return eval_function_body(program, &func.body, &mut call_env);
+                }
+            }
+            eval_parser_expr_standalone(expr)
+        }
+        parser::Expr::Call { callee, args } => {
+            let name = parser_callee_name(callee);
+            if is_union_variant(program, &name) {
+                let payload = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_env(a, program, env))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(Value::Union {
+                    variant: intern::intern_display(&name),
+                    payload,
+                });
+            }
+            if let Some(func) = program.get_function(&name) {
+                let eval_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_env(a, program, env))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
+                for (param, arg) in func.params.iter().zip(eval_args) {
+                    call_env.set(&param.name, arg);
+                }
+                if let Some(handle) = env.get_raw("__coroutine_handle") {
+                    call_env.set("__coroutine_handle", handle.clone());
+                }
+                return eval_function_body(program, &func.body, &mut call_env);
+            }
+            if crate::builtins::is_builtin(&name)
+                && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
+            {
+                let eval_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| eval_parser_expr_with_env(a, program, env))
+                    .collect::<Result<Vec<_>>>()?;
+                return eval_builtin_or_user(program, &name, eval_args, env);
+            }
+            eval_parser_expr_standalone(expr)
+        }
+        parser::Expr::StructLiteral(fields) => {
+            let empty_id = intern::intern_display("");
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
+            for f in fields {
+                let val = eval_parser_expr_with_env(&f.value, program, env)?;
+                field_map.insert(intern::intern_display(&f.name), val);
+            }
+            Ok(Value::strct_interned(empty_id, field_map))
+        }
+        parser::Expr::Unary { op, expr: inner } => {
+            let val = eval_parser_expr_with_env(inner, program, env)?;
+            match op {
+                parser::UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
+                parser::UnaryOp::Neg => match val {
+                    Value::Int(n) => Ok(Value::Int(-n)),
+                    Value::Float(n) => Ok(Value::Float(-n)),
+                    _ => bail!("cannot negate {val}"),
+                },
+            }
+        }
+        parser::Expr::Binary { left, op, right } => {
+            let l = eval_parser_expr_with_env(left, program, env)?;
+            let r = eval_parser_expr_with_env(right, program, env)?;
+            let ast_op = match op {
+                parser::BinaryOp::Add => ast::BinaryOp::Add,
+                parser::BinaryOp::Sub => ast::BinaryOp::Sub,
+                parser::BinaryOp::Mul => ast::BinaryOp::Mul,
+                parser::BinaryOp::Div => ast::BinaryOp::Div,
+                parser::BinaryOp::Mod => ast::BinaryOp::Mod,
+                parser::BinaryOp::Eq => ast::BinaryOp::Equal,
+                parser::BinaryOp::Neq => ast::BinaryOp::NotEqual,
+                parser::BinaryOp::Gt => ast::BinaryOp::GreaterThan,
+                parser::BinaryOp::Lt => ast::BinaryOp::LessThan,
+                parser::BinaryOp::Gte => ast::BinaryOp::GreaterThanOrEqual,
+                parser::BinaryOp::Lte => ast::BinaryOp::LessThanOrEqual,
+                parser::BinaryOp::And => ast::BinaryOp::And,
+                parser::BinaryOp::Or => ast::BinaryOp::Or,
+            };
+            eval_binary_op(&l, &ast_op, &r)
+        }
+        _ => eval_parser_expr_standalone(expr),
+    }
+}
+
 pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
     match expr {
         parser::Expr::Int(v) => Ok(Value::Int(*v)),
         parser::Expr::Float(v) => Ok(Value::Float(*v)),
         parser::Expr::Bool(v) => Ok(Value::Bool(*v)),
-        parser::Expr::String(v) => Ok(Value::String(v.clone())),
+        parser::Expr::String(v) => Ok(Value::string(v.clone())),
         parser::Expr::Ident(name) => {
             match name.as_str() {
                 "true" => Ok(Value::Bool(true)),
@@ -2567,11 +3073,11 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         match name.as_str() {
                             "Ok" => Ok(Value::Ok(Box::new(Value::None))),
                             "None" => Ok(Value::Union {
-                                variant: "None".to_string(),
+                                variant: intern::intern_display("None"),
                                 payload: vec![],
                             }),
                             _ => Ok(Value::Union {
-                                variant: name.clone(),
+                                variant: intern::intern_display(name),
                                 payload: vec![],
                             }),
                         }
@@ -2582,12 +3088,13 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
             }
         }
         parser::Expr::StructLiteral(fields) => {
-            let mut field_map = HashMap::new();
+            let empty_id = intern::intern_display("");
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_standalone(&f.value)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::Struct(String::new(), field_map))
+            Ok(Value::strct_interned(empty_id, field_map))
         }
         parser::Expr::Call { callee, args } => {
             // Handle Ok(...) and Err(...) constructors
@@ -2607,11 +3114,11 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                             parser::Expr::Ident(label) => Ok(Value::Err(label.clone())),
                             other => {
                                 let val = eval_parser_expr_standalone(other)?;
-                                Ok(Value::Err(format!("{val}")))
+                                Ok(Value::Err(format!("{val}").into()))
                             }
                         }
                     } else {
-                        Ok(Value::Err("unknown".to_string()))
+                        Ok(Value::Err("unknown".into()))
                     }
                 }
                 "list" => {
@@ -2619,7 +3126,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         .iter()
                         .map(eval_parser_expr_standalone)
                         .collect::<Result<Vec<_>>>()?;
-                    Ok(Value::List(items))
+                    Ok(Value::list(items))
                 }
                 _ => {
                     // Treat as union variant constructor
@@ -2628,7 +3135,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         .map(eval_parser_expr_standalone)
                         .collect::<Result<Vec<_>>>()?;
                     Ok(Value::Union {
-                        variant: name,
+                        variant: intern::intern_display(&name),
                         payload,
                     })
                 }
@@ -2637,7 +3144,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
         parser::Expr::FieldAccess { base, field } => {
             // For test expectations like result.name — just create a path identifier
             let base_name = parser_callee_name(base);
-            Ok(Value::Err(format!("{base_name}.{field}")))
+            Ok(Value::Err(format!("{base_name}.{field}").into()))
         }
         parser::Expr::Unary { op, expr } => {
             let val = eval_parser_expr_standalone(expr)?;
@@ -2706,7 +3213,7 @@ pub fn trace_function(
         .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
 
     let input_val = eval_parser_expr_standalone(input)?;
-    let mut env = Env::new();
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
     bind_input_to_params(program, func, &input_val, &mut env);
 
     let mut steps = vec![];
@@ -2740,7 +3247,7 @@ fn trace_body(
                             result: format!("ERROR: {e}"),
                             status: TraceStatus::Fail,
                         });
-                        return Some(Value::Err(e.to_string()));
+                        return Some(Value::Err(e.to_string().into()));
                     }
                 }
             }
@@ -2768,7 +3275,7 @@ fn trace_body(
                         result: format!("ERROR: {e}"),
                         status: TraceStatus::Fail,
                     });
-                    return Some(Value::Err(e.to_string()));
+                        return Some(Value::Err(e.to_string().into()));
                 }
             },
             ast::StatementKind::Check {
@@ -2799,7 +3306,7 @@ fn trace_body(
                         result: format!("ERROR: {e}"),
                         status: TraceStatus::Fail,
                     });
-                    return Some(Value::Err(e.to_string()));
+                        return Some(Value::Err(e.to_string().into()));
                 }
             },
             ast::StatementKind::Return { value } => match eval_ast_expr(program, value, env) {
@@ -2819,7 +3326,7 @@ fn trace_body(
                         result: format!("ERROR: {e}"),
                         status: TraceStatus::Fail,
                     });
-                    return Some(Value::Err(e.to_string()));
+                    return Some(Value::Err(e.to_string().into()));
                 }
             },
             _ => {
@@ -3468,7 +3975,7 @@ mod tests {
     #[test]
     fn test_value_display_utf8_string() {
         // Verify Value::String Display preserves multi-byte UTF-8
-        let val = Value::String("café ☕ 日本語".to_string());
+        let val = Value::string("café ☕ 日本語");
         let displayed = format!("{val}");
         assert_eq!(displayed, r#""café ☕ 日本語""#, "Value display should preserve UTF-8");
     }
@@ -3923,8 +4430,10 @@ mod tests {
         // Struct should contain the fields
         match val {
             Value::Struct(_, fields) => {
-                assert!(matches!(fields.get("name"), Some(Value::String(s)) if s == "alice"), "expected name=alice");
-                assert!(matches!(fields.get("age"), Some(Value::Int(25))), "expected age=25");
+                let name_id = intern::intern_display("name");
+                let age_id = intern::intern_display("age");
+                assert!(matches!(fields.get(&name_id), Some(Value::String(s)) if s.as_str() == "alice"), "expected name=alice");
+                assert!(matches!(fields.get(&age_id), Some(Value::Int(25))), "expected age=25");
             }
             _ => panic!("expected struct, got {val}"),
         }
@@ -4001,6 +4510,177 @@ mod tests {
         let result = eval_compiled_or_interpreted(&program, &ev.function_name, &ev.input);
         assert!(result.is_ok(), "func with args: {:?}", result);
         assert_eq!(result.unwrap().0, "7");
+    }
+
+    // ── expr_contains_io_builtin detection ─────────────────────────────
+
+    #[test]
+    fn test_expr_contains_io_builtin_detects_direct_call() {
+        // shell_exec("echo hello") should be detected as IO
+        let source = r#"!eval shell_exec("echo hello")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "shell_exec should be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_detects_nested_call() {
+        // concat("result: ", shell_exec("echo hi")) — IO in args
+        let source = r#"!eval concat("result: ", shell_exec("echo hi"))"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "nested shell_exec in concat args should be detected"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_false_for_sync() {
+        // concat("a", "b") is NOT an IO builtin
+        let source = r#"!eval concat("a", "b")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            !expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "concat should NOT be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_false_for_arithmetic() {
+        let source = "!eval 1 + 2";
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            !expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "arithmetic should NOT be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_expr_contains_io_builtin_detects_http_get() {
+        let source = r#"!eval http_get("http://example.com")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        assert!(ev.inline_expr.is_some());
+        assert!(
+            expr_contains_io_builtin(ev.inline_expr.as_ref().unwrap()),
+            "http_get should be detected as IO builtin"
+        );
+    }
+
+    #[test]
+    fn test_eval_inline_io_without_handle_still_errors() {
+        // When no coroutine handle is available, IO builtins should still error
+        let program = ast::Program::default();
+        let source = r#"!eval shell_exec("echo hello")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
+        assert!(result.is_err(), "IO builtin without handle should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("async IO operation"),
+            "error should mention async IO: {err}"
+        );
+    }
+
+    #[test]
+    fn test_eval_inline_io_with_coroutine_handle_via_mock() {
+        // When a coroutine handle IS available (via eval_inline_expr_with_io),
+        // IO builtins should execute through it.
+        // We use a full tokio runtime + coroutine Runtime to test this end-to-end.
+        let program = ast::Program::default();
+        let source = r#"!eval println("test message")"#;
+        let ops = parser::parse(source).expect("parse should succeed");
+        let ev = ops.into_iter()
+            .find_map(|op| if let parser::Operation::Eval(ev) = op { Some(ev) } else { None })
+            .expect("should have eval op");
+        let expr = ev.inline_expr.unwrap();
+
+        // Spin up a real tokio runtime with coroutine IO loop
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let (runtime, mut io_rx) = crate::coroutine::Runtime::new();
+                let runtime = std::sync::Arc::new(runtime);
+                let io_sender = runtime.io_sender();
+
+                // Spawn IO loop to handle requests (same pattern as eval_test_case_with_mocks)
+                let rt_handle = runtime.clone();
+                let io_loop = tokio::spawn(async move {
+                    while let Some(request) = io_rx.recv().await {
+                        let rt = rt_handle.clone();
+                        tokio::spawn(async move {
+                            rt.handle_io(request).await;
+                        });
+                    }
+                });
+
+                let eval_result = tokio::task::spawn_blocking(move || {
+                    eval_inline_expr_with_io(&program, &expr, io_sender)
+                }).await.unwrap();
+
+                // Shut down the IO loop
+                io_loop.abort();
+
+                eval_result
+            })
+        }).join().unwrap();
+
+        // println returns "" (empty string) on success
+        assert!(result.is_ok(), "println via IO handle should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_eval_inline_io_builtin_in_user_function_context() {
+        // eval_builtin_or_user should execute IO builtins when __coroutine_handle
+        // is present in the env, rather than rejecting them
+        let program = ast::Program::default();
+        let mut env = Env::new();
+
+        // Create a mock coroutine handle (will error on actual IO, but won't
+        // give the "is an async IO operation" rejection)
+        let handle = crate::coroutine::CoroutineHandle::new_mock(vec![
+            crate::session::IoMock {
+                operation: "println".to_string(),
+                patterns: vec![],
+                response: "".to_string(),
+            },
+        ]);
+        env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+
+        let result = eval_builtin_or_user(
+            &program,
+            "println",
+            vec![Value::string("hello")],
+            &mut env,
+        );
+        // With mock, println should succeed (mocked response)
+        assert!(result.is_ok(), "IO builtin with coroutine handle should not reject: {:?}", result);
     }
 
     // ── Side-effect checks for function calls in test params ──────────
@@ -5318,7 +5998,7 @@ mod tests {
         let p = ast::Program::default();
         let val = eval_expr_val(&p, r#"Err("not found")"#);
         match val {
-            Value::Err(msg) => assert_eq!(msg, "\"not found\""),
+            Value::Err(msg) => assert_eq!(&*msg, "\"not found\""),
             _ => panic!("expected Err, got {val}"),
         }
     }
@@ -5874,5 +6554,1566 @@ mod tests {
             );
         }
         println!();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // make_shared_program_mut / read_back_program_mutations
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn make_shared_program_mut_creates_writable_clone() {
+        let mut program = crate::ast::Program::default();
+        // Add a function to verify the clone works
+        let ops = crate::parser::parse("+fn hello ()->String\n  +return \"hi\"\n+end")
+            .expect("parse failed");
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        let shared = make_shared_program_mut(&program);
+
+        // Should be able to read the program
+        {
+            let p = shared.read().unwrap();
+            assert!(p.get_function("hello").is_some());
+        }
+
+        // Should be able to write to the program
+        {
+            let mut p = shared.write().unwrap();
+            p.functions.clear();
+            p.rebuild_function_index();
+        }
+
+        // Verify mutation took effect
+        {
+            let p = shared.read().unwrap();
+            assert!(p.get_function("hello").is_none());
+        }
+    }
+
+    #[test]
+    fn read_back_returns_mutated_state() {
+        let mut program = crate::ast::Program::default();
+        let ops = crate::parser::parse("+fn hello ()->String\n  +return \"hi\"\n+end")
+            .expect("parse failed");
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        let shared = make_shared_program_mut(&program);
+
+        // Mutate via the lock
+        {
+            let mut p = shared.write().unwrap();
+            let new_ops = crate::parser::parse("+fn goodbye ()->String\n  +return \"bye\"\n+end")
+                .expect("parse failed");
+            for op in &new_ops {
+                crate::validator::apply_and_validate(&mut p, op).unwrap();
+            }
+            p.rebuild_function_index();
+        }
+
+        // Read back should see the new function
+        let readback = read_back_program_mutations(&shared);
+        assert!(readback.is_some());
+        let p = readback.unwrap();
+        assert!(p.get_function("hello").is_some(), "original function should still exist");
+        assert!(p.get_function("goodbye").is_some(), "new function should exist after mutation");
+    }
+
+    #[test]
+    fn read_back_returns_original_when_no_mutation() {
+        let program = crate::ast::Program::default();
+        let shared = make_shared_program_mut(&program);
+
+        // No mutations performed
+        let readback = read_back_program_mutations(&shared);
+        assert!(readback.is_some(), "read_back should succeed even without mutations");
+        assert!(readback.unwrap().functions.is_empty(), "should return empty program");
+    }
+
+    #[test]
+    fn shared_program_mut_thread_local_roundtrip() {
+        let mut program = crate::ast::Program::default();
+        let ops = crate::parser::parse("+fn test_fn ()->Int\n  +return 42\n+end")
+            .expect("parse failed");
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        let shared = make_shared_program_mut(&program);
+        set_shared_program_mut(Some(shared.clone()));
+
+        // get_shared_program_mut should return the same Arc
+        let retrieved = get_shared_program_mut();
+        assert!(retrieved.is_some(), "should retrieve program_mut from thread-local");
+
+        // Mutate via the retrieved handle
+        {
+            let lock = retrieved.unwrap();
+            let mut p = lock.write().unwrap();
+            p.functions.clear();
+            p.rebuild_function_index();
+        }
+
+        // read_back from the original shared handle should see the mutation
+        let readback = read_back_program_mutations(&shared);
+        assert!(readback.is_some());
+        assert!(readback.unwrap().functions.is_empty(), "mutations should propagate through shared Arc");
+
+        // Clean up
+        set_shared_program_mut(None);
+    }
+
+    #[test]
+    fn move_symbols_in_mutation_builtin_list() {
+        // Verify that the is_mutation_builtin check in eval.rs includes move_symbols.
+        // This is a structural test — we check the eval path by calling through
+        // the actual code path (via the +await dispatch).
+        //
+        // We build a program with a function that does +await move_symbols(...),
+        // set only the read-only snapshot (no set_shared_program_mut), and verify
+        // that the eval.rs fallback creates the mutable wrapper automatically.
+        let source = "+fn helper ()->String\n  +return \"hi\"\n+end";
+        let ops = crate::parser::parse(source).expect("parse failed");
+        let mut program = crate::ast::Program::default();
+        for op in &ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        // Set only read-only snapshot — mutation builtins need the fallback
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        set_shared_program_mut(None);
+
+        // Build a function that calls +await move_symbols("helper", "Utils")
+        let fn_source = "+fn do_move ()->String [io]\n  +await result:String = move_symbols(\"helper\", \"Utils\")\n  +return result\n+end";
+        let fn_ops = crate::parser::parse(fn_source).expect("parse fn failed");
+        for op in &fn_ops {
+            crate::validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        program.rebuild_function_index();
+
+        // Create a mock handle — move_symbols doesn't go through IO dispatch,
+        // it's handled directly in execute_await, so a mock handle is fine
+        let handle = crate::coroutine::CoroutineHandle::new_mock(vec![]);
+        let mut env = Env::new();
+        env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+
+        // Set the program again with the new function
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        // The is_mutation_builtin check in eval.rs should create the mutable wrapper
+        // for move_symbols (it wouldn't before this fix)
+        let result = eval_function_body_pub(&program, &program.get_function("do_move").unwrap().body, &mut env);
+
+        // Should succeed — if move_symbols wasn't in the is_mutation_builtin list,
+        // it would fail with "program not available (no async context)"
+        assert!(result.is_ok(), "move_symbols should work via eval.rs mutation builtin fallback: {:?}", result.err());
+        let val = result.unwrap();
+        let val_str = format!("{val}");
+        assert!(val_str.contains("moved") || val_str.contains("Utils"),
+            "should confirm move: {val_str}");
+
+        // Clean up
+        set_shared_program(None);
+        set_shared_program_mut(None);
+    }
+
+    // ── String interning tests ────────────────────────────────────────
+
+    #[test]
+    fn test_env_interned_set_get() {
+        // Basic: set a variable and get it back via the interned Env
+        let mut env = Env::new();
+        env.set("x", Value::Int(42));
+        let val = env.get("x").unwrap();
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_env_interned_scope_shadowing() {
+        // Inner scope shadows outer scope; after pop, outer is visible again
+        let mut env = Env::new();
+        env.set("x", Value::Int(1));
+        env.push_scope();
+        env.set("x", Value::Int(2));
+        assert!(matches!(env.get("x").unwrap(), Value::Int(2)));
+        env.pop_scope();
+        assert!(matches!(env.get("x").unwrap(), Value::Int(1)));
+    }
+
+    #[test]
+    fn test_env_interned_undefined_variable() {
+        // Looking up a variable that doesn't exist should return an error
+        let env = Env::new();
+        let result = env.get("nonexistent");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined variable"), "expected undefined variable error, got: {msg}");
+    }
+
+    #[test]
+    fn test_env_interned_set_existing() {
+        // set_existing should update the variable in the outer scope
+        let mut env = Env::new();
+        env.set("counter", Value::Int(0));
+        env.push_scope();
+        // set_existing walks scopes to find "counter" in the outer scope
+        env.set_existing("counter", Value::Int(10));
+        // Inner scope doesn't have "counter", so get() finds outer scope's updated value
+        assert!(matches!(env.get("counter").unwrap(), Value::Int(10)));
+        env.pop_scope();
+        // After pop, the outer scope should have the updated value
+        assert!(matches!(env.get("counter").unwrap(), Value::Int(10)));
+    }
+
+    #[test]
+    fn test_env_interned_get_raw() {
+        // get_raw returns None for missing variables instead of an error
+        let mut env = Env::new();
+        assert!(env.get_raw("missing").is_none());
+        env.set("present", Value::Bool(true));
+        assert!(env.get_raw("present").is_some());
+    }
+
+    #[test]
+    fn test_env_interned_snapshot_bindings() {
+        // snapshot_bindings should return name-value pairs, excluding __ prefixed
+        let mut env = Env::new();
+        env.set("x", Value::Int(1));
+        env.set("__internal", Value::Int(999));
+        env.set("y", Value::string("hello"));
+        let bindings = env.snapshot_bindings();
+        assert_eq!(bindings.len(), 2, "should exclude __internal");
+        // Bindings are sorted by name
+        assert_eq!(bindings[0].0, "x");
+        assert_eq!(bindings[1].0, "y");
+    }
+
+    #[test]
+    fn test_env_interned_multiple_variables() {
+        // Verify multiple variables with different types work correctly
+        let mut env = Env::new();
+        env.set("a", Value::Int(1));
+        env.set("b", Value::Float(2.5));
+        env.set("c", Value::Bool(true));
+        env.set("d", Value::string("hello"));
+        env.set("e", Value::None);
+
+        assert!(matches!(env.get("a").unwrap(), Value::Int(1)));
+        assert!(matches!(env.get("b").unwrap(), Value::Float(f) if (*f - 2.5).abs() < f64::EPSILON));
+        assert!(matches!(env.get("c").unwrap(), Value::Bool(true)));
+        assert!(matches!(env.get("d").unwrap(), Value::String(s) if s.as_str() == "hello"));
+        assert!(matches!(env.get("e").unwrap(), Value::None));
+    }
+
+    #[test]
+    fn test_interned_eval_function_with_variables() {
+        // End-to-end: evaluate a function that uses local variables
+        let source = "\
++fn compute (x:Int, y:Int)->Int
+  +let a:Int = x + 1
+  +let b:Int = y * 2
+  +let result:Int = a + b
+  +return result
+
+!test compute
+  +with x=3 y=4 -> expect 12
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "interned eval should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_interned_eval_nested_scopes() {
+        // Test that nested scopes (if/each/while blocks) work with interning
+        let source = "\
++fn nested (x:Int)->Int
+  +let result:Int = 0
+  +if x > 0
+    +let inner:Int = x + 10
+    +set result = inner
+  +end
+  +return result
+
+!test nested
+  +with x=5 -> expect 15
+  +with x=0 -> expect 0
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 2);
+
+        for (fn_name, case) in &cases {
+            let result = eval_test_case(&program, fn_name, case);
+            assert!(result.is_ok(), "nested scope test should pass: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_intern_name_consistency() {
+        // Verify that the intern_name helper returns consistent ids
+        let env = Env::new();
+        let id1 = env.intern_name("test_var");
+        let id2 = env.intern_name("test_var");
+        let id3 = env.intern_name("other_var");
+        assert_eq!(id1, id2, "same string should get same id");
+        assert_ne!(id1, id3, "different strings should get different ids");
+    }
+
+    #[test]
+    fn test_resolve_name_roundtrip() {
+        // Verify that intern → resolve roundtrips correctly
+        let env = Env::new();
+        let id = env.intern_name("roundtrip_test");
+        let resolved = env.resolve_name(id);
+        assert_eq!(resolved, "roundtrip_test");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Program interner + Env::new_with_interner tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_program_intern_all_names() {
+        // Verify that rebuild_function_index populates the program interner
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +return sum
+";
+        let mut program = build_program(source);
+        // rebuild_function_index is called by build_program, so the interner
+        // should already contain all names.
+        assert!(program.interner.get("add").is_some(), "function name should be interned");
+        assert!(program.interner.get("a").is_some(), "param 'a' should be interned");
+        assert!(program.interner.get("b").is_some(), "param 'b' should be interned");
+        assert!(program.interner.get("sum").is_some(), "local var 'sum' should be interned");
+        // Well-known names should also be interned
+        assert!(program.interner.get("__coroutine_handle").is_some());
+        assert!(program.interner.get("true").is_some());
+        assert!(program.interner.get("false").is_some());
+    }
+
+    #[test]
+    fn test_env_new_with_interner_seeded() {
+        // Env created with new_with_interner should have the same interned ids
+        // as the program's interner
+        let source = "\
++fn greet (name:String)->String
+  +return name
+";
+        let program = build_program(source);
+        let env = Env::new_with_shared_interner(&program.shared_interner);
+
+        // The env's interner should know about the program's names
+        let id_from_program = program.interner.get("name").unwrap();
+        let id_from_env = env.intern_name("name");
+        assert_eq!(id_from_program, id_from_env, "interned ids should match between program and env");
+    }
+
+    #[test]
+    fn test_env_set_id_get_id() {
+        // Verify that set_id and get_id work correctly as fast-path methods
+        let mut env = Env::new();
+        let id = env.intern_name("fast_var");
+        env.set_id(id, Value::Int(99));
+        let val = env.get_id(id);
+        assert!(val.is_some(), "get_id should find the value");
+        assert!(matches!(val.unwrap(), Value::Int(99)));
+    }
+
+    #[test]
+    fn test_env_set_id_scope_isolation() {
+        // Values set via set_id in inner scope should not be visible after pop
+        let mut env = Env::new();
+        let id = env.intern_name("scoped_var");
+        env.push_scope();
+        env.set_id(id, Value::Int(42));
+        assert!(env.get_id(id).is_some());
+        env.pop_scope();
+        assert!(env.get_id(id).is_none(), "value should not be visible after scope pop");
+    }
+
+    #[test]
+    fn test_env_get_id_not_found() {
+        // get_id should return None for unknown ids
+        let env = Env::new();
+        assert!(env.get_id(99999).is_none());
+    }
+
+    #[test]
+    fn test_program_interner_with_modules() {
+        // Verify that module names, module function names, and shared vars are interned
+        let source = "\
+!module Math
+
++fn square (n:Int)->Int
+  +return n * n
+";
+        let program = build_program(source);
+        assert!(program.interner.get("Math").is_some(), "module name should be interned");
+        assert!(program.interner.get("square").is_some(), "module function name should be interned");
+        assert!(program.interner.get("n").is_some(), "param 'n' should be interned");
+    }
+
+    #[test]
+    fn test_interner_eval_function_with_program_interner() {
+        // End-to-end: evaluate a function using Env seeded from program's interner
+        let source = "\
++fn double (x:Int)->Int
+  +let result:Int = x * 2
+  +return result
+
+!test double
+  +with x=5 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "eval with program interner should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_interner_consistency_across_envs() {
+        // Two Envs seeded from the same program interner should produce
+        // the same interned ids, allowing values to be portable between them
+        let source = "+fn identity (v:Int)->Int\n  +return v\n";
+        let program = build_program(source);
+        let env1 = Env::new_with_shared_interner(&program.shared_interner);
+        let env2 = Env::new_with_shared_interner(&program.shared_interner);
+        let id1 = env1.intern_name("v");
+        let id2 = env2.intern_name("v");
+        assert_eq!(id1, id2, "same interner seed should produce same ids");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // SharedInterner + SmallVec scope chain optimization tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn env_shared_interner_o1_clone() {
+        // Creating an Env from a SharedInterner should be O(1) — the Arc is
+        // shared, not cloned. Verify that lookup still works correctly.
+        let mut base = StringInterner::new();
+        base.intern("x");
+        base.intern("y");
+        base.intern("z");
+        let shared = base.shared();
+
+        let mut env = Env::new_with_shared_interner(&shared);
+        env.set("x", Value::Int(1));
+        env.set("y", Value::Int(2));
+
+        assert_eq!(format!("{}", env.get("x").unwrap()), "1");
+        assert_eq!(format!("{}", env.get("y").unwrap()), "2");
+        // z is interned but not set as a variable — get should return Err
+        assert!(env.get("z").is_err(), "z was interned but not set");
+        assert!(env.get("nonexistent").is_err());
+    }
+
+    #[test]
+    fn env_shared_interner_cow_on_new_name() {
+        // When a truly new name is encountered, the SharedInterner should
+        // copy-on-write: existing Envs sharing the same Arc are unaffected.
+        let mut base = StringInterner::new();
+        base.intern("known");
+        let shared = base.shared();
+
+        let mut env1 = Env::new_with_shared_interner(&shared);
+        let mut env2 = Env::new_with_shared_interner(&shared);
+
+        // Intern a new name in env1 (triggers copy-on-write)
+        env1.set("brand_new", Value::Int(99));
+        assert_eq!(format!("{}", env1.get("brand_new").unwrap()), "99");
+
+        // env2 should NOT see "brand_new" because it has its own interner copy
+        // (but env2 can still intern it independently)
+        env2.set("brand_new", Value::Int(77));
+        assert_eq!(format!("{}", env2.get("brand_new").unwrap()), "77");
+    }
+
+    #[test]
+    fn env_smallvec_scope_chain_basic() {
+        // The scope chain uses SmallVec<[_; 4]> — verify push/pop works
+        // correctly through nested scopes without heap allocation for
+        // the typical case (≤4 scopes deep).
+        let mut env = Env::new();
+        env.set("outer", Value::Int(1));
+
+        env.push_scope();
+        env.set("inner1", Value::Int(2));
+        assert_eq!(format!("{}", env.get("outer").unwrap()), "1");
+        assert_eq!(format!("{}", env.get("inner1").unwrap()), "2");
+
+        env.push_scope();
+        env.set("inner2", Value::Int(3));
+        assert_eq!(format!("{}", env.get("outer").unwrap()), "1");
+        assert_eq!(format!("{}", env.get("inner2").unwrap()), "3");
+
+        env.push_scope();
+        env.set("inner3", Value::Int(4));
+        // Still within SmallVec inline capacity (4 scopes: root + 3 nested)
+        assert_eq!(format!("{}", env.get("inner3").unwrap()), "4");
+
+        env.pop_scope();
+        assert!(env.get("inner3").is_err()); // inner3 is gone
+
+        env.pop_scope();
+        assert!(env.get("inner2").is_err()); // inner2 is gone
+
+        env.pop_scope();
+        assert!(env.get("inner1").is_err()); // inner1 is gone
+        assert_eq!(format!("{}", env.get("outer").unwrap()), "1"); // outer still there
+    }
+
+    #[test]
+    fn env_smallvec_spills_to_heap_gracefully() {
+        // When scope depth exceeds SmallVec inline capacity (4), it should
+        // spill to heap and continue working correctly.
+        let mut env = Env::new();
+        env.set("root", Value::Int(0));
+
+        // Push 10 scopes (well beyond inline capacity of 4)
+        for i in 1..=10 {
+            env.push_scope();
+            env.set(&format!("level_{i}"), Value::Int(i as i64));
+        }
+
+        // All variables should be accessible
+        assert_eq!(format!("{}", env.get("root").unwrap()), "0");
+        for i in 1..=10 {
+            assert_eq!(
+                format!("{}", env.get(&format!("level_{i}")).unwrap()),
+                format!("{i}")
+            );
+        }
+
+        // Pop all nested scopes
+        for _ in 1..=10 {
+            env.pop_scope();
+        }
+        assert_eq!(format!("{}", env.get("root").unwrap()), "0");
+        assert!(env.get("level_1").is_err());
+    }
+
+    #[test]
+    fn env_scope_shadowing_with_smallvec() {
+        // Variable shadowing should work correctly with SmallVec scopes
+        let mut env = Env::new();
+        env.set("x", Value::Int(1));
+
+        env.push_scope();
+        env.set("x", Value::Int(2)); // shadows outer x
+        assert_eq!(format!("{}", env.get("x").unwrap()), "2");
+
+        env.pop_scope();
+        assert_eq!(format!("{}", env.get("x").unwrap()), "1"); // outer x restored
+    }
+
+    #[test]
+    fn program_shared_interner_rebuilt_on_mutation() {
+        // After rebuilding the function index, the shared_interner should
+        // contain all AST names and be usable for Env creation.
+        let source = "\
++fn add (a:Int, b:Int)->Int
+  +let sum:Int = a + b
+  +return sum
+";
+        let program = build_program(source);
+
+        // shared_interner should be populated
+        assert!(program.shared_interner.get("add").is_some());
+        assert!(program.shared_interner.get("a").is_some());
+        assert!(program.shared_interner.get("b").is_some());
+        assert!(program.shared_interner.get("sum").is_some());
+
+        // Creating an Env from shared_interner should work
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
+        env.set("a", Value::Int(1));
+        assert_eq!(format!("{}", env.get("a").unwrap()), "1");
+    }
+
+    #[test]
+    fn shared_interner_ids_match_base_interner() {
+        // IDs from SharedInterner should match the original StringInterner
+        let source = "\
++fn greet (name:String)->String
+  +return concat(\"hello \", name)
+";
+        let program = build_program(source);
+
+        let base_id = program.interner.get("name").unwrap();
+        let shared_id = program.shared_interner.get("name").unwrap();
+        assert_eq!(base_id, shared_id, "IDs should be identical between base and shared interner");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Performance optimization tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_concat_prealloc_strings() {
+        // concat with multiple string arguments should produce correct result
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"concat("hello", " ", "world")"#), r#""hello world""#);
+    }
+
+    #[test]
+    fn test_concat_prealloc_mixed_types() {
+        // concat with mixed types (string, int, bool) should format correctly
+        let p = ast::Program::default();
+        let result = eval_expr_str(&p, r#"concat("count: ", 42)"#);
+        assert_eq!(result, r#""count: 42""#);
+    }
+
+    #[test]
+    fn test_concat_empty_args() {
+        // concat with no arguments should return empty string
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"concat()"#), r#""""#);
+    }
+
+    #[test]
+    fn test_concat_single_arg() {
+        // concat with a single argument
+        let p = ast::Program::default();
+        assert_eq!(eval_expr_str(&p, r#"concat("solo")"#), r#""solo""#);
+    }
+
+    #[test]
+    fn test_push_returns_extended_list() {
+        // push should return a new list with the item appended
+        let source = "\
++fn test_push ()->Int
+  +let xs:List<Int> = list(1, 2, 3)
+  +let ys:List<Int> = push(xs, 4)
+  +return len(ys)
+
+!test test_push
+  +with -> expect 4
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        assert_eq!(cases.len(), 1);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "push should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_push_error_wrong_args() {
+        // push with wrong number of args should error
+        let p = ast::Program::default();
+        let mut env = Env::new();
+        let result = eval_builtin_or_user(&p, "push", vec![Value::list(vec![])], &mut env);
+        assert!(result.is_err(), "push with 1 arg should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("expects 2 arguments"), "error should mention arg count: {msg}");
+    }
+
+    #[test]
+    fn test_push_error_not_list() {
+        // push on a non-list should error
+        let p = ast::Program::default();
+        let mut env = Env::new();
+        let result = eval_builtin_or_user(
+            &p,
+            "push",
+            vec![Value::Int(42), Value::Int(1)],
+            &mut env,
+        );
+        assert!(result.is_err(), "push on non-list should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("push expects"), "error should mention push: {msg}");
+    }
+
+    #[test]
+    fn test_push_preserves_original_list_semantics() {
+        // In Adapsis, push returns a new list; verify the function semantics
+        // work correctly in a loop accumulation pattern
+        let source = "\
++fn accumulate (n:Int)->Int
+  +let result:List<Int> = list()
+  +let i:Int = 0
+  +while i < n
+    +set result = push(result, i)
+    +set i = i + 1
+  +end
+  +return len(result)
+
+!test accumulate
+  +with n=4 -> expect 4
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "accumulate with push should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_module_function_lookup_with_index() {
+        // Module-qualified function lookup should work after rebuild_function_index
+        let source = "\
+!module Math
++fn add (a:Int, b:Int)->Int
+  +return a + b
+
+!test Math.add
+  +with a=3 b=4 -> expect 7
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "module function lookup should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_module_function_lookup_not_found() {
+        // Looking up a non-existent module function should return None
+        let mut program = ast::Program::default();
+        program.rebuild_function_index();
+        assert!(program.get_function("NonExistent.func").is_none());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Name interning optimization tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn env_new_with_interner_seeds_names() {
+        // When Env is created with a pre-populated interner, variable lookups
+        // for pre-interned names should use cache hits (no new allocations).
+        let mut interner = StringInterner::new();
+        let id_x = interner.intern("x");
+        let id_y = interner.intern("y");
+
+        let mut env = Env::new_with_interner(&interner);
+        env.set("x", Value::Int(42));
+        env.set("y", Value::Int(99));
+
+        // Look up by name — should hit the pre-interned cache
+        assert!(matches!(env.get("x"), Ok(Value::Int(42))));
+        assert!(matches!(env.get("y"), Ok(Value::Int(99))));
+
+        // Look up by pre-interned id — fast path
+        assert!(matches!(env.get_id(id_x), Some(Value::Int(42))));
+        assert!(matches!(env.get_id(id_y), Some(Value::Int(99))));
+    }
+
+    #[test]
+    fn env_new_with_interner_handles_unknown_names() {
+        // Names not in the pre-seeded interner should still work (interned on demand)
+        let interner = StringInterner::new(); // empty interner
+        let mut env = Env::new_with_interner(&interner);
+        env.set("dynamic_var", Value::string("hello"));
+
+        assert!(matches!(env.get("dynamic_var"), Ok(Value::String(s)) if s.as_str() == "hello"));
+    }
+
+    #[test]
+    fn env_undefined_variable_returns_error() {
+        let env = Env::new();
+        let result = env.get("nonexistent");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("undefined variable"),
+            "error should mention 'undefined variable', got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn env_set_id_and_get_id_roundtrip() {
+        let mut interner = StringInterner::new();
+        let id = interner.intern("counter");
+        let mut env = Env::new_with_interner(&interner);
+
+        env.set_id(id, Value::Int(0));
+        assert!(matches!(env.get_id(id), Some(Value::Int(0))));
+
+        // Update via set_id
+        env.set_id(id, Value::Int(1));
+        assert!(matches!(env.get_id(id), Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn union_variant_hashset_used_in_eval() {
+        // Verify that is_union_variant uses the HashSet-based lookup
+        let source = "\
++type Color = Red | Green | Blue
++fn get_color () -> Color
+  +return Red
+";
+        let program = build_program(source);
+        // The HashSet should contain the variants after rebuild
+        assert!(program.is_union_variant("Red"));
+        assert!(program.is_union_variant("Green"));
+        assert!(program.is_union_variant("Blue"));
+        assert!(!program.is_union_variant("Yellow"));
+    }
+
+    #[test]
+    fn user_function_call_uses_interned_env() {
+        // When a user function is called via eval_builtin_or_user, the child Env
+        // should be seeded with the program's interner for fast param lookups.
+        let source = "\
++fn double (n:Int) -> Int
+  +return n + n
+
+!test double
+  +with n=5 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "user function call with interned env should work: {:?}", result);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Arc-based Value optimisation tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn value_string_clone_is_cheap_arc_bump() {
+        // Cloning a Value::String should share the same Arc allocation
+        let v1 = Value::string("hello world");
+        let v2 = v1.clone();
+        // Both should point to the same underlying str (same Arc)
+        match (&v1, &v2) {
+            (Value::String(a), Value::String(b)) => {
+                assert!(Arc::ptr_eq(a, b), "clone should share the Arc, not allocate a new string");
+            }
+            _ => panic!("expected String variants"),
+        }
+    }
+
+    #[test]
+    fn value_err_clone_preserves_value() {
+        let v1 = Value::Err("some error".to_string());
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::Err(a), Value::Err(b)) => {
+                assert_eq!(a, b, "Err clone should preserve the error message");
+            }
+            _ => panic!("expected Err variants"),
+        }
+    }
+
+    #[test]
+    fn value_list_clone_shares_arc() {
+        let items = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+        let v1 = Value::list(items);
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::List(a), Value::List(b)) => {
+                assert!(Arc::ptr_eq(a, b), "List clone should share the Arc<Vec<Value>>");
+            }
+            _ => panic!("expected List variants"),
+        }
+    }
+
+    #[test]
+    fn value_struct_clone_shares_field_arc() {
+        let mut fields = HashMap::new();
+        fields.insert("x".to_string(), Value::Int(10));
+        fields.insert("y".to_string(), Value::Int(20));
+        let v1 = Value::strct("Point", fields);
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::Struct(n1, f1), Value::Struct(n2, f2)) => {
+                assert_eq!(n1, n2, "Struct name should be preserved");
+                assert!(Arc::ptr_eq(f1, f2), "Struct fields Arc should be shared");
+            }
+            _ => panic!("expected Struct variants"),
+        }
+    }
+
+    #[test]
+    fn value_union_variant_clone_preserves_value() {
+        let v1 = Value::Union {
+            variant: intern::intern_display("Some"),
+            payload: vec![Value::Int(42)],
+        };
+        let v2 = v1.clone();
+        match (&v1, &v2) {
+            (Value::Union { variant: a, .. }, Value::Union { variant: b, .. }) => {
+                assert_eq!(a, b, "Union variant name should be preserved");
+            }
+            _ => panic!("expected Union variants"),
+        }
+    }
+
+    #[test]
+    fn value_string_display_correct() {
+        let v = Value::string("hello");
+        assert_eq!(format!("{v}"), r#""hello""#);
+    }
+
+    #[test]
+    fn value_err_display_correct() {
+        let v = Value::Err("fail".to_string());
+        assert_eq!(format!("{v}"), "Err(fail)");
+    }
+
+    #[test]
+    fn value_struct_field_lookup_with_arc_keys() {
+        // Ensure struct field access works with Arc<str> keys
+        let source = "\
++type Point = x:Int, y:Int
+
++fn get_x (p:Point) -> Int
+  +return p.x
+
+!test get_x
+  +with x=10 y=20 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "struct field access with Arc keys should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_list_operations_with_arc_wrapper() {
+        // push, get, len should all work through Arc<Vec<Value>>
+        let source = "\
++fn list_ops ()->Int
+  +let items:List<Int> = list(1, 2, 3)
+  +let items2:List<Int> = push(items, 4)
+  +return len(items2)
++end
+
+!test list_ops
+  +with -> expect 4
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "list operations through Arc<Vec> should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_string_builtin_ops_through_arc() {
+        // String builtins (concat, len, split, trim, etc.) should work with Arc<str>
+        let source = "\
++fn string_ops (s:String) -> String
+  +let trimmed:String = trim(s)
+  +let upper:String = concat(trimmed, \"!\")
+  +return upper
+
+!test string_ops
+  +with s=\"  hello  \" -> expect \"hello!\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "string builtins through Arc<str> should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_matches_equality_with_arc() {
+        // Value::matches() should work correctly with Arc<str> internals
+        let a = Value::string("hello");
+        let b = Value::string("hello");
+        let c = Value::string("world");
+        assert!(a.matches(&b), "same content Arc<str> should match");
+        assert!(!a.matches(&c), "different content should not match");
+
+        // Err matching
+        let ea = Value::Err("fail".to_string());
+        let eb = Value::Err("fail".to_string());
+        let ec = Value::Err("other".to_string());
+        assert!(ea.matches(&eb));
+        assert!(!ea.matches(&ec));
+
+        // Struct matching
+        let mut f1 = HashMap::new();
+        f1.insert("x".to_string(), Value::Int(1));
+        let mut f2 = HashMap::new();
+        f2.insert("x".to_string(), Value::Int(1));
+        let s1 = Value::strct("P", f1);
+        let s2 = Value::strct("P", f2);
+        assert!(s1.matches(&s2));
+
+        // List matching
+        let l1 = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let l2 = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let l3 = Value::list(vec![Value::Int(1), Value::Int(3)]);
+        assert!(l1.matches(&l2));
+        assert!(!l1.matches(&l3));
+    }
+
+    #[test]
+    fn value_is_truthy_with_arc_string() {
+        assert!(Value::string("x").is_truthy());
+        assert!(!Value::string("").is_truthy());
+    }
+
+    #[test]
+    fn value_match_pattern_with_arc_union() {
+        // +match on union variants should work correctly with Arc<str> variant names
+        let source = "\
++type Color = Red | Green | Blue
+
++fn color_name (c:Color)->String
+  +match c
+  +case Red
+    +return \"red\"
+  +case Green
+    +return \"green\"
+  +case Blue
+    +return \"blue\"
+  +end
++end
+
+!test color_name
+  +with c=Red -> expect \"red\"
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "union match with Arc variant names should work: {:?}", result);
+    }
+
+    #[test]
+    fn value_each_loop_with_arc_list() {
+        // +each over a List should work with Arc<Vec<Value>> wrapper
+        let source = "\
++fn sum_list (items:List<Int>)->Int
+  +let total:Int = 0
+  +each items item:Int
+    +set total = total + item
+  +end
+  +return total
++end
+
+!test sum_list
+  +with items=list(1, 2, 3) -> expect 6
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "+each with Arc<Vec> should work: {:?}", result);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Function dispatch with interned fn_index / module_index
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn interned_fn_index_dispatch_top_level() {
+        // End-to-end: calling a top-level user function should dispatch through
+        // the interned fn_index, not string comparison.
+        let source = "\
++fn triple (n:Int)->Int
+  +return n * 3
+
+!test triple
+  +with n=7 -> expect 21
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "top-level function dispatch via interned index: {:?}", result);
+    }
+
+    #[test]
+    fn interned_fn_index_dispatch_module_qualified() {
+        // Module-qualified function call dispatches through interned module_index + fn_index.
+        let source = "\
+!module Calc
+
++fn square (n:Int)->Int
+  +return n * n
+
+!test Calc.square
+  +with n=6 -> expect 36
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "module function dispatch via interned index: {:?}", result);
+    }
+
+    #[test]
+    fn interned_fn_index_cross_function_call() {
+        // Function A calls function B — both dispatched through interned indices.
+        let source = "\
++fn helper (x:Int)->Int
+  +return x + 1
+
++fn main_fn (x:Int)->Int
+  +call y:Int = helper(x)
+  +return y * 2
+
+!test main_fn
+  +with x=4 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "cross-function dispatch via interned index: {:?}", result);
+    }
+
+    #[test]
+    fn interned_union_variant_lookup_in_match() {
+        // Union variant dispatch uses interned HashSet<InternedId> via is_union_variant.
+        let source = "\
++type Shape = Circle(Int) | Square(Int)
+
++fn area (s:Shape)->Int
+  +match s
+  +case Circle(r)
+    +return r * r * 3
+  +case Square(side)
+    +return side * side
+  +end
+
+!test area
+  +with s=Circle(5) -> expect 75
+  +with s=Square(4) -> expect 16
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        for (fn_name, case) in &cases {
+            let result = eval_test_case(&program, fn_name, case);
+            assert!(result.is_ok(), "union variant dispatch via interned set: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn interned_fn_dispatch_unknown_function_error() {
+        // Calling a non-existent function should produce a clear error, not panic.
+        let program = build_program("+fn noop ()->Int\n  +return 0\n");
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
+        let result = eval_builtin_or_user(&program, "nonexistent_fn", vec![], &mut env);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined function"), "should say undefined: {msg}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Interned struct fields / union variant tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn interned_struct_field_keys_are_u32() {
+        // Value::Struct should use InternedId (u32) keys, not String.
+        let mut fields = HashMap::new();
+        fields.insert("x".to_string(), Value::Int(10));
+        fields.insert("y".to_string(), Value::Int(20));
+        let val = Value::strct("Point", fields);
+        match &val {
+            Value::Struct(name_id, field_map) => {
+                // Keys should be u32 (InternedId)
+                assert_eq!(field_map.len(), 2);
+                let x_id = intern::intern_display("x");
+                let y_id = intern::intern_display("y");
+                assert!(matches!(field_map.get(&x_id), Some(Value::Int(10))), "expected x=10");
+                assert!(matches!(field_map.get(&y_id), Some(Value::Int(20))), "expected y=20");
+                // Name should resolve back to "Point"
+                assert_eq!(intern::resolve_display(*name_id), "Point");
+            }
+            _ => panic!("expected Struct"),
+        }
+    }
+
+    #[test]
+    fn interned_struct_display_resolves_names() {
+        // Value::Struct Display should render field names correctly via the display interner.
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), Value::string("alice"));
+        fields.insert("age".to_string(), Value::Int(30));
+        let val = Value::strct("User", fields);
+        let display = format!("{val}");
+        assert!(display.contains("User{"), "display should show struct name: {display}");
+        assert!(display.contains("name:"), "display should show field 'name': {display}");
+        assert!(display.contains("age:"), "display should show field 'age': {display}");
+        assert!(display.contains("alice"), "display should show field value: {display}");
+        assert!(display.contains("30"), "display should show field value: {display}");
+    }
+
+    #[test]
+    fn interned_union_variant_display() {
+        // Union variant Display should resolve the interned variant name.
+        let val = Value::Union {
+            variant: intern::intern_display("Some"),
+            payload: vec![Value::Int(42)],
+        };
+        let display = format!("{val}");
+        assert_eq!(display, "Some(42)");
+    }
+
+    #[test]
+    fn interned_union_no_payload_display() {
+        let val = Value::Union {
+            variant: intern::intern_display("None"),
+            payload: vec![],
+        };
+        let display = format!("{val}");
+        assert_eq!(display, "None");
+    }
+
+    #[test]
+    fn interned_struct_get_field_by_string() {
+        // Value::get_field should look up by string name via the display interner.
+        let mut fields = HashMap::new();
+        fields.insert("x".to_string(), Value::Int(42));
+        let val = Value::strct("P", fields);
+        assert!(matches!(val.get_field("x"), Some(Value::Int(42))), "should find field x");
+        assert!(val.get_field("y").is_none(), "should not find field y");
+        assert!(val.get_field("nonexistent").is_none(), "should not find nonexistent field");
+    }
+
+    #[test]
+    fn interned_struct_field_access_in_eval() {
+        // Full eval roundtrip: struct init → field access using interned keys
+        let source = "\
++type Config = host:String, port:Int
+
++fn get_port (c:Config) -> Int
+  +return c.port
+
+!test get_port
+  +with host=\"localhost\" port=8080 -> expect 8080
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "interned struct field access: {:?}", result);
+        let result_str = result.unwrap();
+        assert!(result_str.contains("8080"), "result should contain 8080: {result_str}");
+    }
+
+    #[test]
+    fn interned_union_match_dispatch() {
+        // Full eval roundtrip: union variant construction → match dispatch using interned IDs
+        let source = "\
++type Result = Success(Int) | Failure(String)
+
++fn unwrap_result (r:Result) -> Int
+  +match r
+  +case Success(val)
+    +return val
+  +case Failure(msg)
+    +return -1
+  +end
+
+!test unwrap_result
+  +with r=Success(42) -> expect 42
+  +with r=Failure(\"oops\") -> expect -1
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        for (fn_name, case) in &cases {
+            let result = eval_test_case(&program, fn_name, case);
+            assert!(result.is_ok(), "interned union match dispatch: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn interned_struct_empty_name_matches_any() {
+        // Struct with empty name (anonymous) should match any named struct
+        let mut f1 = HashMap::new();
+        f1.insert("x".to_string(), Value::Int(1));
+        let named = Value::strct("Point", f1);
+
+        let mut f2: HashMap<InternedId, Value> = HashMap::new();
+        f2.insert(intern::intern_display("x"), Value::Int(1));
+        let anon = Value::strct_interned(intern::intern_display(""), f2);
+
+        assert!(named.matches(&anon), "named struct should match anonymous");
+        assert!(anon.matches(&named), "anonymous struct should match named");
+    }
+
+    #[test]
+    fn interned_struct_different_names_dont_match() {
+        let mut f1 = HashMap::new();
+        f1.insert("x".to_string(), Value::Int(1));
+        let s1 = Value::strct("A", f1);
+
+        let mut f2 = HashMap::new();
+        f2.insert("x".to_string(), Value::Int(1));
+        let s2 = Value::strct("B", f2);
+
+        assert!(!s1.matches(&s2), "different named structs should not match");
+    }
+
+    #[test]
+    fn interned_union_variant_equality() {
+        // Two unions with the same interned variant should be equal
+        let v1 = Value::Union {
+            variant: intern::intern_display("Ok"),
+            payload: vec![Value::Int(1)],
+        };
+        let v2 = Value::Union {
+            variant: intern::intern_display("Ok"),
+            payload: vec![Value::Int(1)],
+        };
+        assert!(v1.matches(&v2));
+
+        // Different variants should not match
+        let v3 = Value::Union {
+            variant: intern::intern_display("Err"),
+            payload: vec![Value::Int(1)],
+        };
+        assert!(!v1.matches(&v3));
+    }
+
+    #[test]
+    fn interned_struct_strct_interned_roundtrip() {
+        // strct_interned should produce identical values to strct
+        let mut string_fields = HashMap::new();
+        string_fields.insert("a".to_string(), Value::Int(1));
+        string_fields.insert("b".to_string(), Value::Int(2));
+        let via_strct = Value::strct("T", string_fields);
+
+        let mut interned_fields: HashMap<InternedId, Value> = HashMap::new();
+        interned_fields.insert(intern::intern_display("a"), Value::Int(1));
+        interned_fields.insert(intern::intern_display("b"), Value::Int(2));
+        let via_interned = Value::strct_interned(intern::intern_display("T"), interned_fields);
+
+        assert!(via_strct.matches(&via_interned), "strct and strct_interned should produce matching values");
+    }
+
+    #[test]
+    fn interned_display_interner_fallback_for_unknown_id() {
+        // resolve_display should return a fallback for unknown IDs
+        let result = intern::resolve_display(999_999);
+        assert!(result.starts_with("<id:"), "unknown ID should get fallback: {result}");
+    }
+
+    // ── Async multi-parameter tests (regression for display interner bug) ───
+
+    #[test]
+    fn test_async_multi_param_function_binds_params_via_runtime() {
+        // Regression test: async functions with multiple parameters previously
+        // failed with "undefined variable" because the display interner was
+        // not installed on the worker thread spawned by
+        // eval_test_case_with_runtime. bind_input_to_params uses
+        // intern::resolve_display / intern::intern_display to match struct
+        // field names to parameter names, which requires the thread-local
+        // display interner to be populated.
+        let source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"issues_json\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            patterns: vec!["api.github.com".to_string()],
+            response: "issues_json".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
+        assert!(
+            result.is_ok(),
+            "async multi-param test should pass (display interner must be set on worker thread): {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_multi_param_function_binds_params_via_spawn_blocking() {
+        // Same regression test but through eval_test_case_async (the
+        // spawn_blocking path). Ensures the display interner is installed
+        // on the tokio blocking thread pool thread as well.
+        let source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"issues_json\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            patterns: vec!["api.github.com".to_string()],
+            response: "issues_json".to_string(),
+        }];
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let result = eval_test_case_async(&program, fn_name, case, &mocks, tx, &[]).await;
+        assert!(
+            result.is_ok(),
+            "async multi-param test via eval_test_case_async should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_async_multi_param_wrong_expected_fails() {
+        // Error case: async multi-param function test with wrong expected
+        // value should fail cleanly (not with "undefined variable").
+        let source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"wrong_value\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            patterns: vec!["api.github.com".to_string()],
+            response: "actual_issues".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
+        assert!(
+            result.is_err(),
+            "async test with wrong expected should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        // The error should be a value mismatch, NOT "undefined variable"
+        assert!(
+            !err.contains("undefined variable"),
+            "error should NOT be 'undefined variable' (params should bind correctly): {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_session_multi_param_function() {
+        // End-to-end test through the session flow: define an async function
+        // with multiple parameters, add mocks, and run tests.
+        let mut session = crate::session::Session::new();
+
+        let define_source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let results = session.apply_async(define_source, None).await;
+        assert!(results.is_ok(), "define should succeed: {:?}", results);
+
+        let mock_source = "!mock http_get \"api.github.com\" -> \"session_issues\"";
+        let results = session.apply_async(mock_source, None).await;
+        assert!(results.is_ok(), "mock should succeed: {:?}", results);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"session_issues\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].1,
+            "async multi-param test via session should pass: {:?}",
+            results[0]
+        );
+    }
+
+    // ── Value accessor / constructor tests ──────────────────────────
+
+    #[test]
+    fn value_string_uses_arc_for_cheap_clone() {
+        let v = Value::string("hello");
+        let v2 = v.clone();
+        // Both clones share the same Arc allocation
+        if let (Value::String(a), Value::String(b)) = (&v, &v2) {
+            assert!(Arc::ptr_eq(a, b), "clone should share Arc pointer");
+        } else {
+            panic!("expected String variants");
+        }
+    }
+
+    #[test]
+    fn value_list_uses_arc_for_cheap_clone() {
+        let v = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let v2 = v.clone();
+        if let (Value::List(a), Value::List(b)) = (&v, &v2) {
+            assert!(Arc::ptr_eq(a, b), "clone should share Arc pointer");
+        } else {
+            panic!("expected List variants");
+        }
+    }
+
+    #[test]
+    fn value_as_str_returns_inner_slice() {
+        let v = Value::string("café");
+        assert_eq!(v.as_str(), Some("café"));
+        assert_eq!(Value::Int(42).as_str(), None);
+        assert_eq!(Value::None.as_str(), None);
+    }
+
+    #[test]
+    fn value_as_list_returns_inner_slice() {
+        let v = Value::list(vec![Value::Int(1), Value::string("x")]);
+        let slice = v.as_list().unwrap();
+        assert_eq!(slice.len(), 2);
+        assert!(matches!(&slice[0], Value::Int(1)));
+        assert!(Value::Int(0).as_list().is_none());
+    }
+
+    #[test]
+    fn value_as_list_mut_cow_semantics() {
+        // When there's only one Arc reference, as_list_mut should not clone
+        let mut v = Value::list(vec![Value::Int(10)]);
+        {
+            let inner = v.as_list_mut().unwrap();
+            inner.push(Value::Int(20));
+        }
+        let slice = v.as_list().unwrap();
+        assert_eq!(slice.len(), 2);
+        assert!(matches!(&slice[1], Value::Int(20)));
+
+        // When there are multiple Arc references, as_list_mut should CoW-clone
+        let v2 = v.clone();
+        {
+            let inner = v.as_list_mut().unwrap();
+            inner.push(Value::Int(30));
+        }
+        // v was mutated (now has 3 elements), v2 still has 2
+        assert_eq!(v.as_list().unwrap().len(), 3);
+        assert_eq!(v2.as_list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn value_as_list_mut_returns_none_for_non_list() {
+        let mut v = Value::Int(5);
+        assert!(v.as_list_mut().is_none());
     }
 }

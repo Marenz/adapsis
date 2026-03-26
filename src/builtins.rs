@@ -535,6 +535,312 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Marks plan step N (1-based) as failed and returns `Plan: step N failed.`. Takes `(n:Int)`. Fails if the index is out of bounds. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    // Program introspection queries — callable versions of ? query commands
+    Builtin {
+        name: "query_symbols",
+        aliases: &["symbols_list"],
+        short: "list all types and functions (same as ?symbols)",
+        long: "Returns a formatted String listing all types and functions in the current program. Same output as `?symbols`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_symbols_detail",
+        aliases: &[],
+        short: "get details for one symbol (same as ?symbols <name>)",
+        long: "Returns detailed information about a specific symbol (function, type, or module) as a String. Same output as `?symbols <name>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_source",
+        aliases: &["source_get"],
+        short: "get reconstructed source code (same as ?source <fn>)",
+        long: "Returns the reconstructed Adapsis source code for a function or type as a String. Same output as `?source <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_callers",
+        aliases: &["callers_get"],
+        short: "who calls this function (same as ?callers <fn>)",
+        long: "Returns which functions directly call the given function as a String. Same output as `?callers <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_callees",
+        aliases: &["callees_get"],
+        short: "what this function calls (same as ?callees <fn>)",
+        long: "Returns the direct functions called by the given function as a String. Same output as `?callees <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_deps",
+        aliases: &[],
+        short: "direct dependencies (same as ?deps <fn>)",
+        long: "Returns the direct dependencies of a function as a String. Same output as `?deps <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_deps_all",
+        aliases: &["deps_get"],
+        short: "full transitive dependency tree (same as ?deps-all <fn>)",
+        long: "Returns the full transitive dependency tree for a function as a String. Same output as `?deps-all <fn>`. Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_routes",
+        aliases: &["routes_list"],
+        short: "list registered HTTP routes (same as ?routes)",
+        long: "Returns registered HTTP routes as a formatted String. Same output as `?routes`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_tasks",
+        aliases: &[],
+        short: "list spawned async tasks (same as ?tasks)",
+        long: "Returns spawned async tasks and their current wait state as a String. Same output as `?tasks`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "query_library",
+        aliases: &[],
+        short: "show library status (same as ?library)",
+        long: "Returns persistent module library status as a String, including directory path, loaded modules, and files on disk. Same output as `?library`. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    // Program mutation builtins — modify the live program AST
+    Builtin {
+        name: "mutate",
+        aliases: &[],
+        short: "apply Adapsis code mutations to the program: mutate(code) -> String",
+        long: "Parses a String of Adapsis code (mutations like +fn, +type, !module, etc.) and applies them to the live program. \
+               Returns a summary like \"Applied 3 mutations\" on success, or fails with the parse/validation error. \
+               This is the general-purpose mutation builtin — it does the same thing as sending code to the main loop. \
+               Takes `(code:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "fn_remove",
+        aliases: &[],
+        short: "remove a function by name: fn_remove(name) -> String",
+        long: "Removes a function by fully-qualified name (e.g. \"MyModule.my_func\" or bare \"my_func\" for top-level). \
+               Returns \"Removed <name>\" on success, or fails if the function is not found. \
+               Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "type_remove",
+        aliases: &[],
+        short: "remove a type by name: type_remove(name) -> String",
+        long: "Removes a type by name (e.g. \"MyModule.MyType\" or bare \"MyType\" for top-level). \
+               Returns \"Removed <name>\" on success, or fails if the type is not found. \
+               Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "module_remove",
+        aliases: &[],
+        short: "remove an entire module: module_remove(name) -> String",
+        long: "Removes an entire module and all its contents (functions, types, shared vars). \
+               Returns \"Removed module <name>\" on success, or fails if the module is not found. \
+               Takes `(name:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    // Programmatic equivalents of !move, !watch, !agent, !msg, !trace commands
+    Builtin {
+        name: "move_symbols",
+        aliases: &[],
+        short: "move symbols into a module: move_symbols(symbols, target_module) -> String",
+        long: "Moves comma-separated symbol names (functions, types, or modules) into the target module \
+               and updates all call sites automatically. Same as `!move`. \
+               Takes `(symbols:String, target_module:String)`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "watch_start",
+        aliases: &[],
+        short: "start watching a function periodically: watch_start(fn_name, interval_ms) -> String",
+        long: "Starts polling a function periodically and alerts when its result changes. Same as `!watch`. \
+               Takes `(fn_name:String, interval_ms:Int)`. Returns confirmation. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "agent_spawn",
+        aliases: &[],
+        short: "spawn a background agent: agent_spawn(name, scope, task) -> String",
+        long: "Spawns a background agent with the given name, scope, and task. Same as `!agent`. \
+               Scope can be \"read-only\", \"new-only\", \"module X\", or \"full\". \
+               Takes `(name:String, scope:String, task:String)`. Returns confirmation. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "msg_send",
+        aliases: &[],
+        short: "send a message to an agent or main: msg_send(target, message) -> String",
+        long: "Sends a message to a named agent or to \"main\". Same as `!msg`. \
+               The recipient sees it in `?inbox` or agent feedback. \
+               Takes `(target:String, message:String)`. Returns confirmation. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "trace_run",
+        aliases: &[],
+        short: "run a function with tracing: trace_run(fn_name, args) -> String",
+        long: "Runs a function with step-by-step tracing enabled. Same as `!trace`. \
+               Returns the trace output as a formatted String. \
+               Takes `(fn_name:String, args:String)` where args is the input expression text (or empty). \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "route_list",
+        aliases: &[],
+        short: "list all registered HTTP routes: route_list() -> String",
+        long: "Returns all registered HTTP routes as a formatted string, one per line. \
+               Each line shows: METHOD /path -> `Handler.func`. \
+               Returns 'No routes registered.' if none exist. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "route_add",
+        aliases: &[],
+        short: "register an HTTP route: route_add(method, path, handler) -> String",
+        long: "Registers an HTTP route mapping a method+path to an Adapsis function handler. \
+               Takes `(method:String, path:String, handler:String)`. \
+               Method is GET, POST, PUT, DELETE, or PATCH. Path must start with '/'. \
+               Handler is a qualified function name like 'Module.func'. \
+               Upserts: updates existing route if method+path already registered. \
+               Returns confirmation like 'added route GET /api/foo -> `Module.func`'. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "route_remove",
+        aliases: &[],
+        short: "remove an HTTP route: route_remove(method, path) -> String",
+        long: "Removes an HTTP route by method and path. \
+               Takes `(method:String, path:String)`. \
+               Returns confirmation like 'removed route GET /api/foo (was -> `Module.func`)'. \
+               Fails if no route found for the given method+path. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "undo",
+        aliases: &[],
+        short: "revert the last mutation: undo() -> String",
+        long: "Queues an undo operation that reverts the last mutation. \
+               Same as `!undo` command. The undo is processed by the API layer \
+               after the current eval completes. \
+               Returns confirmation that the undo has been queued. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "sandbox_enter",
+        aliases: &[],
+        short: "enter sandbox mode: sandbox_enter() -> String",
+        long: "Queues entry into sandbox mode where mutations are isolated. \
+               Same as `!sandbox enter`. The sandbox is activated by the API layer \
+               after the current eval completes. Use sandbox_merge() to keep changes \
+               or sandbox_discard() to revert. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "sandbox_merge",
+        aliases: &[],
+        short: "merge sandbox changes: sandbox_merge() -> String",
+        long: "Queues merging of sandbox changes into the main program state. \
+               Same as `!sandbox merge`. Processed by the API layer after eval completes. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "sandbox_discard",
+        aliases: &[],
+        short: "discard sandbox changes: sandbox_discard() -> String",
+        long: "Queues discarding of sandbox changes, reverting to the state before sandbox was entered. \
+               Same as `!sandbox discard`. Processed by the API layer after eval completes. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "mock_set",
+        aliases: &[],
+        short: "register an IO mock: mock_set(operation, pattern, response) -> String",
+        long: "Registers a mock IO response for testing. Same as `!mock`. \
+               Takes `(operation:String, pattern:String, response:String)`. \
+               Operation is the IO builtin name (e.g. 'http_get', 'llm_call'). \
+               Pattern is matched against arguments (space-separated for multiple arg positions). \
+               Response is the value returned when the mock matches. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "mock_clear",
+        aliases: &[],
+        short: "clear all IO mocks: mock_clear() -> String",
+        long: "Clears all registered IO mocks. Same as `!unmock`. \
+               Returns 'cleared N mocks'. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "module_create",
+        aliases: &[],
+        short: "create a module: module_create(name) -> String",
+        long: "Creates a new module or confirms it already exists. Same as `!module Name`. \
+               Takes `(name:String)`. Name must start with an uppercase letter. \
+               Returns 'created module Name' on success, or 'module Name already exists'. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "test_run",
+        aliases: &[],
+        short: "run stored tests: test_run(fn_name) -> String",
+        long: "Runs all stored tests for a function. Same as `!test`. \
+               Takes `(fn_name:String)` — fully-qualified name like 'Module.func'. \
+               Returns test results as a string with PASS/FAIL for each test case. \
+               Returns 'no stored tests for fn_name' if none exist. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "fn_replace",
+        aliases: &[],
+        short: "replace a statement: fn_replace(target, new_code) -> String",
+        long: "Replaces a statement in a function. Same as `!replace`. \
+               Takes `(target:String, new_code:String)`. \
+               Target is like 'Module.func.s1' (statement 1 of Module.func). \
+               new_code is valid Adapsis code for the replacement statement(s). \
+                Returns confirmation or fails with validation error. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "library_reload",
+        aliases: &[],
+        short: "reload library module(s) from disk: library_reload(name) -> String",
+        long: "Reloads a module from the persistent library directory (~/.config/adapsis/modules/). \
+               Takes `(name:String)` — the module name (e.g. \"MyModule\"). \
+               If name is empty string \"\", reloads ALL .ax files from the library directory. \
+               The existing module is removed from the program and re-parsed from disk. \
+               Returns \"Reloaded ModuleName successfully\" on success, or fails with the error. \
+               Useful for recovering from load errors at startup without restarting. \
+               Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "library_errors",
+        aliases: &[],
+        short: "get library load/save errors: library_errors() -> String",
+        long: "Returns a formatted string of all library module load/save errors from the current session. \
+               Includes structured load errors (module name + error message) and general session errors. \
+               Returns \"No library errors.\" if no errors have occurred. \
+               Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).
@@ -813,7 +1119,12 @@ pub fn format_for_prompt() -> String {
     }
     out.push_str("\n### IO Functions (require [io,async] effect, use +await)\n");
     for b in IO_BUILTINS {
-        out.push_str(&format!("  {} — {}\n", b.name, b.short));
+        let aliases = if b.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" (aliases: {})", b.aliases.join(", "))
+        };
+        out.push_str(&format!("  {}{} — {}\n", b.name, aliases, b.short));
         if !b.long.is_empty() {
             for line in b.long.lines() {
                 out.push_str(&format!("    {}\n", line));
@@ -841,21 +1152,48 @@ pub fn format_for_prompt() -> String {
     out
 }
 
-/// Check if a name is a builtin (sync or IO).
+/// Pre-built set of all builtin names (sync + IO) and their aliases for O(1) lookup.
+/// Lazily initialized on first access.
+static ALL_BUILTIN_SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut set = std::collections::HashSet::new();
+        for b in BUILTINS {
+            set.insert(b.name);
+            for alias in b.aliases {
+                set.insert(alias);
+            }
+        }
+        for b in IO_BUILTINS {
+            set.insert(b.name);
+            for alias in b.aliases {
+                set.insert(alias);
+            }
+        }
+        set
+    });
+
+/// Pre-built set of IO builtin names and aliases for O(1) lookup.
+/// Lazily initialized on first access.
+static IO_BUILTIN_SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut set = std::collections::HashSet::new();
+        for b in IO_BUILTINS {
+            set.insert(b.name);
+            for alias in b.aliases {
+                set.insert(alias);
+            }
+        }
+        set
+    });
+
+/// Check if a name is a builtin (sync or IO). O(1) HashSet lookup.
 pub fn is_builtin(name: &str) -> bool {
-    BUILTINS
-        .iter()
-        .any(|b| b.name == name || b.aliases.contains(&name))
-        || IO_BUILTINS
-            .iter()
-            .any(|b| b.name == name || b.aliases.contains(&name))
+    ALL_BUILTIN_SET.contains(name)
 }
 
-/// Check if a name is an IO builtin (requires +await).
+/// Check if a name is an IO builtin (requires +await). O(1) HashSet lookup.
 pub fn is_io_builtin(name: &str) -> bool {
-    IO_BUILTINS
-        .iter()
-        .any(|b| b.name == name || b.aliases.contains(&name))
+    IO_BUILTIN_SET.contains(name)
 }
 
 #[cfg(test)]
@@ -1282,5 +1620,219 @@ mod tests {
         assert!(query_names.contains(&"?source"));
         assert!(query_names.contains(&"?deps"));
         assert!(query_names.contains(&"?tasks"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Query IO builtins registration
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn query_io_builtins_registered() {
+        for name in &[
+            "query_symbols",
+            "query_symbols_detail",
+            "query_source",
+            "query_callers",
+            "query_callees",
+            "query_deps",
+            "query_deps_all",
+            "query_routes",
+            "query_tasks",
+            "query_library",
+            "library_reload",
+            "library_errors",
+        ] {
+            assert!(
+                is_io_builtin(name),
+                "query IO builtin '{name}' should be registered"
+            );
+            assert!(
+                is_builtin(name),
+                "query IO builtin '{name}' should also be a builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn query_io_builtins_have_descriptions() {
+        for name in &[
+            "query_symbols",
+            "query_symbols_detail",
+            "query_source",
+            "query_callers",
+            "query_callees",
+            "query_deps",
+            "query_deps_all",
+            "query_routes",
+            "query_tasks",
+            "query_library",
+            "library_reload",
+            "library_errors",
+        ] {
+            let builtin = IO_BUILTINS.iter().find(|b| b.name == *name);
+            assert!(
+                builtin.is_some(),
+                "IO builtin '{name}' should exist in IO_BUILTINS"
+            );
+            let b = builtin.unwrap();
+            assert!(
+                !b.short.is_empty(),
+                "'{name}' should have short description"
+            );
+            assert!(!b.long.is_empty(), "'{name}' should have long description");
+            assert!(
+                b.category == BuiltinCategory::Io,
+                "'{name}' should be Io category"
+            );
+        }
+    }
+
+    #[test]
+    fn format_for_prompt_includes_query_builtins() {
+        let prompt = format_for_prompt();
+        assert!(
+            prompt.contains("query_symbols"),
+            "prompt should mention query_symbols"
+        );
+        assert!(
+            prompt.contains("query_source"),
+            "prompt should mention query_source"
+        );
+        assert!(
+            prompt.contains("query_tasks"),
+            "prompt should mention query_tasks"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Introspection alias registration
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn introspection_aliases_resolve_as_io_builtins() {
+        for alias in &[
+            "symbols_list",
+            "source_get",
+            "callers_get",
+            "callees_get",
+            "deps_get",
+            "routes_list",
+        ] {
+            assert!(
+                is_io_builtin(alias),
+                "introspection alias '{alias}' should resolve as IO builtin"
+            );
+            assert!(
+                is_builtin(alias),
+                "introspection alias '{alias}' should resolve as builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn introspection_aliases_included_in_all_builtin_names() {
+        let names = all_builtin_names();
+        for alias in &[
+            "symbols_list",
+            "source_get",
+            "callers_get",
+            "callees_get",
+            "deps_get",
+            "routes_list",
+        ] {
+            assert!(
+                names.contains(alias),
+                "all_builtin_names should include introspection alias '{alias}'"
+            );
+        }
+    }
+
+    #[test]
+    fn introspection_alias_not_registered_as_unknown() {
+        // Aliases should NOT be found as primary IO_BUILTINS names —
+        // they are aliases on existing entries
+        for alias in &[
+            "symbols_list",
+            "source_get",
+            "callers_get",
+            "callees_get",
+            "deps_get",
+            "routes_list",
+        ] {
+            let is_primary = IO_BUILTINS.iter().any(|b| b.name == *alias);
+            assert!(
+                !is_primary,
+                "'{alias}' should be an alias, not a primary name"
+            );
+        }
+    }
+
+    #[test]
+    fn format_for_prompt_shows_introspection_aliases() {
+        let prompt = format_for_prompt();
+        assert!(
+            prompt.contains("symbols_list"),
+            "prompt should show symbols_list alias"
+        );
+        assert!(
+            prompt.contains("source_get"),
+            "prompt should show source_get alias"
+        );
+        assert!(
+            prompt.contains("routes_list"),
+            "prompt should show routes_list alias"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // HashSet-based lookup tests (name interning optimization)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn hashset_lookup_matches_linear_scan_for_builtins() {
+        // Verify that the HashSet-based is_builtin matches what a linear scan would find
+        for b in BUILTINS {
+            assert!(
+                is_builtin(b.name),
+                "HashSet should find builtin '{}'",
+                b.name
+            );
+            for alias in b.aliases {
+                assert!(
+                    is_builtin(alias),
+                    "HashSet should find alias '{}' for '{}'",
+                    alias,
+                    b.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hashset_lookup_matches_linear_scan_for_io_builtins() {
+        // Verify that the HashSet-based is_io_builtin matches what a linear scan would find
+        for b in IO_BUILTINS {
+            assert!(
+                is_io_builtin(b.name),
+                "HashSet should find IO builtin '{}'",
+                b.name
+            );
+            for alias in b.aliases {
+                assert!(
+                    is_io_builtin(alias),
+                    "HashSet should find IO alias '{}' for '{}'",
+                    alias,
+                    b.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hashset_rejects_unknown_names() {
+        assert!(!is_builtin("totally_made_up_function"));
+        assert!(!is_io_builtin("totally_made_up_function"));
+        assert!(!is_builtin(""));
+        assert!(!is_io_builtin(""));
     }
 }
