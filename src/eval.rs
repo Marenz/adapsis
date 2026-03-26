@@ -1146,6 +1146,11 @@ fn eval_test_case_with_runtime(
                 // Set program snapshot so query builtins (symbols_list, source_get,
                 // etc.) work inside test execution.
                 set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                // Install the display interner on this worker thread so that
+                // bind_input_to_params can resolve InternedIds ↔ strings
+                // (intern::resolve_display / intern::intern_display use a
+                // thread-local interner that is empty on freshly spawned threads).
+                intern::set_display_interner(&program.shared_interner);
                 let func = program
                     .get_function(&fn_name)
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found"))?;
@@ -1162,7 +1167,10 @@ fn eval_test_case_with_runtime(
                 env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
                 bind_input_to_params(&program, func, &input, &mut env);
-                let result = eval_function_body(&program, &func.body, &mut env);
+                // Use eval_function_body_named so FN_NAME_STACK is populated
+                // with the qualified function name — required for +shared
+                // variable resolution in Env::get()/set_existing().
+                let result = eval_function_body_named(&program, &fn_name, &func.body, &mut env);
                 let msg = check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
 
                 // Check +after assertions
@@ -1210,6 +1218,11 @@ pub async fn eval_test_case_async(
         return eval_test_case_with_mocks(program, function_name, case, mocks, http_routes);
     }
 
+    // Install the display interner on the calling thread so
+    // eval_parser_expr_with_program can resolve/intern names correctly
+    // (it uses intern::intern_display which needs the thread-local interner).
+    intern::set_display_interner(&program.shared_interner);
+
     let input = eval_parser_expr_with_program(&case.input, program)?;
     let expected = eval_parser_expr_with_program(&case.expected, program)?;
 
@@ -1230,6 +1243,11 @@ pub async fn eval_test_case_async(
         // Set program snapshot so query builtins (symbols_list, source_get,
         // etc.) work inside async test execution.
         set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        // Install the display interner on this worker thread so that
+        // bind_input_to_params can resolve InternedIds ↔ strings
+        // (intern::resolve_display / intern::intern_display use a
+        // thread-local interner that is empty on freshly spawned threads).
+        intern::set_display_interner(&program.shared_interner);
 
         let func = program
             .get_function(&fn_name)
@@ -1245,7 +1263,10 @@ pub async fn eval_test_case_async(
 
         bind_input_to_params(&program, func, &input, &mut env);
 
-        let result = eval_function_body(&program, &func.body, &mut env);
+        // Use eval_function_body_named so FN_NAME_STACK is populated
+        // with the qualified function name — required for +shared
+        // variable resolution in Env::get()/set_existing().
+        let result = eval_function_body_named(&program, &fn_name, &func.body, &mut env);
         let msg = check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
 
         // Check +after assertions
@@ -7857,5 +7878,144 @@ mod tests {
         // resolve_display should return a fallback for unknown IDs
         let result = intern::resolve_display(999_999);
         assert!(result.starts_with("<id:"), "unknown ID should get fallback: {result}");
+    }
+
+    // ── Async multi-parameter tests (regression for display interner bug) ───
+
+    #[test]
+    fn test_async_multi_param_function_binds_params_via_runtime() {
+        // Regression test: async functions with multiple parameters previously
+        // failed with "undefined variable" because the display interner was
+        // not installed on the worker thread spawned by
+        // eval_test_case_with_runtime. bind_input_to_params uses
+        // intern::resolve_display / intern::intern_display to match struct
+        // field names to parameter names, which requires the thread-local
+        // display interner to be populated.
+        let source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"issues_json\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            patterns: vec!["api.github.com".to_string()],
+            response: "issues_json".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
+        assert!(
+            result.is_ok(),
+            "async multi-param test should pass (display interner must be set on worker thread): {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_multi_param_function_binds_params_via_spawn_blocking() {
+        // Same regression test but through eval_test_case_async (the
+        // spawn_blocking path). Ensures the display interner is installed
+        // on the tokio blocking thread pool thread as well.
+        let source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"issues_json\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            patterns: vec!["api.github.com".to_string()],
+            response: "issues_json".to_string(),
+        }];
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let result = eval_test_case_async(&program, fn_name, case, &mocks, tx, &[]).await;
+        assert!(
+            result.is_ok(),
+            "async multi-param test via eval_test_case_async should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_async_multi_param_wrong_expected_fails() {
+        // Error case: async multi-param function test with wrong expected
+        // value should fail cleanly (not with "undefined variable").
+        let source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"wrong_value\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "http_get".to_string(),
+            patterns: vec!["api.github.com".to_string()],
+            response: "actual_issues".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
+        assert!(
+            result.is_err(),
+            "async test with wrong expected should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        // The error should be a value mismatch, NOT "undefined variable"
+        assert!(
+            !err.contains("undefined variable"),
+            "error should NOT be 'undefined variable' (params should bind correctly): {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_session_multi_param_function() {
+        // End-to-end test through the session flow: define an async function
+        // with multiple parameters, add mocks, and run tests.
+        let mut session = crate::session::Session::new();
+
+        let define_source = "\
++fn fetch_issues (owner:String, repo:String)->String [async]
+  +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
+  +return resp
+";
+        let results = session.apply_async(define_source, None).await;
+        assert!(results.is_ok(), "define should succeed: {:?}", results);
+
+        let mock_source = "!mock http_get \"api.github.com\" -> \"session_issues\"";
+        let results = session.apply_async(mock_source, None).await;
+        assert!(results.is_ok(), "mock should succeed: {:?}", results);
+
+        let test_source = "\
+!test fetch_issues
+  +with owner=\"torvalds\" repo=\"linux\" -> expect \"session_issues\"
+";
+        let results = session.apply_async(test_source, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].1,
+            "async multi-param test via session should pass: {:?}",
+            results[0]
+        );
     }
 }
