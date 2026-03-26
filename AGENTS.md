@@ -92,6 +92,8 @@ web/
   adapsis.html   — Browser UI (SSE broadcast, collapsible thinking)
 ```
 
+- Shared module vars live in `RuntimeState.shared_vars` under `Module.name` keys; eval/test paths must install both shared runtime and shared program snapshots so missing shared slots can be materialized from `+shared` defaults.
+
 ## Key Adapsis Commands
 ```
 !module Name          — switch module context (all +fn/+type after go here)
