@@ -6914,8 +6914,8 @@ mod tests {
 
         assert_eq!(format!("{}", env.get("x").unwrap()), "1");
         assert_eq!(format!("{}", env.get("y").unwrap()), "2");
-        assert!(env.get("z").is_ok()); // z was interned but not set — get returns error
-        // Actually z is not set, so get returns Err
+        // z is interned but not set as a variable — get should return Err
+        assert!(env.get("z").is_err(), "z was interned but not set");
         assert!(env.get("nonexistent").is_err());
     }
 
