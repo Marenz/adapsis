@@ -3738,7 +3738,7 @@ async fn adapsis_route_dispatch(
             // Extract the raw string for HTTP response (no JSON quoting).
             // Infer content-type from the response body.
             let response_body = match &val {
-                eval::Value::String(s) => s.to_string(),
+                eval::Value::String(s) => s.as_ref().clone(),
                 other => format!("{other}"),
             };
             let content_type = {

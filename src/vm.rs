@@ -14,6 +14,7 @@
 
 use crate::eval::Value;
 use crate::intern::{InternedId, StringInterner};
+use std::sync::Arc;
 
 /// A single bytecode instruction.
 #[derive(Debug, Clone)]
@@ -136,7 +137,7 @@ pub struct Frame {
     /// Instruction pointer to return to in the caller's bytecode.
     pub return_ip: usize,
     /// The caller's bytecode (shared Arc, no clone on call/return).
-    pub return_bytecode: std::sync::Arc<Vec<Op>>,
+    pub return_bytecode: Arc<Vec<Op>>,
     /// Base index into `VmState::locals` for the caller's local variables.
     pub locals_base: usize,
 }
@@ -149,7 +150,7 @@ pub struct VmState {
     /// Instruction pointer — index into `bytecode`.
     pub ip: usize,
     /// The bytecode being executed (shared, never cloned on call).
-    pub bytecode: std::sync::Arc<Vec<Op>>,
+    pub bytecode: Arc<Vec<Op>>,
     /// Flat array of local variables (partitioned by call frames via `locals_base`).
     pub locals: Vec<Value>,
     /// Operand stack.
@@ -164,7 +165,7 @@ pub struct CompiledFunction {
     /// Function name (may be module-qualified, e.g. "Math.add").
     pub name: String,
     /// The bytecode instructions for this function (shared, cheap to clone).
-    pub bytecode: std::sync::Arc<Vec<Op>>,
+    pub bytecode: Arc<Vec<Op>>,
     /// Number of local variable slots required (includes parameters).
     pub local_count: usize,
     /// Parameter names in declaration order (for binding call arguments).
@@ -208,7 +209,7 @@ pub fn compile_function(
 
     Ok(CompiledFunction {
         name: func.name.clone(),
-        bytecode: std::sync::Arc::new(compiler.bytecode),
+        bytecode: Arc::new(compiler.bytecode),
         local_count: compiler.local_count,
         param_names: func.params.iter().map(|p| p.name.clone()).collect(),
         local_names: compiler.local_names.clone(),
@@ -701,7 +702,7 @@ fn execute_cached(
     let mut state = VmState {
         function_name: compiled.name.clone(),
         ip: 0,
-        bytecode: std::sync::Arc::clone(&compiled.bytecode),
+        bytecode: Arc::clone(&compiled.bytecode),
         locals: vec![Value::None; compiled.local_count.max(args.len())],
         stack: Vec::with_capacity(32),
         call_stack: Vec::new(),
@@ -915,7 +916,7 @@ fn run_loop(
 
                 // Save current frame
                 let locals_base = state.locals.len();
-                let callee_bytecode = std::sync::Arc::clone(&callee.bytecode);
+                let callee_bytecode = Arc::clone(&callee.bytecode);
                 state.call_stack.push(Frame {
                     return_ip: state.ip,
                     return_bytecode: std::mem::replace(&mut state.bytecode, callee_bytecode),
