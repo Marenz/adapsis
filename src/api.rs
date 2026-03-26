@@ -348,7 +348,7 @@ pub async fn eval_fn(
                 let func = program.get_function(&fn_name)
                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
-                let mut env = eval::Env::new_with_interner(&program.interner);
+                let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
                 env.populate_shared_from_program(&program);
                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                 let input_val = eval::eval_parser_expr_with_program(&input, &program)?;
@@ -1768,7 +1768,7 @@ pub async fn ask(
                                         let func = program.get_function(&fn_name)
                                             .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                        let mut env = crate::eval::Env::new_with_interner(&program.interner);
+                                        let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
                                         env.populate_shared_from_program(&program);
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
                                         let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
@@ -2096,7 +2096,7 @@ pub async fn ask(
                         | crate::parser::Operation::Return(_)) => {
                             match crate::validator::convert_statement_op(op) {
                                 Ok(stmt) => {
-                                    let mut env = crate::eval::Env::new_with_interner(&session.program.interner);
+                                    let mut env = crate::eval::Env::new_with_shared_interner(&session.program.shared_interner);
                                     env.populate_shared_from_program(&session.program);
                                     if let Some(sender) = &config.io_sender {
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
@@ -2663,7 +2663,7 @@ pub async fn ask_stream(
                                             let func = program.get_function(&fn_name)
                                                 .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                            let mut env = crate::eval::Env::new_with_interner(&program.interner);
+                                            let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
                                             env.populate_shared_from_program(&program);
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
                                             let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
@@ -2723,7 +2723,7 @@ pub async fn ask_stream(
                             | crate::parser::Operation::Return(_) => {
                                 match crate::validator::convert_statement_op(op) {
                                     Ok(stmt) => {
-                                        let mut env = crate::eval::Env::new_with_interner(&session.program.interner);
+                                        let mut env = crate::eval::Env::new_with_shared_interner(&session.program.shared_interner);
                                         env.populate_shared_from_program(&session.program);
                                         if let Some(sender) = &config_clone.io_sender {
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
@@ -3718,9 +3718,9 @@ async fn adapsis_route_dispatch(
         let func = program
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
-        let mut env = eval::Env::new_with_interner(&program.interner);
+        let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.populate_shared_from_program(&program);
-        let input = eval::Value::String(body_str.into());
+        let input = eval::Value::string(body_str);
         eval::bind_input_to_params(&program, func, &input, &mut env);
         eval::eval_function_body_pub(&program, &func.body, &mut env)
     })
