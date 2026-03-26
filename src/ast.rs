@@ -376,6 +376,34 @@ impl Program {
             .find_map(|module| module.get_function(name))
     }
 
+    /// Qualify an unqualified function name with its module prefix.
+    /// Returns `"Module.func"` if the function lives inside a module,
+    /// or the original name unchanged if it's already qualified or top-level.
+    pub fn qualify_function_name(&self, name: &str) -> String {
+        // Already qualified — return as-is
+        if name.contains('.') {
+            return name.to_string();
+        }
+        // Check top-level functions first — they don't need qualification
+        if !self.fn_index.is_empty() {
+            if let Some(fn_id) = self.interner.get(name) {
+                if self.fn_index.contains_key(&fn_id) {
+                    return name.to_string();
+                }
+            }
+        } else if self.functions.iter().any(|f| f.name == name) {
+            return name.to_string();
+        }
+        // Search modules
+        for module in &self.modules {
+            if module.get_function(name).is_some() {
+                return format!("{}.{}", module.name, name);
+            }
+        }
+        // Not found anywhere — return as-is
+        name.to_string()
+    }
+
     pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionDecl> {
         // Module-qualified lookup: "Module.func" — use module_index for O(1) module lookup
         if let Some((module_name, function_name)) = name.split_once('.') {
@@ -2433,5 +2461,62 @@ mod tests {
 
         assert!(program.get_function_mut("Math.subtract").is_none());
         assert!(program.get_function_mut("Fake.add").is_none());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // qualify_function_name
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn qualify_function_name_module_function() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Utils", vec![make_fn("helper", Type::Int)]));
+        program.rebuild_function_index();
+
+        assert_eq!(program.qualify_function_name("helper"), "Utils.helper");
+    }
+
+    #[test]
+    fn qualify_function_name_top_level() {
+        let mut program = Program::default();
+        program.functions.push(make_fn("standalone", Type::Int));
+        program.rebuild_function_index();
+
+        assert_eq!(program.qualify_function_name("standalone"), "standalone");
+    }
+
+    #[test]
+    fn qualify_function_name_already_qualified() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Mod", vec![make_fn("func", Type::Int)]));
+        program.rebuild_function_index();
+
+        // Already qualified — returned as-is
+        assert_eq!(program.qualify_function_name("Mod.func"), "Mod.func");
+    }
+
+    #[test]
+    fn qualify_function_name_unknown() {
+        let program = Program::default();
+        assert_eq!(program.qualify_function_name("missing"), "missing");
+    }
+
+    #[test]
+    fn qualify_function_name_top_level_preferred_over_module() {
+        // When a function exists at both top-level and in a module,
+        // top-level takes priority (consistent with get_function)
+        let mut program = Program::default();
+        program.functions.push(make_fn("shared_name", Type::Int));
+        program
+            .modules
+            .push(make_module("Mod", vec![make_fn("shared_name", Type::Int)]));
+        program.rebuild_function_index();
+
+        // Top-level wins — returned unqualified
+        assert_eq!(program.qualify_function_name("shared_name"), "shared_name");
     }
 }
