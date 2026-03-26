@@ -617,7 +617,7 @@ impl CoroutineHandle {
             }
             "roadmap_add" => {
                 let desc = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => bail!("roadmap_add expects (description:String)"),
                 };
@@ -684,7 +684,7 @@ impl CoroutineHandle {
             }
             "plan_set" => {
                 let steps_str = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => bail!("plan_set expects (steps:String)"),
                 };
@@ -771,7 +771,7 @@ impl CoroutineHandle {
             }
             "query_symbols_detail" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_symbols_detail expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -783,7 +783,7 @@ impl CoroutineHandle {
             }
             "query_source" | "source_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_source expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -795,7 +795,7 @@ impl CoroutineHandle {
             }
             "query_callers" | "callers_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_callers expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -807,7 +807,7 @@ impl CoroutineHandle {
             }
             "query_callees" | "callees_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_callees expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -819,7 +819,7 @@ impl CoroutineHandle {
             }
             "query_deps" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_deps expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -831,7 +831,7 @@ impl CoroutineHandle {
             }
             "query_deps_all" | "deps_get" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_deps_all expects (name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -902,7 +902,7 @@ impl CoroutineHandle {
             // ── library_reload — reload module(s) from disk ──
             "library_reload" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => String::new(),
                 };
@@ -920,7 +920,7 @@ impl CoroutineHandle {
             // ── Mutation operations — write to program AST via thread-local ──
             "mutate" => {
                 let code = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => bail!("mutate expects (code:String)"),
                 };
@@ -967,7 +967,7 @@ impl CoroutineHandle {
             }
             "fn_remove" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("fn_remove expects (name:String)"),
                 };
                 let program_lock = crate::eval::get_shared_program_mut()
@@ -1000,7 +1000,7 @@ impl CoroutineHandle {
             }
             "type_remove" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("type_remove expects (name:String)"),
                 };
                 let program_lock = crate::eval::get_shared_program_mut()
@@ -1032,7 +1032,7 @@ impl CoroutineHandle {
             }
             "module_remove" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("module_remove expects (name:String)"),
                 };
                 let program_lock = crate::eval::get_shared_program_mut()
@@ -1052,12 +1052,12 @@ impl CoroutineHandle {
             // ── move_symbols — programmatic !move ──
             "move_symbols" => {
                 let symbols_str = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => bail!("move_symbols expects (symbols:String, target_module:String)"),
                 };
                 let target_module = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => bail!("move_symbols expects (symbols:String, target_module:String)"),
                 };
@@ -1090,11 +1090,11 @@ impl CoroutineHandle {
             // ── trace_run — programmatic !trace ──
             "trace_run" => {
                 let fn_name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("trace_run expects (fn_name:String, args:String)"),
                 };
                 let args_str = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => String::new(),
                 };
@@ -1125,11 +1125,11 @@ impl CoroutineHandle {
             // ── msg_send — programmatic !msg ──
             "msg_send" => {
                 let target = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("msg_send expects (target:String, message:String)"),
                 };
                 let message = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
                     None => bail!("msg_send expects (target:String, message:String)"),
                 };
@@ -1162,7 +1162,7 @@ impl CoroutineHandle {
             // ── watch_start — programmatic !watch ──
             "watch_start" => {
                 let fn_name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("watch_start expects (fn_name:String, interval_ms:Int)"),
                 };
                 let interval_ms = match args.get(1) {
@@ -1196,15 +1196,15 @@ impl CoroutineHandle {
             // ── agent_spawn — programmatic !agent ──
             "agent_spawn" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
                 };
                 let scope = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
                 };
                 let task = match args.get(2) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("agent_spawn expects (name:String, scope:String, task:String)"),
                 };
                 if name.trim().is_empty() {
@@ -1243,15 +1243,15 @@ impl CoroutineHandle {
             // ── route_add — register an HTTP route ──
             "route_add" => {
                 let method = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("route_add expects (method:String, path:String, handler:String)"),
                 };
                 let path = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("route_add expects (method:String, path:String, handler:String)"),
                 };
                 let handler = match args.get(2) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("route_add expects (method:String, path:String, handler:String)"),
                 };
                 let method_upper = method.to_uppercase();
@@ -1284,11 +1284,11 @@ impl CoroutineHandle {
             // ── route_remove — remove an HTTP route by method+path ──
             "route_remove" => {
                 let method = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("route_remove expects (method:String, path:String)"),
                 };
                 let path = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("route_remove expects (method:String, path:String)"),
                 };
                 let method_upper = method.to_uppercase();
@@ -1358,15 +1358,15 @@ impl CoroutineHandle {
             // ── mock_set — register an IO mock response ──
             "mock_set" => {
                 let operation = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
                 };
                 let pattern = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
                 };
                 let response = match args.get(2) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("mock_set expects (operation:String, pattern:String, response:String)"),
                 };
                 if operation.trim().is_empty() {
@@ -1406,7 +1406,7 @@ impl CoroutineHandle {
             // ── module_create — create/switch to a module ──
             "module_create" => {
                 let name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("module_create expects (name:String)"),
                 };
                 if name.trim().is_empty() {
@@ -1439,7 +1439,7 @@ impl CoroutineHandle {
             // ── test_run — run stored tests for a function ──
             "test_run" => {
                 let fn_name = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("test_run expects (fn_name:String)"),
                 };
                 let program = crate::eval::get_shared_program()
@@ -1486,11 +1486,11 @@ impl CoroutineHandle {
             // ── fn_replace — replace a statement in a function ──
             "fn_replace" => {
                 let target = match args.first() {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("fn_replace expects (target:String, new_code:String)"),
                 };
                 let new_code = match args.get(1) {
-                    Some(Value::String(s)) => s.to_string(),
+                    Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("fn_replace expects (target:String, new_code:String)"),
                 };
                 if target.trim().is_empty() {
@@ -1603,7 +1603,7 @@ impl CoroutineHandle {
                     _ => bail!("tcp_write expects handle"),
                 };
                 let data = match &args[1] {
-                    Value::String(s) => s.to_string(),
+                    Value::String(s) => s.as_ref().clone(),
                     other => format!("{other}"),
                 };
                 let (tx, rx) = oneshot::channel();
@@ -1629,7 +1629,7 @@ impl CoroutineHandle {
             }
             "tcp_connect" => {
                 let host = match &args[0] {
-                    Value::String(s) => s.to_string(),
+                    Value::String(s) => s.as_ref().clone(),
                     _ => bail!("tcp_connect expects String host"),
                 };
                 let port = match &args[1] {
@@ -1646,20 +1646,20 @@ impl CoroutineHandle {
             }
             "read_line" | "stdin_read_line" => {
                 let prompt = if args.is_empty() { String::new() } else {
-                    match &args[0] { Value::String(s) => s.to_string(), other => format!("{other}") }
+                    match &args[0] { Value::String(s) => s.as_ref().clone(), other => format!("{other}") }
                 };
                 let (tx, rx) = oneshot::channel();
                 let line = self.send_and_wait(WaitReason::StdinRead, IoRequest::StdinReadLine { prompt, reply: tx }, rx)?;
                 return Ok(Value::string(line));
             }
             "print" => {
-                let text = match &args[0] { Value::String(s) => s.to_string(), other => format!("{other}") };
+                let text = match &args[0] { Value::String(s) => s.as_ref().clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::Running, IoRequest::Print { text, newline: false, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
             }
             "println" => {
-                let text = match &args[0] { Value::String(s) => s.to_string(), other => format!("{other}") };
+                let text = match &args[0] { Value::String(s) => s.as_ref().clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::Running, IoRequest::Print { text, newline: true, reply: tx }, rx)?;
                 return Ok(Value::Int(0));
@@ -1671,32 +1671,32 @@ impl CoroutineHandle {
                 return Ok(Value::Int(0));
             }
             "file_read" | "read_file" => {
-                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("file_read expects String path") };
+                let path = match &args[0] { Value::String(s) => s.as_ref().clone(), _ => bail!("file_read expects String path") };
                 let (tx, rx) = oneshot::channel();
                 let contents = self.send_and_wait(WaitReason::FileRead(path.clone()), IoRequest::FileRead { path, reply: tx }, rx)?;
                 return Ok(Value::string(contents));
             }
             "file_write" | "write_file" => {
-                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("file_write expects String path") };
-                let data = match &args[1] { Value::String(s) => s.to_string(), other => format!("{other}") };
+                let path = match &args[0] { Value::String(s) => s.as_ref().clone(), _ => bail!("file_write expects String path") };
+                let data = match &args[1] { Value::String(s) => s.as_ref().clone(), other => format!("{other}") };
                 let (tx, rx) = oneshot::channel();
                 self.send_and_wait(WaitReason::FileWrite(path.clone()), IoRequest::FileWrite { path, data, reply: tx }, rx)?;
                 return Ok(Value::string("OK"));
             }
             "file_exists" => {
-                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("file_exists expects String path") };
+                let path = match &args[0] { Value::String(s) => s.as_ref().clone(), _ => bail!("file_exists expects String path") };
                 let (tx, rx) = oneshot::channel();
                 let exists = self.send_and_wait(WaitReason::Running, IoRequest::FileExists { path, reply: tx }, rx)?;
                 return Ok(Value::Bool(exists));
             }
             "list_dir" => {
-                let path = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("list_dir expects String path") };
+                let path = match &args[0] { Value::String(s) => s.as_ref().clone(), _ => bail!("list_dir expects String path") };
                 let (tx, rx) = oneshot::channel();
                 let names = self.send_and_wait(WaitReason::Running, IoRequest::ListDir { path, reply: tx }, rx)?;
                 return Ok(Value::list(names.into_iter().map(Value::string).collect()));
             }
             "shell_exec" | "exec" => {
-                let command = match &args[0] { Value::String(s) => s.to_string(), _ => bail!("shell_exec expects String command") };
+                let command = match &args[0] { Value::String(s) => s.as_ref().clone(), _ => bail!("shell_exec expects String command") };
                 let (tx, rx) = oneshot::channel();
                 let (stdout, stderr, code) = self.send_and_wait(
                     WaitReason::ShellExec(command.chars().take(40).collect()),
@@ -1711,31 +1711,31 @@ impl CoroutineHandle {
                 return Ok(Value::string("restarting..."));
             }
             "http_get" => {
-                let url = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("http_get expects (url:String)") };
+                let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_get expects (url:String)") };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::HttpGet(url.clone()), IoRequest::HttpGet { url, reply: tx }, rx)?;
                 return Ok(Value::string(result));
             }
             "http_post" => {
-                let url = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
-                let body = match args.get(1) { Some(Value::String(s)) => s.to_string(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
-                let content_type = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/json".to_string() };
+                let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
+                let body = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
+                let content_type = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => "application/json".to_string() };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPost { url, body, content_type, reply: tx }, rx)?;
                 return Ok(Value::string(result));
             }
             "llm_call" => {
-                let system = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
-                let prompt = match args.get(1) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
-                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.to_string()), _ => None });
+                let system = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
+                let prompt = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };
+                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::LlmCall, IoRequest::LlmCall { model, system, prompt, reply: tx }, rx)?;
                 return Ok(Value::string(result));
             }
             "llm_agent" => {
-                let system = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
-                let task = match args.get(1) { Some(Value::String(s)) => s.to_string(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
-                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.to_string()), _ => None });
+                let system = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
+                let task = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_agent expects (system:String, task:String[, model:String])") };
+                let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::LlmAgent, IoRequest::LlmAgent { model, system, task, reply: tx }, rx)?;
                 return Ok(Value::string(result));
@@ -1766,7 +1766,7 @@ mod tests {
 
     fn unwrap_string(v: Value) -> String {
         match v {
-            Value::String(s) => s.to_string(),
+            Value::String(s) => s.as_ref().clone(),
             other => panic!("expected String, got {other}"),
         }
     }
