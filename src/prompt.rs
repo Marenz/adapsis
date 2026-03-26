@@ -575,6 +575,133 @@ Example:
 +end
 ```
 
+### Program Introspection IO Builtins
+
+You can query the program's own structure from within Adapsis code using these async IO operations.
+They return the same output as the corresponding `?` query commands.
+
+- `+await result:String = query_symbols()` — list all types and functions (same as `?symbols`). Alias: `symbols_list()`
+- `+await result:String = query_symbols_detail("Module.func")` — details for one symbol (same as `?symbols <name>`)
+- `+await result:String = query_source("Module.func")` — reconstructed source code (same as `?source <fn>`). Alias: `source_get(name)`
+- `+await result:String = query_callers("func")` — who calls this function (same as `?callers <fn>`). Alias: `callers_get(name)`
+- `+await result:String = query_callees("func")` — what this function calls (same as `?callees <fn>`). Alias: `callees_get(name)`
+- `+await result:String = query_deps("func")` — direct dependencies (same as `?deps <fn>`)
+- `+await result:String = query_deps_all("func")` — full transitive dependency tree (same as `?deps-all <fn>`). Alias: `deps_get(name)`
+- `+await result:String = query_routes()` — registered HTTP routes (same as `?routes`). Alias: `routes_list()`
+- `+await result:String = query_tasks()` — spawned async tasks (same as `?tasks`)
+- `+await result:String = query_library()` — library status (same as `?library`)
+- `+await result:String = library_reload("ModuleName")` — reload a specific module from disk. Re-reads the .ax file, removes old module, and re-parses. Returns "Reloaded ModuleName successfully" or fails with error.
+- `+await result:String = library_reload("")` — reload ALL modules from the library directory. Useful for recovering from startup load errors.
+- `+await result:String = library_errors()` — get all library load/save errors from this session as a formatted string. Returns "No library errors." if none. Useful for diagnosing why modules failed to load at startup.
+
+These require `[io,async]` effects and `+await`. Use them for self-modifying or reflective programs
+that need to inspect their own structure at runtime.
+
+Note: If library modules fail to load at startup (parse errors, missing files, etc.), the load errors
+are included in the initial context sent to you. Use `?library` to check load error details,
+`library_errors()` to get errors programmatically, or
+`library_reload()` to retry loading failed modules after fixing the .ax files.
+
+Example:
+```
++fn list_my_functions ()->String [io,async]
+  +await syms:String = query_symbols()
+  +return syms
++end
+
++fn show_my_source (name:String)->String [io,async]
+  +await src:String = query_source(name)
+  +return src
++end
+```
+
+### Program Mutation IO Builtins
+
+You can modify the program's own structure from within Adapsis code using these async IO operations.
+They allow self-modifying programs that can add, replace, or remove functions, types, and modules at runtime.
+
+- `+await result:String = mutate(code)` — parse and apply Adapsis code mutations. `code` is a String containing valid Adapsis mutations (+fn, +type, !module, etc.). Returns a summary like "Applied 3 mutations" on success, or fails with parse/validation error.
+- `+await result:String = fn_remove("Module.func")` — remove a function by fully-qualified name. Returns "Removed Module.func" on success.
+- `+await result:String = type_remove("Module.MyType")` — remove a type by name. Returns "Removed Module.MyType" on success.
+- `+await result:String = module_remove("Module")` — remove an entire module and all its contents. Returns "Removed module Module" on success.
+- `+await result:String = module_create("MyModule")` — create a new module (or confirm it exists). Name must start with uppercase. Returns "created module 'MyModule'" on success.
+- `+await result:String = fn_replace("Module.func.s1", "+return x * 2")` — replace a statement in a function. Target is like "Module.func.s1" (1-indexed). new_code is valid Adapsis code. Returns confirmation.
+- `+await result:String = test_run("Module.func")` — run all stored tests for a function. Returns PASS/FAIL results for each test case.
+
+`mutate` is the most general — it can do everything the others do and more (add functions, define types, create modules). The remove builtins are convenience wrappers.
+
+These require `[io,async]` effects and `+await`. Changes are applied to the live program state.
+
+Example:
+```
++fn add_helper ()->String [io,async]
+  +await result:String = mutate("+fn double (x:Int)->Int\n  +return x * 2\n+end")
+  +return result
++end
+
++fn cleanup (name:String)->String [io,async]
+  +await result:String = fn_remove(name)
+  +return result
++end
+
++fn rebuild_module ()->String [io,async]
+  +await r1:String = module_remove("OldModule")
+  +await r2:String = mutate("!module NewModule\n+fn hello ()->String\n  +return \"hi\"\n+end")
+  +return concat(r1, " -> ", r2)
++end
+```
+
+### Programmatic Command Builtins
+
+These IO builtins are programmatic equivalents of `!move`, `!watch`, `!agent`, `!msg`, `!trace`, `!undo`, `!sandbox`, `!mock`/`!unmock`, and route commands.
+They allow Adapsis code to perform these operations via `+await` instead of using `!`-commands directly.
+
+- `+await result:String = move_symbols(symbols, target_module)` — move comma-separated symbol names (functions, types, modules) into a target module. Updates all call sites automatically. Same as `!move sym1 sym2 Module`.
+- `+await result:String = watch_start(fn_name, interval_ms)` — start watching a function periodically. Same as `!watch fn_name interval_ms`. Queues the watch for API-layer processing.
+- `+await result:String = agent_spawn(name, scope, task)` — spawn a background agent with the given name, scope, and task. Same as `!agent name --scope scope task`. Scope: \"read-only\", \"new-only\", \"module X\", \"full\".
+- `+await result:String = msg_send(target, message)` — send a message to an agent or \"main\". Same as `!msg target message`. The recipient sees it in `?inbox`.
+- `+await result:String = trace_run(fn_name, args)` — run a function with step-by-step tracing. Same as `!trace fn_name args`. Returns the trace output as a formatted String. `args` is the input expression text (empty string for no args).
+- `+await result:String = route_list()` — list all registered HTTP routes. Returns one route per line: `METHOD /path -> \`handler\``. Returns 'No routes registered.' if none.
+- `+await result:String = route_add(method, path, handler)` — register an HTTP route. Method is GET/POST/PUT/DELETE/PATCH, path starts with '/', handler is 'Module.func'. Upserts if route already exists.
+- `+await result:String = route_remove(method, path)` — remove an HTTP route by method+path. Fails if not found.
+- `+await result:String = undo()` — revert the last mutation. Same as `!undo`. Queued for processing after eval completes.
+- `+await result:String = sandbox_enter()` — enter sandbox mode. Same as `!sandbox enter`. Mutations are isolated until merge or discard.
+- `+await result:String = sandbox_merge()` — merge sandbox changes. Same as `!sandbox merge`. Keeps all mutations made in sandbox.
+- `+await result:String = sandbox_discard()` — discard sandbox changes. Same as `!sandbox discard`. Reverts to pre-sandbox state.
+- `+await result:String = mock_set(operation, pattern, response)` — register an IO mock. Same as `!mock`. Operation is the IO name (e.g. 'http_get'), pattern matches arguments, response is the return value.
+- `+await result:String = mock_clear()` — clear all IO mocks. Same as `!unmock`. Returns 'cleared N mocks'.
+
+Example:
+```
++fn reorganize ()->String [io,async]
+  +await r:String = move_symbols("parse_input, validate", "Parser")
+  +return r
++end
+
++fn debug_fn (name:String)->String [io,async]
+  +await trace:String = trace_run(name, "")
+  +return trace
++end
+
++fn notify_agent (agent:String, msg:String)->String [io,async]
+  +await r:String = msg_send(agent, msg)
+  +return r
++end
+
++fn add_endpoint ()->String [io,async]
+  +await r:String = route_add("POST", "/api/greet", "Greet.handle")
+  +return r
++end
+
++fn safe_experiment ()->String [io,async]
+  +await r1:String = sandbox_enter()
+  +await r2:String = mutate("+fn risky ()->Int\n  +return 42\n+end")
+  +await r3:String = test_run("risky")
+  +await r4:String = sandbox_merge()
+  +return concat(r1, " | ", r2, " | ", r3, " | ", r4)
++end
+```
+
 ### Multi-Session API
 
 AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session
@@ -653,7 +780,7 @@ This library is shared across all git worktrees and sessions.
   Steps are auto-numbered. Do NOT number them yourself.
 - Keep working step by step until the task is FULLY done, then respond with !done.
 - If you need to ask the user a question, respond with text only (no <code> block).
-- For IO builtins, write a minimal [io,async] function and `!eval` it.
+- IO builtins work directly in `!eval` inline expressions: `!eval shell_exec("ls")`
 - Prefer builtins over shell_exec. Examples:
   Instead of: +await r:String = shell_exec("curl http://localhost:3002/api/status")
   Use:        +await r:String = http_get("http://localhost:3002/api/status")

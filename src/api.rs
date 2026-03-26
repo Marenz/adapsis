@@ -50,15 +50,30 @@ impl AppConfig {
             rt.shared_vars = session.runtime.shared_vars.clone();
             rt.http_routes = session.runtime.http_routes.clone();
             rt.roadmap = session.meta.roadmap.clone();
+            rt.agent_mailbox = session.meta.agent_mailbox.clone();
+            rt.io_mocks = session.meta.io_mocks.clone();
+            // Sync library errors from LibraryState into RuntimeState
+            if let Some(ref lib_state) = session.meta.library_state {
+                if let Ok(errs) = lib_state.errors.lock() {
+                    rt.library_errors = errs.clone();
+                }
+                if let Ok(load_errs) = lib_state.load_errors.lock() {
+                    rt.library_load_errors = load_errs.iter()
+                        .map(|le| (le.module_name.clone(), le.error.clone()))
+                        .collect();
+                }
+            }
         }
     }
 
-    /// Sync runtime changes (roadmap, shared_vars) back into the session shim.
-    /// Call after eval/test that may have called roadmap_add/roadmap_done builtins.
+    /// Sync runtime changes (roadmap, shared_vars, agent_mailbox) back into the session shim.
+    /// Call after eval/test that may have called roadmap_add/roadmap_done/msg_send builtins.
     pub fn sync_runtime_to_session(&self, session: &mut Session) {
         if let Ok(rt) = self.runtime.read() {
             session.meta.roadmap = rt.roadmap.clone();
             session.runtime.shared_vars = rt.shared_vars.clone();
+            session.meta.agent_mailbox = rt.agent_mailbox.clone();
+            session.meta.io_mocks = rt.io_mocks.clone();
         }
     }
 }
@@ -195,6 +210,46 @@ pub async fn eval_fn(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
+                // Check if the expression contains IO builtins — run async if so
+                if eval::expr_contains_io_builtin(&expr) {
+                    if let Some(sender) = &config.io_sender {
+                        let program = config.program.read().await.clone();
+                        let program_mut = crate::eval::make_shared_program_mut(&program);
+                        let program_mut_clone = program_mut.clone();
+                        let sender = sender.clone();
+                        let runtime_for_blocking = config.runtime.clone();
+                        let eval_result = tokio::task::spawn_blocking(move || {
+                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                            eval::eval_inline_expr_with_io(&program, &expr, sender)
+                        }).await;
+                        // Sync mutations back to session if any occurred
+                        if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                            let mut session = config.session.lock().await;
+                            session.program = mutated.clone();
+                            *config.program.write().await = mutated;
+                        }
+                        return match eval_result {
+                            Ok(Ok(val)) => Json(EvalResponse {
+                                result: format!("{val}"),
+                                success: true,
+                                compiled: Some(false),
+                            }),
+                            Ok(Err(e)) => Json(EvalResponse {
+                                result: format!("{e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                            Err(e) => Json(EvalResponse {
+                                result: format!("task error: {e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                        };
+                    }
+                    // No IO sender available — fall through to sync eval which will error
+                }
                 // Tier 1: read program briefly for eval
                 let program = config.program.read().await;
                 match eval::eval_inline_expr(&program, &expr) {
@@ -279,6 +334,8 @@ pub async fn eval_fn(
         if let Some(sender) = &config.io_sender {
             // Tier 1: clone program for the blocking task (lock released before blocking)
             let program = config.program.read().await.clone();
+            let program_mut = crate::eval::make_shared_program_mut(&program);
+            let program_mut_clone = program_mut.clone();
             let fn_name = ev.function_name.clone();
             let input = ev.input.clone();
             let sender = sender.clone();
@@ -286,16 +343,25 @@ pub async fn eval_fn(
 
             let eval_result = tokio::task::spawn_blocking(move || {
                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                crate::eval::set_shared_program_mut(Some(program_mut_clone));
                 let func = program.get_function(&fn_name)
                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
-                let mut env = eval::Env::new();
+                let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
                 env.populate_shared_from_program(&program);
                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                 let input_val = eval::eval_parser_expr_with_program(&input, &program)?;
                 eval::bind_input_to_params(&program, func, &input_val, &mut env);
                 eval::eval_function_body_pub(&program, &func.body, &mut env)
             }).await;
+
+            // Sync mutations back to session if any occurred
+            if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                let mut s = config.session.lock().await;
+                s.program = mutated.clone();
+                *config.program.write().await = mutated;
+            }
 
             // Sync roadmap back after async eval
             {
@@ -1134,6 +1200,17 @@ fn build_plan_context(plan: &[crate::session::PlanStep]) -> (String, bool) {
     (format!("\nCurrent plan:\n{steps}\n"), all_done)
 }
 
+/// Format library load errors for inclusion in the AI context.
+/// Returns an empty string if there are no load errors.
+fn format_library_load_errors(meta: &crate::session::SessionMeta) -> String {
+    if let Some(ref lib_state) = meta.library_state {
+        if let Some(text) = lib_state.format_load_errors() {
+            return format!("\nWARNING — Library module load failures:\n{text}Use `+await result:String = library_reload(\"\")` or `+await result:String = library_reload(\"ModuleName\")` to retry.\n");
+        }
+    }
+    String::new()
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Operation dispatch helpers
 // ═══════════════════════════════════════════════════════════════════════
@@ -1378,10 +1455,12 @@ pub async fn ask(
         let plan_hint = if needs_plan {
             "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
         } else { "" };
+        let load_errors_ctx = format_library_load_errors(&session.meta);
         let context = format!(
-            "Working directory: {}\n{}{}\nUser: {}{}",
+            "Working directory: {}\n{}{}{}\nUser: {}{}",
             config.project_dir,
             crate::validator::program_summary_compact(&session.program),
+            load_errors_ctx,
             plan_ctx,
             req.message,
             plan_hint
@@ -1605,6 +1684,39 @@ pub async fn ask(
                         crate::parser::Operation::Eval(ev) => {
                             // Inline expression: evaluate directly
                             if let Some(ref expr) = ev.inline_expr {
+                                // Check if expression contains IO builtins — run async if so
+                                if crate::eval::expr_contains_io_builtin(expr) {
+                                    if let Some(sender) = &config.io_sender {
+                                        let program = session.program.clone();
+                                        let program_mut = crate::eval::make_shared_program_mut(&program);
+                                        let program_mut_clone = program_mut.clone();
+                                        let expr = expr.clone();
+                                        let sender = sender.clone();
+                                        let runtime_for_blocking = config.runtime.clone();
+                                        drop(session);
+                                        let eval_result = tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                            crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                        }).await;
+                                        let (msg, success) = match &eval_result {
+                                            Ok(Ok(val)) => (format!("= {val}"), true),
+                                            Ok(Err(e)) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
+                                            Err(e) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
+                                        };
+                                        eprintln!("[web:eval] {msg}");
+                                        iter_results.push(MutationResult { message: msg, success });
+                                        session = config.session.lock().await;
+                                        // Sync mutations back
+                                        if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                            session.program = mutated.clone();
+                                                *config.program.write().await = mutated;
+                                        }
+                                        continue;
+                                    }
+                                    // No IO sender — fall through to sync eval which will error
+                                }
                                 match crate::eval::eval_inline_expr(&session.program, expr) {
                                     Ok(val) => {
                                         let msg = format!("= {val}");
@@ -1642,6 +1754,8 @@ pub async fn ask(
                             if needs_async {
                                 if let Some(sender) = &config.io_sender {
                                     let program = session.program.clone();
+                                    let program_mut = crate::eval::make_shared_program_mut(&program);
+                                    let program_mut_clone = program_mut.clone();
                                     let fn_name = ev.function_name.clone();
                                     let input = ev.input.clone();
                                     let sender = sender.clone();
@@ -1649,10 +1763,12 @@ pub async fn ask(
                                     drop(session);
                                     let eval_result = tokio::task::spawn_blocking(move || {
                                         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                        crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                         let func = program.get_function(&fn_name)
                                             .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                        let mut env = crate::eval::Env::new();
+                                        let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
                                         env.populate_shared_from_program(&program);
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
                                         let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
@@ -1667,6 +1783,11 @@ pub async fn ask(
                                     eprintln!("[web:eval] {msg}");
                                     iter_results.push(MutationResult { message: msg, success });
                                     session = config.session.lock().await;
+                                    // Sync mutations back
+                                    if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                        session.program = mutated.clone();
+                                        *config.program.write().await = mutated;
+                                    }
                                 }
                             } else {
                                 match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
@@ -1975,7 +2096,7 @@ pub async fn ask(
                         | crate::parser::Operation::Return(_)) => {
                             match crate::validator::convert_statement_op(op) {
                                 Ok(stmt) => {
-                                    let mut env = crate::eval::Env::new();
+                                    let mut env = crate::eval::Env::new_with_shared_interner(&session.program.shared_interner);
                                     env.populate_shared_from_program(&session.program);
                                     if let Some(sender) = &config.io_sender {
                                         env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
@@ -2240,9 +2361,11 @@ pub async fn ask_stream(
             let plan_hint = if needs_plan {
                 "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
             } else { "" };
-            let context = format!("Working directory: {}\n{}{}\nUser: {}{}",
+            let load_errors_ctx = format_library_load_errors(&meta);
+            let context = format!("Working directory: {}\n{}{}{}\nUser: {}{}",
                 config_clone.project_dir,
                 program_summary,
+                load_errors_ctx,
                 plan_ctx, req.message, plan_hint);
             tx.log("user", &context).await;
             meta.chat_messages.push(crate::session::ChatMessage {
@@ -2455,6 +2578,43 @@ pub async fn ask_stream(
                             crate::parser::Operation::Eval(ev) => {
                                 // Inline expression: evaluate directly
                                 if let Some(ref expr) = ev.inline_expr {
+                                    // Check if expression contains IO builtins — run async if so
+                                    if crate::eval::expr_contains_io_builtin(expr) {
+                                        if let Some(sender) = &config_clone.io_sender {
+                                            let program = session.program.clone();
+                                            let program_mut = crate::eval::make_shared_program_mut(&program);
+                                            let program_mut_clone = program_mut.clone();
+                                            let expr = expr.clone();
+                                            let sender = sender.clone();
+                                            let runtime_for_blocking = config_clone.runtime.clone();
+                                            drop(session);
+                                            let eval_result = tokio::task::spawn_blocking(move || {
+                                                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                                crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                                crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                            }).await;
+                                            let (msg, success) = match &eval_result {
+                                                Ok(Ok(val)) => (format!("{val}"), true),
+                                                Ok(Err(e)) => (format!("eval error: {e}"), false),
+                                                Err(e) => (format!("eval task error: {e}"), false),
+                                            };
+                                            if success {
+                                                op_result.info(format!("= {msg}"));
+                                            } else {
+                                                op_result.error(&msg);
+                                            }
+                                            let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": "(inline)", "success": success})).await;
+                                            session = config_clone.session.lock().await;
+                                            // Sync mutations back
+                                            if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                                session.program = mutated.clone();
+                                                *config_clone.program.write().await = mutated;
+                                            }
+                                            continue;
+                                        }
+                                        // No IO sender — fall through to sync eval which will error
+                                    }
                                     match crate::eval::eval_inline_expr(&session.program, expr) {
                                         Ok(val) => {
                                             let msg = format!("{val}");
@@ -2489,6 +2649,8 @@ pub async fn ask_stream(
                                 if needs_async {
                                     if let Some(sender) = &config_clone.io_sender {
                                         let program = session.program.clone();
+                                        let program_mut = crate::eval::make_shared_program_mut(&program);
+                                        let program_mut_clone = program_mut.clone();
                                         let fn_name = ev.function_name.clone();
                                         let input = ev.input.clone();
                                         let sender = sender.clone();
@@ -2496,10 +2658,12 @@ pub async fn ask_stream(
                                         drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             let func = program.get_function(&fn_name)
                                                 .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                             let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                            let mut env = crate::eval::Env::new();
+                                            let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
                                             env.populate_shared_from_program(&program);
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
                                             let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
@@ -2518,6 +2682,11 @@ pub async fn ask_stream(
                                         }
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": ev.function_name, "success": success})).await;
                                         session = config_clone.session.lock().await;
+                                        // Sync mutations back
+                                        if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                            session.program = mutated.clone();
+                                            *config_clone.program.write().await = mutated;
+                                        }
                                     } else {
                                         op_result.error(format!("eval {}() = async not available [FAILED]", ev.function_name));
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": "async not available", "function": ev.function_name, "success": false})).await;
@@ -2554,7 +2723,7 @@ pub async fn ask_stream(
                             | crate::parser::Operation::Return(_) => {
                                 match crate::validator::convert_statement_op(op) {
                                     Ok(stmt) => {
-                                        let mut env = crate::eval::Env::new();
+                                        let mut env = crate::eval::Env::new_with_shared_interner(&session.program.shared_interner);
                                         env.populate_shared_from_program(&session.program);
                                         if let Some(sender) = &config_clone.io_sender {
                                             env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
@@ -2562,10 +2731,14 @@ pub async fn ask_stream(
                                             ));
                                         }
                                         let program = session.program.clone();
+                                        let program_mut = crate::eval::make_shared_program_mut(&program);
+                                        let program_mut_clone = program_mut.clone();
                                         let runtime_for_blocking = config_clone.runtime.clone();
                                         drop(session);
                                         let result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
                                         }).await;
                                         match result {
@@ -2584,6 +2757,11 @@ pub async fn ask_stream(
                                             }
                                         }
                                         session = config_clone.session.lock().await;
+                                        // Sync mutations back
+                                        if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                            session.program = mutated.clone();
+                                            *config_clone.program.write().await = mutated;
+                                        }
                                     }
                                     Err(e) => {
                                         op_result.error(format!("statement error: {e}"));
@@ -3255,6 +3433,42 @@ async fn session_eval(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
+                // Check if the expression contains IO builtins — run async if so
+                if eval::expr_contains_io_builtin(&expr) {
+                    if let Some(sender) = &config.io_sender {
+                        let program = program.clone();
+                        let program_mut = crate::eval::make_shared_program_mut(&program);
+                        let program_mut_clone = program_mut.clone();
+                        let sender = sender.clone();
+                        let runtime_for_blocking = config.runtime.clone();
+                        let eval_result = tokio::task::spawn_blocking(move || {
+                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                            eval::eval_inline_expr_with_io(&program, &expr, sender)
+                        }).await;
+                        // Note: session eval doesn't sync back to main session — mutations
+                        // are scoped to the session's program_lock
+                        return match eval_result {
+                            Ok(Ok(val)) => Json(EvalResponse {
+                                result: format!("{val}"),
+                                success: true,
+                                compiled: Some(false),
+                            }),
+                            Ok(Err(e)) => Json(EvalResponse {
+                                result: format!("{e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                            Err(e) => Json(EvalResponse {
+                                result: format!("task error: {e}"),
+                                success: false,
+                                compiled: None,
+                            }),
+                        };
+                    }
+                    // No IO sender — fall through to sync eval which will error
+                }
                 match eval::eval_inline_expr(&program, &expr) {
                     Ok(val) => {
                         return Json(EvalResponse {
@@ -3491,29 +3705,40 @@ async fn adapsis_route_dispatch(
     let body_str = String::from_utf8_lossy(&body).to_string();
 
     let runtime_for_blocking = config.runtime.clone();
+    let program_mut = crate::eval::make_shared_program_mut(&program);
+    let program_mut_clone = program_mut.clone();
 
     eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
 
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        crate::eval::set_shared_program_mut(Some(program_mut_clone));
         let func = program
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
-        let mut env = eval::Env::new();
+        let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.populate_shared_from_program(&program);
-        let input = eval::Value::String(body_str);
+        let input = eval::Value::string(body_str);
         eval::bind_input_to_params(&program, func, &input, &mut env);
         eval::eval_function_body_pub(&program, &func.body, &mut env)
     })
     .await;
+
+    // Sync mutations back to session if any occurred
+    if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+        let mut session = config.session.lock().await;
+        session.program = mutated.clone();
+        *config.program.write().await = mutated;
+    }
 
     match eval_result {
         Ok(Ok(val)) => {
             // Extract the raw string for HTTP response (no JSON quoting).
             // Infer content-type from the response body.
             let response_body = match &val {
-                eval::Value::String(s) => s.clone(),
+                eval::Value::String(s) => s.as_ref().clone(),
                 other => format!("{other}"),
             };
             let content_type = {

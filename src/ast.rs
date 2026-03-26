@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
 pub type NodeId = String;
 pub type Identifier = String;
+
+/// A compact interned name identifier for use in the evaluator's scope stack.
+/// This is a `u32` index into a `StringInterner` table — see `crate::intern`.
+pub type InternedName = crate::intern::InternedId;
 
 /// A registered HTTP route that dispatches to an Adapsis function.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,9 +26,33 @@ pub struct Program {
     pub modules: Vec<Module>,
     pub functions: Vec<Arc<FunctionDecl>>,
     pub types: Vec<TypeDecl>,
-    /// Maps function name → index in `functions` Vec. Derived index, not serialized.
+    /// Maps interned function name → index in `functions` Vec. Derived index, not serialized.
+    /// Uses `InternedId` (u32) keys instead of `String` for faster hash + comparison on lookup.
     #[serde(skip)]
-    fn_index: HashMap<String, usize>,
+    fn_index: HashMap<crate::intern::InternedId, usize>,
+    /// Maps interned module name → index in `modules` Vec. Derived index, not serialized.
+    /// Uses `InternedId` (u32) keys instead of `String` for faster hash + comparison on lookup.
+    #[serde(skip)]
+    module_index: HashMap<crate::intern::InternedId, usize>,
+    /// Pre-populated string interner containing all names in the AST (function names,
+    /// parameter names, variable names from let/set/await statements, match bindings, etc.).
+    /// Derived, not serialized — rebuilt by `rebuild_function_index()`.
+    /// The evaluator clones this into each `Env` so that name→id lookups on the hot path
+    /// are guaranteed cache hits (no allocation, no thread-local indirection).
+    #[serde(skip)]
+    pub interner: crate::intern::StringInterner,
+    /// Arc-backed snapshot of the interner for O(1) sharing with Env instances.
+    /// Rebuilt alongside `interner` by `rebuild_function_index()`.
+    /// Cloning this is an O(1) Arc reference-count bump instead of a full
+    /// HashMap + Vec clone.
+    #[serde(skip)]
+    pub shared_interner: crate::intern::SharedInterner,
+    /// Pre-built set of all union variant names (as interned IDs) across all types and modules.
+    /// Replaces the O(N×M) linear scan in `is_union_variant()` with O(1) HashSet lookup.
+    /// Uses `InternedId` (u32) instead of `String` for faster hash + comparison.
+    /// Derived, not serialized — rebuilt by `rebuild_function_index()`.
+    #[serde(skip)]
+    pub union_variants: HashSet<crate::intern::InternedId>,
     /// When true, reject top-level functions — must be inside a module. Set in AdapsisOS mode.
     #[serde(default)]
     pub require_modules: bool,
@@ -39,34 +67,301 @@ impl PartialEq for Program {
 }
 
 impl Program {
-    /// Rebuild the function name → index lookup table. Call after any mutation
-    /// to `self.functions`.
+    /// Rebuild all function name → index lookup tables. Call after any mutation
+    /// to `self.functions` or `self.modules`.
     pub fn rebuild_function_index(&mut self) {
+        // Pre-intern all names in the AST first so that index rebuilds below
+        // can use interned IDs instead of String keys.
+        self.intern_all_names();
+
         self.fn_index.clear();
         for (i, f) in self.functions.iter().enumerate() {
-            self.fn_index.insert(f.name.clone(), i);
+            let id = self.interner.intern(&f.name);
+            self.fn_index.insert(id, i);
+        }
+        // Rebuild module name index and per-module function indices
+        self.module_index.clear();
+        for (i, module) in self.modules.iter_mut().enumerate() {
+            let id = self.interner.intern(&module.name);
+            self.module_index.insert(id, i);
+            module.rebuild_function_index(&mut self.interner);
+        }
+        // Build the Arc-backed shared interner for O(1) Env creation.
+        self.shared_interner = self.interner.shared();
+        // Pre-build the set of all union variant names for O(1) lookup.
+        self.rebuild_union_variants();
+    }
+
+    /// Rebuild the set of all union variant names from type declarations.
+    /// Called by `rebuild_function_index()` after every mutation.
+    /// Uses interned IDs for O(1) integer-based lookups instead of string hashing.
+    fn rebuild_union_variants(&mut self) {
+        self.union_variants.clear();
+        for td in &self.types {
+            if let TypeDecl::TaggedUnion(u) = td {
+                for variant in &u.variants {
+                    let id = self.interner.intern(&variant.name);
+                    self.union_variants.insert(id);
+                }
+            }
+        }
+        for module in &self.modules {
+            Self::collect_union_variants_from_module(
+                &mut self.union_variants,
+                &mut self.interner,
+                module,
+            );
+        }
+    }
+
+    /// Collect union variant names from a module and its sub-modules recursively.
+    fn collect_union_variants_from_module(
+        variants: &mut HashSet<crate::intern::InternedId>,
+        interner: &mut crate::intern::StringInterner,
+        module: &Module,
+    ) {
+        for td in &module.types {
+            if let TypeDecl::TaggedUnion(u) = td {
+                for variant in &u.variants {
+                    let id = interner.intern(&variant.name);
+                    variants.insert(id);
+                }
+            }
+        }
+        for sub in &module.modules {
+            Self::collect_union_variants_from_module(variants, interner, sub);
+        }
+    }
+
+    /// Check if a name is a union variant in O(1) using the pre-built interned ID set.
+    /// Looks up the name in the interner first — if not interned, it can't be a variant.
+    pub fn is_union_variant(&self, name: &str) -> bool {
+        if let Some(id) = self.interner.get(name) {
+            self.union_variants.contains(&id)
+        } else {
+            false
+        }
+    }
+
+    /// Walk the entire AST and intern every name (function names, parameter names,
+    /// variable names from let/set/await/each/match statements, identifiers in
+    /// expressions). This populates `self.interner` so that cloning it into an
+    /// `Env` guarantees all name→id lookups are cache hits.
+    pub fn intern_all_names(&mut self) {
+        // Intern a few well-known names that the evaluator uses as internal keys
+        self.interner.intern("__coroutine_handle");
+        self.interner.intern("true");
+        self.interner.intern("false");
+
+        // Top-level functions
+        for func in &self.functions {
+            Self::intern_function_names(&mut self.interner, func);
+        }
+        // Modules and their functions
+        for module in &self.modules {
+            self.interner.intern(&module.name);
+            for func in &module.functions {
+                Self::intern_function_names(&mut self.interner, func);
+            }
+            // Shared vars
+            for sv in &module.shared_vars {
+                self.interner.intern(&sv.name);
+            }
+            // Sub-modules (recursive)
+            Self::intern_module_names_recursive(&mut self.interner, module);
+        }
+        // Type declarations
+        for td in &self.types {
+            Self::intern_type_decl_names(&mut self.interner, td);
+        }
+    }
+
+    /// Intern all names within a function declaration: function name, parameter
+    /// names, and all names referenced in the body statements/expressions.
+    fn intern_function_names(interner: &mut crate::intern::StringInterner, func: &FunctionDecl) {
+        interner.intern(&func.name);
+        for param in &func.params {
+            interner.intern(&param.name);
+        }
+        Self::intern_body_names(interner, &func.body);
+    }
+
+    /// Intern all names in a statement body (recursive for nested blocks).
+    fn intern_body_names(interner: &mut crate::intern::StringInterner, body: &[Statement]) {
+        for stmt in body {
+            match &stmt.kind {
+                StatementKind::Let { name, value, .. } => {
+                    interner.intern(name);
+                    Self::intern_expr_names(interner, value);
+                }
+                StatementKind::Set { name, value } => {
+                    interner.intern(name);
+                    Self::intern_expr_names(interner, value);
+                }
+                StatementKind::Await { name, call, .. } => {
+                    interner.intern(name);
+                    interner.intern(&call.callee);
+                    for arg in &call.args {
+                        Self::intern_expr_names(interner, arg);
+                    }
+                }
+                StatementKind::Call { binding, call } => {
+                    if let Some(b) = binding {
+                        interner.intern(&b.name);
+                    }
+                    interner.intern(&call.callee);
+                    for arg in &call.args {
+                        Self::intern_expr_names(interner, arg);
+                    }
+                }
+                StatementKind::Each {
+                    iterator,
+                    binding,
+                    body,
+                } => {
+                    interner.intern(&binding.name);
+                    Self::intern_expr_names(interner, iterator);
+                    Self::intern_body_names(interner, body);
+                }
+                StatementKind::Match { expr, arms } => {
+                    Self::intern_expr_names(interner, expr);
+                    for arm in arms {
+                        interner.intern(&arm.variant);
+                        for b in &arm.bindings {
+                            interner.intern(b);
+                        }
+                        Self::intern_body_names(interner, &arm.body);
+                    }
+                }
+                StatementKind::Branch {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    Self::intern_expr_names(interner, condition);
+                    Self::intern_body_names(interner, then_body);
+                    Self::intern_body_names(interner, else_body);
+                }
+                StatementKind::While { condition, body } => {
+                    Self::intern_expr_names(interner, condition);
+                    Self::intern_body_names(interner, body);
+                }
+                StatementKind::Return { value } => {
+                    Self::intern_expr_names(interner, value);
+                }
+                StatementKind::Check { condition, .. } => {
+                    Self::intern_expr_names(interner, condition);
+                }
+                StatementKind::Spawn { call, binding } => {
+                    interner.intern(&call.callee);
+                    for arg in &call.args {
+                        Self::intern_expr_names(interner, arg);
+                    }
+                    if let Some(b) = binding {
+                        interner.intern(&b.name);
+                    }
+                }
+                StatementKind::Yield { value } => {
+                    Self::intern_expr_names(interner, value);
+                }
+            }
+        }
+    }
+
+    /// Intern all names in an expression (recursive).
+    fn intern_expr_names(interner: &mut crate::intern::StringInterner, expr: &Expr) {
+        match expr {
+            Expr::Identifier(name) => {
+                interner.intern(name);
+            }
+            Expr::FieldAccess { base, field } => {
+                Self::intern_expr_names(interner, base);
+                interner.intern(field);
+            }
+            Expr::Call(call) => {
+                interner.intern(&call.callee);
+                for arg in &call.args {
+                    Self::intern_expr_names(interner, arg);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::intern_expr_names(interner, left);
+                Self::intern_expr_names(interner, right);
+            }
+            Expr::Unary { expr: inner, .. } => {
+                Self::intern_expr_names(interner, inner);
+            }
+            Expr::StructInit { ty, fields } => {
+                interner.intern(ty);
+                for f in fields {
+                    interner.intern(&f.name);
+                    Self::intern_expr_names(interner, &f.value);
+                }
+            }
+            Expr::Literal(_) => {}
+        }
+    }
+
+    /// Intern names from sub-modules recursively.
+    fn intern_module_names_recursive(
+        interner: &mut crate::intern::StringInterner,
+        module: &Module,
+    ) {
+        for sub in &module.modules {
+            interner.intern(&sub.name);
+            for func in &sub.functions {
+                Self::intern_function_names(interner, func);
+            }
+            for sv in &sub.shared_vars {
+                interner.intern(&sv.name);
+            }
+            Self::intern_module_names_recursive(interner, sub);
+        }
+    }
+
+    /// Intern names from type declarations.
+    fn intern_type_decl_names(interner: &mut crate::intern::StringInterner, td: &TypeDecl) {
+        match td {
+            TypeDecl::Struct(s) => {
+                interner.intern(&s.name);
+                for f in &s.fields {
+                    interner.intern(&f.name);
+                }
+            }
+            TypeDecl::TaggedUnion(u) => {
+                interner.intern(&u.name);
+                for v in &u.variants {
+                    interner.intern(&v.name);
+                }
+            }
         }
     }
 
     pub fn get_function(&self, name: &str) -> Option<&FunctionDecl> {
-        // Module-qualified lookup: "Module.func"
+        // Module-qualified lookup: "Module.func" — use module_index for O(1) module lookup
         if let Some((module_name, function_name)) = name.split_once('.') {
+            if !self.module_index.is_empty() {
+                let mod_id = self.interner.get(module_name)?;
+                return self
+                    .module_index
+                    .get(&mod_id)
+                    .and_then(|&idx| self.modules.get(idx))
+                    .and_then(|module| {
+                        module.get_function_interned(function_name, &self.interner)
+                    });
+            }
+            // Fallback: linear scan if module index not built
             return self
                 .modules
                 .iter()
                 .find(|module| module.name == module_name)
-                .and_then(|module| {
-                    module
-                        .functions
-                        .iter()
-                        .find(|function| function.name == function_name)
-                        .map(|f| f.as_ref())
-                });
+                .and_then(|module| module.get_function(function_name));
         }
 
         // Use index for O(1) lookup on top-level functions
         if !self.fn_index.is_empty() {
-            if let Some(&idx) = self.fn_index.get(name) {
+            let fn_id = self.interner.get(name)?;
+            if let Some(&idx) = self.fn_index.get(&fn_id) {
                 return self.functions.get(idx).map(|f| f.as_ref());
             }
         } else if let Some(f) = self.functions.iter().find(|function| function.name == name) {
@@ -76,35 +371,39 @@ impl Program {
         }
 
         // Search inside modules for unqualified name
-        self.modules.iter().find_map(|module| {
-            module
-                .functions
-                .iter()
-                .find(|function| function.name == name)
-                .map(|f| f.as_ref())
-        })
+        self.modules
+            .iter()
+            .find_map(|module| module.get_function(name))
     }
 
     pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionDecl> {
-        // Module-qualified lookup: "Module.func"
+        // Module-qualified lookup: "Module.func" — use module_index for O(1) module lookup
         if let Some((module_name, function_name)) = name.split_once('.') {
+            if !self.module_index.is_empty() {
+                // Intern lookup first (copies the u32), then use it — avoids borrow conflict.
+                let mod_id = self.interner.get(module_name)?;
+                if let Some(&idx) = self.module_index.get(&mod_id) {
+                    return self.modules.get_mut(idx).and_then(|module| {
+                        module.get_function_mut_interned(function_name, &self.interner)
+                    });
+                }
+                return None;
+            }
+            // Fallback: linear scan if module index not built
             return self
                 .modules
                 .iter_mut()
                 .find(|module| module.name == module_name)
-                .and_then(|module| {
-                    module
-                        .functions
-                        .iter_mut()
-                        .find(|function| function.name == function_name)
-                        .map(|f| Arc::make_mut(f))
-                });
+                .and_then(|module| module.get_function_mut(function_name));
         }
 
         // Use index for O(1) lookup on top-level functions
         if !self.fn_index.is_empty() {
-            if let Some(&idx) = self.fn_index.get(name) {
-                return self.functions.get_mut(idx).map(|f| Arc::make_mut(f));
+            // Intern lookup first (copies the u32), then use it — avoids borrow conflict.
+            if let Some(fn_id) = self.interner.get(name) {
+                if let Some(&idx) = self.fn_index.get(&fn_id) {
+                    return self.functions.get_mut(idx).map(|f| Arc::make_mut(f));
+                }
             }
         } else if let Some(f) = self
             .functions
@@ -115,13 +414,9 @@ impl Program {
         }
 
         // Search inside modules for unqualified name
-        self.modules.iter_mut().find_map(|module| {
-            module
-                .functions
-                .iter_mut()
-                .find(|function| function.name == name)
-                .map(|f| Arc::make_mut(f))
-        })
+        self.modules
+            .iter_mut()
+            .find_map(|module| module.get_function_mut(name))
     }
 }
 
@@ -166,7 +461,7 @@ pub struct SharedVarDecl {
     pub default: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
     pub id: NodeId,
     pub name: Identifier,
@@ -175,6 +470,91 @@ pub struct Module {
     pub modules: Vec<Module>,
     #[serde(default)]
     pub shared_vars: Vec<SharedVarDecl>,
+    /// Maps interned function name → index in this module's `functions` Vec.
+    /// Uses `InternedId` (u32) keys for faster hash + comparison on lookup.
+    /// Derived index, not serialized. Public so validators can construct Module literals.
+    #[serde(skip)]
+    pub fn_index: HashMap<crate::intern::InternedId, usize>,
+}
+
+impl PartialEq for Module {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.types == other.types
+            && self.functions == other.functions
+            && self.modules == other.modules
+            && self.shared_vars == other.shared_vars
+    }
+}
+
+impl Module {
+    /// Rebuild the per-module function name → index lookup table using interned IDs.
+    pub fn rebuild_function_index(&mut self, interner: &mut crate::intern::StringInterner) {
+        self.fn_index.clear();
+        for (i, f) in self.functions.iter().enumerate() {
+            let id = interner.intern(&f.name);
+            self.fn_index.insert(id, i);
+        }
+        // Recurse into sub-modules
+        for sub in &mut self.modules {
+            sub.rebuild_function_index(interner);
+        }
+    }
+
+    /// O(1) function lookup within this module using the index.
+    /// Falls back to linear scan if the index hasn't been built.
+    pub fn get_function(&self, name: &str) -> Option<&FunctionDecl> {
+        // Fallback: linear scan (used when index not yet built, e.g. before rebuild)
+        self.functions
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.as_ref())
+    }
+
+    /// O(1) function lookup using the interned ID index.
+    /// Called from `Program::get_function` which has access to the interner.
+    pub fn get_function_interned(
+        &self,
+        name: &str,
+        interner: &crate::intern::StringInterner,
+    ) -> Option<&FunctionDecl> {
+        if !self.fn_index.is_empty() {
+            let fn_id = interner.get(name)?;
+            if let Some(&idx) = self.fn_index.get(&fn_id) {
+                return self.functions.get(idx).map(|f| f.as_ref());
+            }
+            return None;
+        }
+        // Fallback: linear scan if index not yet built
+        self.get_function(name)
+    }
+
+    /// O(1) mutable function lookup within this module using the index.
+    pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionDecl> {
+        // Fallback: linear scan (used when index not yet built)
+        self.functions
+            .iter_mut()
+            .find(|f| f.name == name)
+            .map(|f| Arc::make_mut(f))
+    }
+
+    /// O(1) mutable function lookup using the interned ID index.
+    /// Called from `Program::get_function_mut` which has access to the interner.
+    pub fn get_function_mut_interned(
+        &mut self,
+        name: &str,
+        interner: &crate::intern::StringInterner,
+    ) -> Option<&mut FunctionDecl> {
+        if !self.fn_index.is_empty() {
+            let fn_id = interner.get(name)?;
+            if let Some(&idx) = self.fn_index.get(&fn_id) {
+                return self.functions.get_mut(idx).map(|f| Arc::make_mut(f));
+            }
+            return None;
+        }
+        self.get_function_mut(name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -517,6 +897,7 @@ mod tests {
             functions,
             modules: vec![],
             shared_vars: vec![],
+            fn_index: HashMap::new(),
         }
     }
 
@@ -576,12 +957,24 @@ mod tests {
     }
 
     #[test]
-    fn get_function_qualified_wrong_module() {
+    fn module_get_function_mut_with_index() {
         let mut program = Program::default();
         program
             .modules
             .push(make_module("Math", vec![make_fn("add", Type::Int)]));
-        assert!(program.get_function("Utils.add").is_none());
+        program.rebuild_function_index();
+
+        // Mutable lookup via index
+        let func = program.get_function_mut("Math.add");
+        assert!(
+            func.is_some(),
+            "mutable qualified lookup should work with index"
+        );
+        func.unwrap().name = "add_v2".to_string();
+
+        // Rebuild index after mutation so the new name is discoverable
+        program.rebuild_function_index();
+        assert!(program.get_function("Math.add_v2").is_some());
     }
 
     #[test]
@@ -1619,5 +2012,426 @@ mod tests {
         assert_eq!(tc.input, "x=5");
         assert!(!tc.passed);
         assert!(tc.matcher.is_none());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Module index and per-module fn_index tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_index_enables_fast_qualified_lookup() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        program
+            .modules
+            .push(make_module("Strings", vec![make_fn("trim", Type::String)]));
+        program.rebuild_function_index();
+
+        // Qualified lookup should use module_index + per-module fn_index
+        let func = program.get_function("Math.add");
+        assert!(func.is_some(), "Math.add should be found via module index");
+        assert_eq!(func.unwrap().name, "add");
+
+        let func = program.get_function("Strings.trim");
+        assert!(
+            func.is_some(),
+            "Strings.trim should be found via module index"
+        );
+        assert_eq!(func.unwrap().name, "trim");
+    }
+
+    #[test]
+    fn module_index_qualified_not_found() {
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        program.rebuild_function_index();
+
+        // Non-existent module
+        assert!(program.get_function("NonExistent.add").is_none());
+        // Non-existent function in existing module
+        assert!(program.get_function("Math.subtract").is_none());
+    }
+
+    #[test]
+    fn module_fn_index_rebuild() {
+        let mut program = Program::default();
+        program.modules.push(make_module(
+            "Mod",
+            vec![make_fn("alpha", Type::Int), make_fn("beta", Type::String)],
+        ));
+        program.rebuild_function_index();
+
+        // Both functions should be findable
+        assert!(program.get_function("Mod.alpha").is_some());
+        assert!(program.get_function("Mod.beta").is_some());
+
+        // Verify per-module fn_index is populated
+        assert!(!program.modules[0].fn_index.is_empty());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Union variant HashSet (name interning optimization)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn union_variant_set_populated_after_rebuild() {
+        let mut program = Program::default();
+        program.types.push(TypeDecl::TaggedUnion(TaggedUnionDecl {
+            id: String::new(),
+            name: "Color".to_string(),
+            variants: vec![
+                UnionVariant {
+                    id: String::new(),
+                    name: "Red".to_string(),
+                    payload: vec![],
+                },
+                UnionVariant {
+                    id: String::new(),
+                    name: "Green".to_string(),
+                    payload: vec![],
+                },
+                UnionVariant {
+                    id: String::new(),
+                    name: "Blue".to_string(),
+                    payload: vec![],
+                },
+            ],
+        }));
+        program.rebuild_function_index();
+
+        assert!(program.is_union_variant("Red"));
+        assert!(program.is_union_variant("Green"));
+        assert!(program.is_union_variant("Blue"));
+        assert!(!program.is_union_variant("Yellow"));
+        assert!(!program.is_union_variant("Color")); // type name, not a variant
+    }
+
+    #[test]
+    fn union_variant_set_includes_module_types() {
+        let mut program = Program::default();
+        let mut module = make_module("MyModule", vec![]);
+        module.types.push(TypeDecl::TaggedUnion(TaggedUnionDecl {
+            id: String::new(),
+            name: "Shape".to_string(),
+            variants: vec![
+                UnionVariant {
+                    id: String::new(),
+                    name: "Circle".to_string(),
+                    payload: vec![Type::Float],
+                },
+                UnionVariant {
+                    id: String::new(),
+                    name: "Square".to_string(),
+                    payload: vec![],
+                },
+            ],
+        }));
+        program.modules.push(module);
+        program.rebuild_function_index();
+
+        assert!(program.is_union_variant("Circle"));
+        assert!(program.is_union_variant("Square"));
+        assert!(!program.is_union_variant("Triangle"));
+    }
+
+    #[test]
+    fn union_variant_set_empty_when_no_types() {
+        let mut program = Program::default();
+        program.functions.push(make_fn("foo", Type::Int));
+        program.rebuild_function_index();
+
+        assert!(!program.is_union_variant("anything"));
+        assert!(program.union_variants.is_empty());
+    }
+
+    #[test]
+    fn interner_populated_after_rebuild() {
+        let mut program = Program::default();
+        program.functions.push(make_fn_with_params(
+            "add",
+            vec![("x", Type::Int), ("y", Type::Int)],
+            Type::Int,
+        ));
+        program.rebuild_function_index();
+
+        // Function name and parameter names should be interned
+        assert!(program.interner.get("add").is_some());
+        assert!(program.interner.get("x").is_some());
+        assert!(program.interner.get("y").is_some());
+        // Well-known names should also be interned
+        assert!(program.interner.get("true").is_some());
+        assert!(program.interner.get("false").is_some());
+        assert!(program.interner.get("__coroutine_handle").is_some());
+        // Unknown names should not be interned
+        assert!(program.interner.get("nonexistent_var").is_none());
+    }
+
+    #[test]
+    fn interner_populated_for_modules() {
+        let mut program = Program::default();
+        let module = Module {
+            id: "mod_math".to_string(),
+            name: "Math".to_string(),
+            types: vec![],
+            functions: vec![make_fn_with_params(
+                "square",
+                vec![("n", Type::Int)],
+                Type::Int,
+            )],
+            modules: vec![],
+            shared_vars: vec![SharedVarDecl {
+                name: "counter".to_string(),
+                ty: Type::Int,
+                default: Expr::Literal(Literal::Int(0)),
+            }],
+            fn_index: HashMap::new(),
+        };
+        program.modules.push(module);
+        program.rebuild_function_index();
+
+        assert!(program.interner.get("Math").is_some(), "module name");
+        assert!(
+            program.interner.get("square").is_some(),
+            "module function name"
+        );
+        assert!(program.interner.get("n").is_some(), "module function param");
+        assert!(program.interner.get("counter").is_some(), "shared var name");
+    }
+
+    #[test]
+    fn interner_populated_for_type_decls() {
+        let mut program = Program::default();
+        program.types.push(TypeDecl::Struct(StructDecl {
+            id: "struct_user".to_string(),
+            name: "User".to_string(),
+            fields: vec![
+                FieldDecl {
+                    id: "f1".to_string(),
+                    name: "name".to_string(),
+                    ty: Type::String,
+                },
+                FieldDecl {
+                    id: "f2".to_string(),
+                    name: "age".to_string(),
+                    ty: Type::Int,
+                },
+            ],
+        }));
+        program.types.push(TypeDecl::TaggedUnion(TaggedUnionDecl {
+            id: "union_color".to_string(),
+            name: "Color".to_string(),
+            variants: vec![
+                UnionVariant {
+                    id: "v1".to_string(),
+                    name: "Red".to_string(),
+                    payload: vec![],
+                },
+                UnionVariant {
+                    id: "v2".to_string(),
+                    name: "Green".to_string(),
+                    payload: vec![],
+                },
+            ],
+        }));
+        program.rebuild_function_index();
+
+        assert!(program.interner.get("User").is_some(), "struct name");
+        assert!(program.interner.get("name").is_some(), "struct field name");
+        assert!(program.interner.get("age").is_some(), "struct field name");
+        assert!(program.interner.get("Color").is_some(), "union name");
+        assert!(program.interner.get("Red").is_some(), "union variant name");
+        assert!(
+            program.interner.get("Green").is_some(),
+            "union variant name"
+        );
+    }
+
+    #[test]
+    fn interner_empty_program_has_wellknown_names() {
+        let mut program = Program::default();
+        program.rebuild_function_index();
+
+        // Even an empty program should intern well-known names
+        assert!(program.interner.get("__coroutine_handle").is_some());
+        assert!(program.interner.get("true").is_some());
+        assert!(program.interner.get("false").is_some());
+        // But nothing else
+        assert!(program.interner.len() >= 3);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // fn_index / module_index / union_variants use InternedId keys
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fn_index_uses_interned_ids_after_rebuild() {
+        // Verify that fn_index keys are InternedId values matching the interner
+        let mut program = Program::default();
+        program.functions.push(make_fn("alpha", Type::Int));
+        program.functions.push(make_fn("beta", Type::String));
+        program.rebuild_function_index();
+
+        let alpha_id = program
+            .interner
+            .get("alpha")
+            .expect("alpha should be interned");
+        let beta_id = program
+            .interner
+            .get("beta")
+            .expect("beta should be interned");
+
+        // fn_index should contain these interned ids as keys
+        assert!(program.fn_index.contains_key(&alpha_id));
+        assert!(program.fn_index.contains_key(&beta_id));
+
+        // And the indices should point to the right functions
+        let &alpha_idx = program.fn_index.get(&alpha_id).unwrap();
+        assert_eq!(program.functions[alpha_idx].name, "alpha");
+        let &beta_idx = program.fn_index.get(&beta_id).unwrap();
+        assert_eq!(program.functions[beta_idx].name, "beta");
+    }
+
+    #[test]
+    fn module_index_uses_interned_ids_after_rebuild() {
+        // Verify that module_index keys are InternedId values
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        program
+            .modules
+            .push(make_module("Strings", vec![make_fn("trim", Type::String)]));
+        program.rebuild_function_index();
+
+        let math_id = program
+            .interner
+            .get("Math")
+            .expect("Math should be interned");
+        let strings_id = program
+            .interner
+            .get("Strings")
+            .expect("Strings should be interned");
+
+        assert!(program.module_index.contains_key(&math_id));
+        assert!(program.module_index.contains_key(&strings_id));
+
+        let &math_idx = program.module_index.get(&math_id).unwrap();
+        assert_eq!(program.modules[math_idx].name, "Math");
+    }
+
+    #[test]
+    fn module_fn_index_uses_interned_ids() {
+        // Per-module fn_index should also use InternedId keys
+        let mut program = Program::default();
+        program.modules.push(make_module(
+            "Mod",
+            vec![make_fn("foo", Type::Int), make_fn("bar", Type::String)],
+        ));
+        program.rebuild_function_index();
+
+        let foo_id = program.interner.get("foo").expect("foo should be interned");
+        let bar_id = program.interner.get("bar").expect("bar should be interned");
+
+        assert!(program.modules[0].fn_index.contains_key(&foo_id));
+        assert!(program.modules[0].fn_index.contains_key(&bar_id));
+    }
+
+    #[test]
+    fn union_variants_uses_interned_ids() {
+        // union_variants should be HashSet<InternedId> not HashSet<String>
+        let mut program = Program::default();
+        program.types.push(TypeDecl::TaggedUnion(TaggedUnionDecl {
+            id: String::new(),
+            name: "Color".to_string(),
+            variants: vec![
+                UnionVariant {
+                    id: String::new(),
+                    name: "Red".to_string(),
+                    payload: vec![],
+                },
+                UnionVariant {
+                    id: String::new(),
+                    name: "Green".to_string(),
+                    payload: vec![],
+                },
+            ],
+        }));
+        program.rebuild_function_index();
+
+        let red_id = program.interner.get("Red").expect("Red should be interned");
+        let green_id = program
+            .interner
+            .get("Green")
+            .expect("Green should be interned");
+
+        assert!(program.union_variants.contains(&red_id));
+        assert!(program.union_variants.contains(&green_id));
+
+        // is_union_variant should still work via string interface
+        assert!(program.is_union_variant("Red"));
+        assert!(program.is_union_variant("Green"));
+        assert!(!program.is_union_variant("Blue"));
+    }
+
+    #[test]
+    fn get_function_with_uninterned_name_returns_none() {
+        // Looking up a name that was never interned should return None, not panic
+        let mut program = Program::default();
+        program.functions.push(make_fn("known", Type::Int));
+        program.rebuild_function_index();
+
+        // "known" exists
+        assert!(program.get_function("known").is_some());
+        // "unknown" was never interned — should gracefully return None
+        assert!(program.get_function("unknown").is_none());
+    }
+
+    #[test]
+    fn get_function_qualified_with_uninterned_module_returns_none() {
+        // Looking up "UnknownModule.func" where the module name was never interned
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        program.rebuild_function_index();
+
+        assert!(program.get_function("Math.add").is_some());
+        assert!(program.get_function("Fake.add").is_none());
+    }
+
+    #[test]
+    fn get_function_mut_with_interned_index() {
+        // get_function_mut should work through the interned fn_index
+        let mut program = Program::default();
+        program.functions.push(make_fn("greet", Type::String));
+        program.rebuild_function_index();
+
+        let func = program.get_function_mut("greet");
+        assert!(func.is_some());
+        assert_eq!(func.unwrap().name, "greet");
+
+        // Non-existent function
+        assert!(program.get_function_mut("missing").is_none());
+    }
+
+    #[test]
+    fn get_function_mut_qualified_with_interned_index() {
+        // get_function_mut with module-qualified name through interned indices
+        let mut program = Program::default();
+        program
+            .modules
+            .push(make_module("Math", vec![make_fn("add", Type::Int)]));
+        program.rebuild_function_index();
+
+        let func = program.get_function_mut("Math.add");
+        assert!(func.is_some());
+        assert_eq!(func.unwrap().name, "add");
+
+        assert!(program.get_function_mut("Math.subtract").is_none());
+        assert!(program.get_function_mut("Fake.add").is_none());
     }
 }
