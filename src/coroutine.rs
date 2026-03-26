@@ -907,6 +907,9 @@ impl CoroutineHandle {
                 }
                 // Update the read-only snapshot so query builtins see the changes
                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                if let Some(rt) = crate::eval::get_shared_runtime() {
+                    crate::eval::init_missing_shared_runtime_vars(&program, &rt);
+                }
                 let summary = if applied == 1 {
                     format!("Applied 1 mutation: {}", messages[0])
                 } else {

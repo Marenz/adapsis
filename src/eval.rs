@@ -415,6 +415,54 @@ impl Env {
             .insert(id, value);
     }
 
+    fn current_module_name(&self) -> Option<String> {
+        FN_NAME_STACK.with(|s| {
+            let stack = s.borrow();
+            stack
+                .last()
+                .and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
+        })
+    }
+
+    fn shared_key(&self, name: &str) -> Option<String> {
+        self.current_module_name()
+            .map(|module| format!("{module}.{name}"))
+    }
+
+    fn read_shared_value(&mut self, key: &str) -> Option<Value> {
+        if let Some(rt) = &self.shared_runtime {
+            if let Ok(state) = rt.read() {
+                if let Some(value) = state.shared_vars.get(key) {
+                    let value = value.clone();
+                    self.shared_cache.insert(key.to_string(), value.clone());
+                    return Some(value);
+                }
+            }
+        }
+        self.shared_cache.get(key).cloned()
+    }
+
+    fn materialize_shared_value(&mut self, name: &str) -> Option<(String, Value)> {
+        let key = self.shared_key(name)?;
+        if let Some(value) = self.read_shared_value(&key) {
+            return Some((key, value));
+        }
+
+        let program = get_shared_program()?;
+        let module_name = self.current_module_name()?;
+        let module = program.modules.iter().find(|m| m.name == module_name)?;
+        let shared = module.shared_vars.iter().find(|sv| sv.name == name)?;
+        let value = eval_expr_standalone(&program, &shared.default).unwrap_or(Value::Int(0));
+
+        if let Some(rt) = &self.shared_runtime {
+            if let Ok(mut state) = rt.write() {
+                state.shared_vars.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        self.shared_cache.insert(key.clone(), value.clone());
+        Some((key, value))
+    }
+
     /// Mutate an existing variable: walk scopes top-to-bottom, update the
     /// first scope that contains `name`. If not found in local scopes, check
     /// shared vars (keyed by "Module.name"). If still not found, insert into
@@ -427,25 +475,14 @@ impl Env {
                 return;
             }
         }
-        // Check shared vars: derive "Module.name" key from current function context
-        if !self.shared_cache.is_empty() {
-            let module_name = FN_NAME_STACK.with(|s| {
-                let stack = s.borrow();
-                stack.last().and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
-            });
-            if let Some(module) = module_name {
-                let key = format!("{module}.{name}");
-                if self.shared_cache.contains_key(&key) {
-                    // Write through to runtime first (clone key for runtime, move into cache)
-                    if let Some(rt) = &self.shared_runtime {
-                        if let Ok(mut state) = rt.write() {
-                            state.shared_vars.insert(key.clone(), value.clone());
-                        }
-                    }
-                    self.shared_cache.insert(key, value);
-                    return;
+        if let Some((key, _)) = self.materialize_shared_value(name) {
+            if let Some(rt) = &self.shared_runtime {
+                if let Ok(mut state) = rt.write() {
+                    state.shared_vars.insert(key.clone(), value.clone());
                 }
             }
+            self.shared_cache.insert(key, value);
+            return;
         }
         // Not found anywhere — define in current scope
         self.set(name, value);
@@ -453,25 +490,15 @@ impl Env {
 
     /// Look up a variable by walking scopes from top to bottom.
     /// Falls back to shared vars cache (keyed by "Module.name") if not found locally.
-    fn get(&self, name: &str) -> Result<&Value> {
+    fn get(&mut self, name: &str) -> Result<Value> {
         let id = self.intern_name(name);
         for scope in self.scopes.iter().rev() {
             if let Some(val) = scope.get(&id) {
-                return Ok(val);
+                return Ok(val.clone());
             }
         }
-        // Check shared vars: derive "Module.name" key from current function context
-        if !self.shared_cache.is_empty() {
-            let module_name = FN_NAME_STACK.with(|s| {
-                let stack = s.borrow();
-                stack.last().and_then(|fn_name| fn_name.split_once('.').map(|(m, _)| m.to_string()))
-            });
-            if let Some(module) = module_name {
-                let key = format!("{module}.{name}");
-                if let Some(val) = self.shared_cache.get(&key) {
-                    return Ok(val);
-                }
-            }
+        if let Some((_, value)) = self.materialize_shared_value(name) {
+            return Ok(value);
         }
         Err(anyhow!("undefined variable `{name}`"))
     }
@@ -723,6 +750,10 @@ pub fn eval_call_with_input(
 ) -> Result<String> {
     // Install the program's interner for Value::Display resolution.
     intern::set_display_interner(&program.shared_interner);
+    set_shared_program(Some(std::sync::Arc::new(program.clone())));
+    if let Some(rt) = get_shared_runtime() {
+        init_missing_shared_runtime_vars(program, &rt);
+    }
     // Try user-defined function first
     if let Some(func) = program.get_function(function_name) {
         let input_val = eval_parser_expr_standalone(input)?;
@@ -791,6 +822,10 @@ pub fn eval_call_with_input(
 pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<Value> {
     // Install the program's interner for Value::Display resolution.
     intern::set_display_interner(&program.shared_interner);
+    set_shared_program(Some(std::sync::Arc::new(program.clone())));
+    if let Some(rt) = get_shared_runtime() {
+        init_missing_shared_runtime_vars(program, &rt);
+    }
     eval_parser_expr_with_program(expr, program)
 }
 
@@ -803,6 +838,10 @@ pub fn eval_inline_expr_with_io(
     expr: &parser::Expr,
     io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
 ) -> Result<Value> {
+    set_shared_program(Some(std::sync::Arc::new(program.clone())));
+    if let Some(rt) = get_shared_runtime() {
+        init_missing_shared_runtime_vars(program, &rt);
+    }
     let handle = crate::coroutine::CoroutineHandle::new(io_sender);
     let mut env = Env::new_with_shared_interner(&program.shared_interner);
     env.populate_shared_from_program(program);
@@ -1055,6 +1094,34 @@ pub fn eval_test_case(
     eval_test_case_with_mocks(program, function_name, case, &[], &[])
 }
 
+pub fn init_missing_shared_runtime_vars(
+    program: &ast::Program,
+    runtime: &crate::session::SharedRuntime,
+) {
+    let mut missing = Vec::new();
+    if let Ok(state) = runtime.read() {
+        for module in &program.modules {
+            for shared in &module.shared_vars {
+                let key = format!("{}.{}", module.name, shared.name);
+                if !state.shared_vars.contains_key(&key) {
+                    let value = eval_expr_standalone(program, &shared.default).unwrap_or(Value::Int(0));
+                    missing.push((key, value));
+                }
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return;
+    }
+
+    if let Ok(mut state) = runtime.write() {
+        for (key, value) in missing {
+            state.shared_vars.entry(key).or_insert(value);
+        }
+    }
+}
+
 pub fn eval_test_case_with_mocks(
     program: &ast::Program,
     function_name: &str,
@@ -1064,6 +1131,10 @@ pub fn eval_test_case_with_mocks(
 ) -> Result<String> {
     // Install the program's interner for Value::Display resolution.
     intern::set_display_interner(&program.shared_interner);
+    set_shared_program(Some(std::sync::Arc::new(program.clone())));
+    if let Some(rt) = get_shared_runtime() {
+        init_missing_shared_runtime_vars(program, &rt);
+    }
     let func = program
         .get_function(function_name)
         .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
@@ -2652,7 +2723,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                 _ => {
                     // Try variable first
                     if let Ok(val) = env.get(name) {
-                        Ok(val.clone())
+                        Ok(val)
                     } else if is_union_variant(program, name) {
                         // No-payload union variant
                         Ok(Value::Union {
@@ -3020,7 +3091,7 @@ fn eval_parser_expr_with_env(
         parser::Expr::Ident(name) => {
             // Check env first (for variables bound by the caller)
             if let Ok(val) = env.get(name) {
-                return Ok(val.clone());
+                return Ok(val);
             }
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
@@ -6843,7 +6914,7 @@ mod tests {
     #[test]
     fn test_env_interned_undefined_variable() {
         // Looking up a variable that doesn't exist should return an error
-        let env = Env::new();
+        let mut env = Env::new();
         let result = env.get("nonexistent");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -6899,7 +6970,7 @@ mod tests {
         env.set("e", Value::None);
 
         assert!(matches!(env.get("a").unwrap(), Value::Int(1)));
-        assert!(matches!(env.get("b").unwrap(), Value::Float(f) if (*f - 2.5).abs() < f64::EPSILON));
+        assert!(matches!(env.get("b").unwrap(), Value::Float(f) if (f - 2.5).abs() < f64::EPSILON));
         assert!(matches!(env.get("c").unwrap(), Value::Bool(true)));
         assert!(matches!(env.get("d").unwrap(), Value::String(s) if s.as_str() == "hello"));
         assert!(matches!(env.get("e").unwrap(), Value::None));
@@ -6956,7 +7027,7 @@ mod tests {
     #[test]
     fn test_intern_name_consistency() {
         // Verify that the intern_name helper returns consistent ids
-        let env = Env::new();
+        let mut env = Env::new();
         let id1 = env.intern_name("test_var");
         let id2 = env.intern_name("test_var");
         let id3 = env.intern_name("other_var");
@@ -7420,7 +7491,7 @@ mod tests {
 
     #[test]
     fn env_undefined_variable_returns_error() {
-        let env = Env::new();
+        let mut env = Env::new();
         let result = env.get("nonexistent");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -8243,6 +8314,71 @@ mod tests {
         // the fix qualifies it to "Counter.get_count" on FN_NAME_STACK
         // so `count` resolves as "Counter.count" in the shared cache.
         assert!(matches!(result, Value::Int(20)), "expected 20, got {result}");
+    }
+
+    #[test]
+    fn shared_var_set_persists_across_eval_calls() {
+        let source = r#"
+!module Bot
++shared bot_token:String = ""
++fn set_token (raw:String)->String [mut]
+  +let trimmed:String = trim(raw)
+  +set bot_token = trimmed
+  +return bot_token
++end
+
++fn auth_header ()->String
+  +return concat("Bearer ", bot_token)
++end
+"#;
+        let program = build_program(source);
+        let runtime = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        set_shared_runtime(Some(runtime.clone()));
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+
+        let set_result = eval_call_with_input(&program, "Bot.set_token", &parser::Expr::String("  abc123  ".to_string())).unwrap();
+        assert_eq!(set_result, "\"abc123\"");
+
+        let header_result = eval_call_with_input(&program, "Bot.auth_header", &parser::Expr::StructLiteral(vec![])).unwrap();
+        assert_eq!(header_result, "\"Bearer abc123\"");
+
+        let state = runtime.read().unwrap();
+        assert!(matches!(state.shared_vars.get("Bot.bot_token"), Some(Value::String(s)) if s.as_str() == "abc123"));
+    }
+
+    #[test]
+    fn shared_var_set_and_read_work_in_test_context() {
+        let source = r#"
+!module Bot
++shared bot_token:String = ""
++fn configure_and_read (raw:String)->String [mut]
+  +let trimmed:String = trim(raw)
+  +set bot_token = trimmed
+  +return concat("Bearer ", bot_token)
++end
+
+!test Bot.configure_and_read
+  +with "  xyz  " -> expect "Bearer xyz"
+"#;
+        let program = build_program(source);
+        let case = extract_test_cases(source).remove(0).1;
+        let result = eval_test_case(&program, "Bot.configure_and_read", &case).unwrap();
+        assert!(result.contains("expected \"Bearer xyz\""), "unexpected test result: {result}");
+    }
+
+    #[test]
+    fn undeclared_shared_var_still_errors() {
+        let source = r#"
+!module Bot
++fn auth_header ()->String
+  +return concat("Bearer ", bot_token)
++end
+"#;
+        let program = build_program(source);
+        set_shared_program(Some(std::sync::Arc::new(program.clone())));
+
+        let result = eval_call_with_input(&program, "Bot.auth_header", &parser::Expr::StructLiteral(vec![])).unwrap();
+        assert!(result.contains("undefined variable `bot_token`"), "expected undefined variable error, got: {result}");
     }
 
     #[test]
