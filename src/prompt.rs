@@ -84,6 +84,9 @@ Pure functions have no effect annotation.
 +shared name:Type = default_value
   Declare module-scoped mutable state. Must be inside a module.
   Accessible by all functions in that module, including nested calls.
+  The runtime stores one mutable slot per module variable (keyed like Module.name).
+  Reads return the current stored value, and `+set` updates that shared slot.
+  Shared state works the same in normal `!eval` runs and in `!test` execution.
   Example:
   !module Counter
   +shared count:Int = 0
@@ -92,6 +95,9 @@ Pure functions have no effect annotation.
     +return count
   +fn doubled ()->Int
     +return get_count() * 2
+  +fn rename (next:String)->String [mut]
+    +set label = trim(next)
+    +return label
 
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
