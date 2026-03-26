@@ -734,10 +734,11 @@ async fn main() -> Result<()> {
             }
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
-            sess.runtime.roadmap = sess.meta.roadmap.clone();
             let initial_runtime = sess.runtime.clone();
             let shared_runtime: crate::session::SharedRuntime =
                 std::sync::Arc::new(std::sync::RwLock::new(initial_runtime));
+            let shared_meta: crate::session::SharedMeta =
+                std::sync::Arc::new(std::sync::Mutex::new(sess.meta.clone()));
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
@@ -757,6 +758,7 @@ async fn main() -> Result<()> {
             let io_sender_for_spawn = runtime.io_sender();
             let shared_session_for_spawn = shared_session.clone();
             let shared_runtime_for_spawn = shared_runtime.clone();
+            let shared_meta_for_spawn = shared_meta.clone();
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
@@ -777,8 +779,10 @@ async fn main() -> Result<()> {
                             let snap_reg = snap_registry_for_spawn2.clone();
                             let session_ref = shared_session_for_spawn.clone();
                             let runtime_for_blocking = shared_runtime_for_spawn.clone();
+                            let meta_for_blocking = shared_meta_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                                 let session = session_ref.blocking_lock();
                                 let func_decl = match session.program.get_function(&function_name) {
                                     Some(f) => f.clone(),
@@ -872,15 +876,11 @@ async fn main() -> Result<()> {
                 let s = shared_session.lock().await;
                 std::sync::Arc::new(tokio::sync::RwLock::new(s.program.clone()))
             };
-            let tier3_meta = {
-                let s = shared_session.lock().await;
-                std::sync::Arc::new(tokio::sync::Mutex::new(s.meta.clone()))
-            };
 
             let config = api::AppConfig {
                 session: shared_session.clone(),
                 program: tier1_program,
-                meta: tier3_meta,
+                meta: shared_meta.clone(),
                 llm_url: url.clone(),
                 llm_model: model.clone(),
                 llm_api_key: api_key.clone(),
@@ -960,7 +960,7 @@ async fn main() -> Result<()> {
                     {
                         let mut session = save_session.lock().await;
                         session.program = save_program.read().await.clone();
-                        session.meta = save_meta.lock().await.clone();
+                        session.meta = save_meta.lock().unwrap().clone();
                         if let Ok(rt) = save_runtime.read() {
                             session.runtime = rt.clone();
                         }

@@ -26,32 +26,16 @@ use crate::validator;
 
 pub type SharedSession = Arc<Mutex<Session>>;
 
-/// Copy roadmap from session metadata into SharedRuntime so IO builtins can access it.
-fn sync_roadmap_to_runtime(session: &Session, runtime: &crate::session::SharedRuntime) {
-    if let Ok(mut rt) = runtime.write() {
-        rt.roadmap = session.meta.roadmap.clone();
-    }
-}
-
-/// Copy roadmap from SharedRuntime back into session metadata after eval.
-fn sync_roadmap_from_runtime(session: &mut Session, runtime: &crate::session::SharedRuntime) {
-    if let Ok(rt) = runtime.read() {
-        session.meta.roadmap = rt.roadmap.clone();
-    }
-}
-
 impl AppConfig {
     /// Sync the independent tier locks from the session shim.
     /// Call after any mutation that modifies the session (apply, store_test, plan updates, etc).
     pub async fn sync_tiers_from_session(&self, session: &Session) {
         *self.program.write().await = session.program.clone();
-        *self.meta.lock().await = session.meta.clone();
+        *self.meta.lock().unwrap() = session.meta.clone();
         if let Ok(mut rt) = self.runtime.write() {
             rt.shared_vars = session.runtime.shared_vars.clone();
             rt.http_routes = session.runtime.http_routes.clone();
-            rt.roadmap = session.meta.roadmap.clone();
             rt.agent_mailbox = session.meta.agent_mailbox.clone();
-            rt.io_mocks = session.meta.io_mocks.clone();
             // Sync library errors from LibraryState into RuntimeState
             if let Some(ref lib_state) = session.meta.library_state {
                 if let Ok(errs) = lib_state.errors.lock() {
@@ -66,14 +50,18 @@ impl AppConfig {
         }
     }
 
-    /// Sync runtime changes (roadmap, shared_vars, agent_mailbox) back into the session shim.
-    /// Call after eval/test that may have called roadmap_add/roadmap_done/msg_send builtins.
+    /// Sync runtime changes (shared_vars, agent_mailbox) back into the session shim.
+    /// Roadmap, plan, and io_mocks are now in SharedMeta — no need to sync those.
     pub fn sync_runtime_to_session(&self, session: &mut Session) {
         if let Ok(rt) = self.runtime.read() {
-            session.meta.roadmap = rt.roadmap.clone();
             session.runtime.shared_vars = rt.shared_vars.clone();
             session.meta.agent_mailbox = rt.agent_mailbox.clone();
-            session.meta.io_mocks = rt.io_mocks.clone();
+        }
+        // Sync meta changes (roadmap, plan, mocks) back to session shim
+        if let Ok(meta) = self.meta.lock() {
+            session.meta.roadmap = meta.roadmap.clone();
+            session.meta.plan = meta.plan.clone();
+            session.meta.io_mocks = meta.io_mocks.clone();
         }
     }
 }
@@ -91,7 +79,9 @@ pub struct AppConfig {
     pub program: std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
     /// Tier 3: Session metadata — chat history, plan, roadmap, mocks, mutation log.
     /// Brief locks only; never hold during LLM calls or IO.
-    pub meta: std::sync::Arc<tokio::sync::Mutex<crate::session::SessionMeta>>,
+    /// Uses std::sync::Mutex (not tokio) since we never hold across .await points.
+    /// This is also the SharedMeta passed to spawn_blocking tasks via set_shared_meta().
+    pub meta: crate::session::SharedMeta,
     pub llm_url: String,
     pub llm_model: String,
     pub llm_api_key: Option<String>,
@@ -196,6 +186,7 @@ pub async fn eval_fn(
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
+        crate::eval::set_shared_meta(Some(config.meta.clone()));
 
     // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
     if let Some(ref expr_str) = req.expression {
@@ -218,8 +209,10 @@ pub async fn eval_fn(
                         let program_mut_clone = program_mut.clone();
                         let sender = sender.clone();
                         let runtime_for_blocking = config.runtime.clone();
+                            let meta_for_blocking = config.meta.clone();
                         let eval_result = tokio::task::spawn_blocking(move || {
                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                             eval::eval_inline_expr_with_io(&program, &expr, sender)
@@ -307,7 +300,7 @@ pub async fn eval_fn(
     // Clone what we need so the lock is released before eval runs
     let (_require_modules, needs_async, revision) = {
         let program = config.program.read().await;
-        let meta = config.meta.lock().await;
+        let meta = config.meta.lock().unwrap();
 
         // Block eval of untested functions (>2 statements) in AdapsisOS mode
         if program.require_modules {
@@ -340,9 +333,11 @@ pub async fn eval_fn(
             let input = ev.input.clone();
             let sender = sender.clone();
             let runtime_for_blocking = config.runtime.clone();
+                            let meta_for_blocking = config.meta.clone();
 
             let eval_result = tokio::task::spawn_blocking(move || {
                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 crate::eval::set_shared_program_mut(Some(program_mut_clone));
                 let func = program.get_function(&fn_name)
@@ -361,12 +356,6 @@ pub async fn eval_fn(
                 let mut s = config.session.lock().await;
                 s.program = mutated.clone();
                 *config.program.write().await = mutated;
-            }
-
-            // Sync roadmap back after async eval
-            {
-                let mut s = config.session.lock().await;
-                sync_roadmap_from_runtime(&mut s, &config.runtime);
             }
 
             return match eval_result {
@@ -396,7 +385,7 @@ pub async fn eval_fn(
             drop(program); // release Tier 1 before writing Tier 3
             // Tier 3: record eval in history (brief lock)
             {
-                let mut meta = config.meta.lock().await;
+                let mut meta = config.meta.lock().unwrap();
                 let rev = meta.revision;
                 meta.history.push(crate::session::HistoryEntry::Eval {
                     revision: rev,
@@ -444,6 +433,7 @@ pub async fn test_fn(
     Json(req): Json<TestRequest>,
 ) -> Json<TestResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
+        crate::eval::set_shared_meta(Some(config.meta.clone()));
     let operations = match parser::parse(&req.source) {
         Ok(ops) => ops,
         Err(e) => {
@@ -468,7 +458,7 @@ pub async fn test_fn(
             // Clone what we need so locks are released before test execution
             let (program_snapshot, needs_async, mocks, routes) = {
                 let program = config.program.read().await;
-                let meta = config.meta.lock().await;
+                let meta = config.meta.lock().unwrap();
                 let needs_async = program.get_function(&test.function_name)
                     .is_some_and(|f| f.effects.iter().any(|e|
                         matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
@@ -513,7 +503,7 @@ pub async fn test_fn(
             }
             // Tier 3: record test results (brief lock)
             {
-                let mut meta = config.meta.lock().await;
+                let mut meta = config.meta.lock().unwrap();
                 let rev = meta.revision;
                 let details: Vec<String> = results.iter().map(|r| {
                     format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
@@ -559,7 +549,7 @@ pub async fn query(
 ) -> Json<QueryResponse> {
     let response = if req.query.trim() == "?inbox" || req.query.trim().starts_with("?inbox") {
         // Tier 3: read meta (brief lock)
-        let meta = config.meta.lock().await;
+        let meta = config.meta.lock().unwrap();
         let msgs = meta.agent_mailbox.get("main").map(|v| v.as_slice()).unwrap_or(&[]);
         if msgs.is_empty() { "No messages.".to_string() }
         else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
@@ -570,7 +560,7 @@ pub async fn query(
     } else if req.query.trim() == "?library" {
         // Tier 1 + Tier 3: read program + meta
         let program = config.program.read().await;
-        let meta = config.meta.lock().await;
+        let meta = config.meta.lock().unwrap();
         crate::library::query_library(&program, meta.library_state.as_ref())
     } else {
         // Tier 1 + Tier 2: read program + runtime
@@ -581,7 +571,7 @@ pub async fn query(
     };
     // Tier 3: brief write to record query in history
     {
-        let mut meta = config.meta.lock().await;
+        let mut meta = config.meta.lock().unwrap();
         let rev = meta.revision;
         meta.history.push(crate::session::HistoryEntry::Query {
             revision: rev,
@@ -655,7 +645,7 @@ pub async fn status(State(config): State<AppConfig>) -> Json<StatusResponse> {
     };
     // Tier 3: read meta (brief lock)
     let (revision, mutations, history_entries, plan, roadmap) = {
-        let meta = config.meta.lock().await;
+        let meta = config.meta.lock().unwrap();
         (
             meta.revision,
             meta.mutations.len(),
@@ -705,7 +695,7 @@ pub async fn history(
     Json(req): Json<HistoryRequest>,
 ) -> Json<HistoryResponse> {
     // Tier 3: read meta (brief lock)
-    let meta = config.meta.lock().await;
+    let meta = config.meta.lock().unwrap();
     let limit = req.limit.unwrap_or(20);
     // format_recent_history is on Session, but we can reconstruct from meta directly.
     // For now, build a temporary Session just for the formatting helper.
@@ -749,7 +739,7 @@ pub async fn rewind(
             // Sync tiers from session after rewind
             *config.program.write().await = session.program.clone();
             {
-                let mut meta = config.meta.lock().await;
+                let mut meta = config.meta.lock().unwrap();
                 *meta = session.meta.clone();
             }
             Json(RewindResponse {
@@ -867,7 +857,7 @@ pub async fn program(State(config): State<AppConfig>) -> Json<ProgramResponse> {
     // Tier 1: read program (RwLock read — non-exclusive)
     let prog = config.program.read().await;
     // Tier 3: read meta for revision (brief)
-    let revision = config.meta.lock().await.revision;
+    let revision = config.meta.lock().unwrap().revision;
 
     let types = prog.types.iter().map(|td| {
         match td {
@@ -1422,6 +1412,7 @@ pub async fn ask(
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
+        crate::eval::set_shared_meta(Some(config.meta.clone()));
     eprintln!("\n[web:user] {}", req.message);
     let tx = EventSender::broadcast_only(config.event_broadcast.clone());
     tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
@@ -1693,9 +1684,11 @@ pub async fn ask(
                                         let expr = expr.clone();
                                         let sender = sender.clone();
                                         let runtime_for_blocking = config.runtime.clone();
+                            let meta_for_blocking = config.meta.clone();
                                         drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
@@ -1760,9 +1753,11 @@ pub async fn ask(
                                     let input = ev.input.clone();
                                     let sender = sender.clone();
                                     let runtime_for_blocking = config.runtime.clone();
+                            let meta_for_blocking = config.meta.clone();
                                     drop(session);
                                     let eval_result = tokio::task::spawn_blocking(move || {
                                         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                                         crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                         crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                         let func = program.get_function(&fn_name)
@@ -2312,7 +2307,7 @@ pub struct OpenCodeResponse {
 /// Build the full router with LLM support.
 pub async fn agents(State(config): State<AppConfig>) -> Json<Vec<crate::session::AgentStatus>> {
     // Tier 3: read meta (brief lock)
-    let meta = config.meta.lock().await;
+    let meta = config.meta.lock().unwrap();
     Json(meta.agent_log.clone())
 }
 
@@ -2330,6 +2325,7 @@ pub async fn ask_stream(
     let config_clone = config.clone();
     tokio::spawn(async move {
         crate::eval::set_shared_runtime(Some(config_clone.runtime.clone()));
+        crate::eval::set_shared_meta(Some(config_clone.meta.clone()));
         let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone(), config_clone.log_file.clone());
         let llm = crate::llm::LlmClient::new_with_model_and_key(
             &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
@@ -2344,44 +2340,49 @@ pub async fn ask_stream(
             format!("{base}\n\n{builtins}\n\n{identity}")
         };
 
-        let mut messages = {
+            let mut messages = {
             // Tier 1: read program briefly for summary
             let program_summary = {
                 let program = config_clone.program.read().await;
                 crate::validator::program_summary_compact(&program)
             };
             // Tier 3: read/write meta briefly for chat history + plan context
-            let mut meta = config_clone.meta.lock().await;
-            if meta.chat_messages.is_empty() {
+            // Note: guard must be dropped before any .await — std::sync::MutexGuard is not Send.
+            let (context, msgs, meta_snapshot) = {
+                let mut meta = config_clone.meta.lock().unwrap();
+                if meta.chat_messages.is_empty() {
+                    meta.chat_messages.push(crate::session::ChatMessage {
+                        role: "system".to_string(), content: system_prompt,
+                    });
+                }
+                let (plan_ctx, needs_plan) = build_plan_context(&meta.plan);
+                let plan_hint = if needs_plan {
+                    "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
+                } else { "" };
+                let load_errors_ctx = format_library_load_errors(&meta);
+                let context = format!("Working directory: {}\n{}{}{}\nUser: {}{}",
+                    config_clone.project_dir,
+                    program_summary,
+                    load_errors_ctx,
+                    plan_ctx, req.message, plan_hint);
                 meta.chat_messages.push(crate::session::ChatMessage {
-                    role: "system".to_string(), content: system_prompt,
+                    role: "user".to_string(), content: context.clone(),
                 });
-            }
-            let (plan_ctx, needs_plan) = build_plan_context(&meta.plan);
-            let plan_hint = if needs_plan {
-                "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
-            } else { "" };
-            let load_errors_ctx = format_library_load_errors(&meta);
-            let context = format!("Working directory: {}\n{}{}{}\nUser: {}{}",
-                config_clone.project_dir,
-                program_summary,
-                load_errors_ctx,
-                plan_ctx, req.message, plan_hint);
-            tx.log("user", &context).await;
-            meta.chat_messages.push(crate::session::ChatMessage {
-                role: "user".to_string(), content: context,
-            });
-            let msgs = meta.chat_messages.iter().map(|m| match m.role.as_str() {
-                "system" => crate::llm::ChatMessage::system(m.content.clone()),
-                "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-                _ => crate::llm::ChatMessage::user(m.content.clone()),
-            }).collect::<Vec<_>>();
-            // Also sync meta back to session shim so it stays consistent
+                let msgs = meta.chat_messages.iter().map(|m| match m.role.as_str() {
+                    "system" => crate::llm::ChatMessage::system(m.content.clone()),
+                    "assistant" => crate::llm::ChatMessage::assistant(&m.content),
+                    _ => crate::llm::ChatMessage::user(m.content.clone()),
+                }).collect::<Vec<_>>();
+                let meta_snapshot = meta.clone();
+                // guard dropped here — before any .await
+                (context, msgs, meta_snapshot)
+            };
+            // Sync meta snapshot to session shim after releasing the lock
             {
                 let mut session = config_clone.session.lock().await;
-                session.meta = meta.clone();
+                session.meta = meta_snapshot;
             }
-            drop(meta);
+            tx.log("user", &context).await;
             msgs
         }; // All locks released before LLM call
 
@@ -2471,7 +2472,6 @@ pub async fn ask_stream(
 
             // Apply code
             let mut session = config_clone.session.lock().await;
-            sync_roadmap_to_runtime(&session, &config_clone.runtime);
             let mut op_result = OperationResult::new();
 
             match crate::parser::parse(&code) {
@@ -2587,9 +2587,11 @@ pub async fn ask_stream(
                                             let expr = expr.clone();
                                             let sender = sender.clone();
                                             let runtime_for_blocking = config_clone.runtime.clone();
+                            let meta_for_blocking = config_clone.meta.clone();
                                             drop(session);
                                             let eval_result = tokio::task::spawn_blocking(move || {
                                                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                                                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                                 crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                                 crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
@@ -2655,9 +2657,11 @@ pub async fn ask_stream(
                                         let input = ev.input.clone();
                                         let sender = sender.clone();
                                         let runtime_for_blocking = config_clone.runtime.clone();
+                            let meta_for_blocking = config_clone.meta.clone();
                                         drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             let func = program.get_function(&fn_name)
@@ -2734,9 +2738,11 @@ pub async fn ask_stream(
                                         let program_mut = crate::eval::make_shared_program_mut(&program);
                                         let program_mut_clone = program_mut.clone();
                                         let runtime_for_blocking = config_clone.runtime.clone();
+                            let meta_for_blocking = config_clone.meta.clone();
                                         drop(session);
                                         let result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
@@ -3081,7 +3087,7 @@ pub async fn ask_stream(
                                                 {
                                                     let mut session = config_clone.session.lock().await;
                                                     session.program = config_clone.program.read().await.clone();
-                                                    session.meta = config_clone.meta.lock().await.clone();
+                                                    session.meta = config_clone.meta.lock().unwrap().clone();
                                                     if let Ok(rt) = config_clone.runtime.read() { session.runtime = rt.clone(); }
                                                     if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
                                                         let _ = session.save(std::path::Path::new(&path));
@@ -3164,7 +3170,6 @@ pub async fn ask_stream(
                 }
             }
 
-            sync_roadmap_from_runtime(&mut session, &config_clone.runtime);
             drop(session);
 
             // Build detailed feedback with ALL results so the AI can see them
@@ -3441,8 +3446,10 @@ async fn session_eval(
                         let program_mut_clone = program_mut.clone();
                         let sender = sender.clone();
                         let runtime_for_blocking = config.runtime.clone();
+                            let meta_for_blocking = config.meta.clone();
                         let eval_result = tokio::task::spawn_blocking(move || {
                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                             eval::eval_inline_expr_with_io(&program, &expr, sender)
@@ -3665,6 +3672,7 @@ async fn adapsis_route_dispatch(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
+        crate::eval::set_shared_meta(Some(config.meta.clone()));
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
@@ -3705,6 +3713,7 @@ async fn adapsis_route_dispatch(
     let body_str = String::from_utf8_lossy(&body).to_string();
 
     let runtime_for_blocking = config.runtime.clone();
+                            let meta_for_blocking = config.meta.clone();
     let program_mut = crate::eval::make_shared_program_mut(&program);
     let program_mut_clone = program_mut.clone();
 
@@ -3713,6 +3722,7 @@ async fn adapsis_route_dispatch(
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
         crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
         crate::eval::set_shared_program_mut(Some(program_mut_clone));
         let func = program
@@ -3843,7 +3853,7 @@ mod tests {
             program: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::ast::Program::default(),
             )),
-            meta: std::sync::Arc::new(tokio::sync::Mutex::new(
+            meta: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::session::SessionMeta::new(),
             )),
             llm_url: String::new(),
