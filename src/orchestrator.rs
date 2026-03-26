@@ -150,6 +150,19 @@ impl<B: LlmBackend> Orchestrator<B> {
                     parser::Operation::Test(test) => {
                         test_ops.push(test.clone());
                     }
+                    parser::Operation::Module(m) => {
+                        // Extract tests embedded inside module bodies before applying
+                        for body_op in &m.body {
+                            if let parser::Operation::Test(test) = body_op {
+                                test_ops.push(test.clone());
+                            }
+                        }
+                        // Apply the module itself
+                        match validator::apply_and_validate(&mut program, op) {
+                            Ok(msg) => results.push((msg, true)),
+                            Err(e) => results.push((format!("{e}"), false)),
+                        }
+                    }
                     parser::Operation::Mock { operation, patterns, response } => {
                         let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                         io_mocks.push(crate::session::IoMock {
@@ -614,6 +627,18 @@ impl<B: LlmBackend> Orchestrator<B> {
                         }
                         parser::Operation::Test(test) => {
                             test_ops.push(test.clone());
+                        }
+                        parser::Operation::Module(m) => {
+                            // Extract tests embedded inside module bodies
+                            for body_op in &m.body {
+                                if let parser::Operation::Test(test) = body_op {
+                                    test_ops.push(test.clone());
+                                }
+                            }
+                            match validator::apply_and_validate(&mut program, op) {
+                                Ok(msg) => results.push((msg, true)),
+                                Err(e) => results.push((format!("{e}"), false)),
+                            }
                         }
                         parser::Operation::Type(_) => {
                             // Allow adding new types during implementation

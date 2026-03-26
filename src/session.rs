@@ -613,6 +613,90 @@ impl Session {
         }
     }
 
+    /// Run a single test mutation synchronously and push results.
+    fn run_test_sync(&mut self, test: &parser::TestMutation, results: &mut Vec<(String, bool)>) {
+        let mut all_passed = true;
+        for case in &test.cases {
+            match crate::eval::eval_test_case_with_mocks(
+                &self.program,
+                &test.function_name,
+                case,
+                &self.meta.io_mocks,
+                &self.runtime.http_routes,
+            ) {
+                Ok(msg) => results.push((format!("PASS: {msg}"), true)),
+                Err(e) => {
+                    all_passed = false;
+                    results.push((format!("FAIL: {e}"), false));
+                }
+            }
+        }
+        if all_passed && !test.cases.is_empty() {
+            self.store_test(&test.function_name, &test.cases);
+        }
+    }
+
+    /// Run a single test mutation asynchronously and push results.
+    async fn run_test_async(
+        &mut self,
+        test: &parser::TestMutation,
+        io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
+        results: &mut Vec<(String, bool)>,
+    ) {
+        let mut all_passed = true;
+        let needs_async = self
+            .program
+            .get_function(&test.function_name)
+            .is_some_and(|f| {
+                f.effects
+                    .iter()
+                    .any(|e| matches!(e, ast::Effect::Async | ast::Effect::Io))
+            });
+
+        for case in &test.cases {
+            let case_result = if needs_async {
+                if let Some(sender) = io_sender {
+                    crate::eval::eval_test_case_async(
+                        &self.program,
+                        &test.function_name,
+                        case,
+                        &self.meta.io_mocks,
+                        sender.clone(),
+                        &self.runtime.http_routes,
+                    )
+                    .await
+                } else {
+                    crate::eval::eval_test_case_with_mocks(
+                        &self.program,
+                        &test.function_name,
+                        case,
+                        &self.meta.io_mocks,
+                        &self.runtime.http_routes,
+                    )
+                }
+            } else {
+                crate::eval::eval_test_case_with_mocks(
+                    &self.program,
+                    &test.function_name,
+                    case,
+                    &self.meta.io_mocks,
+                    &self.runtime.http_routes,
+                )
+            };
+
+            match case_result {
+                Ok(msg) => results.push((format!("PASS: {msg}"), true)),
+                Err(e) => {
+                    all_passed = false;
+                    results.push((format!("FAIL: {e}"), false));
+                }
+            }
+        }
+        if all_passed && !test.cases.is_empty() {
+            self.store_test(&test.function_name, &test.cases);
+        }
+    }
+
     /// Extract the function names affected by an operation (for test invalidation).
     fn affected_function_names(op: &parser::Operation) -> Vec<String> {
         match op {
@@ -803,25 +887,7 @@ impl Session {
             match op {
                 parser::Operation::Test(test) => {
                     // Run tests and track which functions pass
-                    let mut all_passed = true;
-                    for case in &test.cases {
-                        match crate::eval::eval_test_case_with_mocks(
-                            &self.program,
-                            &test.function_name,
-                            case,
-                            &self.meta.io_mocks,
-                            &self.runtime.http_routes,
-                        ) {
-                            Ok(msg) => results.push((format!("PASS: {msg}"), true)),
-                            Err(e) => {
-                                all_passed = false;
-                                results.push((format!("FAIL: {e}"), false));
-                            }
-                        }
-                    }
-                    if all_passed && !test.cases.is_empty() {
-                        self.store_test(&test.function_name, &test.cases);
-                    }
+                    self.run_test_sync(test, &mut results);
                 }
                 parser::Operation::Trace(_)
                 | parser::Operation::Eval(_)
@@ -931,6 +997,16 @@ impl Session {
                                 results.push((detail, passed));
                                 let _ = name;
                             }
+                            // Run any !test operations embedded inside a module body.
+                            // The parser allows !test inside !module blocks to preserve
+                            // module context for subsequent +fn definitions.
+                            if let parser::Operation::Module(m) = op {
+                                for body_op in &m.body {
+                                    if let parser::Operation::Test(test) = body_op {
+                                        self.run_test_sync(test, &mut results);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => results.push((format!("{e}"), false)),
                     }
@@ -999,58 +1075,7 @@ impl Session {
         for op in &operations {
             match op {
                 parser::Operation::Test(test) => {
-                    let mut all_passed = true;
-                    let needs_async = self
-                        .program
-                        .get_function(&test.function_name)
-                        .is_some_and(|f| {
-                            f.effects.iter().any(|e| {
-                                matches!(e, ast::Effect::Async | ast::Effect::Io)
-                            })
-                        });
-
-                    for case in &test.cases {
-                        let case_result = if needs_async {
-                            if let Some(sender) = io_sender {
-                                crate::eval::eval_test_case_async(
-                                    &self.program,
-                                    &test.function_name,
-                                    case,
-                                    &self.meta.io_mocks,
-                                    sender.clone(),
-                                    &self.runtime.http_routes,
-                                )
-                                .await
-                            } else {
-                                crate::eval::eval_test_case_with_mocks(
-                                    &self.program,
-                                    &test.function_name,
-                                    case,
-                                    &self.meta.io_mocks,
-                                    &self.runtime.http_routes,
-                                )
-                            }
-                        } else {
-                            crate::eval::eval_test_case_with_mocks(
-                                &self.program,
-                                &test.function_name,
-                                case,
-                                &self.meta.io_mocks,
-                                &self.runtime.http_routes,
-                            )
-                        };
-
-                        match case_result {
-                            Ok(msg) => results.push((format!("PASS: {msg}"), true)),
-                            Err(e) => {
-                                all_passed = false;
-                                results.push((format!("FAIL: {e}"), false));
-                            }
-                        }
-                    }
-                    if all_passed && !test.cases.is_empty() {
-                        self.store_test(&test.function_name, &test.cases);
-                    }
+                    self.run_test_async(test, io_sender, &mut results).await;
                 }
                 parser::Operation::Trace(_)
                 | parser::Operation::Eval(_)
@@ -1157,6 +1182,14 @@ impl Session {
                             for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
                                 results.push((detail, passed));
                                 let _ = name;
+                            }
+                            // Run any !test operations embedded inside a module body.
+                            if let parser::Operation::Module(m) = op {
+                                for body_op in &m.body {
+                                    if let parser::Operation::Test(test) = body_op {
+                                        self.run_test_async(test, io_sender, &mut results).await;
+                                    }
+                                }
                             }
                         }
                         Err(e) => results.push((format!("{e}"), false)),
