@@ -136,6 +136,33 @@ impl Value {
         Value::Struct(name_id, Arc::new(fields))
     }
 
+    /// Borrow the inner string slice, if this is a `String` variant.
+    #[inline]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the inner slice, if this is a `List` variant.
+    #[inline]
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self {
+            Value::List(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Get a mutable reference to the inner `Vec`, cloning the `Arc` if needed (CoW).
+    #[inline]
+    pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
+        match self {
+            Value::List(v) => Some(Arc::make_mut(v)),
+            _ => None,
+        }
+    }
+
     /// Look up a field on a struct value by string name, resolving via the
     /// thread-local display interner.
     pub fn get_field(&self, field: &str) -> Option<&Value> {
@@ -1318,9 +1345,9 @@ fn check_test_result(
         // content when the value is a String or Ok(String), avoiding the
         // Display quotes that wrap String values.
         let raw_text = match &actual {
-                    Value::String(s) => s.to_string(),
+            Value::String(s) => s.as_ref().clone(),
             Value::Ok(inner) => match inner.as_ref() {
-                Value::String(s) => s.to_string(),
+                Value::String(s) => s.as_ref().clone(),
                 other => format!("{other}"),
             },
             other => format!("{other}"),
@@ -1957,7 +1984,7 @@ pub fn eval_builtin_or_user(
         "Err" => {
             if args.len() == 1 {
                 match &args[0] {
-                    Value::String(s) => Ok(Value::Err(s.to_string().into())),
+                    Value::String(s) => Ok(Value::Err(s.as_ref().clone().into())),
                     other => Ok(Value::Err(format!("{other}").into())),
                 }
             } else {
@@ -4405,7 +4432,7 @@ mod tests {
             Value::Struct(_, fields) => {
                 let name_id = intern::intern_display("name");
                 let age_id = intern::intern_display("age");
-                assert!(matches!(fields.get(&name_id), Some(Value::String(s)) if &**s == "alice"), "expected name=alice");
+                assert!(matches!(fields.get(&name_id), Some(Value::String(s)) if s.as_str() == "alice"), "expected name=alice");
                 assert!(matches!(fields.get(&age_id), Some(Value::Int(25))), "expected age=25");
             }
             _ => panic!("expected struct, got {val}"),
@@ -6780,7 +6807,7 @@ mod tests {
         assert!(matches!(env.get("a").unwrap(), Value::Int(1)));
         assert!(matches!(env.get("b").unwrap(), Value::Float(f) if (*f - 2.5).abs() < f64::EPSILON));
         assert!(matches!(env.get("c").unwrap(), Value::Bool(true)));
-        assert!(matches!(env.get("d").unwrap(), Value::String(s) if &**s == "hello"));
+        assert!(matches!(env.get("d").unwrap(), Value::String(s) if s.as_str() == "hello"));
         assert!(matches!(env.get("e").unwrap(), Value::None));
     }
 
@@ -7294,7 +7321,7 @@ mod tests {
         let mut env = Env::new_with_interner(&interner);
         env.set("dynamic_var", Value::string("hello"));
 
-        assert!(matches!(env.get("dynamic_var"), Ok(Value::String(s)) if &**s == "hello"));
+        assert!(matches!(env.get("dynamic_var"), Ok(Value::String(s)) if s.as_str() == "hello"));
     }
 
     #[test]
@@ -8017,5 +8044,76 @@ mod tests {
             "async multi-param test via session should pass: {:?}",
             results[0]
         );
+    }
+
+    // ── Value accessor / constructor tests ──────────────────────────
+
+    #[test]
+    fn value_string_uses_arc_for_cheap_clone() {
+        let v = Value::string("hello");
+        let v2 = v.clone();
+        // Both clones share the same Arc allocation
+        if let (Value::String(a), Value::String(b)) = (&v, &v2) {
+            assert!(Arc::ptr_eq(a, b), "clone should share Arc pointer");
+        } else {
+            panic!("expected String variants");
+        }
+    }
+
+    #[test]
+    fn value_list_uses_arc_for_cheap_clone() {
+        let v = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let v2 = v.clone();
+        if let (Value::List(a), Value::List(b)) = (&v, &v2) {
+            assert!(Arc::ptr_eq(a, b), "clone should share Arc pointer");
+        } else {
+            panic!("expected List variants");
+        }
+    }
+
+    #[test]
+    fn value_as_str_returns_inner_slice() {
+        let v = Value::string("café");
+        assert_eq!(v.as_str(), Some("café"));
+        assert_eq!(Value::Int(42).as_str(), None);
+        assert_eq!(Value::None.as_str(), None);
+    }
+
+    #[test]
+    fn value_as_list_returns_inner_slice() {
+        let v = Value::list(vec![Value::Int(1), Value::string("x")]);
+        let slice = v.as_list().unwrap();
+        assert_eq!(slice.len(), 2);
+        assert!(matches!(&slice[0], Value::Int(1)));
+        assert!(Value::Int(0).as_list().is_none());
+    }
+
+    #[test]
+    fn value_as_list_mut_cow_semantics() {
+        // When there's only one Arc reference, as_list_mut should not clone
+        let mut v = Value::list(vec![Value::Int(10)]);
+        {
+            let inner = v.as_list_mut().unwrap();
+            inner.push(Value::Int(20));
+        }
+        let slice = v.as_list().unwrap();
+        assert_eq!(slice.len(), 2);
+        assert!(matches!(&slice[1], Value::Int(20)));
+
+        // When there are multiple Arc references, as_list_mut should CoW-clone
+        let v2 = v.clone();
+        {
+            let inner = v.as_list_mut().unwrap();
+            inner.push(Value::Int(30));
+        }
+        // v was mutated (now has 3 elements), v2 still has 2
+        assert_eq!(v.as_list().unwrap().len(), 3);
+        assert_eq!(v2.as_list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn value_as_list_mut_returns_none_for_non_list() {
+        let mut v = Value::Int(5);
+        assert!(v.as_list_mut().is_none());
     }
 }
