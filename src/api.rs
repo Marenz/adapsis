@@ -3857,12 +3857,8 @@ mod tests {
 
     /// Helper: build a minimal AppConfig for testing multi-session endpoints.
     fn test_config() -> AppConfig {
-        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::session::Session::new(),
-        ));
         let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
         AppConfig {
-            session,
             program: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::ast::Program::default(),
             )),
