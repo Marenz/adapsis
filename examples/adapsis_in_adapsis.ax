@@ -1,4 +1,4 @@
-// A minimal Forge parser and evaluator written IN Forge
+// A minimal Adapsis parser and evaluator written IN Adapsis
 // Handles: +let, +return, integer arithmetic, variables
 
 // === AST Types ===

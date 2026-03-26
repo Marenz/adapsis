@@ -39,7 +39,7 @@ pub type SharedRuntime = Arc<RwLock<RuntimeState>>;
 pub struct MutationEntry {
     pub revision: usize,
     pub timestamp: String,
-    /// The raw Forge source for this mutation (so we can replay it)
+    /// The raw Adapsis source for this mutation (so we can replay it)
     pub source: String,
     /// Human-readable summary of what changed
     pub summary: String,

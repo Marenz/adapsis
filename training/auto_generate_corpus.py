@@ -11,8 +11,8 @@ import sys
 import time
 from pathlib import Path
 
-FORGE = str(Path(__file__).parent.parent / "target" / "debug" / "forge")
-OUTPUT = Path(__file__).parent / "forge_training_data_auto.jsonl"
+FORGE = str(Path(__file__).parent.parent / "target" / "debug" / "adapsis")
+OUTPUT = Path(__file__).parent / "adapsis_training_data_auto.jsonl"
 
 # System prompt (same as in prompt.rs, abbreviated)
 SYSTEM_PROMPT = (
@@ -78,7 +78,7 @@ TASKS = [
 ]
 
 
-def run_forge_task(task: str, max_iterations: int = 5, timeout: int = 120) -> dict:
+def run_adapsis_task(task: str, max_iterations: int = 5, timeout: int = 120) -> dict:
     """Run a Forge task and capture the output."""
     try:
         result = subprocess.run(
@@ -131,7 +131,7 @@ def run_forge_task(task: str, max_iterations: int = 5, timeout: int = 120) -> di
 
 
 def extract_code_from_output(output: str) -> str:
-    """Extract the last successful code block from the forge output."""
+    """Extract the last successful code block from the adapsis output."""
     # The output contains the LLM's responses with [code] markers
     # We want the last code block that was successfully validated
     lines = output.split("\n")
@@ -176,7 +176,7 @@ def extract_code_from_output(output: str) -> str:
 
 def main():
     # Load existing manual corpus
-    manual_path = Path(__file__).parent / "forge_training_data.jsonl"
+    manual_path = Path(__file__).parent / "adapsis_training_data.jsonl"
     existing = []
     if manual_path.exists():
         with open(manual_path) as f:
@@ -188,7 +188,7 @@ def main():
     print(f"Output: {OUTPUT}")
     print()
 
-    # Check forge binary exists
+    # Check adapsis binary exists
     if not Path(FORGE).exists():
         print(f"ERROR: {FORGE} not found. Run 'cargo build' first.")
         sys.exit(1)
@@ -208,7 +208,7 @@ def main():
 
     for i, task in enumerate(TASKS):
         print(f"[{i + 1}/{len(TASKS)}] {task[:70]}...")
-        result = run_forge_task(task)
+        result = run_adapsis_task(task)
         results.append(result)
 
         if result["success"]:

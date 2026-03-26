@@ -1,4 +1,4 @@
-// Concurrent HTTP server written in Forge
+// Concurrent HTTP server written in Adapsis
 // Uses +spawn for parallel connection handling
 // Uses shared state for request counter
 
@@ -12,7 +12,7 @@
 
 +fn handle_connection (conn:Int, counter:Int)->Int [io,async]
   +await request:String = tcp_read(conn)
-  +let body:String = concat("Hello Forge World! Request #", to_string(counter))
+  +let body:String = concat("Hello Adapsis World! Request #", to_string(counter))
   +let response:String = build_response(body)
   +await ok:Int = tcp_write(conn, response)
   +await ok2:Int = tcp_close(conn)

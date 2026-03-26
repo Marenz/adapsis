@@ -2,7 +2,7 @@
 //! HTTP API for AdapsisOS — programmatic access to the session.
 //!
 //! Endpoints:
-//!   POST /api/mutate     — apply Forge source code
+//!   POST /api/mutate     — apply Adapsis source code
 //!   POST /api/eval       — evaluate a function call
 //!   POST /api/test       — run tests for a function
 //!   GET  /api/query      — semantic query (?symbols, ?callers, etc.)
