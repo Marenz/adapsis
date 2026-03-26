@@ -155,8 +155,8 @@ enum Command {
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
 
-        /// Session file (used when auto-starting AdapsisOS)
-        #[arg(short, long, default_value = "adapsisos-session.json")]
+        /// Session name or path (used when auto-starting AdapsisOS)
+        #[arg(short, long, default_value = "repl")]
         session: String,
 
         /// LLM server URL (used when auto-starting)
@@ -174,8 +174,9 @@ enum Command {
         #[arg(short, long, default_value_t = 3001)]
         port: u16,
 
-        /// Session file path
-        #[arg(short, long, default_value = "adapsisos-session.json")]
+        /// Session name or path. Plain names (e.g. "opus-run") are stored in
+        /// ~/.config/adapsis/sessions/<name>.json. Absolute paths are used as-is.
+        #[arg(short, long, default_value = "default")]
         session: String,
 
         /// LLM server URL (OpenAI-compatible)
@@ -709,6 +710,33 @@ async fn main() -> Result<()> {
             repl::run_repl(&api_url).await?;
         }
         Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations, telegram_token, telegram_admin_chat_id } => {
+            // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
+            // absolute paths or paths with directory separators are used as-is.
+            let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
+                session
+            } else {
+                let dir = dirs::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("adapsis")
+                    .join("sessions");
+                std::fs::create_dir_all(&dir).ok();
+                let name = if session.ends_with(".json") { session } else { format!("{session}.json") };
+                dir.join(name).to_string_lossy().to_string()
+            };
+
+            // Prevent session file from living inside the opencode git dir —
+            // !opencode modifies that directory and could corrupt or delete the session.
+            if let Some(ref git_dir) = opencode_git_dir {
+                let session_canonical = std::fs::canonicalize(&session).unwrap_or_else(|_| std::path::PathBuf::from(&session));
+                let git_dir_canonical = std::fs::canonicalize(git_dir).unwrap_or_else(|_| std::path::PathBuf::from(git_dir));
+                if session_canonical.starts_with(&git_dir_canonical) {
+                    eprintln!("ERROR: Session file '{}' is inside the opencode git directory '{}'.", session, git_dir);
+                    eprintln!("       !opencode modifies that directory and could corrupt the session.");
+                    eprintln!("       Use a plain name (e.g. --session opus-run) to store in ~/.config/adapsis/sessions/");
+                    std::process::exit(1);
+                }
+            }
+
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
