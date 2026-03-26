@@ -3484,10 +3484,20 @@ mod tests {
     fn extract_test_cases(source: &str) -> Vec<(String, parser::TestCase)> {
         let ops = parser::parse(source).expect("parse failed");
         let mut cases = Vec::new();
-        for op in ops {
+        for op in &ops {
             if let parser::Operation::Test(test) = op {
-                for case in test.cases {
-                    cases.push((test.function_name.clone(), case));
+                for case in &test.cases {
+                    cases.push((test.function_name.clone(), case.clone()));
+                }
+            }
+            // Also extract tests embedded inside module bodies
+            if let parser::Operation::Module(m) = op {
+                for body_op in &m.body {
+                    if let parser::Operation::Test(test) = body_op {
+                        for case in &test.cases {
+                            cases.push((test.function_name.clone(), case.clone()));
+                        }
+                    }
                 }
             }
         }
@@ -3796,6 +3806,15 @@ mod tests {
         for op in &ops {
             match op {
                 parser::Operation::Test(test) => test_ops.push(test.clone()),
+                parser::Operation::Module(m) => {
+                    // Extract tests embedded inside module bodies
+                    for body_op in &m.body {
+                        if let parser::Operation::Test(test) = body_op {
+                            test_ops.push(test.clone());
+                        }
+                    }
+                    let _ = validator::apply_and_validate(&mut program, op);
+                }
                 parser::Operation::Mock { operation, patterns, response } => {
                     io_mocks.push(IoMock {
                         operation: operation.clone(),

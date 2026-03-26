@@ -396,6 +396,19 @@ async fn main() -> Result<()> {
             for op in &operations {
                 match op {
                     parser::Operation::Test(_) => test_ops.push(op.clone()),
+                    parser::Operation::Module(m) => {
+                        // Collect tests embedded inside module bodies
+                        for body_op in &m.body {
+                            if let parser::Operation::Test(_) = body_op {
+                                test_ops.push(body_op.clone());
+                            }
+                        }
+                        // Still apply the module itself
+                        match validator::apply_and_validate(&mut program, op) {
+                            Ok(msg) => println!("OK: {msg}"),
+                            Err(e) => eprintln!("ERROR: {e}"),
+                        }
+                    }
                     parser::Operation::Mock { operation, patterns, response } => {
                         let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                         io_mocks.push(session::IoMock {

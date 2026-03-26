@@ -452,77 +452,90 @@ pub async fn test_fn(
     let mut failed = 0;
     let mut results = Vec::new();
 
+    // Collect all test operations, including those embedded inside module bodies.
+    let mut all_test_ops: Vec<&parser::TestMutation> = Vec::new();
     for op in &operations {
         if let parser::Operation::Test(test) = op {
-            // Tier 1: read program to check async needs; Tier 3: get mocks
-            // Clone what we need so locks are released before test execution
-            let (program_snapshot, needs_async, mocks, routes) = {
-                let program = config.program.read().await;
-                let meta = config.meta.lock().unwrap();
-                let needs_async = program.get_function(&test.function_name)
-                    .is_some_and(|f| f.effects.iter().any(|e|
-                        matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
-                let routes = config.runtime.read().unwrap().http_routes.clone();
-                (program.clone(), needs_async, meta.io_mocks.clone(), routes)
-            }; // All locks released
+            all_test_ops.push(test);
+        }
+        if let parser::Operation::Module(m) = op {
+            for body_op in &m.body {
+                if let parser::Operation::Test(test) = body_op {
+                    all_test_ops.push(test);
+                }
+            }
+        }
+    }
 
-            for case in &test.cases {
-                // NO LOCKS HELD during test execution
-                let case_result = if needs_async {
-                    if let Some(sender) = &config.io_sender {
-                        eval::eval_test_case_async(
-                            &program_snapshot, &test.function_name, case, &mocks, sender.clone(), &routes,
-                        ).await
-                    } else {
-                        eval::eval_test_case_with_mocks(
-                            &program_snapshot, &test.function_name, case, &mocks, &routes,
-                        )
-                    }
+    for test in &all_test_ops {
+        // Tier 1: read program to check async needs; Tier 3: get mocks
+        // Clone what we need so locks are released before test execution
+        let (program_snapshot, needs_async, mocks, routes) = {
+            let program = config.program.read().await;
+            let meta = config.meta.lock().unwrap();
+            let needs_async = program.get_function(&test.function_name)
+                .is_some_and(|f| f.effects.iter().any(|e|
+                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+            let routes = config.runtime.read().unwrap().http_routes.clone();
+            (program.clone(), needs_async, meta.io_mocks.clone(), routes)
+        }; // All locks released
+
+        for case in &test.cases {
+            // NO LOCKS HELD during test execution
+            let case_result = if needs_async {
+                if let Some(sender) = &config.io_sender {
+                    eval::eval_test_case_async(
+                        &program_snapshot, &test.function_name, case, &mocks, sender.clone(), &routes,
+                    ).await
                 } else {
                     eval::eval_test_case_with_mocks(
                         &program_snapshot, &test.function_name, case, &mocks, &routes,
                     )
-                };
+                }
+            } else {
+                eval::eval_test_case_with_mocks(
+                    &program_snapshot, &test.function_name, case, &mocks, &routes,
+                )
+            };
 
-                match case_result {
-                    Ok(msg) => {
-                        passed += 1;
-                        results.push(TestCaseResult {
-                            message: msg,
-                            pass: true,
-                        });
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        results.push(TestCaseResult {
-                            message: format!("{e}"),
-                            pass: false,
-                        });
-                    }
+            match case_result {
+                Ok(msg) => {
+                    passed += 1;
+                    results.push(TestCaseResult {
+                        message: msg,
+                        pass: true,
+                    });
+                }
+                Err(e) => {
+                    failed += 1;
+                    results.push(TestCaseResult {
+                        message: format!("{e}"),
+                        pass: false,
+                    });
                 }
             }
-            // Tier 3: record test results (brief lock)
-            {
-                let mut meta = config.meta.lock().unwrap();
-                let rev = meta.revision;
-                let details: Vec<String> = results.iter().map(|r| {
-                    format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
-                }).collect();
-                meta.history.push(crate::session::HistoryEntry::Test {
-                    revision: rev,
-                    function: test.function_name.clone(),
-                    passed,
-                    failed,
-                    details,
-                });
-            }
-            // Tier 1: store tests on the program if all passed (brief write lock)
-            if failed == 0 && !test.cases.is_empty() {
-                let mut session = config.session.lock().await;
-                session.store_test(&test.function_name, &test.cases);
-                // Sync program tier from session
-                *config.program.write().await = session.program.clone();
-            }
+        }
+        // Tier 3: record test results (brief lock)
+        {
+            let mut meta = config.meta.lock().unwrap();
+            let rev = meta.revision;
+            let details: Vec<String> = results.iter().map(|r| {
+                format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)
+            }).collect();
+            meta.history.push(crate::session::HistoryEntry::Test {
+                revision: rev,
+                function: test.function_name.clone(),
+                passed,
+                failed,
+                details,
+            });
+        }
+        // Tier 1: store tests on the program if all passed (brief write lock)
+        if failed == 0 && !test.cases.is_empty() {
+            let mut session = config.session.lock().await;
+            session.store_test(&test.function_name, &test.cases);
+            // Sync program tier from session
+            *config.program.write().await = session.program.clone();
         }
     }
 
