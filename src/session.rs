@@ -17,27 +17,19 @@ use crate::validator;
 
 /// Runtime infrastructure state (Tier 2) — shared across async tasks via Arc<RwLock>.
 /// Holds HTTP routes and shared variables, separate from the AST program state.
+/// Roadmap, plan, and io_mocks are NOT here — they live in SessionMeta (via SharedMeta).
 /// TODO(#9): Per-resource locks (each shared var gets its own Arc<RwLock<Value>>).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeState {
     pub http_routes: Vec<crate::ast::HttpRoute>,
     #[serde(skip)]
     pub shared_vars: HashMap<String, crate::eval::Value>,
-    /// Roadmap mirror for builtin access during eval. Synced with SessionMeta.roadmap.
-    #[serde(skip)]
-    pub roadmap: Vec<RoadmapItem>,
-    /// Plan mirror for builtin access during eval. Synced with SessionMeta.plan.
-    #[serde(skip)]
-    pub plan: Vec<PlanStep>,
     /// Agent mailbox mirror for builtin access during eval. Synced with SessionMeta.agent_mailbox.
     #[serde(skip)]
     pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
     /// Pending commands queued by IO builtins (watch_start, agent_spawn) for API-layer processing.
     #[serde(skip)]
     pub pending_commands: Vec<String>,
-    /// IO mocks mirror for builtin access during eval. Synced with SessionMeta.io_mocks.
-    #[serde(skip)]
-    pub io_mocks: Vec<IoMock>,
     /// Library general errors mirror for builtin access during eval.
     /// Synced from LibraryState.errors when tiers are synced.
     #[serde(skip)]
@@ -50,6 +42,11 @@ pub struct RuntimeState {
 
 /// Thread-safe handle to the runtime state.
 pub type SharedRuntime = Arc<RwLock<RuntimeState>>;
+
+/// Thread-safe handle to session metadata (roadmap, plan, mocks).
+/// Uses std::sync::Mutex (not tokio) so it can be locked from sync contexts
+/// like spawn_blocking without requiring an async runtime.
+pub type SharedMeta = Arc<std::sync::Mutex<SessionMeta>>;
 
 /// A single entry in the mutation log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1375,35 +1372,102 @@ impl Session {
     }
 
     fn handle_roadmap(&mut self, action: &parser::RoadmapAction) -> (String, bool) {
-        let result = match action {
-            parser::RoadmapAction::Show => {
-                let items = self.meta.roadmap.iter().enumerate().map(|(i, item)| {
-                    format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
-                }).collect::<Vec<_>>().join("\n");
-                (if items.is_empty() { "Roadmap is empty.".to_string() } else { format!("Roadmap:\n{items}") }, true)
-            }
+        match action {
+            parser::RoadmapAction::Show => (roadmap_list(&self.meta.roadmap), true),
             parser::RoadmapAction::Add(desc) => {
-                self.meta.roadmap.push(RoadmapItem { description: desc.clone(), done: false });
-                (format!("Roadmap: added \"{}\" (#{}).", desc, self.meta.roadmap.len()), true)
+                let msg = roadmap_add(&mut self.meta.roadmap, desc);
+                (msg, true)
             }
             parser::RoadmapAction::Done(n) => {
-                if let Some(item) = self.meta.roadmap.get_mut(n.saturating_sub(1)) {
-                    item.done = true;
-                    (format!("Roadmap: #{n} done."), true)
-                } else { (format!("Roadmap: #{n} not found."), false) }
+                match roadmap_done(&mut self.meta.roadmap, *n) {
+                    Ok(msg) => (msg, true),
+                    Err(e) => (e.to_string(), false),
+                }
             }
             parser::RoadmapAction::Remove(n) => {
-                let idx = n.saturating_sub(1);
-                if idx < self.meta.roadmap.len() {
-                    let removed = self.meta.roadmap.remove(idx);
-                    (format!("Roadmap: removed \"{}\".", removed.description), true)
-                } else { (format!("Roadmap: #{n} not found."), false) }
+                match roadmap_remove(&mut self.meta.roadmap, *n) {
+                    Ok(msg) => (msg, true),
+                    Err(e) => (e.to_string(), false),
+                }
             }
-        };
-        // Keep runtime copy in sync so roadmap builtins see the same data.
-        self.runtime.roadmap = self.meta.roadmap.clone();
-        result
+        }
     }
+}
+
+// ── Free functions for roadmap/plan operations ──────────────────────────────
+// These are the single implementation used by both handle_roadmap() (! commands)
+// and the coroutine builtins (+await roadmap_add etc.) via SHARED_META.
+
+pub fn roadmap_list(roadmap: &[RoadmapItem]) -> String {
+    let items: Vec<String> = roadmap.iter().enumerate().map(|(i, item)| {
+        format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
+    }).collect();
+    if items.is_empty() { "Roadmap is empty.".to_string() } else { format!("Roadmap:\n{}", items.join("\n")) }
+}
+
+pub fn roadmap_add(roadmap: &mut Vec<RoadmapItem>, desc: &str) -> String {
+    roadmap.push(RoadmapItem { description: desc.to_string(), done: false });
+    format!("Roadmap: added \"{}\" (#{}).", desc, roadmap.len())
+}
+
+pub fn roadmap_done(roadmap: &mut Vec<RoadmapItem>, n: usize) -> Result<String> {
+    if let Some(item) = roadmap.get_mut(n.saturating_sub(1)) {
+        item.done = true;
+        Ok(format!("Roadmap: #{n} done."))
+    } else {
+        Err(anyhow!("Roadmap: #{n} not found."))
+    }
+}
+
+pub fn roadmap_remove(roadmap: &mut Vec<RoadmapItem>, n: usize) -> Result<String> {
+    let idx = n.saturating_sub(1);
+    if idx < roadmap.len() {
+        let removed = roadmap.remove(idx);
+        Ok(format!("Roadmap: removed \"{}\".", removed.description))
+    } else {
+        Err(anyhow!("Roadmap: #{n} not found."))
+    }
+}
+
+pub fn plan_set(plan: &mut Vec<PlanStep>, steps: &[String]) -> String {
+    *plan = steps.iter().map(|s| PlanStep {
+        description: s.clone(),
+        status: PlanStatus::Pending,
+    }).collect();
+    format!("Plan set with {} steps.", plan.len())
+}
+
+pub fn plan_done(plan: &mut Vec<PlanStep>, n: usize) -> Result<String> {
+    let idx = n.saturating_sub(1);
+    if idx < plan.len() {
+        plan[idx].status = PlanStatus::Done;
+        Ok(format!("Plan: step {n} done."))
+    } else {
+        Err(anyhow!("plan_done: step {n} not found (plan has {} steps)", plan.len()))
+    }
+}
+
+pub fn plan_fail(plan: &mut Vec<PlanStep>, n: usize) -> Result<String> {
+    let idx = n.saturating_sub(1);
+    if idx < plan.len() {
+        plan[idx].status = PlanStatus::Failed;
+        Ok(format!("Plan: step {n} failed."))
+    } else {
+        Err(anyhow!("plan_fail: step {n} not found (plan has {} steps)", plan.len()))
+    }
+}
+
+pub fn plan_show(plan: &[PlanStep]) -> String {
+    let steps: Vec<String> = plan.iter().enumerate().map(|(i, step)| {
+        let icon = match step.status {
+            PlanStatus::Pending => "[ ]",
+            PlanStatus::InProgress => "[~]",
+            PlanStatus::Done => "[x]",
+            PlanStatus::Failed => "[!]",
+        };
+        format!("{} {}: {}", icon, i + 1, step.description)
+    }).collect();
+    if steps.is_empty() { "No plan set.".to_string() } else { steps.join("\n") }
 }
 
 /// Format a parser::Expr back into source-level syntax suitable for `+with` lines.
@@ -1863,39 +1927,47 @@ mod tests {
     }
 
     #[test]
-    fn runtime_state_default_has_empty_plan() {
-        let state = RuntimeState::default();
-        assert!(state.plan.is_empty(), "default plan should be empty");
+    fn session_meta_default_has_empty_plan() {
+        let meta = SessionMeta::new();
+        assert!(meta.plan.is_empty(), "default plan should be empty");
     }
 
     #[test]
-    fn runtime_state_plan_field_round_trips_in_memory() {
-        let mut state = RuntimeState::default();
-        state.plan.push(PlanStep {
+    fn session_meta_plan_field_round_trips_in_memory() {
+        let mut meta = SessionMeta::new();
+        meta.plan.push(PlanStep {
             description: "step one".to_string(),
             status: PlanStatus::Pending,
         });
-        state.plan.push(PlanStep {
+        meta.plan.push(PlanStep {
             description: "step two".to_string(),
             status: PlanStatus::Done,
         });
-        assert_eq!(state.plan.len(), 2);
-        assert_eq!(state.plan[0].description, "step one");
-        assert_eq!(state.plan[1].status, PlanStatus::Done);
+        assert_eq!(meta.plan.len(), 2);
+        assert_eq!(meta.plan[0].description, "step one");
+        assert_eq!(meta.plan[1].status, PlanStatus::Done);
     }
 
     #[test]
-    fn runtime_state_plan_skipped_in_serialization() {
-        let mut state = RuntimeState::default();
-        state.plan.push(PlanStep {
-            description: "should not serialize".to_string(),
+    fn session_meta_plan_serializes_with_session() {
+        // Plan lives in SessionMeta which IS serialized as part of Session
+        let mut session = Session::new();
+        session.meta.plan.push(PlanStep {
+            description: "should serialize".to_string(),
             status: PlanStatus::InProgress,
         });
-        // Serialize — plan is #[serde(skip)] so it should not appear in JSON
-        let json = serde_json::to_string(&state).expect("serialize");
-        assert!(!json.contains("should not serialize"), "plan field should be skipped during serialization");
-        // Deserialize — plan should default to empty
-        let deserialized: RuntimeState = serde_json::from_str(&json).expect("deserialize");
-        assert!(deserialized.plan.is_empty(), "deserialized plan should be empty (skipped)");
+        let json = serde_json::to_string(&session).expect("serialize");
+        assert!(json.contains("should serialize"), "plan should be serialized with session");
+        let deserialized: Session = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.meta.plan.len(), 1, "plan should round-trip");
+        assert_eq!(deserialized.meta.plan[0].status, PlanStatus::InProgress);
+    }
+
+    #[test]
+    fn runtime_state_no_longer_has_roadmap_or_plan() {
+        // Verify that RuntimeState no longer has these fields (compile-time check)
+        let _state = RuntimeState::default();
+        // These fields have been removed from RuntimeState.
+        // Plan and roadmap are now in SessionMeta only.
     }
 }
