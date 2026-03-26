@@ -522,10 +522,17 @@ impl<'a> Parser<'a> {
                     self.index += 1; // Skip optional +end (backward compat)
                     break;
                 }
-                // Only +fn, +type, +shared belong inside a module — everything else is top-level
+                // +fn, +type, +shared, and !test belong inside a module.
+                // !test between function definitions should not break the module context.
+                // Blank lines are skipped.
+                if next.text.trim().is_empty() {
+                    self.index += 1;
+                    continue;
+                }
                 if !next.text.starts_with("+fn")
                     && !next.text.starts_with("+type")
                     && !next.text.starts_with("+shared")
+                    && !next.text.starts_with("!test")
                 {
                     break;
                 }
@@ -5542,6 +5549,27 @@ Add tests
                 }
             }
             _ => panic!("expected Test"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod module_context_tests {
+    use super::*;
+
+    #[test]
+    fn test_between_functions_preserves_module_context() {
+        let source = "!module TestMod\n+fn foo ()->Int\n  +return 1\n+end\n\n!test TestMod.foo\n  +with -> expect 1\n\n+fn bar ()->Int\n  +return 2\n+end\n";
+        let ops = parse(source).unwrap();
+        assert_eq!(ops.len(), 1, "should be one Module operation");
+        if let Operation::Module(m) = &ops[0] {
+            assert_eq!(m.name, "TestMod");
+            assert_eq!(m.body.len(), 3, "module should contain foo, test, bar");
+            assert!(matches!(&m.body[0], Operation::Function(f) if f.name == "foo"));
+            assert!(matches!(&m.body[1], Operation::Test(t) if t.function_name == "TestMod.foo"));
+            assert!(matches!(&m.body[2], Operation::Function(f) if f.name == "bar"));
+        } else {
+            panic!("expected Module operation");
         }
     }
 }

@@ -3437,13 +3437,20 @@ mod tests {
     fn extract_test_cases(source: &str) -> Vec<(String, parser::TestCase)> {
         let ops = parser::parse(source).expect("parse failed");
         let mut cases = Vec::new();
-        for op in ops {
-            if let parser::Operation::Test(test) = op {
-                for case in test.cases {
-                    cases.push((test.function_name.clone(), case));
+        fn collect(ops: &[parser::Operation], cases: &mut Vec<(String, parser::TestCase)>) {
+            for op in ops {
+                match op {
+                    parser::Operation::Test(test) => {
+                        for case in &test.cases {
+                            cases.push((test.function_name.clone(), case.clone()));
+                        }
+                    }
+                    parser::Operation::Module(m) => collect(&m.body, cases),
+                    _ => {}
                 }
             }
         }
+        collect(&ops, &mut cases);
         cases
     }
 
