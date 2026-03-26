@@ -7511,4 +7511,103 @@ mod tests {
         let result = eval_test_case(&program, fn_name, case);
         assert!(result.is_ok(), "+each with Arc<Vec> should work: {:?}", result);
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Function dispatch with interned fn_index / module_index
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn interned_fn_index_dispatch_top_level() {
+        // End-to-end: calling a top-level user function should dispatch through
+        // the interned fn_index, not string comparison.
+        let source = "\
++fn triple (n:Int)->Int
+  +return n * 3
+
+!test triple
+  +with n=7 -> expect 21
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "top-level function dispatch via interned index: {:?}", result);
+    }
+
+    #[test]
+    fn interned_fn_index_dispatch_module_qualified() {
+        // Module-qualified function call dispatches through interned module_index + fn_index.
+        let source = "\
+!module Calc
+
++fn square (n:Int)->Int
+  +return n * n
+
+!test Calc.square
+  +with n=6 -> expect 36
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "module function dispatch via interned index: {:?}", result);
+    }
+
+    #[test]
+    fn interned_fn_index_cross_function_call() {
+        // Function A calls function B — both dispatched through interned indices.
+        let source = "\
++fn helper (x:Int)->Int
+  +return x + 1
+
++fn main_fn (x:Int)->Int
+  +call y:Int = helper(x)
+  +return y * 2
+
+!test main_fn
+  +with x=4 -> expect 10
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "cross-function dispatch via interned index: {:?}", result);
+    }
+
+    #[test]
+    fn interned_union_variant_lookup_in_match() {
+        // Union variant dispatch uses interned HashSet<InternedId> via is_union_variant.
+        let source = "\
++type Shape = Circle(Int) | Square(Int)
+
++fn area (s:Shape)->Int
+  +match s
+  +case Circle(r)
+    +return r * r * 3
+  +case Square(side)
+    +return side * side
+  +end
+
+!test area
+  +with s=Circle(5) -> expect 75
+  +with s=Square(4) -> expect 16
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        for (fn_name, case) in &cases {
+            let result = eval_test_case(&program, fn_name, case);
+            assert!(result.is_ok(), "union variant dispatch via interned set: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn interned_fn_dispatch_unknown_function_error() {
+        // Calling a non-existent function should produce a clear error, not panic.
+        let program = build_program("+fn noop ()->Int\n  +return 0\n");
+        let mut env = Env::new_with_shared_interner(&program.shared_interner);
+        let result = eval_builtin_or_user(&program, "nonexistent_fn", vec![], &mut env);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined function"), "should say undefined: {msg}");
+    }
 }
