@@ -280,8 +280,10 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 nested.name,
                 decl.name
             ),
+            // !test inside a module body is valid — tests are handled separately
+            parser::Operation::Test(_) => {}
             other => bail!(
-                "unexpected operation in module `{}`: {:?} — only +fn, +type, and +shared are allowed",
+                "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, and !test are allowed",
                 decl.name,
                 std::mem::discriminant(other)
             ),
