@@ -1,4 +1,4 @@
-# FORGE
+# ADAPSIS
 
 **An AI-First Programming Language**
 
@@ -11,15 +11,15 @@ Flat. Concrete. Provenance-tracked. Grammar-constrained.
 
 ## 1. Executive Summary
 
-**Forge** is an AI-native program representation and mutation protocol with a constrained surface language. It is not primarily "the next programming language" — it is a system for AI-assisted software construction, where the AST is the source of truth, changes happen through incremental mutations with immediate compiler feedback, and the language is the surface that makes the protocol work.
+**adapsis** is an AI-native program representation and mutation protocol with a constrained surface language. It is not primarily "the next programming language" — it is a system for AI-assisted software construction, where the AST is the source of truth, changes happen through incremental mutations with immediate compiler feedback, and the language is the surface that makes the protocol work.
 
-The core insight: the real failure mode of LLM code generation is not syntax errors — it's maintaining global consistency over time under limited context. Forge attacks this directly through an interactive compilation loop where the model emits small, validated mutations rather than generating complete programs blind.
+The core insight: the real failure mode of LLM code generation is not syntax errors — it's maintaining global consistency over time under limited context. adapsis attacks this directly through an interactive compilation loop where the model emits small, validated mutations rather than generating complete programs blind.
 
 The innovation is the loop, not the syntax. The AST runtime, the mutation protocol, the semantic query system, and the browser-based multi-representation interface are the real contribution. The language design serves these by being flat, explicit, and easy to validate — but the language alone is not the point.
 
 **Key proposition:** Incremental, feedback-driven program construction produces more correct software than one-shot code generation, and a purpose-built language and protocol make that loop maximally effective.
 
-**End goal:** Forge is expressive enough to implement itself — its own AST runtime, compiler, and provenance tracker — closing the loop where an LLM improves its own toolchain in the language designed for it.
+**End goal:** adapsis is expressive enough to implement itself — its own AST runtime, compiler, and provenance tracker — closing the loop where an LLM improves its own toolchain in the language designed for it.
 
 ---
 
@@ -41,7 +41,7 @@ Current programming languages were designed for humans with keyboards and screen
 
 ## 3. Core Architecture
 
-Forge is not just a language. It is an integrated system with four tightly coupled components.
+adapsis is not just a language. It is an integrated system with four tightly coupled components.
 
 ### 3.1 The Language
 
@@ -174,7 +174,7 @@ The model operates in two distinct phases per step:
 
 **Phase 1 — Unconstrained thinking.** The model reasons in natural language about the problem: approach, edge cases, data structures, trade-offs. No grammar constraint. This is where algorithmic creativity lives.
 
-**Phase 2 — Constrained code emission.** The model generates a Forge AST mutation under the GBNF grammar. Decisions are mostly made; the model is translating its plan into the target format, and the grammar ensures well-formedness.
+**Phase 2 — Constrained code emission.** The model generates a adapsis AST mutation under the GBNF grammar. Decisions are mostly made; the model is translating its plan into the target format, and the grammar ensures well-formedness.
 
 ```
 <think>
@@ -223,7 +223,7 @@ The runtime answers with structured data that becomes part of the model's contex
 
 ## 6. Provenance and Propagation
 
-Provenance tracking is one of Forge's most novel features — and its most dangerous. It manages relationships between related code fragments at the tooling level, enabling bug fixes to flow between structurally similar code. But without a careful trust model, it's a confident bug copier. This section defines both the mechanism and its safety constraints.
+Provenance tracking is one of adapsis's most novel features — and its most dangerous. It manages relationships between related code fragments at the tooling level, enabling bug fixes to flow between structurally similar code. But without a careful trust model, it's a confident bug copier. This section defines both the mechanism and its safety constraints.
 
 ### 6.1 When Provenance Matters
 
@@ -334,11 +334,11 @@ A very tight grammar reduces the token-level branching factor, which *can* push 
 
 ### 8.1 Compilation Story
 
-Forge compiles to native binaries. The AST is already a clean intermediate representation. Since the language is flat, fully typed, has no generics, and no dynamic dispatch, compilation is simpler than most languages. Every type is known at compile time, every call is direct, every effect is annotated.
+adapsis compiles to native binaries. The AST is already a clean intermediate representation. Since the language is flat, fully typed, has no generics, and no dynamic dispatch, compilation is simpler than most languages. Every type is known at compile time, every call is direct, every effect is annotated.
 
 Target options, in order of practicality:
 
-- **Transpile to Rust or C:** Simplest path. Forge's flat, concrete code maps almost directly to Rust without borrowing complexity (all ownership is explicit). Leverage Rust/C's mature optimization backends.
+- **Transpile to Rust or C:** Simplest path. adapsis's flat, concrete code maps almost directly to Rust without borrowing complexity (all ownership is explicit). Leverage Rust/C's mature optimization backends.
 - **LLVM IR:** Direct LLVM codegen. More control, more work. The flat structure maps cleanly to LLVM's SSA-based IR.
 - **Cranelift:** Faster compilation, slightly less optimization. Good for development iteration where the model is generating and testing rapidly.
 
@@ -353,17 +353,17 @@ The deliberate design constraints keep compilation simple:
 - Explicit effects mean the compiler knows exactly what each function does
 - Shallow control flow maps directly to basic blocks
 
-A Forge compiler would be dramatically simpler than a Rust or C++ compiler while producing code of comparable runtime performance.
+A adapsis compiler would be dramatically simpler than a Rust or C++ compiler while producing code of comparable runtime performance.
 
 ### 8.3 Memory Management: Profile-Guided Automatic Strategy Selection
 
-Forge takes a novel approach to memory management: instead of one global strategy, the compiler automatically selects the optimal strategy per function based on static analysis, effect annotations, and real execution profiles from the evaluation phase.
+adapsis takes a novel approach to memory management: instead of one global strategy, the compiler automatically selects the optimal strategy per function based on static analysis, effect annotations, and real execution profiles from the evaluation phase.
 
 The model never thinks about memory. The human never configures anything. The compiled code has near-manual-allocation performance.
 
-#### 8.3.1 Why Forge Can Do This
+#### 8.3.1 Why adapsis Can Do This
 
-Traditional languages can't easily infer memory strategies because of aliasing, opaque function calls, and hidden state. Forge has structural advantages that make aggressive inference tractable:
+Traditional languages can't easily infer memory strategies because of aliasing, opaque function calls, and hidden state. adapsis has structural advantages that make aggressive inference tractable:
 
 - **Types are fully known** — boring generics monomorphize, every concrete type is visible at compile time
 - **Effects tell you what functions do with references** — a pure function can't stash a reference in global state; an `[io]` function might
@@ -416,7 +416,7 @@ This is **profile-guided optimization for memory management**, happening automat
 
 #### 8.3.4 Arena-Per-Request Pattern
 
-Especially powerful for server workloads — the kind of systems Forge would build. The compiler detects the pattern: a function marked `[io]` that processes a request and returns a response, where all intermediates are scoped to the function body.
+Especially powerful for server workloads — the kind of systems adapsis would build. The compiler detects the pattern: a function marked `[io]` that processes a request and returns a response, where all intermediates are scoped to the function body.
 
 ```
 +fn handle_request (req:Request)->Response [io,fail]
@@ -434,14 +434,14 @@ Each incoming request gets its own arena. Everything allocated during processing
 
 #### 8.3.5 Escape Analysis on Steroids
 
-Forge's constraints enable much more aggressive escape analysis than Rust or Go:
+adapsis's constraints enable much more aggressive escape analysis than Rust or Go:
 
 - A pure function (no `[io]`, no `[mut]`) cannot stash references in external state — all allocations are provably local
 - Named function references are just pointers — passing `compare_by_age` to `sort` doesn't extend any lifetime
 - Flat control flow with explicit branches means every value's lifetime is structurally visible
 - No inheritance or dynamic dispatch means no hidden vtable indirection that could extend lifetimes
 
-The result: most allocations in typical Forge code end up on the stack or in arenas. Reference counting is the fallback for genuinely shared, long-lived, dynamically scoped values — not the common case.
+The result: most allocations in typical adapsis code end up on the stack or in arenas. Reference counting is the fallback for genuinely shared, long-lived, dynamically scoped values — not the common case.
 
 #### 8.3.6 The Model's Perspective
 
@@ -467,17 +467,17 @@ The recommended approach is to use both Cranelift and Rust transpilation. Cranel
 | Optimization | Excellent (LLVM) | Good, not great |
 | Iteration loop | Seconds per cycle | Milliseconds per cycle |
 
-This is a proven pattern — the Rust compiler itself uses Cranelift as an optional fast backend for debug builds while keeping LLVM for release. The Forge compiler would have two backends, and the model doesn't need to know which one is active — the extern declarations and code are the same either way.
+This is a proven pattern — the Rust compiler itself uses Cranelift as an optional fast backend for debug builds while keeping LLVM for release. The adapsis compiler would have two backends, and the model doesn't need to know which one is active — the extern declarations and code are the same either way.
 
 ---
 
 ## 9. Building Complex Systems
 
-Can Forge build a web server, a game engine, a database? Yes, but the workflow differs from traditional development.
+Can adapsis build a web server, a game engine, a database? Yes, but the workflow differs from traditional development.
 
 ### 9.1 Complexity Lives in Composition
 
-Individual Forge modules are deliberately simple: flat functions, concrete types, explicit effects. Complexity emerges from the composition graph between modules. A web server is not one complex module but dozens of simple modules with explicit interfaces between them.
+Individual adapsis modules are deliberately simple: flat functions, concrete types, explicit effects. Complexity emerges from the composition graph between modules. A web server is not one complex module but dozens of simple modules with explicit interfaces between them.
 
 The model scaffolds large systems as module graphs, each module internally simple and concrete. The provenance system handles cross-cutting concerns. The semantic query system lets the model maintain coherence across a large codebase without needing it all in context.
 
@@ -491,27 +491,27 @@ The model scaffolds large systems as module graphs, each module internally simpl
 
 ### 9.3 What About Performance-Critical Code?
 
-Forge's flat, concrete, fully-typed nature is actually ideal for performance. No dynamic dispatch, no boxing, no runtime type checks, no garbage collector overhead. The compiled output should be comparable to C for computational kernels.
+adapsis's flat, concrete, fully-typed nature is actually ideal for performance. No dynamic dispatch, no boxing, no runtime type checks, no garbage collector overhead. The compiled output should be comparable to C for computational kernels.
 
-For cases requiring hand-optimized SIMD or unsafe memory access, Forge would support a `[unsafe]` effect marker and a raw-operation mode, similar to Rust's `unsafe` blocks but with the same explicit, flat syntax.
+For cases requiring hand-optimized SIMD or unsafe memory access, adapsis would support a `[unsafe]` effect marker and a raw-operation mode, similar to Rust's `unsafe` blocks but with the same explicit, flat syntax.
 
 ---
 
 ## 10. Foreign Function Interface
 
-Forge can't exist in a vacuum. Real systems need access to existing libraries, operating system APIs, and mature ecosystems. The FFI design follows the same philosophy as everything else: explicit, flat, effects declared. The model should never be surprised by what a foreign function does.
+adapsis can't exist in a vacuum. Real systems need access to existing libraries, operating system APIs, and mature ecosystems. The FFI design follows the same philosophy as everything else: explicit, flat, effects declared. The model should never be surprised by what a foreign function does.
 
 ### 10.1 Three Tiers
 
-**Tier 1: Forge modules.** Native Forge code. Fully validated, fully tracked, all effects known. This is the default.
+**Tier 1: adapsis modules.** Native adapsis code. Fully validated, fully tracked, all effects known. This is the default.
 
-**Tier 2: Rust crate bindings.** The sweet spot for FFI because Rust's type system is rich enough that safe bindings can be generated semi-automatically. Since Forge's simplest compilation path is transpiling to Rust, Rust FFI is almost free — the Forge compiler generates `extern crate` references and wrapper functions. Cargo handles dependency management.
+**Tier 2: Rust crate bindings.** The sweet spot for FFI because Rust's type system is rich enough that safe bindings can be generated semi-automatically. Since adapsis's simplest compilation path is transpiling to Rust, Rust FFI is almost free — the adapsis compiler generates `extern crate` references and wrapper functions. Cargo handles dependency management.
 
 **Tier 3: C FFI.** For raw C libraries (OpenSSL, SQLite, system calls). Inherently unsafe because C provides no type safety guarantees.
 
 ### 10.2 Rust Bindings
 
-The model declares an external module with Forge-typed signatures and effect annotations. The compiler generates the glue and verifies compatibility:
+The model declares an external module with adapsis-typed signatures and effect annotations. The compiler generates the glue and verifies compatibility:
 
 ```
 +extern rust serde_json from "serde_json"
@@ -520,11 +520,11 @@ The model declares an external module with Forge-typed signatures and effect ann
 end
 ```
 
-The compiler checks that the Rust crate's actual signatures are compatible with the declared Forge signatures. If they don't match, it's a compile-time error. The effect annotations are declared by the model (or human) and trusted, but can be verified against Rust's type information.
+The compiler checks that the Rust crate's actual signatures are compatible with the declared adapsis signatures. If they don't match, it's a compile-time error. The effect annotations are declared by the model (or human) and trusted, but can be verified against Rust's type information.
 
 ### 10.3 C Bindings
 
-C FFI requires the `[unsafe]` effect because the Forge compiler can't verify anything about C code:
+C FFI requires the `[unsafe]` effect because the adapsis compiler can't verify anything about C code:
 
 ```
 +extern c sqlite3 from "libsqlite3"
@@ -538,7 +538,7 @@ Everything gets `[unsafe]`. The model knows these functions are dangerous. Calle
 
 ### 10.4 The Wrapping Pattern
 
-The practical pattern is containment: write a thin safe Forge module around unsafe bindings, validate inputs, handle errors, and expose a clean interface. Everything above the wrapper never touches unsafe:
+The practical pattern is containment: write a thin safe adapsis module around unsafe bindings, validate inputs, handle errors, and expose a clean interface. Everything above the wrapper never touches unsafe:
 
 ```
 +module SafeDb
@@ -561,7 +561,7 @@ The practical pattern is containment: write a thin safe Forge module around unsa
 end
 ```
 
-The `[unsafe]` is contained within `SafeDb`. Everything outside sees only `[io,fail]` — clean, safe Forge functions. This mirrors the pattern used in the Rust ecosystem, where unsafe FFI is wrapped in safe abstractions.
+The `[unsafe]` is contained within `SafeDb`. Everything outside sees only `[io,fail]` — clean, safe adapsis functions. This mirrors the pattern used in the Rust ecosystem, where unsafe FFI is wrapped in safe abstractions.
 
 ### 10.5 Querying Available Libraries
 
@@ -577,7 +577,7 @@ The AST runtime answers with declared signatures, and the model generates calls 
 
 ### 10.6 Effect Boundaries
 
-A key property: effects from external code never leak silently. If a Rust crate function can panic, the Forge binding must declare `[fail]`. If a C function does IO, the binding must declare `[io]`. The compiler enforces that no unannounced effects cross the FFI boundary.
+A key property: effects from external code never leak silently. If a Rust crate function can panic, the adapsis binding must declare `[fail]`. If a C function does IO, the binding must declare `[io]`. The compiler enforces that no unannounced effects cross the FFI boundary.
 
 This means the model can always reason about effects locally, even when calling into foreign code. The FFI declaration is the contract, and the contract is visible at every call site.
 
@@ -585,11 +585,11 @@ This means the model can always reason about effects locally, even when calling 
 
 ## 11. Concurrency and Parallelism
 
-Forge separates concurrency (doing multiple things by interleaving on one thread) from parallelism (doing multiple things simultaneously on multiple cores). Each has its own model, its own effect markers, and its own level of danger. The model defaults to the safest option and escalates explicitly.
+adapsis separates concurrency (doing multiple things by interleaving on one thread) from parallelism (doing multiple things simultaneously on multiple cores). Each has its own model, its own effect markers, and its own level of danger. The model defaults to the safest option and escalates explicitly.
 
 ### 11.1 Coroutines: Cooperative Concurrency
 
-Coroutines are Forge's primary concurrency primitive. A coroutine is a function that can pause at marked suspension points, hand a value to its caller, and later resume from where it paused. The function's local state stays alive between yields.
+Coroutines are adapsis's primary concurrency primitive. A coroutine is a function that can pause at marked suspension points, hand a value to its caller, and later resume from where it paused. The function's local state stays alive between yields.
 
 ```
 +fn stream_users (query:Query)->Yield<User> [io,yield]
@@ -618,17 +618,17 @@ Items are produced one at a time, on demand. A million users never all sit in me
 
 ### 11.2 Stackless Design
 
-Forge uses stackless coroutines. A function can only yield if it directly contains a `+yield` statement. It cannot call some other function that secretly yields on its behalf.
+adapsis uses stackless coroutines. A function can only yield if it directly contains a `+yield` statement. It cannot call some other function that secretly yields on its behalf.
 
 If you see a function without `[yield]` in its effects, you know with certainty it runs straight through. No surprises. The model can reason about each function independently.
 
-The compiler transforms coroutines into state machines. Each yield point becomes a state transition. The function's local variables become fields in a struct. Resuming the coroutine is just calling a function that switches on the current state. This is a well-understood transformation (it's what Rust's async/await and Python's generators do under the hood), and Forge's flat structure makes it particularly easy — there's no deep nesting to unravel.
+The compiler transforms coroutines into state machines. Each yield point becomes a state transition. The function's local variables become fields in a struct. Resuming the coroutine is just calling a function that switches on the current state. This is a well-understood transformation (it's what Rust's async/await and Python's generators do under the hood), and adapsis's flat structure makes it particularly easy — there's no deep nesting to unravel.
 
-The "coloring problem" (async functions infecting every caller) is a non-issue in Forge because effect annotations are mandatory from the start. The `[yield]` effect *is* the color, and it's required anyway. There's no separate async/sync split — just functions with or without the yield effect.
+The "coloring problem" (async functions infecting every caller) is a non-issue in adapsis because effect annotations are mandatory from the start. The `[yield]` effect *is* the color, and it's required anyway. There's no separate async/sync split — just functions with or without the yield effect.
 
 ### 11.3 Structured Parallelism: Threads Done Safely
 
-For CPU-bound work that needs multiple cores, Forge provides structured parallelism via the `[parallel]` effect:
+For CPU-bound work that needs multiple cores, adapsis provides structured parallelism via the `[parallel]` effect:
 
 ```
 +fn parallel_process (items:List<Work>)->List<Result<Done>> [parallel]
@@ -672,7 +672,7 @@ Each level is more powerful and more dangerous, and the effect system makes the 
 
 The model defaults to Level 1, escalates to Level 2 for CPU-bound work, uses Level 3 when parallel branches need to communicate, and almost never touches Level 4.
 
-### 11.6 What Forge Deliberately Does Not Support
+### 11.6 What adapsis Deliberately Does Not Support
 
 - **Shared mutable state between threads.** No `Arc<Mutex<T>>`, no atomic operations as language primitives. Shared state goes through channels or a dedicated state-holder thread.
 - **Unstructured thread spawning.** No fire-and-forget threads. Every `+spawn` must be joined or its scope must be bounded. The compiler verifies this.
@@ -680,13 +680,13 @@ The model defaults to Level 1, escalates to Level 2 for CPU-bound work, uses Lev
 
 ### 11.7 Self-Hosting Implications
 
-A cooperative coroutine scheduler is a relatively simple piece of code — a good early target for Forge implementing its own infrastructure. The scheduler itself would use Level 4 (unsafe thread primitives) internally, but everything built on top uses the safe structured primitives. This mirrors how Rust's tokio runtime uses unsafe internally to provide a safe async interface.
+A cooperative coroutine scheduler is a relatively simple piece of code — a good early target for adapsis implementing its own infrastructure. The scheduler itself would use Level 4 (unsafe thread primitives) internally, but everything built on top uses the safe structured primitives. This mirrors how Rust's tokio runtime uses unsafe internally to provide a safe async interface.
 
 ---
 
 ## 12. Evaluation, Simulation, and Testing
 
-Because Forge functions are flat, explicitly typed, and have declared effects, the AST runtime can evaluate, trace, and simulate code at any granularity — from individual expressions up to full modules — without compiling a complete program.
+Because adapsis functions are flat, explicitly typed, and have declared effects, the AST runtime can evaluate, trace, and simulate code at any granularity — from individual expressions up to full modules — without compiling a complete program.
 
 ### 12.1 Function-Level Evaluation
 
@@ -744,11 +744,11 @@ Instead of concrete values, the runtime can reason about constraints symbolicall
   > coverage: 3 paths, all reachable
 ```
 
-This is lightweight formal verification — not full theorem proving, but path enumeration through flat, branch-based code is tractable precisely because Forge has no deep nesting or recursion to blow up the path space.
+This is lightweight formal verification — not full theorem proving, but path enumeration through flat, branch-based code is tractable precisely because adapsis has no deep nesting or recursion to blow up the path space.
 
 ### 12.5 Testing Effectful Functions
 
-Pure functions can be evaluated directly. For functions with effects, Forge's effect system provides the mock boundary. Since every function declares its effects, the runtime knows exactly what external dependencies exist and can intercept at the effect boundary.
+Pure functions can be evaluated directly. For functions with effects, adapsis's effect system provides the mock boundary. Since every function declares its effects, the runtime knows exactly what external dependencies exist and can intercept at the effect boundary.
 
 Instead of mock objects, dependency injection, or test frameworks, the model scripts what the outside world should look like for each test:
 
@@ -762,7 +762,7 @@ Instead of mock objects, dependency injection, or test frameworks, the model scr
 
 The `[io:scripted]` tells the runtime to replace all IO operations with the provided responses. No actual network calls, no external dependencies. Just a table of "when you see this call, return this value."
 
-This works because effects are explicit and the runtime controls them. In a traditional language, an `http.get` call could be buried three layers deep and you'd need complex mock infrastructure to intercept it. In Forge, the runtime knows exactly which functions do IO and intercepts at that boundary trivially.
+This works because effects are explicit and the runtime controls them. In a traditional language, an `http.get` call could be buried three layers deep and you'd need complex mock infrastructure to intercept it. In adapsis, the runtime knows exactly which functions do IO and intercepts at that boundary trivially.
 
 ### 12.6 Effect-Specific Test Modes
 
@@ -813,13 +813,13 @@ The model never has to guess whether its code is correct. It gets immediate, con
 
 ### 12.8 Integration Tests
 
-For testing that modules actually work together with real IO, Forge runs the compiled binary against a real or containerized environment. This is separate from the generation loop — during generation, the model tests against scripted effects for speed. Integration tests run after the program is complete and use the full compilation backend.
+For testing that modules actually work together with real IO, adapsis runs the compiled binary against a real or containerized environment. This is separate from the generation loop — during generation, the model tests against scripted effects for speed. Integration tests run after the program is complete and use the full compilation backend.
 
 ---
 
 ## 13. Browser Interface and Multi-Representation
 
-Forge has no source files. The AST is the single source of truth, and it can be projected into whatever shape is most useful for whoever is looking at it. The browser serves as the primary human interface — a live, interactive window into the program being built.
+adapsis has no source files. The AST is the single source of truth, and it can be projected into whatever shape is most useful for whoever is looking at it. The browser serves as the primary human interface — a live, interactive window into the program being built.
 
 ### 13.1 Three Representations
 
@@ -907,17 +907,17 @@ The implementation is straightforward. The AST runtime (already a Rust service) 
 
 ## 14. Self-Hosting: The Ultimate Validation
 
-If Forge can implement its own AST runtime, compiler, and provenance tracker, that proves the language is expressive enough for real systems work.
+If adapsis can implement its own AST runtime, compiler, and provenance tracker, that proves the language is expressive enough for real systems work.
 
 ### 14.1 Bootstrap Path
 
-**Stage 1:** AST runtime and compiler written in Rust by hand. Model generates Forge code, Rust toolchain compiles it.
+**Stage 1:** AST runtime and compiler written in Rust by hand. Model generates adapsis code, Rust toolchain compiles it.
 
-**Stage 2:** Rewrite the AST runtime in Forge, compiled by the Rust-based compiler. Forge now maintains its own core data structure.
+**Stage 2:** Rewrite the AST runtime in adapsis, compiled by the Rust-based compiler. adapsis now maintains its own core data structure.
 
-**Stage 3:** Rewrite the compiler in Forge. Compile it with the Rust-based compiler one last time. The Forge compiler now compiles itself.
+**Stage 3:** Rewrite the compiler in adapsis. Compile it with the Rust-based compiler one last time. The adapsis compiler now compiles itself.
 
-**Stage 4:** The model generates improvements to the Forge compiler *in Forge*, validated by the Forge compiler. The loop closes.
+**Stage 4:** The model generates improvements to the adapsis compiler *in adapsis*, validated by the adapsis compiler. The loop closes.
 
 This is the classic self-hosting bootstrap (same path C, Rust, and Go all took), but with the twist that Stage 4 involves an LLM improving its own toolchain. The model generates a compiler improvement as AST mutations, the current compiler validates and compiles it, tests run, and if they pass, the new compiler replaces the old one.
 
@@ -925,13 +925,13 @@ This is the classic self-hosting bootstrap (same path C, Rust, and Go all took),
 
 ## 15. Layered Architecture: From Feedback Loop to Full Constraint
 
-The Forge system is designed as independent, stackable layers. Each layer reduces the error rate, but they're independent — you can ship a useful system with just the first layer and add the others incrementally.
+The adapsis system is designed as independent, stackable layers. Each layer reduces the error rate, but they're independent — you can ship a useful system with just the first layer and add the others incrementally.
 
 ### 15.1 The Four Layers
 
-**Layer 0 — Feedback loop (the foundation).** A base model, a system prompt describing Forge's syntax, and the AST runtime validating each step. The model generates something, gets told what's wrong, fixes it. Even without any fine-tuning or grammar constraints, this is already massively better than one-shot generation. A type error on line 3 gets caught and fixed immediately rather than cascading into 50 lines of broken code.
+**Layer 0 — Feedback loop (the foundation).** A base model, a system prompt describing adapsis's syntax, and the AST runtime validating each step. The model generates something, gets told what's wrong, fixes it. Even without any fine-tuning or grammar constraints, this is already massively better than one-shot generation. A type error on line 3 gets caught and fixed immediately rather than cascading into 50 lines of broken code.
 
-**Layer 1 — Few-shot examples.** Add examples of natural language → Forge mutations to the prompt. The model learns the idioms. Most mutations land correctly on the first try. The feedback loop catches the rest. This is hours of work.
+**Layer 1 — Few-shot examples.** Add examples of natural language → adapsis mutations to the prompt. The model learns the idioms. Most mutations land correctly on the first try. The feedback loop catches the rest. This is hours of work.
 
 **Layer 2 — LoRA fine-tuning.** Generate a synthetic training corpus using a capable model (Claude, GPT-4), fine-tune a LoRA adapter. The model rarely produces invalid syntax at all. The feedback loop becomes a safety net rather than the primary correction mechanism. This is days of work.
 
@@ -941,7 +941,7 @@ The Forge system is designed as independent, stackable layers. Each layer reduce
 |-------|-------------|------------|--------|
 | 0: Feedback loop | Immediate validation, targeted fixes | Moderate — model corrects on retry | Weekend |
 | 1: Few-shot | Idiomatic generation | Low — most mutations valid first try | Hours |
-| 2: LoRA | Learned Forge patterns | Very low — rare syntax errors | Days |
+| 2: LoRA | Learned adapsis patterns | Very low — rare syntax errors | Days |
 | 3: GBNF grammar | Impossible to produce invalid syntax | Zero syntactic errors by construction | Weeks |
 
 The key insight: **the feedback loop alone buys most of the value.** Each subsequent layer provides diminishing but real improvements. The system is useful from Layer 0 onward.
@@ -956,16 +956,16 @@ The Qwen 3.5 family is the recommended starting point. Specifically:
 
 **Qwen3.5-4B** for rapid iteration and testing. Fast enough to run hundreds of generate-test cycles per minute. Good for validating the feedback loop at Layer 0 before investing in LoRA training.
 
-Why Qwen 3.5 specifically suits Forge:
+Why Qwen 3.5 specifically suits adapsis:
 
-- **Native thinking mode.** The models generate `<think>` content before structured output by default, which aligns perfectly with Forge's two-phase generation. The LoRA fine-tuning only needs to teach that the structured output phase is Forge mutations.
+- **Native thinking mode.** The models generate `<think>` content before structured output by default, which aligns perfectly with adapsis's two-phase generation. The LoRA fine-tuning only needs to teach that the structured output phase is adapsis mutations.
 - **Agent and tool-use training.** The models are explicitly trained for agent-style workflows with tool calls and structured feedback — exactly the interactive compilation loop pattern.
 - **vLLM and SGLang support.** Both inference backends are supported out of the box, which are the same backends needed for grammar-constrained generation at Layer 3.
 - **MoE efficiency.** The sparse architecture means more intelligence per VRAM dollar, which matters when running on a single 3090.
 
 ### 15.3 Synthetic Training Data
 
-For Layer 2 (LoRA fine-tuning), use a capable model to generate the training corpus: describe the Forge spec, provide examples, have it translate a corpus of small programs into Forge mutations. The feedback loop means the fine-tuned model's output doesn't need to be perfect — the AST runtime catches whatever the LoRA misses.
+For Layer 2 (LoRA fine-tuning), use a capable model to generate the training corpus: describe the adapsis spec, provide examples, have it translate a corpus of small programs into adapsis mutations. The feedback loop means the fine-tuned model's output doesn't need to be perfect — the AST runtime catches whatever the LoRA misses.
 
 If grammar constraints are added at Layer 3, they act as an additional safety net — the LoRA teaches semantics, the grammar enforces syntax, and the feedback loop handles everything else. Each component compensates for the others' weaknesses.
 
@@ -998,7 +998,7 @@ The entire prototype stack runs on a single machine with an RTX 3090 (24GB VRAM)
 
 ### 16.3 Development Phases
 
-**Phase 1 — Feedback loop proof of concept (1 weekend).** Qwen3.5-4B or 9B via vLLM/ollama, a system prompt with Forge syntax examples, a small Python or Rust service that parses the output and feeds errors back. No grammar constraints, no fine-tuning. Test the core hypothesis: does incremental generation with compiler feedback produce better code than one-shot generation?
+**Phase 1 — Feedback loop proof of concept (1 weekend).** Qwen3.5-4B or 9B via vLLM/ollama, a system prompt with adapsis syntax examples, a small Python or Rust service that parses the output and feeds errors back. No grammar constraints, no fine-tuning. Test the core hypothesis: does incremental generation with compiler feedback produce better code than one-shot generation?
 
 **Phase 2 — AST runtime (2–4 weeks).** Build the mutation-based AST service in Rust. Implement proper validation, type-checking, the semantic query system, and function-level evaluation. This is the foundation everything else builds on.
 
@@ -1008,11 +1008,11 @@ The entire prototype stack runs on a single machine with an RTX 3090 (24GB VRAM)
 
 **Phase 5 — Compilation backend (2–4 weeks).** Cranelift for fast dev compilation, Rust transpilation for optimized release builds. Produce running binaries. Benchmark against equivalent hand-written programs.
 
-**Phase 6 — Grammar constraints (1–2 weeks).** Design and test GBNF grammar for Forge syntax. Integrate with vLLM/SGLang constrained generation. Measure improvement over Layer 2 (LoRA only).
+**Phase 6 — Grammar constraints (1–2 weeks).** Design and test GBNF grammar for adapsis syntax. Integrate with vLLM/SGLang constrained generation. Measure improvement over Layer 2 (LoRA only).
 
 **Phase 7 — Provenance and propagation (2–3 weeks).** Build the tracking system. Test on a medium-scale project (10–20 module service).
 
-**Phase 8 — Self-hosting (4–8 weeks).** Rewrite AST runtime in Forge, then compiler. Validate that Forge can build itself.
+**Phase 8 — Self-hosting (4–8 weeks).** Rewrite AST runtime in adapsis, then compiler. Validate that adapsis can build itself.
 
 ---
 
@@ -1030,10 +1030,10 @@ Test configurations, in order:
 | Configuration | What it tests |
 |--------------|---------------|
 | Qwen3.5-9B → one-shot Python | Baseline |
-| Qwen3.5-9B → one-shot Forge (few-shot prompted) | Does the language design help even without feedback? |
-| Qwen3.5-9B → Forge + feedback loop | Does incremental generation with compiler feedback improve correctness? |
-| Qwen3.5-9B → Forge + feedback + LoRA | Does fine-tuning reduce the number of feedback cycles needed? |
-| Qwen3.5-9B → Forge + feedback + LoRA + GBNF | Does grammar constraint eliminate remaining syntax errors? |
+| Qwen3.5-9B → one-shot adapsis (few-shot prompted) | Does the language design help even without feedback? |
+| Qwen3.5-9B → adapsis + feedback loop | Does incremental generation with compiler feedback improve correctness? |
+| Qwen3.5-9B → adapsis + feedback + LoRA | Does fine-tuning reduce the number of feedback cycles needed? |
+| Qwen3.5-9B → adapsis + feedback + LoRA + GBNF | Does grammar constraint eliminate remaining syntax errors? |
 
 The prediction: the feedback loop alone (Layer 0) will show the largest single improvement over the baseline. Each subsequent layer will provide diminishing but measurable gains. The total system will show near-100% syntactic validity, higher semantic correctness, and dramatically better repair efficiency than one-shot Python generation.
 
@@ -1043,18 +1043,18 @@ The prediction: the feedback loop alone (Layer 0) will show the largest single i
 
 - **Standard library scope:** How much built-in functionality? Minimal (like C) or batteries-included (like Python)? The answer affects how much the model needs to generate from scratch vs. compose existing pieces.
 - **Dynamic grammar vs. static:** Should the grammar update during generation to track declared symbols? More correct but computationally expensive. The interactive loop may make this unnecessary.
-- **Coroutine scheduler design:** What scheduling strategy for the cooperative runtime? Round-robin, priority-based, work-stealing? This becomes a self-hosting question once Forge implements its own scheduler.
+- **Coroutine scheduler design:** What scheduling strategy for the cooperative runtime? Round-robin, priority-based, work-stealing? This becomes a self-hosting question once adapsis implements its own scheduler.
 - **Cycle detection strategy:** How aggressive should the reference counting cycle detector be? Background sweep on allocation pressure is the default, but real-time systems may need different guarantees.
 - **Arena scope heuristics:** How does the compiler decide arena boundaries? Per-request is obvious for servers, but what about batch processing, game loops, or long-running computations? May need configurable scope hints.
 - **Semantic query protocol:** The query system (`?symbols`, `?callers`, `?effects`, `?similar`) needs a precise, formal specification. What queries are supported? What's the response format? What's the cost model? This protocol may be as important as the language itself.
 - **Provenance confidence tuning:** What similarity threshold for propagation proposals? How to weight structural similarity vs. shared lineage? This likely needs empirical tuning against real codebases.
-- **Governance:** If AI systems communicate in an opaque language, how do humans audit them? The inspectability of Forge's AST, provenance graph, and browser interface partially addresses this, but the broader question remains open.
+- **Governance:** If AI systems communicate in an opaque language, how do humans audit them? The inspectability of adapsis's AST, provenance graph, and browser interface partially addresses this, but the broader question remains open.
 
 ---
 
 ## 19. Summary
 
-Forge inverts the normal relationship between language and tooling. The interactive compilation feedback loop is the foundation — the model emits code, the runtime validates it, errors feed back, the model fixes them. Everything else is optimization layered on top: few-shot examples, LoRA fine-tuning, grammar constraints, tokenizer co-design. Each layer is independently valuable and incrementally deployable.
+adapsis inverts the normal relationship between language and tooling. The interactive compilation feedback loop is the foundation — the model emits code, the runtime validates it, errors feed back, the model fixes them. Everything else is optimization layered on top: few-shot examples, LoRA fine-tuning, grammar constraints, tokenizer co-design. Each layer is independently valuable and incrementally deployable.
 
 The result is a system where:
 
@@ -1064,6 +1064,6 @@ The result is a system where:
 - Abstraction is handled by tooling (provenance tracking) rather than language features (generics)
 - Grammar constraints can eliminate syntax errors by construction, but aren't required to start
 - The system is useful from day one (feedback loop only) and improves as layers are added
-- The ultimate validation is self-hosting: Forge compiling Forge, improved by an LLM writing Forge
+- The ultimate validation is self-hosting: adapsis compiling adapsis, improved by an LLM writing adapsis
 
 *A good AI-first language is not easy to write. It is easy to understand, verify, and rewrite without hallucinating.*

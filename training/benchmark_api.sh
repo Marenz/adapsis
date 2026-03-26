@@ -118,7 +118,7 @@ ask "L5_expr" "Define type Expr = Literal(Int) | Add(Expr, Expr) | Mul(Expr, Exp
 # === Level 6: IO ===
 echo "--- Level 6: IO ---"
 
-ask "L6_file" "Write a function that writes \"test123\" to /tmp/forge-bench-test.txt and reads it back, returning the content. Use file_write and file_read with [io,async]. Eval it." 3
+ask "L6_file" "Write a function that writes \"test123\" to /tmp/adapsis-bench-test.txt and reads it back, returning the content. Use file_write and file_read with [io,async]. Eval it." 3
 [ $? -eq 0 ] && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 ask "L6_shell" "Write a function that runs shell_exec(\"echo hello\") and returns the result. Use [io,async]. Eval it." 3

@@ -127,7 +127,9 @@ web/
 - **Cloud** (port 4000): claude-sonnet-4-6, claude-opus-4-6, gpt-5.4, mimo-v2-pro
 - **Local 9B** (port 8081): `systemctl --user start llama-server` — Qwen3.5-9B
 - **Local A3** (port 8082): `systemctl --user start llama-server-a3` — Qwen3.5-35B-A3B
-- Qwen3.5 family works from system prompt. Non-Qwen models fail on Adapsis syntax.
+- **Local Nemotron** (port 8083): `systemctl --user start llama-server-nemotron` — Nemotron Cascade 2 30B-A3B (Mamba2 hybrid, ~178 tok/s, 1M context, no KV cache scaling)
+- Only one local model at a time (GPU conflicts). Nemotron, A3, and 9B are mutually exclusive.
+- Qwen3.5 family works from system prompt. Nemotron Cascade 2 handles Adapsis syntax reasonably well out-of-the-box.
 - LLM retries honor server-provided rate-limit hints when present (`Retry-After`, `x-ratelimit-reset`, JSON `retry_after[_ms]`) before falling back to exponential backoff.
 
 ## Test Infrastructure

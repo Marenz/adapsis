@@ -22,12 +22,12 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
         }
         _ => {
             println!("Cannot connect to AdapsisOS at {api_url}");
-            println!("Start it with: forge os --session project.json -p PORT");
+            println!("Start it with: adapsis os --session project.json -p PORT");
             return Ok(());
         }
     }
 
-    println!("Type naturally or use Forge code (+fn, !eval, ?symbols). /quit to exit.\n");
+    println!("Type naturally or use Adapsis code (+fn, !eval, ?symbols). /quit to exit.\n");
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -40,7 +40,7 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
             .and_then(|v| v.get("revision").and_then(|r| r.as_u64()))
             .unwrap_or(0);
 
-        print!("forge[{rev}]> ");
+        print!("adapsis[{rev}]> ");
         stdout.flush()?;
 
         let mut input = String::new();
@@ -87,7 +87,7 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
             }
             "/help" | "/h" => {
                 println!("  Just type naturally — the AI handles everything.");
-                println!("  Forge code: +fn, +type, !eval, !test, ?symbols, ?source");
+                println!("  Adapsis code: +fn, +type, !eval, !test, ?symbols, ?source");
                 println!("  /status — show program state");
                 println!("  /quit — exit");
                 continue;
@@ -95,11 +95,11 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
             _ => {}
         }
 
-        // Check if it's direct Forge code (starts with + ! ?)
-        let is_forge = input.starts_with('+') || input.starts_with('!') || input.starts_with('?');
+        // Check if it's direct Adapsis code (starts with + ! ?)
+        let is_adapsis = input.starts_with('+') || input.starts_with('!') || input.starts_with('?');
 
-        if is_forge {
-            // For direct Forge code, use /api/mutate or specific endpoints
+        if is_adapsis {
+            // For direct Adapsis code, use /api/mutate or specific endpoints
             if input.starts_with("!eval ") {
                 let rest = &input[6..].trim();
                 // Try parsing as inline expression first

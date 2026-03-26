@@ -1,4 +1,4 @@
-//! Type checker for Forge programs.
+//! Type checker for Adapsis programs.
 //!
 //! Validates that:
 //! - All referenced types exist
@@ -570,7 +570,7 @@ fn query_deps_modules(program: &Program, graph: &CallGraph, target: &str) -> Str
     out
 }
 
-/// Reconstruct Forge source code from the AST for a function.
+/// Reconstruct Adapsis source code from the AST for a function.
 /// Supports both qualified (`Module.func`) and unqualified (`func`) names.
 fn reconstruct_source(program: &Program, target: &str) -> String {
     // Module-qualified lookup: "Module.func"

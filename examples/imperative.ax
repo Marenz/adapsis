@@ -72,5 +72,5 @@
   +with "" -> expect ""
 
 !eval count_chars s="mississippi" target="s"
-!eval reverse_string "Forge"
+!eval reverse_string "Adapsis"
 !eval repeat_string s="ha" n=3

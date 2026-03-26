@@ -1,4 +1,4 @@
-// Recursive data structures in Forge
+// Recursive data structures in Adapsis
 // An expression tree with pattern matching
 
 +type Expr = Literal(Int) | Neg(Expr) | Add(Expr, Expr) | Mul(Expr, Expr)

@@ -1,4 +1,4 @@
-// Expression parser written in Forge
+// Expression parser written in Adapsis
 // Parses "1+2*3" into Add(Literal(1), Mul(Literal(2), Literal(3)))
 
 +type Expr = Literal(Int) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)

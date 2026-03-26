@@ -626,7 +626,7 @@ The let binding is missing a type annotation. In Forge every binding needs expli
 
 
 def main():
-    output_path = Path(__file__).parent / "forge_training_data.jsonl"
+    output_path = Path(__file__).parent / "adapsis_training_data.jsonl"
 
     with open(output_path, "w") as f:
         for task, response in EXAMPLES:
@@ -642,9 +642,9 @@ def main():
     print(f"Generated {len(EXAMPLES)} training examples -> {output_path}")
 
     # Validate that code blocks parse
-    forge_binary = Path(__file__).parent.parent / "target" / "debug" / "forge"
-    if not forge_binary.exists():
-        print(f"  (skip validation — {forge_binary} not found)")
+    adapsis_binary = Path(__file__).parent.parent / "target" / "debug" / "adapsis"
+    if not adapsis_binary.exists():
+        print(f"  (skip validation — {adapsis_binary} not found)")
         return
 
     import subprocess
@@ -672,7 +672,7 @@ def main():
             tmp_path = tmp.name
 
         result = subprocess.run(
-            [str(forge_binary), "check", tmp_path],
+            [str(adapsis_binary), "check", tmp_path],
             capture_output=True,
             text=True,
         )

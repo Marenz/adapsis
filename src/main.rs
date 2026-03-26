@@ -155,8 +155,8 @@ enum Command {
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
 
-        /// Session file (used when auto-starting AdapsisOS)
-        #[arg(short, long, default_value = "adapsisos-session.json")]
+        /// Session name or path (used when auto-starting AdapsisOS)
+        #[arg(short, long, default_value = "repl")]
         session: String,
 
         /// LLM server URL (used when auto-starting)
@@ -174,8 +174,9 @@ enum Command {
         #[arg(short, long, default_value_t = 3001)]
         port: u16,
 
-        /// Session file path
-        #[arg(short, long, default_value = "adapsisos-session.json")]
+        /// Session name or path. Plain names (e.g. "opus-run") are stored in
+        /// ~/.config/adapsis/sessions/<name>.json. Absolute paths are used as-is.
+        #[arg(short, long, default_value = "default")]
         session: String,
 
         /// LLM server URL (OpenAI-compatible)
@@ -709,6 +710,33 @@ async fn main() -> Result<()> {
             repl::run_repl(&api_url).await?;
         }
         Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations, telegram_token, telegram_admin_chat_id } => {
+            // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
+            // absolute paths or paths with directory separators are used as-is.
+            let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
+                session
+            } else {
+                let dir = dirs::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("adapsis")
+                    .join("sessions");
+                std::fs::create_dir_all(&dir).ok();
+                let name = if session.ends_with(".json") { session } else { format!("{session}.json") };
+                dir.join(name).to_string_lossy().to_string()
+            };
+
+            // Prevent session file from living inside the opencode git dir —
+            // !opencode modifies that directory and could corrupt or delete the session.
+            if let Some(ref git_dir) = opencode_git_dir {
+                let session_canonical = std::fs::canonicalize(&session).unwrap_or_else(|_| std::path::PathBuf::from(&session));
+                let git_dir_canonical = std::fs::canonicalize(git_dir).unwrap_or_else(|_| std::path::PathBuf::from(git_dir));
+                if session_canonical.starts_with(&git_dir_canonical) {
+                    eprintln!("ERROR: Session file '{}' is inside the opencode git directory '{}'.", session, git_dir);
+                    eprintln!("       !opencode modifies that directory and could corrupt the session.");
+                    eprintln!("       Use a plain name (e.g. --session opus-run) to store in ~/.config/adapsis/sessions/");
+                    std::process::exit(1);
+                }
+            }
+
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
@@ -734,10 +762,11 @@ async fn main() -> Result<()> {
             }
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
-            sess.runtime.roadmap = sess.meta.roadmap.clone();
             let initial_runtime = sess.runtime.clone();
             let shared_runtime: crate::session::SharedRuntime =
                 std::sync::Arc::new(std::sync::RwLock::new(initial_runtime));
+            let shared_meta: crate::session::SharedMeta =
+                std::sync::Arc::new(std::sync::Mutex::new(sess.meta.clone()));
 
             let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
 
@@ -757,6 +786,7 @@ async fn main() -> Result<()> {
             let io_sender_for_spawn = runtime.io_sender();
             let shared_session_for_spawn = shared_session.clone();
             let shared_runtime_for_spawn = shared_runtime.clone();
+            let shared_meta_for_spawn = shared_meta.clone();
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
@@ -777,8 +807,10 @@ async fn main() -> Result<()> {
                             let snap_reg = snap_registry_for_spawn2.clone();
                             let session_ref = shared_session_for_spawn.clone();
                             let runtime_for_blocking = shared_runtime_for_spawn.clone();
+                            let meta_for_blocking = shared_meta_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 eval::set_shared_runtime(Some(runtime_for_blocking));
+                                eval::set_shared_meta(Some(meta_for_blocking));
                                 let session = session_ref.blocking_lock();
                                 let func_decl = match session.program.get_function(&function_name) {
                                     Some(f) => f.clone(),
@@ -872,15 +904,11 @@ async fn main() -> Result<()> {
                 let s = shared_session.lock().await;
                 std::sync::Arc::new(tokio::sync::RwLock::new(s.program.clone()))
             };
-            let tier3_meta = {
-                let s = shared_session.lock().await;
-                std::sync::Arc::new(tokio::sync::Mutex::new(s.meta.clone()))
-            };
 
             let config = api::AppConfig {
                 session: shared_session.clone(),
                 program: tier1_program,
-                meta: tier3_meta,
+                meta: shared_meta.clone(),
                 llm_url: url.clone(),
                 llm_model: model.clone(),
                 llm_api_key: api_key.clone(),
@@ -960,7 +988,7 @@ async fn main() -> Result<()> {
                     {
                         let mut session = save_session.lock().await;
                         session.program = save_program.read().await.clone();
-                        session.meta = save_meta.lock().await.clone();
+                        session.meta = save_meta.lock().unwrap().clone();
                         if let Ok(rt) = save_runtime.read() {
                             session.runtime = rt.clone();
                         }
