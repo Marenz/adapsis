@@ -13,8 +13,8 @@ from trl import SFTTrainer, SFTConfig
 
 
 def main():
-    data_path = Path(__file__).parent / "forge_training_data.jsonl"
-    output_dir = Path(__file__).parent / "forge-lora-qwen3.5-9b"
+    data_path = Path(__file__).parent / "adapsis_training_data.jsonl"
+    output_dir = Path(__file__).parent / "adapsis-lora-qwen3.5-9b"
 
     # Load training data
     print("Loading training data...")
@@ -107,7 +107,7 @@ def main():
     tokenizer.save_pretrained(output_dir)
 
     # Export to GGUF for llama.cpp
-    gguf_dir = Path(__file__).parent / "forge-lora-qwen3.5-9b-gguf"
+    gguf_dir = Path(__file__).parent / "adapsis-lora-qwen3.5-9b-gguf"
     print(f"\nExporting merged model to GGUF at {gguf_dir}...")
     try:
         model.save_pretrained_gguf(

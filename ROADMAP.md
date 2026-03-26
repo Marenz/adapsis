@@ -19,14 +19,14 @@ program state, a plan, and works toward goals — both user-directed and self-in
 - All mutations are logged, rewindable, inspectable
 - `--autonomous` flag: inject a goal and let the AI work without user input
 
-This is the default `forge os` mode.
+This is the default `adapsis os` mode.
 
 ### Adaptive Mode (planned)
 
 AdapsisOS loads a **pre-built Adapsis program** and the AI can modify/extend it at runtime
 via the mutation protocol. Like a live-patching server.
 
-- Start with: `forge os --load program.ax --adaptive`
+- Start with: `adapsis os --load program.ax --adaptive`
 - The program runs (e.g. an HTTP server, a data pipeline, a game)
 - The AI monitors it via `!watch` and `?tasks`
 - When the user or an event triggers a change, the AI hot-patches the running program
@@ -40,7 +40,7 @@ Use cases: self-adapting servers, AI-driven game NPCs, live data pipeline reconf
 Freeze the current program state into a **standalone native binary** via AOT compilation.
 No runtime, no mutation protocol, no LLM — just a compiled executable.
 
-- Build with: `forge compile --output binary session.json`
+- Build with: `adapsis compile --output binary session.json`
 - Takes the current `Program` AST and compiles everything through Cranelift
 - Produces a statically-linked binary with no Adapsis runtime overhead
 - Useful for deploying what the AI built as a production artifact

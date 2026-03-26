@@ -5,7 +5,7 @@
 set -euo pipefail
 
 PORT="${1:-3001}"
-LOG_FILE="${2:-forgeos.log}"
+LOG_FILE="${2:-adapsisos.log}"
 API="http://127.0.0.1:${PORT}"
 
 # Colors

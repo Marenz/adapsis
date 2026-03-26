@@ -4,7 +4,7 @@
 //! `+await` operations send IO requests to the runtime and block (async) until
 //! the result comes back. `+spawn` creates a new coroutine.
 //!
-//! The runtime bridges Forge's synchronous evaluator with tokio's async world
+//! The runtime bridges Adapsis's synchronous evaluator with tokio's async world
 //! using oneshot channels: the evaluator blocks on a channel receive, the
 //! runtime completes the IO and sends the result back.
 
@@ -596,22 +596,13 @@ impl CoroutineHandle {
     /// This is called from the synchronous evaluator, so we use block_on
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
-        // ── Roadmap operations — handled locally, no IO channel needed ──
-        // These run before mock/IO dispatch since they only access the
-        // thread-local SharedRuntime and never touch the IO channel.
+        // ── Roadmap and plan operations — handled locally via SHARED_META ──
+        // These access SessionMeta directly (the single source of truth).
+        // No IO channel needed; no more syncing between runtime and meta.
         match op {
             "roadmap_list" => {
-                let result = crate::eval::get_shared_runtime()
-                    .and_then(|rt| rt.read().ok().map(|state| {
-                        let items: Vec<String> = state.roadmap.iter().enumerate().map(|(i, item)| {
-                            format!("{} {}: {}", if item.done { "[x]" } else { "[ ]" }, i + 1, item.description)
-                        }).collect();
-                        if items.is_empty() {
-                            "Roadmap is empty.".to_string()
-                        } else {
-                            format!("Roadmap:\n{}", items.join("\n"))
-                        }
-                    }))
+                let result = crate::eval::get_shared_meta()
+                    .and_then(|meta| meta.lock().ok().map(|m| crate::session::roadmap_list(&m.roadmap)))
                     .unwrap_or_else(|| "Roadmap is empty.".to_string());
                 return Ok(Value::string(result));
             }
@@ -624,15 +615,17 @@ impl CoroutineHandle {
                 if desc.trim().is_empty() {
                     bail!("roadmap_add: description must not be empty");
                 }
-                if let Some(rt) = crate::eval::get_shared_runtime() {
-                    if let Ok(mut state) = rt.write() {
-                        state.roadmap.push(crate::session::RoadmapItem {
-                            description: desc.clone(),
-                            done: false,
-                        });
-                    }
-                }
-                return Ok(Value::string(desc));
+                let result = crate::eval::get_shared_meta()
+                    .ok_or_else(|| anyhow::anyhow!("roadmap_add: no meta available"))
+                    .and_then(|meta| {
+                        meta.lock()
+                            .map_err(|_| anyhow::anyhow!("roadmap_add: could not lock meta"))
+                            .map(|mut m| {
+                                crate::session::roadmap_add(&mut m.roadmap, &desc);
+                                desc.clone()
+                            })
+                    })?;
+                return Ok(Value::string(result));
             }
             "roadmap_done" => {
                 let n = match args.first() {
@@ -642,43 +635,20 @@ impl CoroutineHandle {
                 if n < 1 {
                     bail!("roadmap_done: index must be >= 1");
                 }
-                let result = crate::eval::get_shared_runtime()
-                    .ok_or_else(|| anyhow::anyhow!("roadmap_done: no runtime available"))
-                    .and_then(|rt| {
-                        rt.write()
-                            .map_err(|_| anyhow::anyhow!("roadmap_done: could not access runtime"))
-                            .and_then(|mut state| {
-                                let idx = (n as usize).saturating_sub(1);
-                                if idx < state.roadmap.len() {
-                                    state.roadmap[idx].done = true;
-                                    Ok(format!("Roadmap: #{n} done."))
-                                } else {
-                                    Err(anyhow::anyhow!("roadmap_done: item #{n} not found (roadmap has {} items)", state.roadmap.len()))
-                                }
-                            })
+                let result = crate::eval::get_shared_meta()
+                    .ok_or_else(|| anyhow::anyhow!("roadmap_done: no meta available"))
+                    .and_then(|meta| {
+                        meta.lock()
+                            .map_err(|_| anyhow::anyhow!("roadmap_done: could not lock meta"))
+                            .and_then(|mut m| crate::session::roadmap_done(&mut m.roadmap, n as usize))
                     })?;
                 return Ok(Value::string(result));
             }
 
-            // ── Plan operations — handled locally, no IO channel needed ──
+            // ── Plan operations — via SHARED_META ──
             "plan_show" => {
-                let result = crate::eval::get_shared_runtime()
-                    .and_then(|rt| rt.read().ok().map(|state| {
-                        let steps: Vec<String> = state.plan.iter().enumerate().map(|(i, step)| {
-                            let icon = match step.status {
-                                crate::session::PlanStatus::Pending => "[ ]",
-                                crate::session::PlanStatus::InProgress => "[~]",
-                                crate::session::PlanStatus::Done => "[x]",
-                                crate::session::PlanStatus::Failed => "[!]",
-                            };
-                            format!("{} {}: {}", icon, i + 1, step.description)
-                        }).collect();
-                        if steps.is_empty() {
-                            "No plan set.".to_string()
-                        } else {
-                            steps.join("\n")
-                        }
-                    }))
+                let result = crate::eval::get_shared_meta()
+                    .and_then(|meta| meta.lock().ok().map(|m| crate::session::plan_show(&m.plan)))
                     .unwrap_or_else(|| "No plan set.".to_string());
                 return Ok(Value::string(result));
             }
@@ -696,19 +666,14 @@ impl CoroutineHandle {
                 if descriptions.is_empty() {
                     bail!("plan_set: steps must not be empty");
                 }
-                let count = descriptions.len();
-                if let Some(rt) = crate::eval::get_shared_runtime() {
-                    if let Ok(mut state) = rt.write() {
-                        state.plan = descriptions
-                            .into_iter()
-                            .map(|d| crate::session::PlanStep {
-                                description: d,
-                                status: crate::session::PlanStatus::Pending,
-                            })
-                            .collect();
-                    }
-                }
-                return Ok(Value::string(format!("Plan set with {count} steps.")));
+                let result = crate::eval::get_shared_meta()
+                    .ok_or_else(|| anyhow::anyhow!("plan_set: no meta available"))
+                    .and_then(|meta| {
+                        meta.lock()
+                            .map_err(|_| anyhow::anyhow!("plan_set: could not lock meta"))
+                            .map(|mut m| crate::session::plan_set(&mut m.plan, &descriptions))
+                    })?;
+                return Ok(Value::string(result));
             }
             "plan_done" => {
                 let n = match args.first() {
@@ -718,20 +683,12 @@ impl CoroutineHandle {
                 if n < 1 {
                     bail!("plan_done: index must be >= 1");
                 }
-                let result = crate::eval::get_shared_runtime()
-                    .ok_or_else(|| anyhow::anyhow!("plan_done: no runtime available"))
-                    .and_then(|rt| {
-                        rt.write()
-                            .map_err(|_| anyhow::anyhow!("plan_done: could not access runtime"))
-                            .and_then(|mut state| {
-                                let idx = (n as usize).saturating_sub(1);
-                                if idx < state.plan.len() {
-                                    state.plan[idx].status = crate::session::PlanStatus::Done;
-                                    Ok(format!("Plan: step {n} done."))
-                                } else {
-                                    Err(anyhow::anyhow!("plan_done: step {n} not found (plan has {} steps)", state.plan.len()))
-                                }
-                            })
+                let result = crate::eval::get_shared_meta()
+                    .ok_or_else(|| anyhow::anyhow!("plan_done: no meta available"))
+                    .and_then(|meta| {
+                        meta.lock()
+                            .map_err(|_| anyhow::anyhow!("plan_done: could not lock meta"))
+                            .and_then(|mut m| crate::session::plan_done(&mut m.plan, n as usize))
                     })?;
                 return Ok(Value::string(result));
             }
@@ -743,20 +700,12 @@ impl CoroutineHandle {
                 if n < 1 {
                     bail!("plan_fail: index must be >= 1");
                 }
-                let result = crate::eval::get_shared_runtime()
-                    .ok_or_else(|| anyhow::anyhow!("plan_fail: no runtime available"))
-                    .and_then(|rt| {
-                        rt.write()
-                            .map_err(|_| anyhow::anyhow!("plan_fail: could not access runtime"))
-                            .and_then(|mut state| {
-                                let idx = (n as usize).saturating_sub(1);
-                                if idx < state.plan.len() {
-                                    state.plan[idx].status = crate::session::PlanStatus::Failed;
-                                    Ok(format!("Plan: step {n} failed."))
-                                } else {
-                                    Err(anyhow::anyhow!("plan_fail: step {n} not found (plan has {} steps)", state.plan.len()))
-                                }
-                            })
+                let result = crate::eval::get_shared_meta()
+                    .ok_or_else(|| anyhow::anyhow!("plan_fail: no meta available"))
+                    .and_then(|meta| {
+                        meta.lock()
+                            .map_err(|_| anyhow::anyhow!("plan_fail: could not lock meta"))
+                            .and_then(|mut m| crate::session::plan_fail(&mut m.plan, n as usize))
                     })?;
                 return Ok(Value::string(result));
             }
@@ -1373,10 +1322,10 @@ impl CoroutineHandle {
                     bail!("mock_set: operation must not be empty");
                 }
                 let patterns: Vec<String> = pattern.split_whitespace().map(|s| s.to_string()).collect();
-                let rt = crate::eval::get_shared_runtime()
-                    .ok_or_else(|| anyhow::anyhow!("mock_set: no runtime available"))?;
-                rt.write()
-                    .map_err(|_| anyhow::anyhow!("mock_set: could not access runtime"))?
+                let meta = crate::eval::get_shared_meta()
+                    .ok_or_else(|| anyhow::anyhow!("mock_set: no meta available"))?;
+                meta.lock()
+                    .map_err(|_| anyhow::anyhow!("mock_set: could not lock meta"))?
                     .io_mocks.push(crate::session::IoMock {
                         operation: operation.clone(),
                         patterns: patterns.clone(),
@@ -1391,13 +1340,13 @@ impl CoroutineHandle {
 
             // ── mock_clear — clear all IO mocks ──
             "mock_clear" => {
-                let rt = crate::eval::get_shared_runtime()
-                    .ok_or_else(|| anyhow::anyhow!("mock_clear: no runtime available"))?;
+                let meta = crate::eval::get_shared_meta()
+                    .ok_or_else(|| anyhow::anyhow!("mock_clear: no meta available"))?;
                 let count = {
-                    let mut state = rt.write()
-                        .map_err(|_| anyhow::anyhow!("mock_clear: could not access runtime"))?;
-                    let count = state.io_mocks.len();
-                    state.io_mocks.clear();
+                    let mut m = meta.lock()
+                        .map_err(|_| anyhow::anyhow!("mock_clear: could not lock meta"))?;
+                    let count = m.io_mocks.len();
+                    m.io_mocks.clear();
                     count
                 };
                 return Ok(Value::string(format!("cleared {count} mocks")));
@@ -1460,9 +1409,12 @@ impl CoroutineHandle {
                         test_src.push_str(&format!("  +after {} {} \"{}\"\n", ac.target, ac.matcher, ac.value));
                     }
                 }
-                // Get IO mocks and routes from runtime for test execution
-                let (io_mocks, http_routes) = crate::eval::get_shared_runtime()
-                    .and_then(|rt| rt.read().ok().map(|state| (state.io_mocks.clone(), state.http_routes.clone())))
+                // Get IO mocks from meta and routes from runtime for test execution
+                let io_mocks = crate::eval::get_shared_meta()
+                    .and_then(|meta| meta.lock().ok().map(|m| m.io_mocks.clone()))
+                    .unwrap_or_default();
+                let http_routes = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
                     .unwrap_or_default();
                 // Parse and run the reconstructed test
                 let ops = crate::parser::parse(&test_src)
@@ -1749,19 +1701,15 @@ impl CoroutineHandle {
 mod tests {
     use super::*;
 
-    /// Helper: set up a SharedRuntime with an empty roadmap and install it as
-    /// the thread-local, returning the handle and runtime for assertions.
-    fn setup_roadmap_runtime() -> (CoroutineHandle, crate::session::SharedRuntime) {
-        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
-            http_routes: vec![],
-            shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
-            ..Default::default()
-        }));
+    /// Helper: set up SharedMeta and SharedRuntime with empty roadmap/plan
+    /// and install them as thread-locals, returning the handle and meta for assertions.
+    fn setup_roadmap_runtime() -> (CoroutineHandle, crate::session::SharedMeta) {
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
         crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::eval::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
-        (handle, rt)
+        (handle, meta)
     }
 
     fn unwrap_string(v: Value) -> String {
@@ -1780,7 +1728,7 @@ mod tests {
 
     #[test]
     fn roadmap_add_and_list() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, meta) = setup_roadmap_runtime();
 
         // Add an item
         let result = unwrap_string(
@@ -1788,10 +1736,10 @@ mod tests {
         );
         assert_eq!(result, "Build feature X");
 
-        // Verify it's in the runtime state
-        assert_eq!(rt.read().unwrap().roadmap.len(), 1);
-        assert_eq!(rt.read().unwrap().roadmap[0].description, "Build feature X");
-        assert!(!rt.read().unwrap().roadmap[0].done);
+        // Verify it's in the meta state
+        assert_eq!(meta.lock().unwrap().roadmap.len(), 1);
+        assert_eq!(meta.lock().unwrap().roadmap[0].description, "Build feature X");
+        assert!(!meta.lock().unwrap().roadmap[0].done);
 
         // List should show it
         let list = unwrap_string(handle.execute_await("roadmap_list", &[]).unwrap());
@@ -1819,7 +1767,7 @@ mod tests {
 
     #[test]
     fn roadmap_done_marks_item() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, meta) = setup_roadmap_runtime();
 
         // Add two items
         handle
@@ -1836,8 +1784,8 @@ mod tests {
         assert!(result.contains("#2 done"), "confirmation: {result}");
 
         // Verify state
-        assert!(!rt.read().unwrap().roadmap[0].done);
-        assert!(rt.read().unwrap().roadmap[1].done);
+        assert!(!meta.lock().unwrap().roadmap[0].done);
+        assert!(meta.lock().unwrap().roadmap[1].done);
 
         // List should show [x] for item 2
         let list = unwrap_string(handle.execute_await("roadmap_list", &[]).unwrap());
@@ -1888,7 +1836,7 @@ mod tests {
 
     #[test]
     fn plan_set_and_show() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, meta) = setup_roadmap_runtime();
 
         let result = unwrap_string(
             handle.execute_await("plan_set", &[Value::string("Parse input\nValidate data\nStore results")]).unwrap()
@@ -1896,10 +1844,10 @@ mod tests {
         assert_eq!(result, "Plan set with 3 steps.");
 
         // Verify state
-        assert_eq!(rt.read().unwrap().plan.len(), 3);
-        assert_eq!(rt.read().unwrap().plan[0].description, "Parse input");
-        assert_eq!(rt.read().unwrap().plan[1].description, "Validate data");
-        assert_eq!(rt.read().unwrap().plan[2].description, "Store results");
+        assert_eq!(meta.lock().unwrap().plan.len(), 3);
+        assert_eq!(meta.lock().unwrap().plan[0].description, "Parse input");
+        assert_eq!(meta.lock().unwrap().plan[1].description, "Validate data");
+        assert_eq!(meta.lock().unwrap().plan[2].description, "Store results");
 
         // Show should list all steps
         let show = unwrap_string(handle.execute_await("plan_show", &[]).unwrap());
@@ -1928,20 +1876,20 @@ mod tests {
 
     #[test]
     fn plan_set_skips_blank_lines() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, meta) = setup_roadmap_runtime();
 
         let result = unwrap_string(
             handle.execute_await("plan_set", &[Value::string("Step A\n\n  \nStep B")]).unwrap()
         );
         assert_eq!(result, "Plan set with 2 steps.");
-        assert_eq!(rt.read().unwrap().plan.len(), 2);
-        assert_eq!(rt.read().unwrap().plan[0].description, "Step A");
-        assert_eq!(rt.read().unwrap().plan[1].description, "Step B");
+        assert_eq!(meta.lock().unwrap().plan.len(), 2);
+        assert_eq!(meta.lock().unwrap().plan[0].description, "Step A");
+        assert_eq!(meta.lock().unwrap().plan[1].description, "Step B");
     }
 
     #[test]
     fn plan_done_marks_step() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, meta) = setup_roadmap_runtime();
 
         handle.execute_await("plan_set", &[Value::string("Alpha\nBravo")]).unwrap();
 
@@ -1951,8 +1899,8 @@ mod tests {
         assert_eq!(result, "Plan: step 2 done.");
 
         // Verify state
-        assert_eq!(rt.read().unwrap().plan[0].status, crate::session::PlanStatus::Pending);
-        assert_eq!(rt.read().unwrap().plan[1].status, crate::session::PlanStatus::Done);
+        assert_eq!(meta.lock().unwrap().plan[0].status, crate::session::PlanStatus::Pending);
+        assert_eq!(meta.lock().unwrap().plan[1].status, crate::session::PlanStatus::Done);
 
         // Show should reflect [x]
         let show = unwrap_string(handle.execute_await("plan_show", &[]).unwrap());
@@ -1990,7 +1938,7 @@ mod tests {
 
     #[test]
     fn plan_fail_marks_step() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, meta) = setup_roadmap_runtime();
 
         handle.execute_await("plan_set", &[Value::string("First\nSecond\nThird")]).unwrap();
 
@@ -2000,8 +1948,8 @@ mod tests {
         assert_eq!(result, "Plan: step 1 failed.");
 
         // Verify state
-        assert_eq!(rt.read().unwrap().plan[0].status, crate::session::PlanStatus::Failed);
-        assert_eq!(rt.read().unwrap().plan[1].status, crate::session::PlanStatus::Pending);
+        assert_eq!(meta.lock().unwrap().plan[0].status, crate::session::PlanStatus::Failed);
+        assert_eq!(meta.lock().unwrap().plan[1].status, crate::session::PlanStatus::Pending);
 
         // Show should reflect [!]
         let show = unwrap_string(handle.execute_await("plan_show", &[]).unwrap());
@@ -2039,14 +1987,14 @@ mod tests {
 
     #[test]
     fn plan_set_replaces_existing() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, meta) = setup_roadmap_runtime();
 
         handle.execute_await("plan_set", &[Value::string("Old step 1\nOld step 2")]).unwrap();
-        assert_eq!(rt.read().unwrap().plan.len(), 2);
+        assert_eq!(meta.lock().unwrap().plan.len(), 2);
 
         handle.execute_await("plan_set", &[Value::string("New step")]).unwrap();
-        assert_eq!(rt.read().unwrap().plan.len(), 1);
-        assert_eq!(rt.read().unwrap().plan[0].description, "New step");
+        assert_eq!(meta.lock().unwrap().plan.len(), 1);
+        assert_eq!(meta.lock().unwrap().plan[0].description, "New step");
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -2073,8 +2021,6 @@ mod tests {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
             ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
@@ -2255,8 +2201,6 @@ mod tests {
                 handler_fn: "health_check".to_string(),
             }],
             shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
             ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
@@ -2316,8 +2260,6 @@ mod tests {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
             ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
@@ -2364,8 +2306,6 @@ mod tests {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
             ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
@@ -2660,8 +2600,6 @@ mod tests {
                 handler_fn: "handle_data".to_string(),
             }],
             shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
             ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
@@ -2679,8 +2617,6 @@ mod tests {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
             ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
@@ -2860,8 +2796,6 @@ mod tests {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
-            roadmap: vec![],
-            plan: vec![],
             ..Default::default()
         }));
         crate::eval::set_shared_runtime(Some(rt));
@@ -2880,7 +2814,8 @@ mod tests {
 
     #[test]
     fn msg_send_delivers_message() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
         let result = unwrap_string(
             handle.execute_await("msg_send", &[
                 Value::string("agent1"),
@@ -2889,7 +2824,7 @@ mod tests {
         );
         assert!(result.contains("Message sent to 'agent1'"), "confirmation: {result}");
 
-        // Verify message is in the mailbox
+        // Verify message is in the mailbox (agent_mailbox is still in RuntimeState)
         let state = rt.read().unwrap();
         let inbox = state.agent_mailbox.get("agent1").unwrap();
         assert_eq!(inbox.len(), 1);
@@ -2900,7 +2835,8 @@ mod tests {
 
     #[test]
     fn msg_send_multiple_messages() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
         handle.execute_await("msg_send", &[
             Value::string("agent1"),
             Value::string("first"),
@@ -3314,7 +3250,9 @@ mod tests {
     #[test]
     fn mock_set_adds_mock() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
+        crate::eval::set_shared_runtime(Some(rt));
+        crate::eval::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("mock_set", &[
             Value::string("http_get"),
@@ -3322,16 +3260,18 @@ mod tests {
             Value::string("mock response body"),
         ]).unwrap());
         assert!(result.contains("mock: http_get"), "should confirm mock: {result}");
-        let state = rt.read().unwrap();
-        assert_eq!(state.io_mocks.len(), 1);
-        assert_eq!(state.io_mocks[0].operation, "http_get");
-        assert_eq!(state.io_mocks[0].response, "mock response body");
+        let m = meta.lock().unwrap();
+        assert_eq!(m.io_mocks.len(), 1);
+        assert_eq!(m.io_mocks[0].operation, "http_get");
+        assert_eq!(m.io_mocks[0].response, "mock response body");
     }
 
     #[test]
     fn mock_set_empty_operation_fails() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
         crate::eval::set_shared_runtime(Some(rt));
+        crate::eval::set_shared_meta(Some(meta));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("mock_set", &[
             Value::string(""),
@@ -3343,32 +3283,35 @@ mod tests {
 
     #[test]
     fn mock_clear_clears_all_mocks() {
-        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
-            io_mocks: vec![
-                crate::session::IoMock {
-                    operation: "http_get".into(),
-                    patterns: vec!["x".into()],
-                    response: "y".into(),
-                },
-                crate::session::IoMock {
-                    operation: "http_post".into(),
-                    patterns: vec![],
-                    response: "z".into(),
-                },
-            ],
-            ..Default::default()
-        }));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        let mut initial_meta = crate::session::SessionMeta::new();
+        initial_meta.io_mocks = vec![
+            crate::session::IoMock {
+                operation: "http_get".into(),
+                patterns: vec!["x".into()],
+                response: "y".into(),
+            },
+            crate::session::IoMock {
+                operation: "http_post".into(),
+                patterns: vec![],
+                response: "z".into(),
+            },
+        ];
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(initial_meta));
+        crate::eval::set_shared_runtime(Some(rt));
+        crate::eval::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("mock_clear", &[]).unwrap());
         assert!(result.contains("cleared 2 mocks"), "should report count: {result}");
-        assert_eq!(rt.read().unwrap().io_mocks.len(), 0);
+        assert_eq!(meta.lock().unwrap().io_mocks.len(), 0);
     }
 
     #[test]
     fn mock_clear_empty_returns_zero() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
         crate::eval::set_shared_runtime(Some(rt));
+        crate::eval::set_shared_meta(Some(meta));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("mock_clear", &[]).unwrap());
         assert!(result.contains("cleared 0 mocks"), "should report 0: {result}");
@@ -3573,7 +3516,8 @@ mod tests {
 
     #[test]
     fn library_errors_with_load_errors() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
         // Add some library load errors to the runtime state
         if let Ok(mut state) = rt.write() {
             state.library_load_errors = vec![
@@ -3589,7 +3533,8 @@ mod tests {
 
     #[test]
     fn library_errors_with_general_errors() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
             state.library_errors = vec![
                 "failed to persist module `Foo`: disk full".to_string(),
@@ -3602,7 +3547,8 @@ mod tests {
 
     #[test]
     fn library_errors_with_both_error_types() {
-        let (handle, rt) = setup_roadmap_runtime();
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
             state.library_load_errors = vec![
                 ("FailedMod".to_string(), "syntax error".to_string()),

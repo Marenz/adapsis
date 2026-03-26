@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 /// Events streamed to the browser over WebSocket.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
-pub enum ForgeEvent {
+pub enum AdapsisEvent {
     /// A new iteration of the feedback loop started
     IterationStart {
         iteration: usize,
@@ -100,7 +100,7 @@ pub struct FieldSnapshot {
 /// Event bus for broadcasting to multiple WebSocket clients.
 #[derive(Clone)]
 pub struct EventBus {
-    sender: broadcast::Sender<ForgeEvent>,
+    sender: broadcast::Sender<AdapsisEvent>,
 }
 
 impl EventBus {
@@ -109,18 +109,18 @@ impl EventBus {
         Self { sender }
     }
 
-    pub fn send(&self, event: ForgeEvent) {
+    pub fn send(&self, event: AdapsisEvent) {
         // Ignore errors (no receivers connected)
         let _ = self.sender.send(event);
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<ForgeEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<AdapsisEvent> {
         self.sender.subscribe()
     }
 }
 
 /// Build a ProgramSnapshot from the AST.
-pub fn snapshot_program(program: &crate::ast::Program) -> ForgeEvent {
+pub fn snapshot_program(program: &crate::ast::Program) -> AdapsisEvent {
     let modules = program
         .modules
         .iter()
@@ -138,7 +138,7 @@ pub fn snapshot_program(program: &crate::ast::Program) -> ForgeEvent {
         .collect();
     let types = program.types.iter().map(snapshot_type).collect();
 
-    ForgeEvent::ProgramSnapshot {
+    AdapsisEvent::ProgramSnapshot {
         modules,
         functions,
         types,

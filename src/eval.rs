@@ -1120,11 +1120,8 @@ fn fork_runtime_for_test(
     let forked = crate::session::RuntimeState {
         http_routes: http_routes.to_vec(),
         shared_vars,
-        roadmap: Vec::new(),
-        plan: Vec::new(),
         agent_mailbox: std::collections::HashMap::new(),
         pending_commands: Vec::new(),
-        io_mocks: Vec::new(),
         library_errors: Vec::new(),
         library_load_errors: Vec::new(),
     };
@@ -1154,6 +1151,13 @@ fn eval_test_case_with_runtime(
     let after_checks = case.after_checks.clone();
     let routes = http_routes.to_vec();
     let forked_runtime = fork_runtime_for_test(&program, http_routes);
+    // Create an isolated SessionMeta for test execution.
+    // Pre-populate io_mocks so mock_set/mock_clear builtins work in tests.
+    let forked_meta: crate::session::SharedMeta = {
+        let mut m = crate::session::SessionMeta::new();
+        m.io_mocks = mocks.to_vec();
+        std::sync::Arc::new(std::sync::Mutex::new(m))
+    };
 
     // Spin up a temporary tokio runtime + coroutine IO loop on a dedicated
     // thread.  This works whether or not the caller is already inside a tokio
@@ -1163,6 +1167,7 @@ fn eval_test_case_with_runtime(
         // copies from program defaults, not the live runtime.
         let forked_rt_clone = forked_runtime.clone();
         set_shared_runtime(forked_runtime);
+        set_shared_meta(Some(forked_meta.clone()));
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1188,8 +1193,10 @@ fn eval_test_case_with_runtime(
             // Run the evaluation in a blocking task so blocking_send/blocking_recv
             // don't stall the tokio executor.
             let forked_rt_for_blocking = forked_rt_clone;
+            let forked_meta_for_blocking = forked_meta.clone();
             let eval_result = tokio::task::spawn_blocking(move || {
                 set_shared_runtime(forked_rt_for_blocking);
+                set_shared_meta(Some(forked_meta_for_blocking));
                 // Set program snapshot so query builtins (symbols_list, source_get,
                 // etc.) work inside test execution.
                 set_shared_program(Some(std::sync::Arc::new(program.clone())));
@@ -1282,11 +1289,17 @@ pub async fn eval_test_case_async(
     let after_checks = case.after_checks.clone();
     let routes = http_routes.to_vec();
     let forked_rt = fork_runtime_for_test(&program, http_routes);
+    let forked_meta_async: crate::session::SharedMeta = {
+        let mut m = crate::session::SessionMeta::new();
+        m.io_mocks = mocks.to_vec();
+        std::sync::Arc::new(std::sync::Mutex::new(m))
+    };
 
     let eval_result = tokio::task::spawn_blocking(move || {
         // Use a forked RuntimeState for test isolation — shared vars are fresh
         // copies from program defaults, not the live runtime.
         set_shared_runtime(forked_rt);
+        set_shared_meta(Some(forked_meta_async));
         // Set program snapshot so query builtins (symbols_list, source_get,
         // etc.) work inside async test execution.
         set_shared_program(Some(std::sync::Arc::new(program.clone())));
@@ -1873,6 +1886,9 @@ std::thread_local! {
     /// Thread-local SharedRuntime so newly-created Env instances automatically
     /// have access to +shared variables without explicit plumbing.
     static SHARED_RUNTIME: std::cell::RefCell<Option<crate::session::SharedRuntime>> = std::cell::RefCell::new(None);
+    /// Thread-local SharedMeta so roadmap/plan/mock builtins in coroutine.rs
+    /// access the same data as handle_roadmap() in session.rs. No more syncing.
+    static SHARED_META: std::cell::RefCell<Option<crate::session::SharedMeta>> = std::cell::RefCell::new(None);
     /// Thread-local Program snapshot for query builtins (query_symbols, query_source, etc.)
     /// that need access to the AST from within coroutine IO dispatch.
     static SHARED_PROGRAM: std::cell::RefCell<Option<std::sync::Arc<crate::ast::Program>>> = std::cell::RefCell::new(None);
@@ -1894,6 +1910,18 @@ pub fn set_shared_runtime(rt: Option<crate::session::SharedRuntime>) {
 /// roadmap builtins that need access to runtime state.
 pub fn get_shared_runtime() -> Option<crate::session::SharedRuntime> {
     SHARED_RUNTIME.with(|s| s.borrow().clone())
+}
+
+/// Set the thread-local SharedMeta for roadmap/plan/mock builtin access.
+/// Call this alongside set_shared_runtime before spawn_blocking eval tasks.
+pub fn set_shared_meta(meta: Option<crate::session::SharedMeta>) {
+    SHARED_META.with(|s| *s.borrow_mut() = meta);
+}
+
+/// Get the thread-local SharedMeta (if set). Used by coroutine.rs for
+/// roadmap_add/roadmap_done/plan_set/plan_done/plan_fail builtins.
+pub fn get_shared_meta() -> Option<crate::session::SharedMeta> {
+    SHARED_META.with(|s| s.borrow().clone())
 }
 
 /// Set the thread-local Program snapshot for query builtins.

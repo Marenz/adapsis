@@ -1,10 +1,10 @@
 // File IO example — read, write, list directory
 
 +fn main ()->Int [io,async]
-  +await ok:Int = file_write("/tmp/forge-test.txt", "Hello from Forge!")
-  +await content:String = file_read("/tmp/forge-test.txt")
-  +await exists:Bool = file_exists("/tmp/forge-test.txt")
-  +await missing:Bool = file_exists("/tmp/forge-nonexistent.txt")
+  +await ok:Int = file_write("/tmp/adapsis-test.txt", "Hello from Adapsis!")
+  +await content:String = file_read("/tmp/adapsis-test.txt")
+  +await exists:Bool = file_exists("/tmp/adapsis-test.txt")
+  +await missing:Bool = file_exists("/tmp/adapsis-nonexistent.txt")
   +await files:List<String> = list_dir("/tmp")
   +return 0
 +end

@@ -34,7 +34,7 @@ start_model() {
   sleep 2
   
   # Temporarily update service
-  cat > /tmp/forge-bench-override.conf << EOF
+  cat > /tmp/adapsis-bench-override.conf << EOF
 [Service]
 ExecStart=
 ExecStart=/usr/bin/podman run --rm --name llama-server \
@@ -49,7 +49,7 @@ ExecStart=/usr/bin/podman run --rm --name llama-server \
 EOF
 
   mkdir -p ~/.config/systemd/user/llama-server.service.d/
-  cp /tmp/forge-bench-override.conf ~/.config/systemd/user/llama-server.service.d/override.conf
+  cp /tmp/adapsis-bench-override.conf ~/.config/systemd/user/llama-server.service.d/override.conf
   systemctl --user daemon-reload
   systemctl --user start llama-server.service
   

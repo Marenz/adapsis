@@ -1,6 +1,6 @@
-//! Cranelift-based JIT compiler for Forge programs.
+//! Cranelift-based JIT compiler for Adapsis programs.
 //!
-//! Compiles Forge AST to native machine code via Cranelift IR.
+//! Compiles Adapsis AST to native machine code via Cranelift IR.
 //! For Phase 5, we support:
 //! - Int → i64
 //! - Float → f64
@@ -21,7 +21,7 @@ use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 
 use crate::ast;
 
-/// A compiled Forge program, ready to execute.
+/// A compiled Adapsis program, ready to execute.
 pub struct CompiledProgram {
     module: JITModule,
     functions: HashMap<String, FuncId>,
@@ -241,7 +241,7 @@ extern "C" fn rt_string_len(_ptr: *const u8, len: i64) -> i64 {
     len
 }
 
-/// Compile a Forge program to native code via Cranelift JIT.
+/// Compile an Adapsis program to native code via Cranelift JIT.
 pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
@@ -326,7 +326,7 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     })
 }
 
-/// Build a Cranelift signature from a Forge function declaration.
+/// Build a Cranelift signature from an Adapsis function declaration.
 fn build_signature(
     module: &mut JITModule,
     func: &ast::FunctionDecl,
@@ -347,16 +347,16 @@ fn build_signature(
     Ok(sig)
 }
 
-/// Map Forge types to Cranelift types.
+/// Map Adapsis types to Cranelift types.
 /// String is represented as two i64 values (ptr, len).
-fn forge_type_to_cranelift(ty: &ast::Type) -> Result<types::Type> {
+fn adapsis_type_to_cranelift(ty: &ast::Type) -> Result<types::Type> {
     match ty {
         ast::Type::Int => Ok(types::I64),
         ast::Type::Float => Ok(types::F64),
         ast::Type::Bool => Ok(types::I8),
         ast::Type::Byte => Ok(types::I8),
         ast::Type::String => Ok(types::I64), // ptr half — len is a second value
-        ast::Type::Result(inner) => forge_type_to_cranelift(inner),
+        ast::Type::Result(inner) => adapsis_type_to_cranelift(inner),
         _ => bail!("type {:?} not yet supported in compiler", ty),
     }
 }
@@ -425,7 +425,7 @@ fn compile_function(
             let zero = comp_ctx.builder.ins().iconst(types::I64, 0);
             comp_ctx.builder.ins().return_(&[zero, zero]);
         } else {
-            let ret_type = forge_type_to_cranelift(&func.return_type)?;
+            let ret_type = adapsis_type_to_cranelift(&func.return_type)?;
             let default_val = if ret_type == types::F64 {
                 comp_ctx.builder.ins().f64const(0.0)
             } else {
@@ -444,7 +444,7 @@ struct RuntimeFuncs {
     eq_id: FuncId,
 }
 
-/// Compute the flattened Cranelift types for a Forge type.
+/// Compute the flattened Cranelift types for an Adapsis type.
 /// Structs expand to their fields, strings to (ptr, len).
 fn flatten_type(ty: &ast::Type, program: &ast::Program) -> Vec<types::Type> {
     match ty {
@@ -605,7 +605,7 @@ fn compile_body(ctx: &mut CompilationContext, stmts: &[ast::Statement]) -> Resul
 fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Result<()> {
     match &stmt.kind {
         ast::StatementKind::Let { name, ty, value } => {
-            let cl_type = forge_type_to_cranelift(ty)?;
+            let cl_type = adapsis_type_to_cranelift(ty)?;
             let val = compile_expr(ctx, value, cl_type)?;
             let var = alloc_var(ctx, name, cl_type);
             ctx.builder.def_var(var, val);
@@ -614,13 +614,13 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
 
         ast::StatementKind::Call { binding, call } => {
             let ret_type = if let Some(b) = binding {
-                forge_type_to_cranelift(&b.ty)?
+                adapsis_type_to_cranelift(&b.ty)?
             } else {
                 types::I64
             };
             let val = compile_call(ctx, call, ret_type)?;
             if let Some(b) = binding {
-                let cl_type = forge_type_to_cranelift(&b.ty)?;
+                let cl_type = adapsis_type_to_cranelift(&b.ty)?;
                 let var = alloc_var(ctx, &b.name, cl_type);
                 ctx.builder.def_var(var, val);
             }
@@ -659,7 +659,7 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
                 };
                 ctx.builder.ins().return_(&[ptr, len]);
             } else {
-                let ret_cl_type = forge_type_to_cranelift(ctx.return_type)?;
+                let ret_cl_type = adapsis_type_to_cranelift(ctx.return_type)?;
                 let val = compile_expr(ctx, value, ret_cl_type)?;
                 ctx.builder.ins().return_(&[val]);
             }
@@ -1773,13 +1773,13 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // 6. forge_type_to_cranelift
+    // 6. adapsis_type_to_cranelift
     // ═════════════════════════════════════════════════════════════════════
 
     #[test]
     fn type_mapping_int() {
         assert_eq!(
-            forge_type_to_cranelift(&ast::Type::Int).unwrap(),
+            adapsis_type_to_cranelift(&ast::Type::Int).unwrap(),
             types::I64
         );
     }
@@ -1787,7 +1787,7 @@ mod tests {
     #[test]
     fn type_mapping_float() {
         assert_eq!(
-            forge_type_to_cranelift(&ast::Type::Float).unwrap(),
+            adapsis_type_to_cranelift(&ast::Type::Float).unwrap(),
             types::F64
         );
     }
@@ -1795,7 +1795,7 @@ mod tests {
     #[test]
     fn type_mapping_bool() {
         assert_eq!(
-            forge_type_to_cranelift(&ast::Type::Bool).unwrap(),
+            adapsis_type_to_cranelift(&ast::Type::Bool).unwrap(),
             types::I8
         );
     }
@@ -1803,7 +1803,7 @@ mod tests {
     #[test]
     fn type_mapping_byte() {
         assert_eq!(
-            forge_type_to_cranelift(&ast::Type::Byte).unwrap(),
+            adapsis_type_to_cranelift(&ast::Type::Byte).unwrap(),
             types::I8
         );
     }
@@ -1812,7 +1812,7 @@ mod tests {
     fn type_mapping_string() {
         // String maps to I64 (ptr half)
         assert_eq!(
-            forge_type_to_cranelift(&ast::Type::String).unwrap(),
+            adapsis_type_to_cranelift(&ast::Type::String).unwrap(),
             types::I64
         );
     }
@@ -1821,14 +1821,14 @@ mod tests {
     fn type_mapping_result_int() {
         // Result<Int> unwraps to the inner type
         assert_eq!(
-            forge_type_to_cranelift(&ast::Type::Result(Box::new(ast::Type::Int))).unwrap(),
+            adapsis_type_to_cranelift(&ast::Type::Result(Box::new(ast::Type::Int))).unwrap(),
             types::I64
         );
     }
 
     #[test]
     fn type_mapping_list_unsupported() {
-        assert!(forge_type_to_cranelift(&ast::Type::List(Box::new(ast::Type::Int))).is_err());
+        assert!(adapsis_type_to_cranelift(&ast::Type::List(Box::new(ast::Type::Int))).is_err());
     }
 
     // ═════════════════════════════════════════════════════════════════════

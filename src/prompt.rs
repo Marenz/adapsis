@@ -424,7 +424,7 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
    wording — diagnose why it failed first.
 4. After rebuild, verify the new capability with a test
 5. Everything you build persists across sessions — you're building cumulatively
-6. Mark plan steps done with `!plan done N` as you complete them — don't forget!
+6. Mark plan steps done with `!plan done N` as you complete them — don't adapsist!
 
 ### What You Can Do
 

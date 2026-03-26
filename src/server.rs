@@ -1,4 +1,4 @@
-//! HTTP + WebSocket server for the Forge browser interface.
+//! HTTP + WebSocket server for the Adapsis browser interface.
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::ast;
-use crate::events::{self, EventBus, ForgeEvent};
+use crate::events::{self, EventBus, AdapsisEvent};
 use crate::llm::{LlmBackend, LlmClient};
 use crate::orchestrator;
 
@@ -55,7 +55,7 @@ pub async fn serve<B: LlmBackend + Send + Sync + 'static>(
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    info!("Forge browser interface at http://127.0.0.1:{port}");
+    info!("Adapsis browser interface at http://127.0.0.1:{port}");
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -83,11 +83,11 @@ async fn run_handler<B: LlmBackend + Send + Sync + 'static>(
         // orchestrator's perspective by running it inline.
         // For now, just send a placeholder — the real integration happens in the
         // `serve_and_run` function below.
-        event_bus.send(ForgeEvent::IterationStart {
+        event_bus.send(AdapsisEvent::IterationStart {
             iteration: 0,
             max_iterations,
         });
-        event_bus.send(ForgeEvent::ProgramState {
+        event_bus.send(AdapsisEvent::ProgramState {
             summary: format!("Task received: {task}"),
         });
     });
@@ -165,7 +165,7 @@ pub async fn serve_and_run<B: LlmBackend + Send + Sync + Clone + 'static>(
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    info!("Forge browser interface at http://127.0.0.1:{port}");
+    info!("Adapsis browser interface at http://127.0.0.1:{port}");
     info!("Open the URL in your browser, then the task will start automatically.");
 
     // Run server and orchestrator concurrently
@@ -176,11 +176,11 @@ pub async fn serve_and_run<B: LlmBackend + Send + Sync + Clone + 'static>(
         let mut orch =
             orchestrator::Orchestrator::with_event_bus(llm, max_iterations, event_bus.clone());
         if let Err(e) = orch.run(&task).await {
-            event_bus.send(ForgeEvent::MutationError {
+            event_bus.send(AdapsisEvent::MutationError {
                 message: format!("orchestrator error: {e}"),
             });
         }
-        event_bus.send(ForgeEvent::Done);
+        event_bus.send(AdapsisEvent::Done);
     };
 
     tokio::select! {
