@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -5,6 +6,44 @@ use std::sync::Arc;
 /// Using `u32` instead of `usize` saves 4 bytes per key on 64-bit platforms
 /// and the 4-billion limit is more than sufficient for variable names.
 pub type InternedId = u32;
+
+// ── Thread-local interner for Display resolution ────────────────────────────
+//
+// `Value::Display` and other string-needing paths must resolve `InternedId`
+// back to `&str` without having an explicit interner parameter.  We keep a
+// thread-local `SharedInterner` snapshot that is installed by the evaluator
+// before any `Display` formatting can occur.  The snapshot is updated by
+// `set_display_interner()` which is called from `eval.rs` whenever a fresh
+// `Program::shared_interner` is available.
+
+thread_local! {
+    static DISPLAY_INTERNER: RefCell<SharedInterner> = RefCell::new(SharedInterner::new());
+}
+
+/// Install a `SharedInterner` snapshot for `resolve_display()` lookups on this thread.
+/// Call this before any code that may format `Value` instances (e.g. at eval entry points).
+pub fn set_display_interner(si: &SharedInterner) {
+    DISPLAY_INTERNER.with(|di| *di.borrow_mut() = si.clone());
+}
+
+/// Resolve an `InternedId` to its string using the thread-local display interner.
+/// Returns the interned string, or a fallback `"<id:N>"` if the interner has not
+/// been installed or the id is out of range.
+pub fn resolve_display(id: InternedId) -> String {
+    DISPLAY_INTERNER.with(|di| {
+        di.borrow()
+            .resolve(id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("<id:{id}>"))
+    })
+}
+
+/// Intern a name via the thread-local display interner.
+/// This is used by `Value::strct()` and similar convenience constructors
+/// that accept string arguments but need to produce `InternedId` keys.
+pub fn intern_display(s: &str) -> InternedId {
+    DISPLAY_INTERNER.with(|di| di.borrow_mut().intern(s))
+}
 
 /// A fast string interner that maps strings to compact `u32` identifiers.
 ///
@@ -348,5 +387,61 @@ mod tests {
         let shared = SharedInterner::default();
         assert!(shared.is_empty());
         assert_eq!(shared.len(), 0);
+    }
+
+    // --- Display interner tests ---
+
+    #[test]
+    fn test_display_interner_set_and_resolve() {
+        let mut base = StringInterner::new();
+        let id_hello = base.intern("hello");
+        let id_world = base.intern("world");
+        let shared = base.shared();
+
+        set_display_interner(&shared);
+
+        assert_eq!(resolve_display(id_hello), "hello");
+        assert_eq!(resolve_display(id_world), "world");
+    }
+
+    #[test]
+    fn test_display_interner_unknown_id_fallback() {
+        // With an empty display interner, unknown IDs should produce a fallback
+        set_display_interner(&SharedInterner::new());
+        let result = resolve_display(999);
+        assert!(
+            result.starts_with("<id:"),
+            "should produce fallback for unknown id: {result}"
+        );
+    }
+
+    #[test]
+    fn test_intern_display_roundtrip() {
+        set_display_interner(&SharedInterner::new());
+        let id = intern_display("test_name");
+        let resolved = resolve_display(id);
+        assert_eq!(resolved, "test_name");
+        // Re-interning should return the same ID
+        assert_eq!(intern_display("test_name"), id);
+    }
+
+    #[test]
+    fn test_display_interner_consistent_ids_with_shared() {
+        // IDs from a SharedInterner should be resolvable after set_display_interner
+        let mut base = StringInterner::new();
+        base.intern("alpha");
+        base.intern("beta");
+        let shared = base.shared();
+
+        // Manually intern a new name via shared
+        let mut shared_clone = shared.clone();
+        let id_gamma = shared_clone.intern("gamma");
+
+        // Install the extended clone as display interner
+        set_display_interner(&shared_clone);
+        assert_eq!(resolve_display(id_gamma), "gamma");
+        // Original names should still resolve
+        assert_eq!(resolve_display(0), "alpha");
+        assert_eq!(resolve_display(1), "beta");
     }
 }

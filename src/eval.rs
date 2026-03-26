@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::ast;
 use crate::compiler::CompiledProgram;
-use crate::intern::{InternedId, SharedInterner, StringInterner};
+use crate::intern::{self, InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
 
@@ -21,28 +21,30 @@ pub fn new_jit_cache() -> JitCache {
 
 /// A runtime value during evaluation.
 ///
-/// **Performance notes**: String-like fields use `Arc<str>` instead of `String`
-/// so that cloning a `Value` is a cheap reference-count bump rather than a heap
-/// allocation + memcpy.  `List` uses `Arc<Vec<Value>>` and `Struct` uses
-/// `Arc<HashMap<Arc<str>, Value>>` for the same reason — compound values are
-/// read far more often than they are mutated.
+/// **Performance notes**: Struct field keys, struct type names, and union variant
+/// names use `InternedId` (u32) instead of `String` for fast hash + comparison.
+/// `List` uses `Arc<Vec<Value>>` and `Struct` uses `Arc<HashMap<InternedId, Value>>`
+/// — compound values are read far more often than they are mutated.
 ///
 /// `Arc` (rather than `Rc`) is required because `Value`s are sent across thread
 /// boundaries via `tokio::task::spawn_blocking` in the async evaluation paths.
+///
+/// To resolve interned IDs back to strings (e.g. for Display), use the
+/// thread-local display interner installed by `intern::set_display_interner()`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Value {
     CoroutineHandle(crate::coroutine::CoroutineHandle),
     TaskHandle(crate::coroutine::TaskId),
     Union {
-        variant: String,
+        variant: InternedId,
         payload: Vec<Value>,
     },
     Int(i64),
     Float(f64),
     Bool(bool),
     String(Arc<String>),
-    Struct(String, Arc<HashMap<String, Value>>),
+    Struct(InternedId, Arc<HashMap<InternedId, Value>>),
     List(Arc<Vec<Value>>),
     Ok(Box<Value>),
     Err(String),
@@ -56,12 +58,14 @@ impl fmt::Display for Value {
             Value::Float(v) => write!(f, "{v}"),
             Value::Bool(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "\"{v}\""),
-            Value::Struct(name, fields) => {
+            Value::Struct(name_id, fields) => {
+                let name = intern::resolve_display(*name_id);
                 write!(f, "{name}{{")?;
-                for (i, (k, v)) in fields.iter().enumerate() {
+                for (i, (k_id, v)) in fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
+                    let k = intern::resolve_display(*k_id);
                     write!(f, "{k}: {v}")?;
                 }
                 write!(f, "}}")
@@ -80,10 +84,11 @@ impl fmt::Display for Value {
             Value::Err(msg) => write!(f, "Err({msg})"),
             Value::None => write!(f, "None"),
             Value::Union { variant, payload } => {
+                let variant_name = intern::resolve_display(*variant);
                 if payload.is_empty() {
-                    write!(f, "{variant}")
+                    write!(f, "{variant_name}")
                 } else {
-                    write!(f, "{variant}(")?;
+                    write!(f, "{variant_name}(")?;
                     for (i, v) in payload.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
@@ -113,9 +118,34 @@ impl Value {
     }
 
     /// Convenience constructor: wrap a struct name + field map in `Arc`.
+    /// Accepts string keys and interns them via the thread-local display interner.
     #[inline]
-    pub fn strct(name: impl Into<String>, fields: HashMap<String, Value>) -> Self {
-        Value::Struct(name.into(), Arc::new(fields))
+    pub fn strct(name: impl AsRef<str>, fields: HashMap<String, Value>) -> Self {
+        let name_id = intern::intern_display(name.as_ref());
+        let interned_fields: HashMap<InternedId, Value> = fields
+            .into_iter()
+            .map(|(k, v)| (intern::intern_display(&k), v))
+            .collect();
+        Value::Struct(name_id, Arc::new(interned_fields))
+    }
+
+    /// Convenience constructor: create a struct from pre-interned field keys.
+    /// This is the fast path — no string interning overhead.
+    #[inline]
+    pub fn strct_interned(name_id: InternedId, fields: HashMap<InternedId, Value>) -> Self {
+        Value::Struct(name_id, Arc::new(fields))
+    }
+
+    /// Look up a field on a struct value by string name, resolving via the
+    /// thread-local display interner.
+    pub fn get_field(&self, field: &str) -> Option<&Value> {
+        match self {
+            Value::Struct(_, fields) => {
+                let id = intern::intern_display(field);
+                fields.get(&id)
+            }
+            _ => None,
+        }
     }
 
     fn is_truthy(&self) -> bool {
@@ -143,8 +173,10 @@ impl Value {
             (Value::Err(a), Value::Err(b)) => a == b,
             (Value::None, Value::None) => true,
             (Value::Struct(n1, f1), Value::Struct(n2, f2)) => {
-                // Allow empty name to match any struct name
-                (n1.is_empty() || n2.is_empty() || n1 == n2)
+                // Allow empty-string name (interned) to match any struct name.
+                // InternedId comparison is O(1) — just integer equality.
+                let empty_id = intern::intern_display("");
+                (n1 == &empty_id || n2 == &empty_id || n1 == n2)
                     && f1.len() == f2.len()
                     && f1
                         .iter()
@@ -489,6 +521,8 @@ pub fn eval_compiled_or_interpreted_cached(
     cache: Option<&JitCache>,
     revision: usize,
 ) -> Result<(String, bool)> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     // If it's a builtin, use eval_call_with_input directly
     if program.get_function(function_name).is_none() && crate::builtins::is_builtin(function_name) {
         let result = eval_call_with_input(program, function_name, input)?;
@@ -594,7 +628,8 @@ fn input_to_vm_args(input: &parser::Expr, func: &ast::FunctionDecl) -> Result<Ve
         Value::Struct(_, ref fields) => {
             let mut args = Vec::new();
             for param in &func.params {
-                if let Some(val) = fields.get(param.name.as_str()) {
+                let pid = intern::intern_display(&param.name);
+                if let Some(val) = fields.get(&pid) {
                     args.push(val.clone());
                 } else {
                     bail!("missing argument for parameter `{}`", param.name);
@@ -644,6 +679,8 @@ pub fn eval_call_with_input(
     function_name: &str,
     input: &parser::Expr,
 ) -> Result<String> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     // Try user-defined function first
     if let Some(func) = program.get_function(function_name) {
         let input_val = eval_parser_expr_standalone(input)?;
@@ -705,6 +742,8 @@ pub fn eval_call_with_input(
 /// Evaluate an inline expression directly (not a function call).
 /// Used for `!eval 1 + 2`, `!eval concat("a", "b")`, etc.
 pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<Value> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     eval_parser_expr_with_program(expr, program)
 }
 
@@ -777,8 +816,9 @@ pub fn bind_input_to_params(
             // Single struct-typed param — pass the whole struct
             env.set(&func.params[0].name, input.clone());
             // Also expose fields directly for field access (e.g., input.name)
-            for (k, v) in fields.iter() {
-                env.set(k.as_ref(), v.clone());
+            for (k_id, v) in fields.iter() {
+                let k = intern::resolve_display(*k_id);
+                env.set(&k, v.clone());
             }
         }
         (Value::Struct(_, fields), _) => {
@@ -787,21 +827,29 @@ pub fn bind_input_to_params(
             let all_match = func
                 .params
                 .iter()
-                .all(|p| fields.contains_key(p.name.as_str()));
+                .all(|p| {
+                    let pid = intern::intern_display(&p.name);
+                    fields.contains_key(&pid)
+                });
 
             if all_match {
                 // Direct match: a=3 b=4 for (a:Int, b:Int)
                 for param in &func.params {
-                    if let Some(val) = fields.get(param.name.as_str()) {
+                    let pid = intern::intern_display(&param.name);
+                    if let Some(val) = fields.get(&pid) {
                         env.set(&param.name, val.clone());
                     }
                 }
             } else {
                 // Check for positional fields (_0, _1, ...) from space-separated args
-                let is_positional = fields.keys().any(|k| k.starts_with('_') && k[1..].parse::<usize>().is_ok());
+                let is_positional = fields.keys().any(|k| {
+                    let s = intern::resolve_display(*k);
+                    s.starts_with('_') && s[1..].parse::<usize>().is_ok()
+                });
                 if is_positional && fields.len() == func.params.len() {
                     for (i, param) in func.params.iter().enumerate() {
-                        if let Some(val) = fields.get(format!("_{i}").as_str()) {
+                        let pos_id = intern::intern_display(&format!("_{i}"));
+                        if let Some(val) = fields.get(&pos_id) {
                             env.set(&param.name, val.clone());
                         }
                     }
@@ -813,7 +861,8 @@ pub fn bind_input_to_params(
 
                     for param in &func.params {
                         // Check if this param matches a field directly
-                        if let Some(val) = fields.get(param.name.as_str()) {
+                        let pid = intern::intern_display(&param.name);
+                        if let Some(val) = fields.get(&pid) {
                             env.set(&param.name, val.clone());
                             used_fields.insert(&param.name);
                             continue;
@@ -823,20 +872,18 @@ pub fn bind_input_to_params(
                         if let ast::Type::Struct(type_name) = &param.ty {
                             if let Some(type_fields) = get_struct_fields(program, type_name) {
                                 // Collect input fields that match this struct's fields
-                                let mut struct_fields = HashMap::new();
+                                let mut struct_fields: HashMap<InternedId, Value> = HashMap::new();
                                 for (tf_name, _) in &type_fields {
-                                    if let Some(val) = fields.get(tf_name.as_str()) {
-                                        struct_fields.insert(tf_name.clone(), val.clone());
-                                        // tf_name borrows from type_fields which is
-                                        // block-scoped, so use as_str() for the
-                                        // longer-lived HashSet via param.name above;
-                                        // this insert is omitted since used_fields is
-                                        // currently only used to track distribution and
-                                        // tf_name's scope is too short.
+                                    let tf_id = intern::intern_display(tf_name);
+                                    if let Some(val) = fields.get(&tf_id) {
+                                        struct_fields.insert(tf_id, val.clone());
                                     }
                                 }
                                 if !struct_fields.is_empty() {
-                                    let struct_val = Value::strct(type_name, struct_fields);
+                                    let struct_val = Value::strct_interned(
+                                        intern::intern_display(type_name),
+                                        struct_fields,
+                                    );
                                     env.set(&param.name, struct_val);
                                 }
                             }
@@ -909,7 +956,7 @@ fn match_single_pattern(
                 payload,
             } = value
             {
-                if v == variant {
+                if intern::resolve_display(*v) == *variant {
                     match_nested_patterns(program, sub_patterns, payload, env)
                 } else {
                     Ok(false)
@@ -968,6 +1015,8 @@ pub fn eval_test_case_with_mocks(
     mocks: &[crate::session::IoMock],
     http_routes: &[ast::HttpRoute],
 ) -> Result<String> {
+    // Install the program's interner for Value::Display resolution.
+    intern::set_display_interner(&program.shared_interner);
     let func = program
         .get_function(function_name)
         .ok_or_else(|| anyhow!("function `{function_name}` not found{}", crate::eval::suggest_similar(program, function_name)))?;
@@ -1508,8 +1557,9 @@ fn eval_function_body(
                 match &val {
                     Value::Union { variant, payload } => {
                         let mut matched = false;
+                        let variant_str = intern::resolve_display(*variant);
                         for arm in arms {
-                            if arm.variant == variant.as_ref() {
+                            if arm.variant == variant_str {
                                 env.push_scope();
                                 // Exact variant match — bind payload values
                                 for (i, binding) in arm.bindings.iter().enumerate() {
@@ -1551,13 +1601,13 @@ fn eval_function_body(
                             }
                         }
                         if !matched {
-                            bail!("+match: no arm matched variant `{variant}`");
+                            bail!("+match: no arm matched variant `{variant_str}`");
                         }
                     }
                     // Treat Ok/Err as union variants for pattern matching
                     Value::Ok(inner) => {
                         let as_union = Value::Union {
-                            variant: "Ok".to_string(),
+                            variant: intern::intern_display("Ok"),
                             payload: vec![inner.as_ref().clone()],
                         };
                         let mut matched = false;
@@ -1590,7 +1640,7 @@ fn eval_function_body(
                     }
                     Value::Err(msg) => {
                         let as_union = Value::Union {
-                            variant: "Err".to_string(),
+                            variant: intern::intern_display("Err"),
                             payload: vec![Value::string(msg.clone())],
                         };
                         let mut matched = false;
@@ -1869,7 +1919,7 @@ pub fn eval_builtin_or_user(
     // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
     if is_union_variant(program, callee) {
         return Ok(Value::Union {
-            variant: callee.to_string(),
+            variant: intern::intern_display(callee),
             payload: args,
         });
     }
@@ -2459,7 +2509,7 @@ pub fn eval_builtin_or_user(
                 // Check if it's a union variant constructor
                 if is_union_variant(program, callee) {
                     return Ok(Value::Union {
-                        variant: callee.to_string(),
+                        variant: intern::intern_display(callee),
                         payload: args,
                     });
                 }
@@ -2503,7 +2553,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                     } else if is_union_variant(program, name) {
                         // No-payload union variant
                         Ok(Value::Union {
-                            variant: name.clone(),
+                            variant: intern::intern_display(name),
                             payload: vec![],
                         })
                     } else {
@@ -2514,9 +2564,10 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
         }
         ast::Expr::FieldAccess { base, field } => {
             let base_val = eval_ast_expr(program, base, env)?;
+            let field_id = intern::intern_display(field);
             match &base_val {
                 Value::Struct(_, fields) => fields
-                    .get(field.as_str())
+                    .get(&field_id)
                     .cloned()
                     .ok_or_else(|| anyhow!("field `{field}` not found on {base_val}")),
                 Value::Ok(inner) => {
@@ -2529,7 +2580,7 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                             // Transparent field access on Ok values
                             match inner.as_ref() {
                                 Value::Struct(_, fields) => fields
-                                    .get(field.as_str())
+                                    .get(&field_id)
                                     .cloned()
                                     .ok_or_else(|| anyhow!("field `{field}` not found")),
                                 _ => bail!("cannot access field `{field}` on {base_val}"),
@@ -2609,12 +2660,12 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             }
         }
         ast::Expr::StructInit { ty, fields } => {
-            let mut field_map = HashMap::new();
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
                 let val = eval_ast_expr(program, &f.value, env)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::strct(ty.clone(), field_map))
+            Ok(Value::strct_interned(intern::intern_display(ty), field_map))
         }
     }
 }
@@ -2719,7 +2770,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
             // Check if this is a user-defined union variant first
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
-                    variant: name.clone(),
+                    variant: intern::intern_display(name),
                     payload: vec![],
                 });
             }
@@ -2753,7 +2804,7 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
                     .map(|a| eval_parser_expr_with_program(a, program))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Value::Union {
-                    variant: name,
+                    variant: intern::intern_display(&name),
                     payload,
                 });
             }
@@ -2798,12 +2849,13 @@ pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program
         }
         // StructLiteral needs program access so field values can call user functions
         parser::Expr::StructLiteral(fields) => {
-            let mut field_map = HashMap::new();
+            let empty_id = intern::intern_display("");
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_with_program(&f.value, program)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::strct("", field_map))
+            Ok(Value::strct_interned(empty_id, field_map))
         }
         // Unary expressions need program access for their inner expression
         parser::Expr::Unary { op, expr: inner } => {
@@ -2859,7 +2911,7 @@ fn eval_parser_expr_with_env(
             }
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
-                    variant: name.clone(),
+                    variant: intern::intern_display(name),
                     payload: vec![],
                 });
             }
@@ -2882,7 +2934,7 @@ fn eval_parser_expr_with_env(
                     .map(|a| eval_parser_expr_with_env(a, program, env))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Value::Union {
-                    variant: name,
+                    variant: intern::intern_display(&name),
                     payload,
                 });
             }
@@ -2912,12 +2964,13 @@ fn eval_parser_expr_with_env(
             eval_parser_expr_standalone(expr)
         }
         parser::Expr::StructLiteral(fields) => {
-            let mut field_map = HashMap::new();
+            let empty_id = intern::intern_display("");
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_with_env(&f.value, program, env)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::strct("", field_map))
+            Ok(Value::strct_interned(empty_id, field_map))
         }
         parser::Expr::Unary { op, expr: inner } => {
             let val = eval_parser_expr_with_env(inner, program, env)?;
@@ -2972,11 +3025,11 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         match name.as_str() {
                             "Ok" => Ok(Value::Ok(Box::new(Value::None))),
                             "None" => Ok(Value::Union {
-                                variant: "None".to_string(),
+                                variant: intern::intern_display("None"),
                                 payload: vec![],
                             }),
                             _ => Ok(Value::Union {
-                                variant: name.clone(),
+                                variant: intern::intern_display(name),
                                 payload: vec![],
                             }),
                         }
@@ -2987,12 +3040,13 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
             }
         }
         parser::Expr::StructLiteral(fields) => {
-            let mut field_map = HashMap::new();
+            let empty_id = intern::intern_display("");
+            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
                 let val = eval_parser_expr_standalone(&f.value)?;
-                field_map.insert(f.name.clone(), val);
+                field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::strct("", field_map))
+            Ok(Value::strct_interned(empty_id, field_map))
         }
         parser::Expr::Call { callee, args } => {
             // Handle Ok(...) and Err(...) constructors
@@ -3033,7 +3087,7 @@ pub fn eval_parser_expr_standalone(expr: &parser::Expr) -> Result<Value> {
                         .map(eval_parser_expr_standalone)
                         .collect::<Result<Vec<_>>>()?;
                     Ok(Value::Union {
-                        variant: name,
+                        variant: intern::intern_display(&name),
                         payload,
                     })
                 }
@@ -4328,8 +4382,10 @@ mod tests {
         // Struct should contain the fields
         match val {
             Value::Struct(_, fields) => {
-                assert!(matches!(fields.get("name"), Some(Value::String(s)) if &**s == "alice"), "expected name=alice");
-                assert!(matches!(fields.get("age"), Some(Value::Int(25))), "expected age=25");
+                let name_id = intern::intern_display("name");
+                let age_id = intern::intern_display("age");
+                assert!(matches!(fields.get(&name_id), Some(Value::String(s)) if &**s == "alice"), "expected name=alice");
+                assert!(matches!(fields.get(&age_id), Some(Value::Int(25))), "expected age=25");
             }
             _ => panic!("expected struct, got {val}"),
         }
@@ -7342,7 +7398,7 @@ mod tests {
     #[test]
     fn value_union_variant_clone_preserves_value() {
         let v1 = Value::Union {
-            variant: "Some".to_string(),
+            variant: intern::intern_display("Some"),
             payload: vec![Value::Int(42)],
         };
         let v2 = v1.clone();
@@ -7609,5 +7665,197 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("undefined function"), "should say undefined: {msg}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Interned struct fields / union variant tests
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn interned_struct_field_keys_are_u32() {
+        // Value::Struct should use InternedId (u32) keys, not String.
+        let mut fields = HashMap::new();
+        fields.insert("x".to_string(), Value::Int(10));
+        fields.insert("y".to_string(), Value::Int(20));
+        let val = Value::strct("Point", fields);
+        match &val {
+            Value::Struct(name_id, field_map) => {
+                // Keys should be u32 (InternedId)
+                assert_eq!(field_map.len(), 2);
+                let x_id = intern::intern_display("x");
+                let y_id = intern::intern_display("y");
+                assert!(matches!(field_map.get(&x_id), Some(Value::Int(10))), "expected x=10");
+                assert!(matches!(field_map.get(&y_id), Some(Value::Int(20))), "expected y=20");
+                // Name should resolve back to "Point"
+                assert_eq!(intern::resolve_display(*name_id), "Point");
+            }
+            _ => panic!("expected Struct"),
+        }
+    }
+
+    #[test]
+    fn interned_struct_display_resolves_names() {
+        // Value::Struct Display should render field names correctly via the display interner.
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), Value::string("alice"));
+        fields.insert("age".to_string(), Value::Int(30));
+        let val = Value::strct("User", fields);
+        let display = format!("{val}");
+        assert!(display.contains("User{"), "display should show struct name: {display}");
+        assert!(display.contains("name:"), "display should show field 'name': {display}");
+        assert!(display.contains("age:"), "display should show field 'age': {display}");
+        assert!(display.contains("alice"), "display should show field value: {display}");
+        assert!(display.contains("30"), "display should show field value: {display}");
+    }
+
+    #[test]
+    fn interned_union_variant_display() {
+        // Union variant Display should resolve the interned variant name.
+        let val = Value::Union {
+            variant: intern::intern_display("Some"),
+            payload: vec![Value::Int(42)],
+        };
+        let display = format!("{val}");
+        assert_eq!(display, "Some(42)");
+    }
+
+    #[test]
+    fn interned_union_no_payload_display() {
+        let val = Value::Union {
+            variant: intern::intern_display("None"),
+            payload: vec![],
+        };
+        let display = format!("{val}");
+        assert_eq!(display, "None");
+    }
+
+    #[test]
+    fn interned_struct_get_field_by_string() {
+        // Value::get_field should look up by string name via the display interner.
+        let mut fields = HashMap::new();
+        fields.insert("x".to_string(), Value::Int(42));
+        let val = Value::strct("P", fields);
+        assert!(matches!(val.get_field("x"), Some(Value::Int(42))), "should find field x");
+        assert!(val.get_field("y").is_none(), "should not find field y");
+        assert!(val.get_field("nonexistent").is_none(), "should not find nonexistent field");
+    }
+
+    #[test]
+    fn interned_struct_field_access_in_eval() {
+        // Full eval roundtrip: struct init → field access using interned keys
+        let source = "\
++type Config = host:String, port:Int
+
++fn get_port (c:Config) -> Int
+  +return c.port
+
+!test get_port
+  +with host=\"localhost\" port=8080 -> expect 8080
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        let (fn_name, case) = &cases[0];
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(result.is_ok(), "interned struct field access: {:?}", result);
+        let result_str = result.unwrap();
+        assert!(result_str.contains("8080"), "result should contain 8080: {result_str}");
+    }
+
+    #[test]
+    fn interned_union_match_dispatch() {
+        // Full eval roundtrip: union variant construction → match dispatch using interned IDs
+        let source = "\
++type Result = Success(Int) | Failure(String)
+
++fn unwrap_result (r:Result) -> Int
+  +match r
+  +case Success(val)
+    +return val
+  +case Failure(msg)
+    +return -1
+  +end
+
+!test unwrap_result
+  +with r=Success(42) -> expect 42
+  +with r=Failure(\"oops\") -> expect -1
+";
+        let program = build_program(source);
+        let cases = extract_test_cases(source);
+        for (fn_name, case) in &cases {
+            let result = eval_test_case(&program, fn_name, case);
+            assert!(result.is_ok(), "interned union match dispatch: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn interned_struct_empty_name_matches_any() {
+        // Struct with empty name (anonymous) should match any named struct
+        let mut f1 = HashMap::new();
+        f1.insert("x".to_string(), Value::Int(1));
+        let named = Value::strct("Point", f1);
+
+        let mut f2: HashMap<InternedId, Value> = HashMap::new();
+        f2.insert(intern::intern_display("x"), Value::Int(1));
+        let anon = Value::strct_interned(intern::intern_display(""), f2);
+
+        assert!(named.matches(&anon), "named struct should match anonymous");
+        assert!(anon.matches(&named), "anonymous struct should match named");
+    }
+
+    #[test]
+    fn interned_struct_different_names_dont_match() {
+        let mut f1 = HashMap::new();
+        f1.insert("x".to_string(), Value::Int(1));
+        let s1 = Value::strct("A", f1);
+
+        let mut f2 = HashMap::new();
+        f2.insert("x".to_string(), Value::Int(1));
+        let s2 = Value::strct("B", f2);
+
+        assert!(!s1.matches(&s2), "different named structs should not match");
+    }
+
+    #[test]
+    fn interned_union_variant_equality() {
+        // Two unions with the same interned variant should be equal
+        let v1 = Value::Union {
+            variant: intern::intern_display("Ok"),
+            payload: vec![Value::Int(1)],
+        };
+        let v2 = Value::Union {
+            variant: intern::intern_display("Ok"),
+            payload: vec![Value::Int(1)],
+        };
+        assert!(v1.matches(&v2));
+
+        // Different variants should not match
+        let v3 = Value::Union {
+            variant: intern::intern_display("Err"),
+            payload: vec![Value::Int(1)],
+        };
+        assert!(!v1.matches(&v3));
+    }
+
+    #[test]
+    fn interned_struct_strct_interned_roundtrip() {
+        // strct_interned should produce identical values to strct
+        let mut string_fields = HashMap::new();
+        string_fields.insert("a".to_string(), Value::Int(1));
+        string_fields.insert("b".to_string(), Value::Int(2));
+        let via_strct = Value::strct("T", string_fields);
+
+        let mut interned_fields: HashMap<InternedId, Value> = HashMap::new();
+        interned_fields.insert(intern::intern_display("a"), Value::Int(1));
+        interned_fields.insert(intern::intern_display("b"), Value::Int(2));
+        let via_interned = Value::strct_interned(intern::intern_display("T"), interned_fields);
+
+        assert!(via_strct.matches(&via_interned), "strct and strct_interned should produce matching values");
+    }
+
+    #[test]
+    fn interned_display_interner_fallback_for_unknown_id() {
+        // resolve_display should return a fallback for unknown IDs
+        let result = intern::resolve_display(999_999);
+        assert!(result.starts_with("<id:"), "unknown ID should get fallback: {result}");
     }
 }

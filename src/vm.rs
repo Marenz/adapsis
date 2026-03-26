@@ -103,10 +103,10 @@ pub enum Op {
 
     // ── Struct / composite construction ──────────────────────────────
     /// Pop N values (one per field name), construct a struct.
-    /// Field names are in declaration order; values are popped in reverse.
-    MakeStruct(Vec<String>),
-    /// Pop a struct value, push the value of the named field.
-    GetField(String),
+    /// Field names are interned IDs in declaration order; values are popped in reverse.
+    MakeStruct(Vec<InternedId>),
+    /// Pop a struct value, push the value of the named field (interned ID).
+    GetField(InternedId),
     /// Pop N values, construct a list.
     MakeList(usize),
 
@@ -122,11 +122,12 @@ pub enum Op {
 
     // ── Union / variant operations ───────────────────────────────────
     /// Construct a union variant with `payload_count` values from the stack.
-    PushVariant(String, usize),
-    /// Pattern match: pop a value, check if it's the named variant with
+    /// Variant name is an interned ID.
+    PushVariant(InternedId, usize),
+    /// Pattern match: pop a value, check if it's the named variant (interned ID) with
     /// the expected binding count. If it matches, push the bindings
     /// (payload values) then push `true`. If not, push `false`.
-    MatchVariant(String, usize),
+    MatchVariant(InternedId, usize),
 }
 
 /// A call-stack frame, saved when entering a function call.
@@ -451,7 +452,8 @@ impl<'a> Compiler<'a> {
 
                     // MatchVariant: load subject, check variant, push bindings + true/false
                     self.emit(Op::LoadLocal(subject_slot));
-                    self.emit(Op::MatchVariant(arm.variant.clone(), arm.bindings.len()));
+                    let variant_id = self.interner.intern(&arm.variant);
+                    self.emit(Op::MatchVariant(variant_id, arm.bindings.len()));
                     let skip_jump = self.here();
                     self.emit(Op::BranchIfNot(0)); // placeholder
 
@@ -533,7 +535,8 @@ impl<'a> Compiler<'a> {
                             self.emit(Op::PushNone);
                         } else {
                             // Treat as zero-arg variant constructor
-                            self.emit(Op::PushVariant(name.clone(), 0));
+                            let vid = self.interner.intern(name);
+                            self.emit(Op::PushVariant(vid, 0));
                         }
                     }
                 }
@@ -541,7 +544,8 @@ impl<'a> Compiler<'a> {
 
             ast::Expr::FieldAccess { base, field } => {
                 self.compile_expr(base)?;
-                self.emit(Op::GetField(field.clone()));
+                let fid = self.interner.intern(field);
+                self.emit(Op::GetField(fid));
             }
 
             ast::Expr::Call(call) => {
@@ -578,15 +582,15 @@ impl<'a> Compiler<'a> {
             }
 
             ast::Expr::StructInit { ty, fields } => {
-                let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                let field_ids: Vec<InternedId> = fields
+                    .iter()
+                    .map(|f| self.interner.intern(&f.name))
+                    .collect();
                 for field in fields {
                     self.compile_expr(&field.value)?;
                 }
-                if ty.is_empty() {
-                    self.emit(Op::MakeStruct(field_names));
-                } else {
-                    self.emit(Op::MakeStruct(field_names));
-                }
+                let _ = ty; // type name currently unused in bytecode
+                self.emit(Op::MakeStruct(field_ids));
             }
         }
         Ok(())
@@ -1017,22 +1021,26 @@ fn run_loop(
             }
 
             // ── Struct / composite ───────────────────────────────────
-            Op::MakeStruct(field_names) => {
-                let mut fields = HashMap::new();
-                for name in field_names.iter().rev() {
+            Op::MakeStruct(field_ids) => {
+                let empty_id = crate::intern::intern_display("");
+                let mut fields: HashMap<InternedId, Value> = HashMap::new();
+                for id in field_ids.iter().rev() {
                     let val = pop_stack(&mut state.stack)?;
-                    fields.insert(name.clone(), val);
+                    fields.insert(*id, val);
                 }
-                state.stack.push(Value::strct("", fields));
+                state.stack.push(Value::strct_interned(empty_id, fields));
             }
-            Op::GetField(field) => {
-                let field = field.clone();
+            Op::GetField(field_id) => {
+                let field_id = *field_id;
                 let val = pop_stack(&mut state.stack)?;
                 match val {
                     Value::Struct(_, ref map) => {
                         let field_val = map
-                            .get(field.as_str())
-                            .ok_or_else(|| anyhow::anyhow!("field `{field}` not found on struct"))?
+                            .get(&field_id)
+                            .ok_or_else(|| {
+                                let field_name = crate::intern::resolve_display(field_id);
+                                anyhow::anyhow!("field `{field_name}` not found on struct")
+                            })?
                             .clone();
                         state.stack.push(field_val);
                     }
@@ -1071,27 +1079,27 @@ fn run_loop(
             }
 
             // ── Union / variant ops ──────────────────────────────────
-            Op::PushVariant(variant_name, count) => {
+            Op::PushVariant(variant_id, count) => {
                 let count = *count;
-                let variant_name = variant_name.clone();
+                let variant_id = *variant_id;
                 let mut payload = Vec::with_capacity(count);
                 for _ in 0..count {
                     payload.push(pop_stack(&mut state.stack)?);
                 }
                 payload.reverse();
                 state.stack.push(Value::Union {
-                    variant: variant_name.clone(),
+                    variant: variant_id,
                     payload,
                 });
             }
-            Op::MatchVariant(variant_name, binding_count) => {
+            Op::MatchVariant(variant_id, binding_count) => {
                 let binding_count = *binding_count;
                 let val = pop_stack(&mut state.stack)?;
                 match val {
                     Value::Union {
                         ref variant,
                         ref payload,
-                    } if variant == variant_name => {
+                    } if variant == variant_id => {
                         // Push bindings onto stack (in order), then push true
                         for i in 0..binding_count.min(payload.len()) {
                             state.stack.push(payload[i].clone());
@@ -1187,6 +1195,8 @@ mod tests {
             }
         }
         program.rebuild_function_index();
+        // Install interner for Value::Display resolution in tests
+        crate::intern::set_display_interner(&program.shared_interner);
         program
     }
 
@@ -1392,8 +1402,8 @@ mod tests {
         let has_get_field = compiled
             .bytecode
             .iter()
-            .any(|op| matches!(op, Op::GetField(f) if f == "x"));
-        assert!(has_get_field, "should emit GetField(\"x\")");
+            .any(|op| matches!(op, Op::GetField(f) if crate::intern::resolve_display(*f) == "x"));
+        assert!(has_get_field, "should emit GetField for field \"x\"");
     }
 
     #[test]
@@ -1417,8 +1427,8 @@ mod tests {
         let has_match = compiled
             .bytecode
             .iter()
-            .any(|op| matches!(op, Op::MatchVariant(v, _) if v == "Red"));
-        assert!(has_match, "should emit MatchVariant(\"Red\", 0)");
+            .any(|op| matches!(op, Op::MatchVariant(v, _) if crate::intern::resolve_display(*v) == "Red"));
+        assert!(has_match, "should emit MatchVariant for variant \"Red\"");
     }
 
     #[test]
