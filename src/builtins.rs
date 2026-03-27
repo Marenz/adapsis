@@ -600,6 +600,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "query_inbox",
+        aliases: &[],
+        short: "show inbox contents (same as ?inbox)",
+        long: "Returns the current session inbox as a formatted String. Same output as `?inbox`: each line is `[timestamp] from sender: message`, or `No messages.` when empty. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "query_library",
         aliases: &[],
         short: "show library status (same as ?library)",
@@ -685,6 +692,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         aliases: &[],
         short: "drain pending inbox messages as JSON array string",
         long: "Reads all pending inbox messages for the current main session and returns a JSON array String of message contents such as `[\"msg1\",\"msg2\"]`. Clears the inbox after reading and returns `[]` when no messages are pending. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "inbox_clear",
+        aliases: &[],
+        short: "clear all pending inbox messages",
+        long: "Clears all pending inbox messages for the current main session and returns a confirmation String like `cleared 2 messages`. Takes no arguments. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {
