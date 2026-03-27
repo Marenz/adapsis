@@ -24,12 +24,22 @@ use crate::session::Session;
 use crate::typeck;
 use crate::validator;
 
-pub type SharedSession = Arc<Mutex<Session>>;
-
 impl AppConfig {
-    /// Sync the independent tier locks from the session shim.
-    /// Call after any mutation that modifies the session (apply, store_test, plan updates, etc).
-    pub async fn sync_tiers_from_session(&self, session: &Session) {
+    /// Build a temporary Session snapshot from the live tiers.
+    pub async fn snapshot_session(&self) -> Session {
+        let program = self.program.read().await.clone();
+        let meta = self.meta.lock().unwrap().clone();
+        let runtime = self.runtime.read().unwrap().clone();
+        Session {
+            program,
+            runtime,
+            meta,
+            sandbox: None,
+        }
+    }
+
+    /// Write a temporary Session snapshot back into the live tiers.
+    pub async fn write_back_session(&self, session: &Session) {
         *self.program.write().await = session.program.clone();
         *self.meta.lock().unwrap() = session.meta.clone();
         if let Ok(mut rt) = self.runtime.write() {
@@ -49,21 +59,6 @@ impl AppConfig {
             }
         }
     }
-
-    /// Sync runtime changes (shared_vars, agent_mailbox) back into the session shim.
-    /// Roadmap, plan, and io_mocks are now in SharedMeta — no need to sync those.
-    pub fn sync_runtime_to_session(&self, session: &mut Session) {
-        if let Ok(rt) = self.runtime.read() {
-            session.runtime.shared_vars = rt.shared_vars.clone();
-            session.meta.agent_mailbox = rt.agent_mailbox.clone();
-        }
-        // Sync meta changes (roadmap, plan, mocks) back to session shim
-        if let Ok(meta) = self.meta.lock() {
-            session.meta.roadmap = meta.roadmap.clone();
-            session.meta.plan = meta.plan.clone();
-            session.meta.io_mocks = meta.io_mocks.clone();
-        }
-    }
 }
 
 /// Thread-safe session manager: maps session IDs to independent Program instances.
@@ -74,7 +69,6 @@ pub type SessionManager = Arc<Mutex<std::collections::HashMap<String, Arc<tokio:
 /// Extended state for the API, including LLM and OpenCode configuration.
 #[derive(Clone)]
 pub struct AppConfig {
-    pub session: SharedSession,
     /// Tier 1: Program AST — read-heavy, use read() for queries, write() briefly for mutations
     pub program: std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
     /// Tier 3: Session metadata — chat history, plan, roadmap, mocks, mutation log.
@@ -138,12 +132,10 @@ pub async fn mutate(
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
-    // Mutate still uses the session shim — it calls apply_async which needs
-    // &mut self access to program+meta+runtime. After mutation, sync the tiers.
-    let mut session = config.session.lock().await;
-     match session.apply_async(&req.source, config.io_sender.as_ref()).await {
+    let mut session = config.snapshot_session().await;
+    match session.apply_async(&req.source, config.io_sender.as_ref()).await {
         Ok(results) => {
-            config.sync_tiers_from_session(&session).await;
+            config.write_back_session(&session).await;
             Json(MutateResponse {
                 revision: session.meta.revision,
                 results: results
@@ -219,8 +211,6 @@ pub async fn eval_fn(
                         }).await;
                         // Sync mutations back to session if any occurred
                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-                            let mut session = config.session.lock().await;
-                            session.program = mutated.clone();
                             *config.program.write().await = mutated;
                         }
                         return match eval_result {
@@ -353,8 +343,6 @@ pub async fn eval_fn(
 
             // Sync mutations back to session if any occurred
             if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-                let mut s = config.session.lock().await;
-                s.program = mutated.clone();
                 *config.program.write().await = mutated;
             }
 
@@ -532,10 +520,9 @@ pub async fn test_fn(
         }
         // Tier 1: store tests on the program if all passed (brief write lock)
         if failed == 0 && !test.cases.is_empty() {
-            let mut session = config.session.lock().await;
+            let mut session = config.snapshot_session().await;
             session.store_test(&test.function_name, &test.cases);
-            // Sync program tier from session
-            *config.program.write().await = session.program.clone();
+            config.write_back_session(&session).await;
         }
     }
 
@@ -745,16 +732,10 @@ pub async fn rewind(
     State(config): State<AppConfig>,
     Json(req): Json<RewindRequest>,
 ) -> Json<RewindResponse> {
-    // Rewind needs all tiers — use the session shim for now (rare operation)
-    let mut session = config.session.lock().await;
+    let mut session = config.snapshot_session().await;
     match session.rewind_to(req.revision) {
         Ok(()) => {
-            // Sync tiers from session after rewind
-            *config.program.write().await = session.program.clone();
-            {
-                let mut meta = config.meta.lock().unwrap();
-                *meta = session.meta.clone();
-            }
+            config.write_back_session(&session).await;
             Json(RewindResponse {
                 revision: session.meta.revision,
                 success: true,
@@ -1447,8 +1428,8 @@ pub async fn ask(
     };
 
     // Build messages from conversation history
+    let mut session = config.snapshot_session().await;
     let mut messages = {
-        let mut session = config.session.lock().await;
         if session.meta.chat_messages.is_empty() {
             session.meta.chat_messages.push(crate::session::ChatMessage {
                 role: "system".to_string(),
@@ -1540,7 +1521,7 @@ pub async fn ask(
         let mut iter_test_results: Vec<TestCaseResult> = vec![];
         let mut iter_has_errors = false;
 
-        let mut session = config.session.lock().await;
+        let mut session = config.snapshot_session().await;
 
         match crate::parser::parse(&code) {
             Ok(ops) => {
@@ -1554,7 +1535,7 @@ pub async fn ask(
                         }
                         crate::parser::Operation::Type(t) => {
                             let name = t.name.clone();
-                            session.program.types.retain(|existing| existing.name() != name);
+                            session.program.types.retain(|existing: &crate::ast::TypeDecl| existing.name() != name);
                         }
                         _ => {}
                     }
@@ -1627,7 +1608,7 @@ pub async fn ask(
                 if has_mutations {
                     match session.apply(&code) {
                         Ok(res) => {
-                            config.sync_tiers_from_session(&session).await;
+                            config.write_back_session(&session).await;
                             for (msg, ok) in res {
                                 eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
                                 if !ok { iter_has_errors = true; }
@@ -1660,11 +1641,9 @@ pub async fn ask(
                                         let mocks = session.meta.io_mocks.clone();
                                         let routes = session.runtime.http_routes.clone();
                                         let sender = sender.clone();
-                                        drop(session);
                                         let result = crate::eval::eval_test_case_async(
                                             &program, &fn_name, &case, &mocks, sender, &routes,
                                         ).await;
-                                        session = config.session.lock().await;
                                         result
                                     } else {
                                         crate::eval::eval_test_case_with_mocks(
@@ -1698,7 +1677,6 @@ pub async fn ask(
                                         let sender = sender.clone();
                                         let runtime_for_blocking = config.runtime.clone();
                             let meta_for_blocking = config.meta.clone();
-                                        drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                 eval::set_shared_meta(Some(meta_for_blocking));
@@ -1713,11 +1691,10 @@ pub async fn ask(
                                         };
                                         eprintln!("[web:eval] {msg}");
                                         iter_results.push(MutationResult { message: msg, success });
-                                        session = config.session.lock().await;
                                         // Sync mutations back
                                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                                             session.program = mutated.clone();
-                                                *config.program.write().await = mutated;
+                                            *config.program.write().await = mutated;
                                         }
                                         continue;
                                     }
@@ -1767,7 +1744,6 @@ pub async fn ask(
                                     let sender = sender.clone();
                                     let runtime_for_blocking = config.runtime.clone();
                             let meta_for_blocking = config.meta.clone();
-                                    drop(session);
                                     let eval_result = tokio::task::spawn_blocking(move || {
                                         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                 eval::set_shared_meta(Some(meta_for_blocking));
@@ -1790,7 +1766,6 @@ pub async fn ask(
                                     };
                                     eprintln!("[web:eval] {msg}");
                                     iter_results.push(MutationResult { message: msg, success });
-                                    session = config.session.lock().await;
                                     // Sync mutations back
                                     if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                                         session.program = mutated.clone();
@@ -1839,7 +1814,8 @@ pub async fn ask(
                             let fn_name = function_name.clone();
                             let fn_args = args.clone();
                             let interval = *interval_ms;
-                            let session_ref = config.session.clone();
+                            let watch_program = config.program.clone();
+                            let watch_meta = config.meta.clone();
                             let io_sender = config.io_sender.clone();
                             let trigger = config.self_trigger.clone();
                             let watch_jit_cache = config.jit_cache.clone();
@@ -1851,7 +1827,8 @@ pub async fn ask(
 
                                     // Evaluate the function
                                     let result = {
-                                        let session = session_ref.lock().await;
+                                        let program = watch_program.read().await;
+                                        let meta = watch_meta.lock().unwrap();
                                         let input_expr = if fn_args.trim().is_empty() {
                                             crate::parser::Expr::StructLiteral(vec![])
                                         } else {
@@ -1865,8 +1842,8 @@ pub async fn ask(
                                             }
                                         };
                                         match crate::eval::eval_compiled_or_interpreted_cached(
-                                            &session.program, &fn_name, &input_expr,
-                                            Some(&watch_jit_cache), session.meta.revision,
+                                            &program, &fn_name, &input_expr,
+                                            Some(&watch_jit_cache), meta.revision,
                                         ) {
                                             Ok((r, _)) => r,
                                             Err(e) => format!("error: {e}"),
@@ -1899,9 +1876,9 @@ pub async fn ask(
                             let llm_url = config.llm_url.clone();
                             let llm_model = config.llm_model.clone();
                             let llm_key = config.llm_api_key.clone();
-                            let session_ref = config.session.clone();
-
-                            drop(session);
+                            let agent_program = config.program.clone();
+                            let agent_meta = config.meta.clone();
+                            let agent_runtime = config.runtime.clone();
 
                             // Run agent in background
                             tokio::spawn(async move {
@@ -1933,8 +1910,8 @@ pub async fn ask(
                                 for agent_iter in 0..10 {
                                     // Check inbox for messages from other agents or main
                                     {
-                                        let mut session = session_ref.lock().await;
-                                        let inbox = session.drain_messages(&agent_name);
+                                        let mut meta = agent_meta.lock().unwrap();
+                                        let inbox = meta.agent_mailbox.remove(&agent_name).unwrap_or_default();
                                         if !inbox.is_empty() {
                                             let inbox_text = inbox.iter()
                                                 .map(|m| format!("[from {}] {}", m.from, m.content))
@@ -1964,8 +1941,14 @@ pub async fn ask(
                                         for op in &ops {
                                             if let crate::parser::Operation::Message { to, content } = op {
                                                 eprintln!("[agent:{agent_name}] !msg → {to}: {content}");
-                                                let mut session = session_ref.lock().await;
-                                                session.send_agent_message(&agent_name, to, content);
+                                                let mut meta = agent_meta.lock().unwrap();
+                                                let msg = crate::session::AgentMessage {
+                                                    from: agent_name.clone(),
+                                                    to: to.clone(),
+                                                    content: content.clone(),
+                                                    timestamp: crate::session::now(),
+                                                };
+                                                meta.agent_mailbox.entry(to.clone()).or_default().push(msg);
                                             }
                                         }
                                     }
@@ -1994,7 +1977,28 @@ pub async fn ask(
                                 }
 
                                 // Merge branch back into main session
-                                let mut session = session_ref.lock().await;
+                                let mut session = AppConfig {
+                                    program: agent_program.clone(),
+                                    meta: agent_meta.clone(),
+                                    llm_url: String::new(),
+                                    llm_model: String::new(),
+                                    llm_api_key: None,
+                                    project_dir: String::new(),
+                                    io_sender: None,
+                                    self_trigger: tokio::sync::mpsc::channel(1).0,
+                                    task_registry: None,
+                                    snapshot_registry: None,
+                                    log_file: None,
+                                    jit_cache: eval::new_jit_cache(),
+                                    event_broadcast: tokio::sync::broadcast::channel(1).0,
+                                    opencode_git_dir: String::new(),
+                                    opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                                    message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                                    max_iterations: 0,
+                                    training_log: None,
+                                    runtime: agent_runtime.clone(),
+                                    sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                                }.snapshot_session().await;
                                 let conflicts = branch.merge_into(&mut session);
                                 if conflicts.is_empty() {
                                     eprintln!("[agent:{agent_name}] merged successfully");
@@ -2017,6 +2021,29 @@ pub async fn ask(
                                         s.message = conflicts.join("; ");
                                     }
                                 }
+                                let cfg = AppConfig {
+                                    program: agent_program.clone(),
+                                    meta: agent_meta.clone(),
+                                    llm_url: String::new(),
+                                    llm_model: String::new(),
+                                    llm_api_key: None,
+                                    project_dir: String::new(),
+                                    io_sender: None,
+                                    self_trigger: tokio::sync::mpsc::channel(1).0,
+                                    task_registry: None,
+                                    snapshot_registry: None,
+                                    log_file: None,
+                                    jit_cache: eval::new_jit_cache(),
+                                    event_broadcast: tokio::sync::broadcast::channel(1).0,
+                                    opencode_git_dir: String::new(),
+                                    opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                                    message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                                    max_iterations: 0,
+                                    training_log: None,
+                                    runtime: agent_runtime.clone(),
+                                    sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                                };
+                                cfg.write_back_session(&session).await;
                             });
 
                             iter_results.push(MutationResult {
@@ -2024,7 +2051,6 @@ pub async fn ask(
                                 success: true,
                             });
 
-                            session = config.session.lock().await;
                             session.meta.agent_log.push(crate::session::AgentStatus {
                                 name: name.clone(),
                                 task: task.chars().take(100).collect(),
@@ -2043,7 +2069,6 @@ pub async fn ask(
                         }
                         crate::parser::Operation::OpenCode(task) => {
                             eprintln!("[web:opencode] {task}");
-                            drop(session);
                             let oc_result = tokio::time::timeout(
                                 std::time::Duration::from_secs(3600),
                                 tokio::process::Command::new("opencode")
@@ -2087,7 +2112,6 @@ pub async fn ask(
                                     iter_results.push(MutationResult { message: "OpenCode failed or timed out".to_string(), success: false });
                                 }
                             }
-                            session = config.session.lock().await;
                         }
                         // Top-level statements: execute immediately
                         op @ (crate::parser::Operation::Call(_)
@@ -2143,7 +2167,8 @@ pub async fn ask(
 
         all_results.extend(iter_results.clone());
         all_test_results.extend(iter_test_results.clone());
-        drop(session);
+        // Write mutations back to tiers after each iteration
+        config.write_back_session(&session).await;
 
         // Build feedback for next iteration
         if iter_has_errors {
@@ -2164,20 +2189,20 @@ pub async fn ask(
         }
     }
 
-    // Save conversation
+    // Save conversation — write assistant reply directly into meta tier
     {
-        let mut session = config.session.lock().await;
         let summary = format!("{}\n{}", reply_text.chars().take(200).collect::<String>(),
             all_results.iter().map(|r| format!("{}: {}", if r.success {"OK"} else {"ERR"}, r.message)).collect::<Vec<_>>().join("\n"));
-        session.meta.chat_messages.push(crate::session::ChatMessage {
+        let mut meta = config.meta.lock().unwrap();
+        meta.chat_messages.push(crate::session::ChatMessage {
             role: "assistant".to_string(), content: summary,
         });
-        if session.meta.chat_messages.len() > 50 {
-            let system = session.meta.chat_messages[0].clone();
-            let start = session.meta.chat_messages.len() - 49;
-            let keep: Vec<_> = session.meta.chat_messages[start..].to_vec();
-            session.meta.chat_messages = vec![system];
-            session.meta.chat_messages.extend(keep);
+        if meta.chat_messages.len() > 50 {
+            let system = meta.chat_messages[0].clone();
+            let start = meta.chat_messages.len() - 49;
+            let keep: Vec<_> = meta.chat_messages[start..].to_vec();
+            meta.chat_messages = vec![system];
+            meta.chat_messages.extend(keep);
         }
     }
 
@@ -2390,11 +2415,6 @@ pub async fn ask_stream(
                 // guard dropped here — before any .await
                 (context, msgs, meta_snapshot)
             };
-            // Sync meta snapshot to session shim after releasing the lock
-            {
-                let mut session = config_clone.session.lock().await;
-                session.meta = meta_snapshot;
-            }
             tx.log("user", &context).await;
             msgs
         }; // All locks released before LLM call
@@ -2484,7 +2504,7 @@ pub async fn ask_stream(
             tx.log("code", &code).await;
 
             // Apply code
-            let mut session = config_clone.session.lock().await;
+            let mut session = config_clone.snapshot_session().await;
             let mut op_result = OperationResult::new();
 
             match crate::parser::parse(&code) {
@@ -2521,7 +2541,7 @@ pub async fn ask_stream(
                     if has_mutations {
                         match session.apply(&code) {
                             Ok(res) => {
-                                config_clone.sync_tiers_from_session(&session).await;
+                                config_clone.write_back_session(&session).await;
                                 for (msg, ok) in &res {
                                     if *ok {
                                         op_result.ok(msg);
@@ -2556,11 +2576,9 @@ pub async fn ask_stream(
                                             let mocks = session.meta.io_mocks.clone();
                                             let routes = session.runtime.http_routes.clone();
                                             let sender = sender.clone();
-                                            drop(session);
                                             let result = crate::eval::eval_test_case_async(
                                                 &program, &fn_name, &case, &mocks, sender, &routes,
                                             ).await;
-                                            session = config_clone.session.lock().await;
                                             result
                                         } else {
                                             crate::eval::eval_test_case_with_mocks(
@@ -2601,7 +2619,6 @@ pub async fn ask_stream(
                                             let sender = sender.clone();
                                             let runtime_for_blocking = config_clone.runtime.clone();
                             let meta_for_blocking = config_clone.meta.clone();
-                                            drop(session);
                                             let eval_result = tokio::task::spawn_blocking(move || {
                                                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                 eval::set_shared_meta(Some(meta_for_blocking));
@@ -2620,7 +2637,6 @@ pub async fn ask_stream(
                                                 op_result.error(&msg);
                                             }
                                             let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": "(inline)", "success": success})).await;
-                                            session = config_clone.session.lock().await;
                                             // Sync mutations back
                                             if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                                                 session.program = mutated.clone();
@@ -2671,7 +2687,6 @@ pub async fn ask_stream(
                                         let sender = sender.clone();
                                         let runtime_for_blocking = config_clone.runtime.clone();
                             let meta_for_blocking = config_clone.meta.clone();
-                                        drop(session);
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                 eval::set_shared_meta(Some(meta_for_blocking));
@@ -2698,7 +2713,6 @@ pub async fn ask_stream(
                                             op_result.error(format!("eval {}() = {msg} [FAILED]", ev.function_name));
                                         }
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": ev.function_name, "success": success})).await;
-                                        session = config_clone.session.lock().await;
                                         // Sync mutations back
                                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                                             session.program = mutated.clone();
@@ -2752,7 +2766,6 @@ pub async fn ask_stream(
                                         let program_mut_clone = program_mut.clone();
                                         let runtime_for_blocking = config_clone.runtime.clone();
                             let meta_for_blocking = config_clone.meta.clone();
-                                        drop(session);
                                         let result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                 eval::set_shared_meta(Some(meta_for_blocking));
@@ -2775,7 +2788,6 @@ pub async fn ask_stream(
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("task error: {e}"), "success": false})).await;
                                             }
                                         }
-                                        session = config_clone.session.lock().await;
                                         // Sync mutations back
                                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                                             session.program = mutated.clone();
@@ -2816,7 +2828,6 @@ pub async fn ask_stream(
                                 // Sequential lock — only one !opencode at a time
                                 let _opencode_guard = config_clone.opencode_lock.lock().await;
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Running !opencode: {}", task.chars().take(80).collect::<String>()), "success": true})).await;
-                                drop(session);
                                 // Use the configured opencode directory (fixed checkout, not dynamic worktrees)
                                 let work_dir = config_clone.opencode_git_dir.clone();
                                 log_activity(&config_clone.log_file, "opencode-dir", &work_dir).await;
@@ -2824,8 +2835,8 @@ pub async fn ask_stream(
 
                                 // Get existing OpenCode session ID to continue building on top
                                 let oc_session_id = {
-                                    let s = config_clone.session.lock().await;
-                                    s.meta.opencode_session_id.clone()
+                                    let meta = config_clone.meta.lock().unwrap();
+                                    meta.opencode_session_id.clone()
                                 };
 
                                 let recent_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2934,9 +2945,9 @@ pub async fn ask_stream(
                                                     "step_start" | "step_finish" => {
                                                         // Capture session ID for reuse
                                                         if let Some(sid) = event.get("sessionID").and_then(|s| s.as_str()) {
-                                                            let mut s = config_clone.session.lock().await;
-                                                            if s.meta.opencode_session_id.as_deref() != Some(sid) {
-                                                                s.meta.opencode_session_id = Some(sid.to_string());
+                                                            let mut meta = config_clone.meta.lock().unwrap();
+                                                            if meta.opencode_session_id.as_deref() != Some(sid) {
+                                                                meta.opencode_session_id = Some(sid.to_string());
                                                                 eprintln!("[opencode] session ID: {sid}");
                                                             }
                                                         }
@@ -2975,8 +2986,8 @@ pub async fn ask_stream(
                                             let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode session stale, retrying fresh...", "success": true})).await;
                                             // Clear session ID
                                             {
-                                                let mut s = config_clone.session.lock().await;
-                                                s.meta.opencode_session_id = None;
+                                                let mut meta = config_clone.meta.lock().unwrap();
+                                                meta.opencode_session_id = None;
                                             }
                                             // Retry without --session/--fork
                                             let recent_for_retry = recent_lines.clone();
@@ -3018,9 +3029,9 @@ pub async fn ask_stream(
                                                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
                                                             // Capture new session ID
                                                             if let Some(sid) = event.get("sessionID").and_then(|s| s.as_str()) {
-                                                                let mut s = config_clone.session.lock().await;
-                                                                if s.meta.opencode_session_id.is_none() {
-                                                                    s.meta.opencode_session_id = Some(sid.to_string());
+                                                                let mut meta = config_clone.meta.lock().unwrap();
+                                                                if meta.opencode_session_id.is_none() {
+                                                                    meta.opencode_session_id = Some(sid.to_string());
                                                                 }
                                                             }
                                                             let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -3042,7 +3053,6 @@ pub async fn ask_stream(
                                                 _ => {
                                                     let ctx = recent_lines.lock().unwrap().join("\n");
                                                     op_result.error(format!("OpenCode retry failed\n{ctx}"));
-                                                    session = config_clone.session.lock().await;
                                                     continue;
                                                 }
                                             }
@@ -3078,7 +3088,6 @@ pub async fn ask_stream(
                                             log_activity(&config_clone.log_file, "opencode-no-changes", &msg).await;
                                             op_result.error(&msg);
                                             let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
-                                            session = config_clone.session.lock().await;
                                             continue;
                                         }
                                     }
@@ -3096,14 +3105,11 @@ pub async fn ask_stream(
                                             Ok(b) if b.status.success() => {
                                                 log_activity(&config_clone.log_file, "opencode-restart", "rebuild successful, attempting restart").await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
-                                                // Save session before restart — sync tiers first
+                                                // Save session before restart — snapshot current tiers
                                                 {
-                                                    let mut session = config_clone.session.lock().await;
-                                                    session.program = config_clone.program.read().await.clone();
-                                                    session.meta = config_clone.meta.lock().unwrap().clone();
-                                                    if let Ok(rt) = config_clone.runtime.read() { session.runtime = rt.clone(); }
+                                                    let snap = config_clone.snapshot_session().await;
                                                     if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
-                                                        let _ = session.save(std::path::Path::new(&path));
+                                                        let _ = snap.save(std::path::Path::new(&path));
                                                     }
                                                 }
                                                 // execvp replaces the process — if it returns, it failed
@@ -3156,7 +3162,6 @@ pub async fn ask_stream(
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
                                 }
-                                session = config_clone.session.lock().await;
                             }
                             _ => {}
                         }
@@ -3183,12 +3188,12 @@ pub async fn ask_stream(
                 }
             }
 
-            drop(session);
+            // Write session mutations back to tiers after each iteration
+            config_clone.write_back_session(&session).await;
 
             // Build detailed feedback with ALL results so the AI can see them
             // Also re-run queries and check inbox
             {
-                let mut session = config_clone.session.lock().await;
                 if let Ok(ops) = crate::parser::parse(&code) {
                     for op in &ops {
                         if let crate::parser::Operation::Query(query) = op {
@@ -3245,12 +3250,12 @@ pub async fn ask_stream(
 
             // Build plan status summary for feedback
             let plan_summary = {
-                let session = config_clone.session.lock().await;
-                let in_progress: Vec<_> = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::InProgress)).collect();
-                let pending: Vec<_> = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending)).collect();
-                let failed: Vec<_> = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Failed)).collect();
-                let total = session.meta.plan.len();
-                let done = session.meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Done)).count();
+                let meta = config_clone.meta.lock().unwrap();
+                let in_progress: Vec<_> = meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::InProgress)).collect();
+                let pending: Vec<_> = meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Pending)).collect();
+                let failed: Vec<_> = meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Failed)).collect();
+                let total = meta.plan.len();
+                let done = meta.plan.iter().filter(|s| matches!(s.status, crate::session::PlanStatus::Done)).count();
                 if total == 0 {
                     "No plan set. Create one with !plan set.".to_string()
                 } else if pending.is_empty() && in_progress.is_empty() && failed.is_empty() {
@@ -3749,10 +3754,8 @@ async fn adapsis_route_dispatch(
     })
     .await;
 
-    // Sync mutations back to session if any occurred
+    // Sync mutations back to program tier if any occurred
     if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-        let mut session = config.session.lock().await;
-        session.program = mutated.clone();
         *config.program.write().await = mutated;
     }
 

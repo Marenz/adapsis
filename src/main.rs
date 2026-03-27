@@ -23,6 +23,30 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+async fn snapshot_from_tiers(
+    program: &std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
+    meta: &crate::session::SharedMeta,
+    runtime: &crate::session::SharedRuntime,
+) -> crate::session::Session {
+    crate::session::Session {
+        program: program.read().await.clone(),
+        runtime: runtime.read().unwrap().clone(),
+        meta: meta.lock().unwrap().clone(),
+        sandbox: None,
+    }
+}
+
+async fn write_back_to_tiers(
+    program: &std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
+    meta: &crate::session::SharedMeta,
+    runtime: &crate::session::SharedRuntime,
+    session: &crate::session::Session,
+) {
+    *program.write().await = session.program.clone();
+    *meta.lock().unwrap() = session.meta.clone();
+    *runtime.write().unwrap() = session.runtime.clone();
+}
+
 #[derive(Parser)]
 #[command(name = "adapsis", about = "Adapsis — the adaptive, self-modifying AI programming environment")]
 struct Cli {
@@ -781,8 +805,6 @@ async fn main() -> Result<()> {
             let shared_meta: crate::session::SharedMeta =
                 std::sync::Arc::new(std::sync::Mutex::new(sess.meta.clone()));
 
-            let shared_session = std::sync::Arc::new(tokio::sync::Mutex::new(sess));
-
             // Set up coroutine runtime for async IO
             let (mut runtime, mut io_rx) = coroutine::Runtime::new();
             runtime.llm_url = url.clone();
@@ -797,9 +819,9 @@ async fn main() -> Result<()> {
             let task_registry_for_spawn = runtime.task_registry.clone();
             let snap_registry_for_spawn2 = runtime.snapshot_registry.clone();
             let io_sender_for_spawn = runtime.io_sender();
-            let shared_session_for_spawn = shared_session.clone();
             let shared_runtime_for_spawn = shared_runtime.clone();
             let shared_meta_for_spawn = shared_meta.clone();
+            let shared_program_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
@@ -818,14 +840,14 @@ async fn main() -> Result<()> {
                             let sender = io_sender_for_spawn.clone();
                             let registry = task_registry_for_spawn.clone();
                             let snap_reg = snap_registry_for_spawn2.clone();
-                            let session_ref = shared_session_for_spawn.clone();
                             let runtime_for_blocking = shared_runtime_for_spawn.clone();
                             let meta_for_blocking = shared_meta_for_spawn.clone();
+                            let program_for_blocking = shared_program_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 eval::set_shared_runtime(Some(runtime_for_blocking));
                                 eval::set_shared_meta(Some(meta_for_blocking));
-                                let session = session_ref.blocking_lock();
-                                let func_decl = match session.program.get_function(&function_name) {
+                                let program = program_for_blocking.blocking_read().clone();
+                                let func_decl = match program.get_function(&function_name) {
                                     Some(f) => f.clone(),
                                     None => {
                                         eprintln!("spawn: function `{function_name}` not found");
@@ -837,8 +859,6 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                let program = session.program.clone();
-                                drop(session);
                                 eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                 eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&program)));
 
@@ -911,15 +931,9 @@ async fn main() -> Result<()> {
             };
 
             // Build the three independent tiers from the loaded session.
-            // These are the new lock-discipline tiers; `shared_session` remains
-            // temporarily as a compatibility shim for handlers not yet migrated.
-            let tier1_program = {
-                let s = shared_session.lock().await;
-                std::sync::Arc::new(tokio::sync::RwLock::new(s.program.clone()))
-            };
+            let tier1_program = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
 
             let config = api::AppConfig {
-                session: shared_session.clone(),
                 program: tier1_program,
                 meta: shared_meta.clone(),
                 llm_url: url.clone(),
@@ -992,21 +1006,14 @@ async fn main() -> Result<()> {
             // Auto-save session periodically.
             // Sync tier state into the session shim before saving so that
             // changes made through the tier locks are persisted.
-            let save_session = shared_session.clone();
             let save_path = session.clone();
+            let autosave_program = save_program.clone();
+            let autosave_meta = save_meta.clone();
+            let autosave_runtime = save_runtime.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    // Sync tiers → session shim
-                    {
-                        let mut session = save_session.lock().await;
-                        session.program = save_program.read().await.clone();
-                        session.meta = save_meta.lock().unwrap().clone();
-                        if let Ok(rt) = save_runtime.read() {
-                            session.runtime = rt.clone();
-                        }
-                    }
-                    let session = save_session.lock().await;
+                    let session = snapshot_from_tiers(&autosave_program, &autosave_meta, &autosave_runtime).await;
                     if let Err(e) = session.save(std::path::Path::new(&save_path)) {
                         eprintln!("auto-save failed: {e}");
                     }
@@ -1014,7 +1021,10 @@ async fn main() -> Result<()> {
             });
 
             // Self-trigger loop: process system events through the AI
-            let trigger_session = shared_session.clone();
+            // (use save_* clones since config was moved into the router above)
+            let trigger_program = save_program.clone();
+            let trigger_meta = save_meta.clone();
+            let trigger_runtime = save_runtime.clone();
             let trigger_url = url.clone();
             let trigger_model = model.clone();
             let trigger_key = api_key.clone();
@@ -1025,12 +1035,12 @@ async fn main() -> Result<()> {
 
                     // Add event as tool message — AI decides whether to act
                     let messages = {
-                        let mut session = trigger_session.lock().await;
-                        session.meta.chat_messages.push(crate::session::ChatMessage {
+                        let mut meta = trigger_meta.lock().unwrap();
+                        meta.chat_messages.push(crate::session::ChatMessage {
                             role: "tool".to_string(),
                             content: event_message.clone(),
                         });
-                        session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
+                        meta.chat_messages.iter().map(|m| match m.role.as_str() {
                             "system" => llm::ChatMessage::system(m.content.clone()),
                             "assistant" => llm::ChatMessage::assistant(&m.content),
                             _ => llm::ChatMessage::user(m.content.clone()),
@@ -1044,7 +1054,7 @@ async fn main() -> Result<()> {
 
                             // Apply code if any
                             if !code.is_empty() && code.trim() != "DONE" {
-                                let mut session = trigger_session.lock().await;
+                                let mut session = snapshot_from_tiers(&trigger_program, &trigger_meta, &trigger_runtime).await;
                                 if let Ok(ops) = crate::parser::parse(&code) {
                                     let mut fns_removed = false;
                                     for op in &ops {
@@ -1067,6 +1077,7 @@ async fn main() -> Result<()> {
                                     role: "assistant".to_string(),
                                     content: format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()),
                                 });
+                                write_back_to_tiers(&trigger_program, &trigger_meta, &trigger_runtime, &session).await;
                             }
                         }
                         Err(e) => {
@@ -1078,7 +1089,7 @@ async fn main() -> Result<()> {
 
             // Autonomous mode: inject goal as the first message after startup
             // Skip if session already has chat history (e.g. after !opencode restart)
-            let session_has_history = shared_session.lock().await.meta.chat_messages.len() > 1;
+            let session_has_history = shared_meta.lock().unwrap().chat_messages.len() > 1;
             // Autonomous loop: always runs. If --autonomous is given, use it as the
             // initial goal. Otherwise, check the roadmap — if there are undone items,
             // continue working on them automatically.
