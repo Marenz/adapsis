@@ -1103,12 +1103,54 @@ impl CoroutineHandle {
                     content: message.clone(),
                     timestamp,
                 };
+                if let Some(meta) = crate::eval::get_shared_meta() {
+                    if let Ok(mut meta) = meta.lock() {
+                        meta.agent_mailbox
+                            .entry(target.clone())
+                            .or_default()
+                            .push(msg.clone());
+                    }
+                }
                 state.agent_mailbox
                     .entry(target.clone())
                     .or_default()
                     .push(msg);
 
                 return Ok(Value::string(format!("Message sent to '{target}'")));
+            }
+
+            // ── inbox_read — programmatic inbox drain ──
+            "inbox_read" => {
+                if !args.is_empty() {
+                    bail!("inbox_read expects no arguments");
+                }
+
+                let mut messages = if let Some(meta) = crate::eval::get_shared_meta() {
+                    meta.lock()
+                        .map_err(|_| anyhow::anyhow!("inbox_read: could not lock meta"))?
+                        .agent_mailbox
+                        .remove("main")
+                        .unwrap_or_default()
+                } else {
+                    let rt = crate::eval::get_shared_runtime()
+                        .ok_or_else(|| anyhow::anyhow!("inbox_read: no runtime available"))?;
+                    rt.write()
+                        .map_err(|_| anyhow::anyhow!("inbox_read: could not access runtime"))?
+                        .agent_mailbox
+                        .remove("main")
+                        .unwrap_or_default()
+                };
+
+                if let Some(rt) = crate::eval::get_shared_runtime() {
+                    if let Ok(mut state) = rt.write() {
+                        state.agent_mailbox.remove("main");
+                    }
+                }
+
+                let contents: Vec<String> = messages.drain(..).map(|msg| msg.content).collect();
+                let payload = serde_json::to_string(&contents)
+                    .map_err(|e| anyhow::anyhow!("inbox_read: failed to serialize inbox: {e}"))?;
+                return Ok(Value::string(payload));
             }
 
             // ── watch_start — programmatic !watch ──
@@ -2857,6 +2899,20 @@ mod tests {
     }
 
     #[test]
+    fn msg_send_syncs_meta_mailbox() {
+        let (handle, meta) = setup_roadmap_runtime();
+        handle.execute_await("msg_send", &[
+            Value::string("agent1"),
+            Value::string("hello from main"),
+        ]).unwrap();
+
+        let meta = meta.lock().unwrap();
+        let inbox = meta.agent_mailbox.get("agent1").unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].content, "hello from main");
+    }
+
+    #[test]
     fn msg_send_empty_target_fails() {
         let (handle, _rt) = setup_roadmap_runtime();
         let result = handle.execute_await("msg_send", &[
@@ -2886,6 +2942,38 @@ mod tests {
         let (handle, _rt) = setup_roadmap_runtime();
         let result = handle.execute_await("msg_send", &[Value::string("agent1")]);
         assert!(result.is_err(), "should fail without message arg");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // inbox_read builtin
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn inbox_read_returns_json_and_clears_inbox() {
+        let (handle, meta) = setup_roadmap_runtime();
+        {
+            let mut meta = meta.lock().unwrap();
+            crate::session::send_agent_message(&mut meta, "agent1", "main", "first");
+            crate::session::send_agent_message(&mut meta, "agent2", "main", "second");
+        }
+        let rt = crate::eval::get_shared_runtime().unwrap();
+        rt.write().unwrap().agent_mailbox = meta.lock().unwrap().agent_mailbox.clone();
+
+        let result = unwrap_string(handle.execute_await("inbox_read", &[]).unwrap());
+        assert_eq!(result, "[\"first\",\"second\"]");
+        assert!(meta.lock().unwrap().agent_mailbox.get("main").is_none());
+        assert!(rt.read().unwrap().agent_mailbox.get("main").is_none());
+
+        let second = unwrap_string(handle.execute_await("inbox_read", &[]).unwrap());
+        assert_eq!(second, "[]");
+    }
+
+    #[test]
+    fn inbox_read_with_args_fails() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let result = handle.execute_await("inbox_read", &[Value::string("unexpected")]);
+        assert!(result.is_err(), "should fail with extra args");
+        assert!(result.unwrap_err().to_string().contains("expects no arguments"));
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -3041,7 +3129,7 @@ mod tests {
     #[test]
     fn new_io_builtins_registered() {
         for name in &[
-            "move_symbols", "watch_start", "agent_spawn", "msg_send", "trace_run",
+            "move_symbols", "watch_start", "agent_spawn", "msg_send", "inbox_read", "trace_run",
             "route_list", "route_add", "route_remove",
             "undo", "sandbox_enter", "sandbox_merge", "sandbox_discard",
             "mock_set", "mock_clear",

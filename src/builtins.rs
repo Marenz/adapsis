@@ -681,6 +681,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "inbox_read",
+        aliases: &[],
+        short: "drain pending inbox messages as JSON array string",
+        long: "Reads all pending inbox messages for the current main session and returns a JSON array String of message contents such as `[\"msg1\",\"msg2\"]`. Clears the inbox after reading and returns `[]` when no messages are pending. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "trace_run",
         aliases: &[],
         short: "run a function with tracing: trace_run(fn_name, args) -> String",
