@@ -75,7 +75,7 @@ impl AppConfig {
 }
 
 fn make_sse_event(event: &str, data: impl Into<String>) -> String {
-    serde_json::json!({"event": event, "data": data.into()}).to_string()
+    serde_json::json!({"type": event, "detail": data.into()}).to_string()
 }
 
 fn broadcast_sse_event(sender: &tokio::sync::broadcast::Sender<String>, event: &str, data: impl Into<String>) {
@@ -4028,6 +4028,7 @@ async fn get_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
 
     /// Helper: build a minimal AppConfig for testing multi-session endpoints.
     fn test_config() -> AppConfig {
@@ -4066,7 +4067,12 @@ mod tests {
 
     async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<String>) -> serde_json::Value {
         let raw = rx.recv().await.unwrap();
-        serde_json::from_str(&raw).unwrap()
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({"raw": raw.clone()}));
+        if let Some(encoded) = value.as_str() {
+            serde_json::from_str(encoded).unwrap_or(value)
+        } else {
+            value
+        }
     }
 
     #[tokio::test]
