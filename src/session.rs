@@ -418,39 +418,23 @@ impl Session {
 
     /// Send a message to an agent (or "main" for the main session).
     pub fn send_agent_message(&mut self, from: &str, to: &str, content: &str) {
-        let msg = AgentMessage {
-            from: from.to_string(),
-            to: to.to_string(),
-            content: content.to_string(),
-            timestamp: now(),
-        };
-        self.meta.agent_mailbox
-            .entry(to.to_string())
-            .or_default()
-            .push(msg);
+        send_agent_message(&mut self.meta, from, to, content);
     }
 
     /// Drain all pending messages for an agent.
     pub fn drain_messages(&mut self, agent_name: &str) -> Vec<AgentMessage> {
-        self.meta.agent_mailbox.remove(agent_name).unwrap_or_default()
+        drain_messages(&mut self.meta, agent_name)
     }
 
     /// Peek at pending messages without removing them.
     pub fn peek_messages(&self, agent_name: &str) -> &[AgentMessage] {
-        self.meta.agent_mailbox
-            .get(agent_name)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        peek_messages(&self.meta, agent_name)
     }
 
     /// Check whether a function is considered "tested":
     /// the function's AST `tests` field is non-empty and all test cases have `passed == true`.
     pub fn is_function_tested(&self, fn_name: &str) -> bool {
-        if let Some(func) = self.program.get_function(fn_name) {
-            !func.tests.is_empty() && func.tests.iter().all(|t| t.passed)
-        } else {
-            false
-        }
+        is_function_tested(&self.program, fn_name)
     }
 
     /// Add or replace an HTTP route.
@@ -575,42 +559,7 @@ impl Session {
     /// Store test cases for a function in the AST.
     /// Populates the function's `tests` field (replace, not append).
     pub fn store_test(&mut self, fn_name: &str, cases: &[parser::TestCase]) {
-        let ast_tests: Vec<ast::TestCase> = cases
-            .iter()
-            .map(|c| ast::TestCase {
-                input: format_expr(&c.input),
-                expected: format_expr(&c.expected),
-                passed: true,
-                matcher: c.matcher.as_ref().map(serialize_matcher),
-                after_checks: c.after_checks.iter().map(|a| ast::AfterCheck {
-                    target: a.target.clone(),
-                    matcher: a.matcher.clone(),
-                    value: a.value.clone(),
-                }).collect(),
-            })
-            .collect();
-        if let Some(func) = self.program.get_function_mut(fn_name) {
-            func.tests = ast_tests.clone();
-        }
-        // Also store on qualified name(s) if bare name was given
-        if !fn_name.contains('.') {
-            let qnames: Vec<String> = self
-                .program
-                .modules
-                .iter()
-                .flat_map(|m| {
-                    m.functions
-                        .iter()
-                        .filter(|f| f.name == fn_name)
-                        .map(|f| format!("{}.{}", m.name, f.name))
-                })
-                .collect();
-            for qn in &qnames {
-                if let Some(func) = self.program.get_function_mut(qn) {
-                    func.tests = ast_tests.clone();
-                }
-            }
-        }
+        store_test(&mut self.program, fn_name, cases)
     }
 
     /// Run a single test mutation synchronously and push results.
@@ -1252,12 +1201,7 @@ impl Session {
 
     /// Record an eval in the working history.
     pub fn record_eval(&mut self, function: &str, input: &str, result: &str) {
-        self.meta.history.push(HistoryEntry::Eval {
-            revision: self.meta.revision,
-            function: function.to_string(),
-            input: input.to_string(),
-            result: result.to_string(),
-        });
+        record_eval(&mut self.meta, function, input, result);
     }
 
     /// Record test results in the working history.
@@ -1268,61 +1212,22 @@ impl Session {
         failed: usize,
         details: Vec<String>,
     ) {
-        self.meta.history.push(HistoryEntry::Test {
-            revision: self.meta.revision,
-            function: function.to_string(),
-            passed,
-            failed,
-            details,
-        });
+        record_test(&mut self.meta, function, passed, failed, details);
     }
 
     /// Record a query in the working history.
     pub fn record_query(&mut self, query: &str, response: &str) {
-        self.meta.history.push(HistoryEntry::Query {
-            revision: self.meta.revision,
-            query: query.to_string(),
-            response: response.to_string(),
-        });
+        record_query(&mut self.meta, query, response);
     }
 
     /// Record a trace in the working history.
     pub fn record_trace(&mut self, function: &str, steps: usize) {
-        self.meta.history.push(HistoryEntry::Trace {
-            revision: self.meta.revision,
-            function: function.to_string(),
-            steps,
-        });
+        record_trace(&mut self.meta, function, steps);
     }
 
     /// Replay mutations up to a specific revision, reconstructing program state.
     pub fn rewind_to(&mut self, target_revision: usize) -> Result<()> {
-        if target_revision > self.meta.sources.len() {
-            return Err(anyhow!(
-                "revision {} doesn't exist (latest is {})",
-                target_revision,
-                self.meta.sources.len()
-            ));
-        }
-
-        // Rebuild from scratch
-        self.program = ast::Program::default();
-        for source in &self.meta.sources[..target_revision] {
-            let operations = parser::parse(source)?;
-            for op in &operations {
-                match op {
-                    parser::Operation::Test(_)
-                    | parser::Operation::Trace(_)
-                    | parser::Operation::Eval(_)
-                    | parser::Operation::Query(_) => {}
-                    _ => {
-                        let _ = validator::apply_and_validate(&mut self.program, op);
-                    }
-                }
-            }
-        }
-        self.meta.revision = target_revision;
-        Ok(())
+        rewind_to(&mut self.program, &mut self.runtime, &mut self.meta, &mut self.sandbox, target_revision)
     }
 
     /// Get recent history formatted for the LLM context.
@@ -1425,6 +1330,140 @@ impl Session {
             }
         }
     }
+}
+
+// ── Free functions for session sub-operations ───────────────────────────────
+
+pub fn send_agent_message(meta: &mut SessionMeta, from: &str, to: &str, content: &str) {
+    let msg = AgentMessage {
+        from: from.to_string(),
+        to: to.to_string(),
+        content: content.to_string(),
+        timestamp: now(),
+    };
+    meta.agent_mailbox.entry(to.to_string()).or_default().push(msg);
+}
+
+pub fn drain_messages(meta: &mut SessionMeta, agent_name: &str) -> Vec<AgentMessage> {
+    meta.agent_mailbox.remove(agent_name).unwrap_or_default()
+}
+
+pub fn peek_messages<'a>(meta: &'a SessionMeta, agent_name: &str) -> &'a [AgentMessage] {
+    meta.agent_mailbox.get(agent_name).map(|v| v.as_slice()).unwrap_or(&[])
+}
+
+pub fn is_function_tested(program: &ast::Program, fn_name: &str) -> bool {
+    program.get_function(fn_name)
+        .map(|func| !func.tests.is_empty() && func.tests.iter().all(|t| t.passed))
+        .unwrap_or(false)
+}
+
+pub fn store_test(program: &mut ast::Program, fn_name: &str, cases: &[parser::TestCase]) {
+    let ast_tests: Vec<ast::TestCase> = cases
+        .iter()
+        .map(|c| ast::TestCase {
+            input: format_expr(&c.input),
+            expected: format_expr(&c.expected),
+            passed: true,
+            matcher: c.matcher.as_ref().map(serialize_matcher),
+            after_checks: c.after_checks.iter().map(|a| ast::AfterCheck {
+                target: a.target.clone(),
+                matcher: a.matcher.clone(),
+                value: a.value.clone(),
+            }).collect(),
+        })
+        .collect();
+    if let Some(func) = program.get_function_mut(fn_name) {
+        func.tests = ast_tests.clone();
+    }
+    if !fn_name.contains('.') {
+        let qnames: Vec<String> = program
+            .modules
+            .iter()
+            .flat_map(|m| {
+                m.functions
+                    .iter()
+                    .filter(|f| f.name == fn_name)
+                    .map(|f| format!("{}.{}", m.name, f.name))
+            })
+            .collect();
+        for qn in &qnames {
+            if let Some(func) = program.get_function_mut(qn) {
+                func.tests = ast_tests.clone();
+            }
+        }
+    }
+}
+
+pub fn record_eval(meta: &mut SessionMeta, function: &str, input: &str, result: &str) {
+    meta.history.push(HistoryEntry::Eval {
+        revision: meta.revision,
+        function: function.to_string(),
+        input: input.to_string(),
+        result: result.to_string(),
+    });
+}
+
+pub fn record_test(meta: &mut SessionMeta, function: &str, passed: usize, failed: usize, details: Vec<String>) {
+    meta.history.push(HistoryEntry::Test {
+        revision: meta.revision,
+        function: function.to_string(),
+        passed,
+        failed,
+        details,
+    });
+}
+
+pub fn record_query(meta: &mut SessionMeta, query: &str, response: &str) {
+    meta.history.push(HistoryEntry::Query {
+        revision: meta.revision,
+        query: query.to_string(),
+        response: response.to_string(),
+    });
+}
+
+pub fn record_trace(meta: &mut SessionMeta, function: &str, steps: usize) {
+    meta.history.push(HistoryEntry::Trace {
+        revision: meta.revision,
+        function: function.to_string(),
+        steps,
+    });
+}
+
+pub fn rewind_to(
+    program: &mut ast::Program,
+    runtime: &mut RuntimeState,
+    meta: &mut SessionMeta,
+    sandbox: &mut Option<SandboxState>,
+    target_revision: usize,
+) -> Result<()> {
+    if target_revision > meta.sources.len() {
+        return Err(anyhow!(
+            "revision {} doesn't exist (latest is {})",
+            target_revision,
+            meta.sources.len()
+        ));
+    }
+
+    *program = ast::Program::default();
+    *runtime = RuntimeState::default();
+    for source in &meta.sources[..target_revision] {
+        let operations = parser::parse(source)?;
+        for op in &operations {
+            match op {
+                parser::Operation::Test(_)
+                | parser::Operation::Trace(_)
+                | parser::Operation::Eval(_)
+                | parser::Operation::Query(_) => {}
+                _ => {
+                    let _ = validator::apply_and_validate(program, op);
+                }
+            }
+        }
+    }
+    meta.revision = target_revision;
+    *sandbox = None;
+    Ok(())
 }
 
 // ── Free functions for roadmap/plan operations ──────────────────────────────
