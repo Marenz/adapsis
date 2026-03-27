@@ -707,7 +707,7 @@ They allow Adapsis code to perform these operations via `+await` instead of usin
 - `+await result:String = sandbox_discard()` — discard sandbox changes. Same as `!sandbox discard`. Reverts to pre-sandbox state.
 - `+await result:String = mock_set(operation, pattern, response)` — register an IO mock. Same as `!mock`. `operation` can be any IO operation name (for example `http_get`, `sleep`, or `inbox_read`), `pattern` matches arguments, and `response` is the return value.
 - `+await result:String = mock_clear()` — clear all IO mocks. Same as `!unmock`. Returns 'cleared N mocks'.
-- `+await result:String = sse_broadcast(event_type, data)` — broadcast a JSON event like `{"type":"mutation","detail":"..."}` to `/api/events` subscribers. Returns `ok`.
+- `+await result:String = sse_broadcast(event_type, data)` — broadcast a JSON event like `{"type":"mutation","data":"..."}` to `/api/events` subscribers. Returns `ok`.
 
 Example:
 ```
@@ -773,7 +773,7 @@ API endpoints:
 - `DELETE /api/sessions/:id` — delete a session (cannot delete \"main\").
 - `POST /api/sessions/:id/eval` — evaluate in a specific session. Same body as `/api/eval`.
 - `POST /api/sessions/:id/mutate` — apply mutations to a specific session. Same body as `/api/mutate`.
-- `GET /api/events` — subscribe to Server-Sent Events. Messages include JSON like `{"type":"mutation","summary":"..."}`, `{"type":"eval","result":"..."}`, or `{"type":"test","function":"Name","passed":1,"failed":0}`.
+- `GET /api/events` — subscribe to Server-Sent Events. Messages are JSON strings like `{"type":"mutation","data":"Applied 1 mutations"}`, `{"type":"eval","data":"42"}`, or `{"type":"test","data":"foo: 1 passed, 0 failed"}`.
 - `GET /ui` — minimal dashboard for `/api/events`, inline eval, and mutations.
 
 Sessions are isolated: functions defined in one session are not visible in another.
