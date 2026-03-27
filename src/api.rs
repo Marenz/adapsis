@@ -74,12 +74,12 @@ impl AppConfig {
     }
 }
 
-fn make_sse_event(event: &str, data: impl Into<String>) -> String {
-    serde_json::json!({"type": event, "detail": data.into()}).to_string()
+fn emit_event(state: &AppConfig, event_json: &str) {
+    let _ = state.event_broadcast.send(event_json.to_string());
 }
 
-fn broadcast_sse_event(sender: &tokio::sync::broadcast::Sender<String>, event: &str, data: impl Into<String>) {
-    let _ = sender.send(make_sse_event(event, data));
+fn make_sse_event(event: &str, data: impl Into<String>) -> String {
+    serde_json::json!({"type": event, "detail": data.into()}).to_string()
 }
 
 fn encode_broadcast_event(event: &serde_json::Value) -> String {
@@ -195,12 +195,11 @@ pub async fn mutate(
             *config.program.write().await = program;
             *config.runtime.write().unwrap() = runtime;
             *config.meta.lock().unwrap() = meta.clone();
-            broadcast_sse_event(&config.event_broadcast, "mutation", summary);
+            emit_event(&config, &serde_json::json!({"type": "mutation", "summary": summary}).to_string());
             Json(MutateResponse { revision: meta.revision, results: response_results })
         }
         Err(e) => {
             let message = format!("error: {e}");
-            broadcast_sse_event(&config.event_broadcast, "mutation", message.clone());
             Json(MutateResponse {
             revision: meta.revision,
             results: vec![MutationResult {
@@ -248,7 +247,7 @@ pub async fn eval_fn(
                 success: false,
                 compiled: None,
             };
-            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
             return Json(response);
         }
         match parser::parse_expr_pub(0, expr_str) {
@@ -292,7 +291,7 @@ pub async fn eval_fn(
                                 compiled: None,
                             },
                         };
-                        broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                        emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
                         return Json(response);
                     }
                     // No IO sender available — fall through to sync eval which will error
@@ -306,7 +305,7 @@ pub async fn eval_fn(
                             success: true,
                             compiled: Some(false),
                         };
-                        broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                        emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
                         return Json(response);
                     }
                     Err(e) => {
@@ -315,7 +314,7 @@ pub async fn eval_fn(
                             success: false,
                             compiled: None,
                         };
-                        broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                        emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
                         return Json(response);
                     }
                 }
@@ -326,7 +325,7 @@ pub async fn eval_fn(
                     success: false,
                     compiled: None,
                 };
-                broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
                 return Json(response);
             }
         }
@@ -347,7 +346,7 @@ pub async fn eval_fn(
                     success: false,
                     compiled: None,
                 };
-                broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
                 return Json(response);
             }
         }
@@ -374,7 +373,7 @@ pub async fn eval_fn(
                         success: false,
                         compiled: None,
                     };
-                    broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                    emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
                     return Json(response);
                 }
             }
@@ -439,7 +438,7 @@ pub async fn eval_fn(
                     compiled: None,
                 },
             };
-            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
             return Json(response);
         }
     }
@@ -465,7 +464,7 @@ pub async fn eval_fn(
                 success: true,
                 compiled: Some(compiled),
             };
-            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
             Json(response)
         }
         Err(e) => {
@@ -474,7 +473,7 @@ pub async fn eval_fn(
                 success: false,
                 compiled: None,
             };
-            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
             Json(response)
         }
     }
@@ -516,7 +515,7 @@ pub async fn test_fn(
                     pass: false,
                 }],
             };
-            broadcast_sse_event(&config.event_broadcast, "test", format!("{} passed; {} failed", response.passed, response.failed));
+            emit_event(&config, &serde_json::json!({"type": "test", "function": "(parse)", "passed": response.passed, "failed": response.failed}).to_string());
             return Json(response);
         }
     };
@@ -541,6 +540,8 @@ pub async fn test_fn(
     }
 
     for test in &all_test_ops {
+        let start_passed = passed;
+        let start_failed = failed;
         // Tier 1: read program to check async needs; Tier 3: get mocks
         // Clone what we need so locks are released before test execution
         let (program_snapshot, needs_async, mocks, routes) = {
@@ -608,6 +609,15 @@ pub async fn test_fn(
             let mut program = config.program.write().await;
             crate::session::store_test(&mut program, &test.function_name, &test.cases);
         }
+        emit_event(
+            &config,
+            &serde_json::json!({
+                "type": "test",
+                "function": test.function_name,
+                "passed": passed - start_passed,
+                "failed": failed - start_failed,
+            }).to_string(),
+        );
     }
 
     let response = TestResponse {
@@ -615,7 +625,6 @@ pub async fn test_fn(
         failed,
         results,
     };
-    broadcast_sse_event(&config.event_broadcast, "test", format!("{} passed; {} failed", response.passed, response.failed));
     Json(response)
 }
 
@@ -3920,7 +3929,10 @@ async fn events_stream(
         }
     };
     (
-        [(axum::http::header::CACHE_CONTROL, "no-cache")],
+        [
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::CONNECTION, "keep-alive"),
+        ],
         axum::response::sse::Sse::new(stream).keep_alive(KeepAlive::default()),
     )
 }
@@ -4081,6 +4093,7 @@ mod tests {
         let response = events_stream(State(config)).await.into_response();
         assert_eq!(response.headers()[axum::http::header::CONTENT_TYPE], "text/event-stream");
         assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-cache");
+        assert_eq!(response.headers()[axum::http::header::CONNECTION], "keep-alive");
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -4505,7 +4518,7 @@ mod tests {
         assert!(response.results.iter().all(|r| r.success));
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "mutation");
-        assert!(event["detail"].as_str().unwrap().contains("ping"));
+        assert!(event["summary"].as_str().unwrap().contains("ping"));
     }
 
     #[tokio::test]
@@ -4532,7 +4545,7 @@ mod tests {
         assert!(response.success);
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "eval");
-        assert!(event["detail"].as_str().unwrap().contains("42"));
+        assert_eq!(event["result"], "42");
     }
 
     #[tokio::test]
@@ -4557,7 +4570,9 @@ mod tests {
         assert_eq!(response.passed, 1);
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "test");
-        assert_eq!(event["detail"], "1 passed; 0 failed");
+        assert_eq!(event["function"], "one");
+        assert_eq!(event["passed"], 1);
+        assert_eq!(event["failed"], 0);
     }
 
     #[tokio::test]
