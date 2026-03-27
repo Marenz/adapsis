@@ -3731,6 +3731,31 @@ mod tests {
     }
 
     #[test]
+    fn test_async_function_with_mock_inbox_read() {
+        let source = "\
++fn drain_inbox ()->String [io,async]
+  +await resp:String = inbox_read()
+  +return resp
+";
+        let program = build_program(source);
+
+        let test_source = "\
+!test drain_inbox
+  +with -> expect \"[\\\"mocked\\\"]\"
+";
+        let cases = extract_test_cases(test_source);
+        let (fn_name, case) = &cases[0];
+
+        let mocks = vec![IoMock {
+            operation: "inbox_read".to_string(),
+            patterns: vec!["".to_string()],
+            response: "[\"mocked\"]".to_string(),
+        }];
+        let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
+        assert!(result.is_ok(), "inbox_read mock test should pass: {:?}", result);
+    }
+
+    #[test]
     fn test_async_function_nested_await_propagates_handle() {
         // An async function that calls another user-defined async function
         // which itself does +await on a builtin — handle must propagate
