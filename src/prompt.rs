@@ -523,8 +523,9 @@ Use `!mock` to register fake IO responses, then `!test` works with async functio
 
 !unmock
 
-Mocks intercept +await calls during tests — if the operation and args match the
-pattern, the mock value is returned without real IO. Use !unmock to clear all mocks.
+Mocks intercept any `+await` IO operation during tests — if the operation name and args match the
+pattern, the mock value is returned without real IO. This includes command/query-style IO builtins
+such as `inbox_read()`, not just network or file operations. Use !unmock to clear all mocks.
 Tests with mocks run async functions through the coroutine executor automatically.
 
 ### Sandbox Mode
@@ -684,7 +685,7 @@ They allow Adapsis code to perform these operations via `+await` instead of usin
 - `+await result:String = sandbox_enter()` — enter sandbox mode. Same as `!sandbox enter`. Mutations are isolated until merge or discard.
 - `+await result:String = sandbox_merge()` — merge sandbox changes. Same as `!sandbox merge`. Keeps all mutations made in sandbox.
 - `+await result:String = sandbox_discard()` — discard sandbox changes. Same as `!sandbox discard`. Reverts to pre-sandbox state.
-- `+await result:String = mock_set(operation, pattern, response)` — register an IO mock. Same as `!mock`. Operation is the IO name (e.g. 'http_get'), pattern matches arguments, response is the return value.
+- `+await result:String = mock_set(operation, pattern, response)` — register an IO mock. Same as `!mock`. `operation` can be any IO operation name (for example `http_get`, `sleep`, or `inbox_read`), `pattern` matches arguments, and `response` is the return value.
 - `+await result:String = mock_clear()` — clear all IO mocks. Same as `!unmock`. Returns 'cleared N mocks'.
 
 Example:
