@@ -1509,7 +1509,7 @@ impl CoroutineHandle {
                 }
                 let sender = crate::eval::get_shared_event_broadcast()
                     .ok_or_else(|| anyhow::anyhow!("sse_broadcast: no event broadcast available"))?;
-                let payload = serde_json::json!({"type": event_type, "detail": data}).to_string();
+                let payload = serde_json::json!({"type": event_type, "data": data}).to_string();
                 sender.send(payload)
                     .map_err(|e| anyhow::anyhow!("sse_broadcast: failed to send event: {e}"))?;
                 return Ok(Value::string("ok"));
@@ -3577,7 +3577,7 @@ mod tests {
         ]).unwrap());
         assert_eq!(result, "ok");
         let payload = rx.try_recv().unwrap();
-        assert_eq!(payload, "{\"detail\":\"updated module\",\"type\":\"mutation\"}");
+        assert_eq!(payload, "{\"data\":\"updated module\",\"type\":\"mutation\"}");
     }
 
     #[test]

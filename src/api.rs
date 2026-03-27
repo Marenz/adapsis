@@ -79,7 +79,7 @@ fn emit_event(state: &AppConfig, event_json: &str) {
 }
 
 fn make_sse_event(event: &str, data: impl Into<String>) -> String {
-    serde_json::json!({"type": event, "detail": data.into()}).to_string()
+    serde_json::json!({"type": event, "data": data.into()}).to_string()
 }
 
 fn encode_broadcast_event(event: &serde_json::Value) -> String {
@@ -188,14 +188,11 @@ pub async fn mutate(
                 .into_iter()
                 .map(|(message, success)| MutationResult { message, success })
                 .collect();
-            let summary = response_results.iter()
-                .map(|r| format!("{}: {}", if r.success { "ok" } else { "err" }, r.message))
-                .collect::<Vec<_>>()
-                .join("; ");
+            let summary = format!("Applied {} mutations", response_results.len());
             *config.program.write().await = program;
             *config.runtime.write().unwrap() = runtime;
             *config.meta.lock().unwrap() = meta.clone();
-            emit_event(&config, &serde_json::json!({"type": "mutation", "summary": summary}).to_string());
+            emit_event(&config, &make_sse_event("mutation", summary));
             Json(MutateResponse { revision: meta.revision, results: response_results })
         }
         Err(e) => {
@@ -247,7 +244,7 @@ pub async fn eval_fn(
                 success: false,
                 compiled: None,
             };
-            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+            emit_event(&config, &make_sse_event("eval", response.result.clone()));
             return Json(response);
         }
         match parser::parse_expr_pub(0, expr_str) {
@@ -291,7 +288,7 @@ pub async fn eval_fn(
                                 compiled: None,
                             },
                         };
-                        emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+                        emit_event(&config, &make_sse_event("eval", response.result.clone()));
                         return Json(response);
                     }
                     // No IO sender available — fall through to sync eval which will error
@@ -305,7 +302,7 @@ pub async fn eval_fn(
                             success: true,
                             compiled: Some(false),
                         };
-                        emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+                        emit_event(&config, &make_sse_event("eval", response.result.clone()));
                         return Json(response);
                     }
                     Err(e) => {
@@ -314,7 +311,7 @@ pub async fn eval_fn(
                             success: false,
                             compiled: None,
                         };
-                        emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+                        emit_event(&config, &make_sse_event("eval", response.result.clone()));
                         return Json(response);
                     }
                 }
@@ -325,7 +322,7 @@ pub async fn eval_fn(
                     success: false,
                     compiled: None,
                 };
-                emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+                emit_event(&config, &make_sse_event("eval", response.result.clone()));
                 return Json(response);
             }
         }
@@ -346,7 +343,7 @@ pub async fn eval_fn(
                     success: false,
                     compiled: None,
                 };
-                emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+                emit_event(&config, &make_sse_event("eval", response.result.clone()));
                 return Json(response);
             }
         }
@@ -373,7 +370,7 @@ pub async fn eval_fn(
                         success: false,
                         compiled: None,
                     };
-                    emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+                    emit_event(&config, &make_sse_event("eval", response.result.clone()));
                     return Json(response);
                 }
             }
@@ -438,7 +435,7 @@ pub async fn eval_fn(
                     compiled: None,
                 },
             };
-            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+            emit_event(&config, &make_sse_event("eval", response.result.clone()));
             return Json(response);
         }
     }
@@ -464,7 +461,7 @@ pub async fn eval_fn(
                 success: true,
                 compiled: Some(compiled),
             };
-            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+            emit_event(&config, &make_sse_event("eval", response.result.clone()));
             Json(response)
         }
         Err(e) => {
@@ -473,7 +470,7 @@ pub async fn eval_fn(
                 success: false,
                 compiled: None,
             };
-            emit_event(&config, &serde_json::json!({"type": "eval", "result": response.result.clone()}).to_string());
+            emit_event(&config, &make_sse_event("eval", response.result.clone()));
             Json(response)
         }
     }
@@ -515,7 +512,7 @@ pub async fn test_fn(
                     pass: false,
                 }],
             };
-            emit_event(&config, &serde_json::json!({"type": "test", "function": "(parse)", "passed": response.passed, "failed": response.failed}).to_string());
+            emit_event(&config, &make_sse_event("test", format!("(parse): {} passed, {} failed", response.passed, response.failed)));
             return Json(response);
         }
     };
@@ -609,15 +606,10 @@ pub async fn test_fn(
             let mut program = config.program.write().await;
             crate::session::store_test(&mut program, &test.function_name, &test.cases);
         }
-        emit_event(
-            &config,
-            &serde_json::json!({
-                "type": "test",
-                "function": test.function_name,
-                "passed": passed - start_passed,
-                "failed": failed - start_failed,
-            }).to_string(),
-        );
+        emit_event(&config, &make_sse_event(
+            "test",
+            format!("{}: {} passed, {} failed", test.function_name, passed - start_passed, failed - start_failed),
+        ));
     }
 
     let response = TestResponse {
@@ -4518,7 +4510,7 @@ mod tests {
         assert!(response.results.iter().all(|r| r.success));
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "mutation");
-        assert!(event["summary"].as_str().unwrap().contains("ping"));
+        assert_eq!(event["data"], "Applied 1 mutations");
     }
 
     #[tokio::test]
@@ -4545,7 +4537,27 @@ mod tests {
         assert!(response.success);
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "eval");
-        assert_eq!(event["result"], "42");
+        assert_eq!(event["data"], "42");
+    }
+
+    #[tokio::test]
+    async fn eval_error_broadcasts_sse_event() {
+        let config = test_config();
+        let mut rx = config.event_broadcast.subscribe();
+
+        let Json(response) = eval_fn(
+            State(config),
+            Json(EvalRequest {
+                function: String::new(),
+                input: String::new(),
+                expression: Some(String::new()),
+            }),
+        ).await;
+
+        assert!(!response.success);
+        let event = recv_event(&mut rx).await;
+        assert_eq!(event["type"], "eval");
+        assert_eq!(event["data"], "empty expression");
     }
 
     #[tokio::test]
@@ -4570,9 +4582,7 @@ mod tests {
         assert_eq!(response.passed, 1);
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "test");
-        assert_eq!(event["function"], "one");
-        assert_eq!(event["passed"], 1);
-        assert_eq!(event["failed"], 0);
+        assert_eq!(event["data"], "one: 1 passed, 0 failed");
     }
 
     #[tokio::test]
