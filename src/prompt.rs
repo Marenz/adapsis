@@ -707,7 +707,7 @@ They allow Adapsis code to perform these operations via `+await` instead of usin
 - `+await result:String = sandbox_discard()` — discard sandbox changes. Same as `!sandbox discard`. Reverts to pre-sandbox state.
 - `+await result:String = mock_set(operation, pattern, response)` — register an IO mock. Same as `!mock`. `operation` can be any IO operation name (for example `http_get`, `sleep`, or `inbox_read`), `pattern` matches arguments, and `response` is the return value.
 - `+await result:String = mock_clear()` — clear all IO mocks. Same as `!unmock`. Returns 'cleared N mocks'.
-- `+await result:String = sse_broadcast(event_type, data)` — broadcast a JSON event like `{"type":"mutation","data":"..."}` to `/api/events` subscribers. Returns `ok`.
+- `+await result:String = sse_send(event_type, data)` — broadcast a JSON event like `{"type":"mutation","data":"..."}` to `/api/events` subscribers. Returns `sent`. Alias: `sse_broadcast(...)`.
 
 Example:
 ```
@@ -742,7 +742,7 @@ Example:
 +end
 
 +fn announce_change (msg:String)->String [io,async]
-  +await r:String = sse_broadcast("mutation", msg)
+  +await r:String = sse_send("mutation", msg)
   +return r
 +end
 

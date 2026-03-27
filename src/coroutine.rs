@@ -1493,26 +1493,26 @@ impl CoroutineHandle {
                 return Ok(Value::string(format!("cleared {count} mocks")));
             }
 
-            // ── sse_broadcast — send event to SSE listeners ──
-            "sse_broadcast" => {
+            // ── sse_send — send event to SSE listeners ──
+            "sse_send" | "sse_broadcast" => {
                 let event_type = match args.first() {
                     Some(Value::String(s)) => s.as_ref().clone(),
-                    _ => bail!("sse_broadcast expects (event_type:String, data:String)"),
+                    _ => bail!("sse_send expects (event_type:String, data:String)"),
                 };
                 let data = match args.get(1) {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     Some(other) => format!("{other}"),
-                    None => bail!("sse_broadcast expects (event_type:String, data:String)"),
+                    None => bail!("sse_send expects (event_type:String, data:String)"),
                 };
                 if event_type.trim().is_empty() {
-                    bail!("sse_broadcast: event_type must not be empty");
+                    bail!("sse_send: event_type must not be empty");
                 }
                 let sender = crate::eval::get_shared_event_broadcast()
-                    .ok_or_else(|| anyhow::anyhow!("sse_broadcast: no event broadcast available"))?;
+                    .ok_or_else(|| anyhow::anyhow!("sse_send: no event broadcast available"))?;
                 let payload = serde_json::json!({"type": event_type, "data": data}).to_string();
                 sender.send(payload)
-                    .map_err(|e| anyhow::anyhow!("sse_broadcast: failed to send event: {e}"))?;
-                return Ok(Value::string("ok"));
+                    .map_err(|e| anyhow::anyhow!("sse_send: failed to send event: {e}"))?;
+                return Ok(Value::string("sent"));
             }
 
             // ── module_create — create/switch to a module ──
@@ -3289,7 +3289,7 @@ mod tests {
             "move_symbols", "watch_start", "agent_spawn", "msg_send", "query_inbox", "inbox_read", "inbox_clear", "trace_run",
             "route_list", "route_add", "route_remove",
             "undo", "sandbox_enter", "sandbox_merge", "sandbox_discard",
-            "mock_set", "mock_clear", "sse_broadcast",
+            "mock_set", "mock_clear", "sse_send",
             "module_create", "test_run", "fn_replace",
         ] {
             assert!(
@@ -3566,25 +3566,25 @@ mod tests {
     }
 
     #[test]
-    fn sse_broadcast_sends_json_event() {
+    fn sse_send_sends_json_event() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         crate::eval::set_shared_event_broadcast(Some(tx));
         let handle = CoroutineHandle::new_mock(vec![]);
 
-        let result = unwrap_string(handle.execute_await("sse_broadcast", &[
+        let result = unwrap_string(handle.execute_await("sse_send", &[
             Value::string("mutation"),
             Value::string("updated module"),
         ]).unwrap());
-        assert_eq!(result, "ok");
+        assert_eq!(result, "sent");
         let payload = rx.try_recv().unwrap();
         assert_eq!(payload, "{\"data\":\"updated module\",\"type\":\"mutation\"}");
     }
 
     #[test]
-    fn sse_broadcast_without_sender_fails() {
+    fn sse_send_without_sender_fails() {
         crate::eval::set_shared_event_broadcast(None);
         let handle = CoroutineHandle::new_mock(vec![]);
-        let result = handle.execute_await("sse_broadcast", &[
+        let result = handle.execute_await("sse_send", &[
             Value::string("mutation"),
             Value::string("updated module"),
         ]);
