@@ -520,9 +520,8 @@ pub async fn test_fn(
         }
         // Tier 1: store tests on the program if all passed (brief write lock)
         if failed == 0 && !test.cases.is_empty() {
-            let mut session = config.snapshot_session().await;
-            session.store_test(&test.function_name, &test.cases);
-            config.write_back_session(&session).await;
+            let mut program = config.program.write().await;
+            crate::session::store_test(&mut program, &test.function_name, &test.cases);
         }
     }
 
@@ -732,18 +731,20 @@ pub async fn rewind(
     State(config): State<AppConfig>,
     Json(req): Json<RewindRequest>,
 ) -> Json<RewindResponse> {
-    let mut session = config.snapshot_session().await;
-    match session.rewind_to(req.revision) {
+    let mut program = config.program.write().await;
+    let mut runtime = config.runtime.write().unwrap();
+    let mut meta = config.meta.lock().unwrap();
+    let mut sandbox = None;
+    match crate::session::rewind_to(&mut program, &mut runtime, &mut meta, &mut sandbox, req.revision) {
         Ok(()) => {
-            config.write_back_session(&session).await;
             Json(RewindResponse {
-                revision: session.meta.revision,
+                revision: meta.revision,
                 success: true,
                 message: format!("rewound to revision {}", req.revision),
             })
         }
         Err(e) => Json(RewindResponse {
-            revision: session.meta.revision,
+            revision: meta.revision,
             success: false,
             message: format!("{e}"),
         }),
