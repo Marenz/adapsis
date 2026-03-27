@@ -773,7 +773,7 @@ API endpoints:
 - `DELETE /api/sessions/:id` — delete a session (cannot delete \"main\").
 - `POST /api/sessions/:id/eval` — evaluate in a specific session. Same body as `/api/eval`.
 - `POST /api/sessions/:id/mutate` — apply mutations to a specific session. Same body as `/api/mutate`.
-- `GET /api/events` — subscribe to Server-Sent Events. Each message is a JSON string like `{"type":"mutation","detail":"..."}`.
+- `GET /api/events` — subscribe to Server-Sent Events. Messages include JSON like `{"type":"mutation","summary":"..."}`, `{"type":"eval","result":"..."}`, or `{"type":"test","function":"Name","passed":1,"failed":0}`.
 - `GET /ui` — minimal dashboard for `/api/events`, inline eval, and mutations.
 
 Sessions are isolated: functions defined in one session are not visible in another.
