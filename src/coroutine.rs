@@ -809,6 +809,61 @@ impl CoroutineHandle {
                 };
                 return Ok(Value::string(result));
             }
+            "query_inbox" => {
+                if !args.is_empty() {
+                    bail!("query_inbox expects no arguments");
+                }
+                let result = crate::eval::get_shared_meta()
+                    .map(|meta| {
+                        meta.lock()
+                            .map_err(|_| anyhow::anyhow!("query_inbox: could not lock meta"))
+                            .map(|meta| {
+                                let msgs = crate::session::peek_messages(&meta, "main");
+                                if msgs.is_empty() {
+                                    "No messages.".to_string()
+                                } else {
+                                    msgs.iter()
+                                        .map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                }
+                            })
+                    })
+                    .transpose()?
+                    .unwrap_or_else(|| "No messages.".to_string());
+                return Ok(Value::string(result));
+            }
+            "inbox_clear" => {
+                if !args.is_empty() {
+                    bail!("inbox_clear expects no arguments");
+                }
+
+                let cleared = if let Some(meta) = crate::eval::get_shared_meta() {
+                    meta.lock()
+                        .map_err(|_| anyhow::anyhow!("inbox_clear: could not lock meta"))?
+                        .agent_mailbox
+                        .remove("main")
+                        .map(|msgs| msgs.len())
+                        .unwrap_or(0)
+                } else {
+                    let rt = crate::eval::get_shared_runtime()
+                        .ok_or_else(|| anyhow::anyhow!("inbox_clear: no runtime available"))?;
+                    rt.write()
+                        .map_err(|_| anyhow::anyhow!("inbox_clear: could not access runtime"))?
+                        .agent_mailbox
+                        .remove("main")
+                        .map(|msgs| msgs.len())
+                        .unwrap_or(0)
+                };
+
+                if let Some(rt) = crate::eval::get_shared_runtime() {
+                    if let Ok(mut state) = rt.write() {
+                        state.agent_mailbox.remove("main");
+                    }
+                }
+
+                return Ok(Value::string(format!("cleared {cleared} messages")));
+            }
             "query_library" => {
                 let program = crate::eval::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_library: program not available"))?;
@@ -2292,6 +2347,53 @@ mod tests {
     }
 
     #[test]
+    fn query_inbox_matches_query_output() {
+        let (handle, meta) = setup_roadmap_runtime();
+        {
+            let mut meta = meta.lock().unwrap();
+            crate::session::send_agent_message(&mut meta, "agent1", "main", "hello");
+            crate::session::send_agent_message(&mut meta, "agent2", "main", "status update");
+        }
+
+        let result = unwrap_string(handle.execute_await("query_inbox", &[]).unwrap());
+        assert!(result.contains("from agent1: hello"), "got: {result}");
+        assert!(result.contains("from agent2: status update"), "got: {result}");
+    }
+
+    #[test]
+    fn query_inbox_with_args_fails() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let result = handle.execute_await("query_inbox", &[Value::string("unexpected")]);
+        assert!(result.is_err(), "should fail with extra args");
+        assert!(result.unwrap_err().to_string().contains("expects no arguments"));
+    }
+
+    #[test]
+    fn inbox_clear_removes_messages() {
+        let (handle, meta) = setup_roadmap_runtime();
+        {
+            let mut meta = meta.lock().unwrap();
+            crate::session::send_agent_message(&mut meta, "agent1", "main", "first");
+            crate::session::send_agent_message(&mut meta, "agent2", "main", "second");
+        }
+        let rt = crate::eval::get_shared_runtime().unwrap();
+        rt.write().unwrap().agent_mailbox = meta.lock().unwrap().agent_mailbox.clone();
+
+        let result = unwrap_string(handle.execute_await("inbox_clear", &[]).unwrap());
+        assert_eq!(result, "cleared 2 messages");
+        assert!(meta.lock().unwrap().agent_mailbox.get("main").is_none());
+        assert!(rt.read().unwrap().agent_mailbox.get("main").is_none());
+    }
+
+    #[test]
+    fn inbox_clear_with_args_fails() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let result = handle.execute_await("inbox_clear", &[Value::string("unexpected")]);
+        assert!(result.is_err(), "should fail with extra args");
+        assert!(result.unwrap_err().to_string().contains("expects no arguments"));
+    }
+
+    #[test]
     fn query_library_returns_string() {
         let handle = setup_query_runtime("");
         let result = unwrap_string(handle.execute_await("query_library", &[]).unwrap());
@@ -3129,7 +3231,7 @@ mod tests {
     #[test]
     fn new_io_builtins_registered() {
         for name in &[
-            "move_symbols", "watch_start", "agent_spawn", "msg_send", "inbox_read", "trace_run",
+            "move_symbols", "watch_start", "agent_spawn", "msg_send", "query_inbox", "inbox_read", "inbox_clear", "trace_run",
             "route_list", "route_add", "route_remove",
             "undo", "sandbox_enter", "sandbox_merge", "sandbox_discard",
             "mock_set", "mock_clear",
