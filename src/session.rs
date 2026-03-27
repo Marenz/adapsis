@@ -1620,7 +1620,7 @@ fn serialize_matcher(m: &parser::TestMatcher) -> String {
     }
 }
 
-fn now() -> String {
+pub fn now() -> String {
     // Simple timestamp without external crate
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
