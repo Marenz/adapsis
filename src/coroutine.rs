@@ -592,10 +592,51 @@ impl CoroutineHandle {
         Ok(result)
     }
 
+    fn try_mock_io(&self, op: &str, args: &[Value], fail_on_missing: bool) -> Result<Option<Value>> {
+        let Some(mocks) = &self.mocks else {
+            return Ok(None);
+        };
+
+        let arg_strs: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+        let arg_str = arg_strs.join(" ");
+        'mock_loop: for mock in mocks {
+            if mock.operation != op {
+                continue;
+            }
+            if mock.patterns.len() == 1 {
+                if arg_str.contains(&mock.patterns[0]) {
+                    return Ok(Some(Value::string(mock.response.clone())));
+                }
+            } else {
+                if mock.patterns.len() > arg_strs.len() {
+                    continue;
+                }
+                for (pat, arg) in mock.patterns.iter().zip(arg_strs.iter()) {
+                    if !arg.contains(pat) {
+                        continue 'mock_loop;
+                    }
+                }
+                return Ok(Some(Value::string(mock.response.clone())));
+            }
+        }
+
+        if fail_on_missing && self.io_tx.is_closed() {
+            bail!("no mock for {op}({arg_str}) — add !mock {op} \"<pattern>\" -> \"<response>\"");
+        }
+
+        Ok(None)
+    }
+
     /// Execute an await operation — sends IO request and blocks until result.
     /// This is called from the synchronous evaluator, so we use block_on
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
+        if op != "mock_set" && op != "mock_clear" {
+            if let Some(result) = self.try_mock_io(op, args, false)? {
+                return Ok(result);
+            }
+        }
+
         // ── Roadmap and plan operations — handled locally via SHARED_META ──
         // These access SessionMeta directly (the single source of truth).
         // No IO channel needed; no more syncing between runtime and meta.
@@ -1573,37 +1614,8 @@ impl CoroutineHandle {
             _ => {} // fall through to mock/IO dispatch
         }
 
-        // Check mock table first — if a mock matches, return it without real IO
-        if let Some(mocks) = &self.mocks {
-            let arg_strs: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
-            let arg_str = arg_strs.join(" ");
-            'mock_loop: for mock in mocks {
-                if mock.operation != op {
-                    continue;
-                }
-                // Match each pattern against the corresponding arg position.
-                // Single-pattern mocks match against the joined arg string (backward compat).
-                if mock.patterns.len() == 1 {
-                    if arg_str.contains(&mock.patterns[0]) {
-                        return Ok(Value::string(mock.response.clone()));
-                    }
-                } else {
-                    // Multi-pattern: each pattern must match the corresponding arg
-                    if mock.patterns.len() > arg_strs.len() {
-                        continue;
-                    }
-                    for (pat, arg) in mock.patterns.iter().zip(arg_strs.iter()) {
-                        if !arg.contains(pat) {
-                            continue 'mock_loop;
-                        }
-                    }
-                    return Ok(Value::string(mock.response.clone()));
-                }
-            }
-            // No mock matched — for mock-only handles, return an error
-            if self.io_tx.is_closed() {
-                bail!("no mock for {op}({arg_str}) — add !mock {op} \"<pattern>\" -> \"<response>\"");
-            }
+        if let Some(result) = self.try_mock_io(op, args, true)? {
+            return Ok(result);
         }
 
         let op = op.to_string();
@@ -3068,6 +3080,27 @@ mod tests {
 
         let second = unwrap_string(handle.execute_await("inbox_read", &[]).unwrap());
         assert_eq!(second, "[]");
+    }
+
+    #[test]
+    fn inbox_read_mock_intercepts_and_preserves_inbox() {
+        let (_handle, meta) = setup_roadmap_runtime();
+        {
+            let mut meta = meta.lock().unwrap();
+            crate::session::send_agent_message(&mut meta, "agent1", "main", "first");
+        }
+        let handle = CoroutineHandle::new_mock(vec![crate::session::IoMock {
+            operation: "inbox_read".to_string(),
+            patterns: vec!["".to_string()],
+            response: "[\"mocked\"]".to_string(),
+        }]);
+
+        let result = unwrap_string(handle.execute_await("inbox_read", &[]).unwrap());
+        assert_eq!(result, "[\"mocked\"]");
+        let meta = meta.lock().unwrap();
+        let inbox = meta.agent_mailbox.get("main").unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].content, "first");
     }
 
     #[test]
