@@ -309,14 +309,25 @@ pub struct AgentBranch {
 impl AgentBranch {
     /// Create a new branch forked from the current session state.
     pub fn fork(name: &str, scope: AgentScope, task: &str, session: &Session) -> Self {
-        let runtime_state = session.runtime.clone();
+        Self::fork_from_parts(name, scope, task, &session.program, &session.runtime, &session.meta)
+    }
+
+    pub fn fork_from_parts(
+        name: &str,
+        scope: AgentScope,
+        task: &str,
+        program: &ast::Program,
+        runtime: &RuntimeState,
+        meta: &SessionMeta,
+    ) -> Self {
+        let runtime_state = runtime.clone();
         let snapshot = runtime_state.shared_vars.clone();
         Self {
             name: name.to_string(),
             scope,
             task: task.to_string(),
-            fork_revision: session.meta.revision,
-            program: session.program.clone(),
+            fork_revision: meta.revision,
+            program: program.clone(),
             mutations: Vec::new(),
             runtime_state,
             runtime_state_snapshot: snapshot,
@@ -368,10 +379,20 @@ impl AgentBranch {
     /// Merge this branch's mutations back into a session.
     /// Returns list of conflicts (empty if clean merge).
     pub fn merge_into(self, session: &mut Session) -> Vec<String> {
+        self.merge_into_parts(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox)
+    }
+
+    pub fn merge_into_parts(
+        self,
+        program: &mut ast::Program,
+        runtime: &mut RuntimeState,
+        meta: &mut SessionMeta,
+        sandbox: &mut Option<SandboxState>,
+    ) -> Vec<String> {
         let mut conflicts = Vec::new();
 
         for source in &self.mutations {
-            match session.apply(source) {
+            match apply_to_tiers(program, runtime, meta, sandbox, source) {
                 Ok(results) => {
                     for (msg, ok) in &results {
                         if !ok {
@@ -391,7 +412,7 @@ impl AgentBranch {
                 None => true, // new key added during branch
             };
             if changed {
-                session.runtime.shared_vars.insert(key.clone(), val.clone());
+                runtime.shared_vars.insert(key.clone(), val.clone());
             }
         }
 
@@ -1330,6 +1351,53 @@ impl Session {
             }
         }
     }
+}
+
+/// Apply source mutations against loose tiers by using a temporary Session wrapper.
+/// This centralizes the remaining legacy mutation path in one place while the
+/// rest of the codebase operates directly on program/meta/runtime tiers.
+pub fn apply_to_tiers(
+    program: &mut ast::Program,
+    runtime: &mut RuntimeState,
+    meta: &mut SessionMeta,
+    sandbox: &mut Option<SandboxState>,
+    source: &str,
+) -> Result<Vec<(String, bool)>> {
+    let mut session = Session {
+        program: program.clone(),
+        runtime: runtime.clone(),
+        meta: meta.clone(),
+        sandbox: sandbox.clone(),
+    };
+    let result = session.apply(source);
+    *program = session.program;
+    *runtime = session.runtime;
+    *meta = session.meta;
+    *sandbox = session.sandbox;
+    result
+}
+
+/// Async variant of [`apply_to_tiers`].
+pub async fn apply_to_tiers_async(
+    program: &mut ast::Program,
+    runtime: &mut RuntimeState,
+    meta: &mut SessionMeta,
+    sandbox: &mut Option<SandboxState>,
+    source: &str,
+    io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
+) -> Result<Vec<(String, bool)>> {
+    let mut session = Session {
+        program: program.clone(),
+        runtime: runtime.clone(),
+        meta: meta.clone(),
+        sandbox: sandbox.clone(),
+    };
+    let result = session.apply_async(source, io_sender).await;
+    *program = session.program;
+    *runtime = session.runtime;
+    *meta = session.meta;
+    *sandbox = session.sandbox;
+    result
 }
 
 // ── Free functions for session sub-operations ───────────────────────────────
