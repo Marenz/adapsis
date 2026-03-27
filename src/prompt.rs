@@ -313,6 +313,26 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
 !eval eval_expr Add(Literal(1), Mul(Literal(2), Literal(3)))
 </code>
 
+## Example 6: String-based match dispatch
+
+`+match`/`+case` works on strings too — use it for command dispatch instead of nested if/else:
+
+<code>
++fn handle_command (cmd:String)->String [io,async]
+  +match cmd
+  +case "/help"
+    +return "Available: /help, /status, /sync"
+  +case "/status"
+    +await s:String = http_get("http://localhost:3002/api/status")
+    +return s
+  +case _
+    +if starts_with(cmd, "/run ")
+      +let arg:String = substring(cmd, 5, len(cmd))
+      +return concat("running: ", arg)
+    +else
+      +return concat("unknown: ", cmd)
+</code>
+
 ### Inline Expression Eval
 `!eval` accepts inline expressions — use this instead of creating wrapper functions:
 ```
@@ -687,6 +707,7 @@ They allow Adapsis code to perform these operations via `+await` instead of usin
 - `+await result:String = sandbox_discard()` — discard sandbox changes. Same as `!sandbox discard`. Reverts to pre-sandbox state.
 - `+await result:String = mock_set(operation, pattern, response)` — register an IO mock. Same as `!mock`. `operation` can be any IO operation name (for example `http_get`, `sleep`, or `inbox_read`), `pattern` matches arguments, and `response` is the return value.
 - `+await result:String = mock_clear()` — clear all IO mocks. Same as `!unmock`. Returns 'cleared N mocks'.
+- `+await result:String = sse_broadcast(event_type, data)` — broadcast a JSON event to `/api/events` subscribers. Returns `ok`.
 
 Example:
 ```
@@ -720,6 +741,11 @@ Example:
   +return r
 +end
 
++fn announce_change (msg:String)->String [io,async]
+  +await r:String = sse_broadcast("mutation", msg)
+  +return r
++end
+
 +fn add_endpoint ()->String [io,async]
   +await r:String = route_add("POST", "/api/greet", "Greet.handle")
   +return r
@@ -747,6 +773,8 @@ API endpoints:
 - `DELETE /api/sessions/:id` — delete a session (cannot delete \"main\").
 - `POST /api/sessions/:id/eval` — evaluate in a specific session. Same body as `/api/eval`.
 - `POST /api/sessions/:id/mutate` — apply mutations to a specific session. Same body as `/api/mutate`.
+- `GET /api/events` — subscribe to Server-Sent Events. Each message is a JSON string like `{"event":"mutation","data":"..."}`.
+- `GET /ui` — minimal browser event log for `/api/events`.
 
 Sessions are isolated: functions defined in one session are not visible in another.
 The \"main\" session delegates to the existing `/api/eval` and `/api/mutate` endpoints.

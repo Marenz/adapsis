@@ -807,6 +807,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "sse_broadcast",
+        aliases: &[],
+        short: "broadcast an SSE event: sse_broadcast(event, data) -> String",
+        long: "Broadcasts a Server-Sent Event payload to `/api/events` listeners as a JSON string like `{\"event\":\"name\",\"data\":\"value\"}`. Takes `(event_type:String, data:String)`. Returns `ok`. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "module_create",
         aliases: &[],
         short: "create a module: module_create(name) -> String",

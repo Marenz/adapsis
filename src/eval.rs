@@ -1960,6 +1960,8 @@ std::thread_local! {
     /// Thread-local SharedMeta so roadmap/plan/mock builtins in coroutine.rs
     /// access the same data as handle_roadmap() in session.rs. No more syncing.
     static SHARED_META: std::cell::RefCell<Option<crate::session::SharedMeta>> = std::cell::RefCell::new(None);
+    /// Thread-local SSE broadcast sender so IO builtins can emit API events.
+    static SHARED_EVENT_BROADCAST: std::cell::RefCell<Option<tokio::sync::broadcast::Sender<String>>> = std::cell::RefCell::new(None);
     /// Thread-local Program snapshot for query builtins (query_symbols, query_source, etc.)
     /// that need access to the AST from within coroutine IO dispatch.
     static SHARED_PROGRAM: std::cell::RefCell<Option<std::sync::Arc<crate::ast::Program>>> = std::cell::RefCell::new(None);
@@ -1993,6 +1995,14 @@ pub fn set_shared_meta(meta: Option<crate::session::SharedMeta>) {
 /// roadmap_add/roadmap_done/plan_set/plan_done/plan_fail builtins.
 pub fn get_shared_meta() -> Option<crate::session::SharedMeta> {
     SHARED_META.with(|s| s.borrow().clone())
+}
+
+pub fn set_shared_event_broadcast(sender: Option<tokio::sync::broadcast::Sender<String>>) {
+    SHARED_EVENT_BROADCAST.with(|s| *s.borrow_mut() = sender);
+}
+
+pub fn get_shared_event_broadcast() -> Option<tokio::sync::broadcast::Sender<String>> {
+    SHARED_EVENT_BROADCAST.with(|s| s.borrow().clone())
 }
 
 /// Set the thread-local Program snapshot for query builtins.
