@@ -20,34 +20,31 @@ use tokio::sync::Mutex;
 
 use crate::eval;
 use crate::parser;
-use crate::session::Session;
+use crate::session::{RuntimeState, SandboxState, SessionMeta};
 use crate::typeck;
 use crate::validator;
 
 impl AppConfig {
-    /// Build a temporary Session snapshot from the live tiers.
-    pub async fn snapshot_session(&self) -> Session {
-        let program = self.program.read().await.clone();
-        let meta = self.meta.lock().unwrap().clone();
-        let runtime = self.runtime.read().unwrap().clone();
-        Session {
-            program,
-            runtime,
-            meta,
+    /// Build a temporary working snapshot from the live tiers.
+    async fn snapshot_working_set(&self) -> WorkingSet {
+        WorkingSet {
+            program: self.program.read().await.clone(),
+            runtime: self.runtime.read().unwrap().clone(),
+            meta: self.meta.lock().unwrap().clone(),
             sandbox: None,
         }
     }
 
-    /// Write a temporary Session snapshot back into the live tiers.
-    pub async fn write_back_session(&self, session: &Session) {
-        *self.program.write().await = session.program.clone();
-        *self.meta.lock().unwrap() = session.meta.clone();
+    /// Write a temporary working snapshot back into the live tiers.
+    async fn write_back_working_set(&self, ws: &WorkingSet) {
+        *self.program.write().await = ws.program.clone();
+        *self.meta.lock().unwrap() = ws.meta.clone();
         if let Ok(mut rt) = self.runtime.write() {
-            rt.shared_vars = session.runtime.shared_vars.clone();
-            rt.http_routes = session.runtime.http_routes.clone();
-            rt.agent_mailbox = session.meta.agent_mailbox.clone();
+            rt.shared_vars = ws.runtime.shared_vars.clone();
+            rt.http_routes = ws.runtime.http_routes.clone();
+            rt.agent_mailbox = ws.meta.agent_mailbox.clone();
             // Sync library errors from LibraryState into RuntimeState
-            if let Some(ref lib_state) = session.meta.library_state {
+            if let Some(ref lib_state) = ws.meta.library_state {
                 if let Ok(errs) = lib_state.errors.lock() {
                     rt.library_errors = errs.clone();
                 }
@@ -59,6 +56,15 @@ impl AppConfig {
             }
         }
     }
+}
+
+/// Temporary mutable working state used by complex handlers.
+/// Live truth is still the three tiers in AppConfig; this is just a local bag.
+struct WorkingSet {
+    program: crate::ast::Program,
+    runtime: RuntimeState,
+    meta: SessionMeta,
+    sandbox: Option<SandboxState>,
 }
 
 /// Thread-safe session manager: maps session IDs to independent Program instances.
@@ -132,12 +138,17 @@ pub async fn mutate(
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
-    let mut session = config.snapshot_session().await;
-    match session.apply_async(&req.source, config.io_sender.as_ref()).await {
+    let mut program = config.program.read().await.clone();
+    let mut runtime = config.runtime.read().unwrap().clone();
+    let mut meta = config.meta.lock().unwrap().clone();
+    let mut sandbox = None;
+    match crate::session::apply_to_tiers_async(&mut program, &mut runtime, &mut meta, &mut sandbox, &req.source, config.io_sender.as_ref()).await {
         Ok(results) => {
-            config.write_back_session(&session).await;
+            *config.program.write().await = program;
+            *config.runtime.write().unwrap() = runtime;
+            *config.meta.lock().unwrap() = meta.clone();
             Json(MutateResponse {
-                revision: session.meta.revision,
+                revision: meta.revision,
                 results: results
                     .into_iter()
                     .map(|(message, success)| MutationResult { message, success })
@@ -145,7 +156,7 @@ pub async fn mutate(
             })
         }
         Err(e) => Json(MutateResponse {
-            revision: session.meta.revision,
+            revision: meta.revision,
             results: vec![MutationResult {
                 message: format!("error: {e}"),
                 success: false,
@@ -1301,13 +1312,13 @@ async fn process_plan(
 /// Process a `?query` operation.
 async fn process_query(
     query: &str,
-    session: &crate::session::Session,
+    session: &WorkingSet,
     config: &AppConfig,
     tx: &EventSender,
     result: &mut OperationResult,
 ) {
     let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
-        let msgs = session.peek_messages("main");
+        let msgs = crate::session::peek_messages(&session.meta, "main");
         if msgs.is_empty() {
             "No messages.".to_string()
         } else {
@@ -1337,7 +1348,7 @@ async fn process_query(
 
 /// Process `!done` — checks for untested functions and signals completion.
 async fn process_done(
-    session: &crate::session::Session,
+    session: &WorkingSet,
     iteration: usize,
     tx: &EventSender,
     result: &mut OperationResult,
@@ -1350,7 +1361,7 @@ async fn process_done(
             .flat_map(|m| {
                 m.functions.iter().filter_map(|f| {
                     let qname = format!("{}.{}", m.name, f.name);
-                    if f.body.len() > 2 && !session.is_function_tested(&qname) {
+                    if f.body.len() > 2 && !crate::session::is_function_tested(&session.program, &qname) {
                         Some(qname)
                     } else {
                         None
@@ -1429,7 +1440,7 @@ pub async fn ask(
     };
 
     // Build messages from conversation history
-    let mut session = config.snapshot_session().await;
+    let mut session = config.snapshot_working_set().await;
     let mut messages = {
         if session.meta.chat_messages.is_empty() {
             session.meta.chat_messages.push(crate::session::ChatMessage {
@@ -1522,7 +1533,7 @@ pub async fn ask(
         let mut iter_test_results: Vec<TestCaseResult> = vec![];
         let mut iter_has_errors = false;
 
-        let mut session = config.snapshot_session().await;
+        let mut session = config.snapshot_working_set().await;
 
         match crate::parser::parse(&code) {
             Ok(ops) => {
@@ -1550,7 +1561,7 @@ pub async fn ask(
                 if has_undo {
                     if session.meta.revision > 0 {
                         let prev = session.meta.revision - 1;
-                        match session.rewind_to(prev) {
+                        match crate::session::rewind_to(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, prev) {
                             Ok(()) => iter_results.push(MutationResult { message: format!("Undone to rev {prev}"), success: true }),
                             Err(e) => { iter_has_errors = true; iter_results.push(MutationResult { message: format!("Undo: {e}"), success: false }); }
                         }
@@ -1607,9 +1618,9 @@ pub async fn ask(
                     | crate::parser::Operation::OpenCode(_)));
 
                 if has_mutations {
-                    match session.apply(&code) {
+                    match crate::session::apply_to_tiers(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, &code) {
                         Ok(res) => {
-                            config.write_back_session(&session).await;
+                            config.write_back_working_set(&session).await;
                             for (msg, ok) in res {
                                 eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
                                 if !ok { iter_has_errors = true; }
@@ -1662,7 +1673,7 @@ pub async fn ask(
                                 }
                             }
                             if all_passed && !test.cases.is_empty() {
-                                session.store_test(&test.function_name, &test.cases);
+                                crate::session::store_test(&mut session.program, &test.function_name, &test.cases);
                             }
                         }
                         crate::parser::Operation::Eval(ev) => {
@@ -1720,7 +1731,7 @@ pub async fn ask(
                             // Block eval of untested functions in AdapsisOS mode
                             if session.program.require_modules {
                                 if let Some(func) = session.program.get_function(&ev.function_name) {
-                                    if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
+                                    if func.body.len() > 2 && !crate::session::is_function_tested(&session.program, &ev.function_name) {
                                         iter_has_errors = true;
                                         iter_results.push(MutationResult {
                                             message: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
@@ -1792,7 +1803,7 @@ pub async fn ask(
                         }
                         crate::parser::Operation::Query(query) => {
                             let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
-                                let msgs = session.peek_messages("main");
+                                let msgs = crate::session::peek_messages(&session.meta, "main");
                                 if msgs.is_empty() {
                                     "No messages.".to_string()
                                 } else {
@@ -1870,7 +1881,7 @@ pub async fn ask(
                             eprintln!("[web:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
 
                             let agent_scope = crate::session::AgentScope::parse(scope);
-                            let branch = crate::session::AgentBranch::fork(name, agent_scope, task, &session);
+                            let branch = crate::session::AgentBranch::fork_from_parts(name, agent_scope, task, &session.program, &session.runtime, &session.meta);
                             let program_summary = crate::validator::program_summary_compact(&session.program);
                             let agent_task = task.clone();
                             let agent_name = name.clone();
@@ -1978,73 +1989,35 @@ pub async fn ask(
                                 }
 
                                 // Merge branch back into main session
-                                let mut session = AppConfig {
-                                    program: agent_program.clone(),
-                                    meta: agent_meta.clone(),
-                                    llm_url: String::new(),
-                                    llm_model: String::new(),
-                                    llm_api_key: None,
-                                    project_dir: String::new(),
-                                    io_sender: None,
-                                    self_trigger: tokio::sync::mpsc::channel(1).0,
-                                    task_registry: None,
-                                    snapshot_registry: None,
-                                    log_file: None,
-                                    jit_cache: eval::new_jit_cache(),
-                                    event_broadcast: tokio::sync::broadcast::channel(1).0,
-                                    opencode_git_dir: String::new(),
-                                    opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-                                    message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                                    max_iterations: 0,
-                                    training_log: None,
-                                    runtime: agent_runtime.clone(),
-                                    sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-                                }.snapshot_session().await;
-                                let conflicts = branch.merge_into(&mut session);
+                                let mut program = agent_program.read().await.clone();
+                                let mut runtime = agent_runtime.read().unwrap().clone();
+                                let mut meta = agent_meta.lock().unwrap().clone();
+                                let mut sandbox = None;
+                                let conflicts = branch.merge_into_parts(&mut program, &mut runtime, &mut meta, &mut sandbox);
                                 if conflicts.is_empty() {
                                     eprintln!("[agent:{agent_name}] merged successfully");
-                                    session.meta.chat_messages.push(crate::session::ChatMessage {
+                                    meta.chat_messages.push(crate::session::ChatMessage {
                                         role: "system".to_string(),
                                         content: format!("Agent '{agent_name}' completed and merged successfully."),
                                     });
-                                    if let Some(s) = session.meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                    if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
                                         s.status = "merged".to_string();
                                         s.message = "completed and merged".to_string();
                                     }
                                 } else {
                                     eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
-                                    session.meta.chat_messages.push(crate::session::ChatMessage {
+                                    meta.chat_messages.push(crate::session::ChatMessage {
                                         role: "system".to_string(),
                                         content: format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
                                     });
-                                    if let Some(s) = session.meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                    if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
                                         s.status = "conflict".to_string();
                                         s.message = conflicts.join("; ");
                                     }
                                 }
-                                let cfg = AppConfig {
-                                    program: agent_program.clone(),
-                                    meta: agent_meta.clone(),
-                                    llm_url: String::new(),
-                                    llm_model: String::new(),
-                                    llm_api_key: None,
-                                    project_dir: String::new(),
-                                    io_sender: None,
-                                    self_trigger: tokio::sync::mpsc::channel(1).0,
-                                    task_registry: None,
-                                    snapshot_registry: None,
-                                    log_file: None,
-                                    jit_cache: eval::new_jit_cache(),
-                                    event_broadcast: tokio::sync::broadcast::channel(1).0,
-                                    opencode_git_dir: String::new(),
-                                    opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-                                    message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                                    max_iterations: 0,
-                                    training_log: None,
-                                    runtime: agent_runtime.clone(),
-                                    sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-                                };
-                                cfg.write_back_session(&session).await;
+                                *agent_program.write().await = program;
+                                *agent_runtime.write().unwrap() = runtime;
+                                *agent_meta.lock().unwrap() = meta;
                             });
 
                             iter_results.push(MutationResult {
@@ -2062,7 +2035,7 @@ pub async fn ask(
                         }
                         crate::parser::Operation::Message { to, content } => {
                             eprintln!("[web:msg] → {to}: {content}");
-                            session.send_agent_message("main", &to, &content);
+                            crate::session::send_agent_message(&mut session.meta, "main", &to, &content);
                             iter_results.push(MutationResult {
                                 message: format!("Message sent to '{to}'"),
                                 success: true,
@@ -2169,7 +2142,7 @@ pub async fn ask(
         all_results.extend(iter_results.clone());
         all_test_results.extend(iter_test_results.clone());
         // Write mutations back to tiers after each iteration
-        config.write_back_session(&session).await;
+        config.write_back_working_set(&session).await;
 
         // Build feedback for next iteration
         if iter_has_errors {
@@ -2505,7 +2478,7 @@ pub async fn ask_stream(
             tx.log("code", &code).await;
 
             // Apply code
-            let mut session = config_clone.snapshot_session().await;
+            let mut session = config_clone.snapshot_working_set().await;
             let mut op_result = OperationResult::new();
 
             match crate::parser::parse(&code) {
@@ -2540,9 +2513,9 @@ pub async fn ask_stream(
                         | crate::parser::Operation::OpenCode(_)));
 
                     if has_mutations {
-                        match session.apply(&code) {
+                        match crate::session::apply_to_tiers(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, &code) {
                             Ok(res) => {
-                                config_clone.write_back_session(&session).await;
+                                config_clone.write_back_working_set(&session).await;
                                 for (msg, ok) in &res {
                                     if *ok {
                                         op_result.ok(msg);
@@ -2604,7 +2577,7 @@ pub async fn ask_stream(
                                     }
                                 }
                                 if all_passed && !test.cases.is_empty() {
-                                    session.store_test(&test.function_name, &test.cases);
+                                    crate::session::store_test(&mut session.program, &test.function_name, &test.cases);
                                 }
                             }
                             crate::parser::Operation::Eval(ev) => {
@@ -2665,7 +2638,7 @@ pub async fn ask_stream(
                                 // Block eval of untested functions (>2 statements) in AdapsisOS mode
                                 if session.program.require_modules {
                                     if let Some(func) = session.program.get_function(&ev.function_name) {
-                                        if func.body.len() > 2 && !session.is_function_tested(&ev.function_name) {
+                                        if func.body.len() > 2 && !crate::session::is_function_tested(&session.program, &ev.function_name) {
                                             let msg = format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len());
                                             op_result.error(&msg);
                                             let _ = tx.send(serde_json::json!({"type": "eval", "result": msg, "function": ev.function_name, "success": false})).await;
@@ -2819,7 +2792,7 @@ pub async fn ask_stream(
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("cleared {count} mocks"), "success": true})).await;
                             }
                             crate::parser::Operation::Message { to, content } => {
-                                session.send_agent_message("main", to, content);
+                                crate::session::send_agent_message(&mut session.meta, "main", to, content);
                                 op_result.ok(format!("Message sent to '{to}'"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Message sent to '{to}'"), "success": true})).await;
                             }
@@ -3108,8 +3081,9 @@ pub async fn ask_stream(
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
                                                 // Save session before restart — snapshot current tiers
                                                 {
-                                                    let snap = config_clone.snapshot_session().await;
+                                                    let snap = config_clone.snapshot_working_set().await;
                                                     if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
+                                                        let snap = crate::session::Session { program: snap.program, runtime: snap.runtime, meta: snap.meta, sandbox: snap.sandbox };
                                                         let _ = snap.save(std::path::Path::new(&path));
                                                     }
                                                 }
@@ -3190,7 +3164,7 @@ pub async fn ask_stream(
             }
 
             // Write session mutations back to tiers after each iteration
-            config_clone.write_back_session(&session).await;
+            config_clone.write_back_working_set(&session).await;
 
             // Build detailed feedback with ALL results so the AI can see them
             // Also re-run queries and check inbox
@@ -3205,7 +3179,7 @@ pub async fn ask_stream(
                             } else if query.trim() == "?library" {
                                 crate::library::query_library(&session.program, session.meta.library_state.as_ref())
                             } else if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
-                                let msgs = session.peek_messages("main");
+                                let msgs = crate::session::peek_messages(&session.meta, "main");
                                 if msgs.is_empty() { "No messages.".to_string() }
                                 else { msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n") }
                             } else {
@@ -3217,7 +3191,7 @@ pub async fn ask_stream(
                     }
                 }
                 // Check for messages from agents addressed to main
-                let inbox = session.drain_messages("main");
+                let inbox = crate::session::drain_messages(&mut session.meta, "main");
                 if !inbox.is_empty() {
                     let inbox_text = inbox.iter()
                         .map(|m| format!("[from {}] {}", m.from, m.content))
@@ -3233,7 +3207,7 @@ pub async fn ask_stream(
                         for m in &session.program.modules {
                             for f in &m.functions {
                                 let qname = format!("{}.{}", m.name, f.name);
-                                if f.body.len() > 2 && !session.is_function_tested(&qname) {
+                                if f.body.len() > 2 && !crate::session::is_function_tested(&session.program, &qname) {
                                     fns.push(qname);
                                 }
                             }

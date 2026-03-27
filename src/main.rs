@@ -36,17 +36,6 @@ async fn snapshot_from_tiers(
     }
 }
 
-async fn write_back_to_tiers(
-    program: &std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
-    meta: &crate::session::SharedMeta,
-    runtime: &crate::session::SharedRuntime,
-    session: &crate::session::Session,
-) {
-    *program.write().await = session.program.clone();
-    *meta.lock().unwrap() = session.meta.clone();
-    *runtime.write().unwrap() = session.runtime.clone();
-}
-
 #[derive(Parser)]
 #[command(name = "adapsis", about = "Adapsis — the adaptive, self-modifying AI programming environment")]
 struct Cli {
@@ -1054,30 +1043,35 @@ async fn main() -> Result<()> {
 
                             // Apply code if any
                             if !code.is_empty() && code.trim() != "DONE" {
-                                let mut session = snapshot_from_tiers(&trigger_program, &trigger_meta, &trigger_runtime).await;
+                                let mut program = trigger_program.read().await.clone();
+                                let mut runtime = trigger_runtime.read().unwrap().clone();
+                                let mut meta = trigger_meta.lock().unwrap().clone();
+                                let mut sandbox = None;
                                 if let Ok(ops) = crate::parser::parse(&code) {
                                     let mut fns_removed = false;
                                     for op in &ops {
                                         match op {
-                                            crate::parser::Operation::Function(f) => { session.program.functions.retain(|e| e.name != f.name); fns_removed = true; }
-                                            crate::parser::Operation::Type(t) => { let n = t.name.clone(); session.program.types.retain(|e| e.name() != n); }
+                                            crate::parser::Operation::Function(f) => { program.functions.retain(|e| e.name != f.name); fns_removed = true; }
+                                            crate::parser::Operation::Type(t) => { let n = t.name.clone(); program.types.retain(|e| e.name() != n); }
                                             _ => {}
                                         }
                                     }
                                     if fns_removed {
-                                        session.program.rebuild_function_index();
+                                        program.rebuild_function_index();
                                     }
-                                    if let Ok(results) = session.apply(&code) {
+                                    if let Ok(results) = crate::session::apply_to_tiers(&mut program, &mut runtime, &mut meta, &mut sandbox, &code) {
                                         for (msg, ok) in &results {
                                             eprintln!("[self-trigger:{}] {msg}", if *ok { "ok" } else { "err" });
                                         }
                                     }
                                 }
-                                session.meta.chat_messages.push(crate::session::ChatMessage {
+                                meta.chat_messages.push(crate::session::ChatMessage {
                                     role: "assistant".to_string(),
                                     content: format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()),
                                 });
-                                write_back_to_tiers(&trigger_program, &trigger_meta, &trigger_runtime, &session).await;
+                                *trigger_program.write().await = program;
+                                *trigger_runtime.write().unwrap() = runtime;
+                                *trigger_meta.lock().unwrap() = meta;
                             }
                         }
                         Err(e) => {
