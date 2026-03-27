@@ -352,6 +352,11 @@ Good: !eval shell_exec("ls")
 If the argument parses as a complete expression, it is evaluated directly.
 Otherwise, it falls back to the existing `!eval func_name args` behavior.
 
+**Timeouts**: `!eval` has a 30-second timeout — if an evaluation takes longer, it is
+cancelled and returns an error. `http_get`/`http_post` also have a 30-second timeout.
+Do NOT use `!eval` or `http_get` for streaming endpoints (like SSE) — they will time out.
+Use `+spawn` for long-running tasks.
+
 When the runtime reports errors, fix them with targeted !replace operations or by regenerating the affected function.
 
 ## Important Workflow Notes

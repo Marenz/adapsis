@@ -358,12 +358,12 @@ impl Runtime {
             }
             IoRequest::HttpGet { url, reply } => {
                 tokio::spawn(async move {
-                    let client = reqwest::Client::new();
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_default();
                     match client.get(&url).send().await {
                         Ok(resp) => {
-                            // text() decodes using the charset from Content-Type,
-                            // defaulting to UTF-8 when none is specified (correct
-                            // for application/json per RFC 8259).
                             match resp.text().await {
                                 Ok(body) => { let _ = reply.send(Ok(body)); }
                                 Err(e) => { let _ = reply.send(Err(e.into())); }
@@ -375,7 +375,10 @@ impl Runtime {
             }
             IoRequest::HttpPost { url, body, content_type, reply } => {
                 tokio::spawn(async move {
-                    let client = reqwest::Client::new();
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_default();
                     // Ensure charset=utf-8 is present in Content-Type for
                     // text-based types so servers know the body encoding.
                     let ct = if !content_type.contains("charset=") &&

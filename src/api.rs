@@ -23,6 +23,9 @@ use crate::eval;
 use crate::parser;
 use crate::session::{RuntimeState, SandboxState, SessionMeta};
 use crate::typeck;
+
+/// Default timeout for `!eval` execution (seconds).
+const EVAL_TIMEOUT_SECS: u64 = 30;
 use crate::validator;
 
 impl AppConfig {
@@ -1367,27 +1370,37 @@ impl OperationResult {
     }
 
     fn ok(&mut self, msg: impl Into<String>) {
-        self.feedback.push(format!("OK: {}", msg.into()));
+        let entry = format!("OK: {}", msg.into());
+        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        self.feedback.push(entry);
     }
 
     fn pass(&mut self, msg: impl Into<String>) {
         self.tests_passed += 1;
-        self.feedback.push(format!("PASS: {}", msg.into()));
+        let entry = format!("PASS: {}", msg.into());
+        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        self.feedback.push(entry);
     }
 
     fn fail(&mut self, msg: impl Into<String>) {
         self.tests_failed += 1;
         self.has_errors = true;
-        self.feedback.push(format!("FAIL: {}", msg.into()));
+        let entry = format!("FAIL: {}", msg.into());
+        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        self.feedback.push(entry);
     }
 
     fn error(&mut self, msg: impl Into<String>) {
         self.has_errors = true;
-        self.feedback.push(format!("ERROR: {}", msg.into()));
+        let entry = format!("ERROR: {}", msg.into());
+        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        self.feedback.push(entry);
     }
 
     fn info(&mut self, msg: impl Into<String>) {
-        self.feedback.push(msg.into());
+        let entry = msg.into();
+        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        self.feedback.push(entry);
     }
 }
 
@@ -1829,18 +1842,22 @@ pub async fn ask(
                                         let runtime_for_blocking = config.runtime.clone();
                                         let meta_for_blocking = config.meta.clone();
                                         let event_broadcast = config.event_broadcast.clone();
-                                        let eval_result = tokio::task::spawn_blocking(move || {
+                                    let eval_result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
+                                        tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
                                             eval::set_shared_meta(Some(meta_for_blocking));
                                             eval::set_shared_event_broadcast(Some(event_broadcast));
                                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
-                                        }).await;
+                                        })
+                                    ).await;
                                         let (msg, success) = match &eval_result {
-                                            Ok(Ok(val)) => (format!("= {val}"), true),
-                                            Ok(Err(e)) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
-                                            Err(e) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
+                                            Ok(Ok(Ok(val))) => (format!("= {val}"), true),
+                                            Ok(Ok(Err(e))) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
+                                            Ok(Err(e)) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
+                                            Err(_) => { iter_has_errors = true; (format!("eval timed out after {EVAL_TIMEOUT_SECS}s"), false) }
                                         };
                                         eprintln!("[web:eval] {msg}");
                                         iter_results.push(MutationResult { message: msg, success });
@@ -1899,26 +1916,31 @@ pub async fn ask(
                                     let runtime_for_blocking = config.runtime.clone();
                                     let meta_for_blocking = config.meta.clone();
                                     let event_broadcast = config.event_broadcast.clone();
-                                    let eval_result = tokio::task::spawn_blocking(move || {
-                                        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                        eval::set_shared_meta(Some(meta_for_blocking));
-                                        eval::set_shared_event_broadcast(Some(event_broadcast));
-                                        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                        crate::eval::set_shared_program_mut(Some(program_mut_clone));
-                                        let func = program.get_function(&fn_name)
-                                            .ok_or_else(|| anyhow::anyhow!("function not found"))?;
-                                        let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                        let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
-                                        env.populate_shared_from_program(&program);
-                                        env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                        let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
-                                        crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
-                                        crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
-                                    }).await;
+                                    let eval_fn_name = ev.function_name.clone();
+                                    let eval_result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
+                                        tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_event_broadcast(Some(event_broadcast));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                            let func = program.get_function(&fn_name)
+                                                .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                                            let handle = crate::coroutine::CoroutineHandle::new(sender);
+                                            let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
+                                            env.populate_shared_from_program(&program);
+                                            env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
+                                            let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
+                                            crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
+                                            crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
+                                        })
+                                    ).await;
                                     let (msg, success) = match &eval_result {
-                                        Ok(Ok(val)) => (format!("eval {}() = {val}", ev.function_name), true),
-                                        Ok(Err(e)) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
-                                        Err(e) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
+                                        Ok(Ok(Ok(val))) => (format!("eval {}() = {val}", eval_fn_name), true),
+                                        Ok(Ok(Err(e))) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
+                                        Ok(Err(e)) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
+                                        Err(_) => { iter_has_errors = true; (format!("eval {}() timed out after {EVAL_TIMEOUT_SECS}s", eval_fn_name), false) }
                                     };
                                     eprintln!("[web:eval] {msg}");
                                     iter_results.push(MutationResult { message: msg, success });
@@ -2746,18 +2768,22 @@ pub async fn ask_stream(
                                             let runtime_for_blocking = config_clone.runtime.clone();
                                             let meta_for_blocking = config_clone.meta.clone();
                                             let event_broadcast = config_clone.event_broadcast.clone();
-                                            let eval_result = tokio::task::spawn_blocking(move || {
-                                                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                                eval::set_shared_meta(Some(meta_for_blocking));
-                                                eval::set_shared_event_broadcast(Some(event_broadcast));
-                                                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                                crate::eval::set_shared_program_mut(Some(program_mut_clone));
-                                                crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
-                                            }).await;
+                                            let eval_result = tokio::time::timeout(
+                                                std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
+                                                tokio::task::spawn_blocking(move || {
+                                                    crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                                    eval::set_shared_meta(Some(meta_for_blocking));
+                                                    eval::set_shared_event_broadcast(Some(event_broadcast));
+                                                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                                    crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                                    crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                                })
+                                            ).await;
                                             let (msg, success) = match &eval_result {
-                                                Ok(Ok(val)) => (format!("{val}"), true),
-                                                Ok(Err(e)) => (format!("eval error: {e}"), false),
-                                                Err(e) => (format!("eval task error: {e}"), false),
+                                                Ok(Ok(Ok(val))) => (format!("{val}"), true),
+                                                Ok(Ok(Err(e))) => (format!("eval error: {e}"), false),
+                                                Ok(Err(e)) => (format!("eval task error: {e}"), false),
+                                                Err(_) => (format!("eval timed out after {EVAL_TIMEOUT_SECS}s"), false),
                                             };
                                             if success {
                                                 op_result.info(format!("= {msg}"));
@@ -2817,26 +2843,31 @@ pub async fn ask_stream(
                                         let runtime_for_blocking = config_clone.runtime.clone();
                                         let meta_for_blocking = config_clone.meta.clone();
                                         let event_broadcast = config_clone.event_broadcast.clone();
-                                        let eval_result = tokio::task::spawn_blocking(move || {
-                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                            eval::set_shared_meta(Some(meta_for_blocking));
-                                            eval::set_shared_event_broadcast(Some(event_broadcast));
-                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
-                                            let func = program.get_function(&fn_name)
-                                                .ok_or_else(|| anyhow::anyhow!("function not found"))?;
-                                            let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                            let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
-                                            env.populate_shared_from_program(&program);
-                                            env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                            let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
-                                            crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
-                                            crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
-                                        }).await;
+                                        let eval_fn_name = ev.function_name.clone();
+                                        let eval_result = tokio::time::timeout(
+                                            std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
+                                            tokio::task::spawn_blocking(move || {
+                                                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                                eval::set_shared_meta(Some(meta_for_blocking));
+                                                eval::set_shared_event_broadcast(Some(event_broadcast));
+                                                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                                crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                                let func = program.get_function(&fn_name)
+                                                    .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                                                let handle = crate::coroutine::CoroutineHandle::new(sender);
+                                                let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
+                                                env.populate_shared_from_program(&program);
+                                                env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
+                                                let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
+                                                crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
+                                                crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
+                                            })
+                                        ).await;
                                         let (msg, success) = match &eval_result {
-                                            Ok(Ok(val)) => (format!("{val}"), true),
-                                            Ok(Err(e)) => (format!("error: {e}"), false),
-                                            Err(e) => (format!("task error: {e}"), false),
+                                            Ok(Ok(Ok(val))) => (format!("{val}"), true),
+                                            Ok(Ok(Err(e))) => (format!("error: {e}"), false),
+                                            Ok(Err(e)) => (format!("task error: {e}"), false),
+                                            Err(_) => (format!("eval {}() timed out after {EVAL_TIMEOUT_SECS}s", eval_fn_name), false),
                                         };
                                         if success {
                                             op_result.info(format!("eval {}() = {msg}", ev.function_name));
