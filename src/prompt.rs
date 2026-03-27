@@ -601,6 +601,7 @@ They return the same output as the corresponding `?` query commands.
 - `+await result:String = query_deps_all("func")` — full transitive dependency tree (same as `?deps-all <fn>`). Alias: `deps_get(name)`
 - `+await result:String = query_routes()` — registered HTTP routes (same as `?routes`). Alias: `routes_list()`
 - `+await result:String = query_tasks()` — spawned async tasks (same as `?tasks`)
+- `+await result:String = query_inbox()` — current inbox contents (same as `?inbox`). Returns `[timestamp] from sender: message` lines, or `No messages.` when empty.
 - `+await result:String = query_library()` — library status (same as `?library`)
 - `+await result:String = library_reload("ModuleName")` — reload a specific module from disk. Re-reads the .ax file, removes old module, and re-parses. Returns "Reloaded ModuleName successfully" or fails with error.
 - `+await result:String = library_reload("")` — reload ALL modules from the library directory. Useful for recovering from startup load errors.
@@ -672,7 +673,9 @@ They allow Adapsis code to perform these operations via `+await` instead of usin
 - `+await result:String = watch_start(fn_name, interval_ms)` — start watching a function periodically. Same as `!watch fn_name interval_ms`. Queues the watch for API-layer processing.
 - `+await result:String = agent_spawn(name, scope, task)` — spawn a background agent with the given name, scope, and task. Same as `!agent name --scope scope task`. Scope: \"read-only\", \"new-only\", \"module X\", \"full\".
 - `+await result:String = msg_send(target, message)` — send a message to an agent or \"main\". Same as `!msg target message`. The recipient sees it in `?inbox`.
+- `+await result:String = query_inbox()` — inspect the current session inbox with the same formatted output as `?inbox`, without consuming messages.
 - `+await result:String = inbox_read()` — read and clear the pending inbox for the main session. Returns a JSON array string of message contents like `["msg1","msg2"]`, or `[]` when empty. Same message stream as `?inbox`, but consuming.
+- `+await result:String = inbox_clear()` — clear the current session inbox and return `cleared N messages`.
 - `+await result:String = trace_run(fn_name, args)` — run a function with step-by-step tracing. Same as `!trace fn_name args`. Returns the trace output as a formatted String. `args` is the input expression text (empty string for no args).
 - `+await result:String = route_list()` — list all registered HTTP routes. Returns one route per line: `METHOD /path -> \`handler\``. Returns 'No routes registered.' if none.
 - `+await result:String = route_add(method, path, handler)` — register an HTTP route. Method is GET/POST/PUT/DELETE/PATCH, path starts with '/', handler is 'Module.func'. Upserts if route already exists.
@@ -701,8 +704,18 @@ Example:
   +return r
 +end
 
++fn show_inbox ()->String [io,async]
+  +await r:String = query_inbox()
+  +return r
++end
+
 +fn drain_inbox ()->String [io,async]
   +await r:String = inbox_read()
+  +return r
++end
+
++fn clear_inbox ()->String [io,async]
+  +await r:String = inbox_clear()
   +return r
 +end
 
