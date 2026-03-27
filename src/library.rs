@@ -361,7 +361,47 @@ fn load_module_source(program: &mut ast::Program, source: &str) -> Result<String
         validator::apply_and_validate(program, op)?;
     }
 
+    // Restore persisted tests from !test blocks.
+    // reconstruct_module_source() only emits tests that previously passed,
+    // so we trust them and mark them passed: true without re-executing.
+    if let Some(ref mod_name) = module_name {
+        restore_tests_from_operations(program, mod_name, &operations);
+    }
+
     module_name.ok_or_else(|| anyhow::anyhow!("no !module declaration found in source"))
+}
+
+/// Restore `!test` blocks from parsed operations into the corresponding
+/// function's `tests` field. Called during library load to preserve test
+/// state across restarts.
+fn restore_tests_from_operations(
+    program: &mut ast::Program,
+    module_name: &str,
+    operations: &[parser::Operation],
+) {
+    // Collect tests from top-level !test ops and from inside !module body
+    let mut tests_to_restore: Vec<(&str, &[parser::TestCase])> = Vec::new();
+
+    for op in operations {
+        match op {
+            parser::Operation::Test(t) => {
+                tests_to_restore.push((&t.function_name, &t.cases));
+            }
+            parser::Operation::Module(m) => {
+                for body_op in &m.body {
+                    if let parser::Operation::Test(t) = body_op {
+                        tests_to_restore.push((&t.function_name, &t.cases));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (fn_name, cases) in tests_to_restore {
+        let qualified = format!("{module_name}.{fn_name}");
+        crate::session::store_test(program, &qualified, cases);
+    }
 }
 
 /// Persist a module's reconstructed source to the library directory.
@@ -953,6 +993,80 @@ mod tests {
         assert!(
             err.contains("no !module declaration"),
             "error should mention missing module declaration: {err}"
+        );
+    }
+
+    #[test]
+    fn test_persist_and_load_preserves_tests() {
+        // Build a module with a function and attach a test to it
+        let source = "!module TestMod\n+fn double (n:Int)->Int\n  +return n * 2\n";
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+
+        // Store a passing test on the function
+        let test_source = "!test double\n  +with n=3 -> expect 6\n  +with n=0 -> expect 0\n";
+        let test_ops = parser::parse(test_source).unwrap();
+        for op in &test_ops {
+            if let parser::Operation::Test(t) = op {
+                crate::session::store_test(
+                    &mut program,
+                    &format!("TestMod.{}", t.function_name),
+                    &t.cases,
+                );
+            }
+        }
+
+        // Verify the test is stored
+        let func = program.get_function("TestMod.double").unwrap();
+        assert_eq!(
+            func.tests.len(),
+            2,
+            "should have 2 test cases before persist"
+        );
+        assert!(
+            func.tests.iter().all(|t| t.passed),
+            "all tests should be marked passed"
+        );
+
+        // Persist → reconstruct source → load into fresh program
+        let module = program
+            .modules
+            .iter()
+            .find(|m| m.name == "TestMod")
+            .unwrap();
+        let reconstructed = reconstruct_module_source(module);
+
+        // Verify the reconstructed source contains !test blocks
+        assert!(
+            reconstructed.contains("!test double"),
+            "reconstructed source should contain !test block"
+        );
+        assert!(
+            reconstructed.contains("+with"),
+            "reconstructed source should contain test cases"
+        );
+
+        // Load into a fresh program (this is where the bug is)
+        let mut program2 = ast::Program::default();
+        load_module_source(&mut program2, &reconstructed).unwrap();
+
+        let func2 = program2.get_function("TestMod.double").unwrap();
+        assert_eq!(
+            func2.tests.len(),
+            2,
+            "tests should survive persist→load roundtrip (got {} tests)",
+            func2.tests.len()
+        );
+        assert!(
+            func2.tests.iter().all(|t| t.passed),
+            "all restored tests should be marked passed"
+        );
+        assert!(
+            crate::session::is_function_tested(&program2, "TestMod.double"),
+            "function should be considered tested after reload"
         );
     }
 }

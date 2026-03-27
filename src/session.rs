@@ -127,6 +127,10 @@ pub struct SessionMeta {
     /// IO mock table: (operation, url_pattern) -> response. Used during !test.
     #[serde(default)]
     pub io_mocks: Vec<IoMock>,
+    /// Output from the last `!opencode` run, persisted so the AI has context
+    /// after a restart triggered by `!opencode` → rebuild → execvp.
+    #[serde(default)]
+    pub last_opencode_output: Option<String>,
     /// Library state — tracks loaded modules and errors. Not serialized.
     #[serde(skip)]
     pub library_state: Option<crate::library::LibraryState>,
@@ -146,6 +150,7 @@ impl SessionMeta {
             agent_mailbox: HashMap::new(),
             opencode_session_id: None,
             io_mocks: Vec::new(),
+            last_opencode_output: None,
             library_state: None,
         }
     }
@@ -1310,6 +1315,81 @@ impl Session {
         }
 
         out
+    }
+
+    /// Build a context summary for the AI after a process restart.
+    ///
+    /// Assembles what happened before the restart from persisted state:
+    /// recent mutations, opencode output, library errors, and roadmap.
+    /// Consumes `last_opencode_output` so it's only shown once.
+    pub fn restart_context(&mut self) -> String {
+        let mut sections: Vec<String> = Vec::new();
+
+        // 1. What triggered the restart
+        if let Some(output) = self.meta.last_opencode_output.take() {
+            let truncated: String = output.chars().take(2000).collect();
+            sections.push(format!("## Last !opencode output\n{truncated}"));
+        }
+
+        // 2. Recent mutations (last 10)
+        if !self.meta.mutations.is_empty() {
+            let start = self.meta.mutations.len().saturating_sub(10);
+            let lines: Vec<String> = self.meta.mutations[start..]
+                .iter()
+                .map(|e| {
+                    let status = if e.success { "ok" } else { "FAILED" };
+                    format!("  [rev {}] {} — {}", e.revision, status, e.summary)
+                })
+                .collect();
+            sections.push(format!("## Recent mutations\n{}", lines.join("\n")));
+        }
+
+        // 3. Library load errors
+        if let Some(ref lib_state) = self.meta.library_state {
+            if let Some(formatted) = lib_state.format_load_errors() {
+                sections.push(format!("## Library load errors\n{formatted}"));
+            }
+        }
+
+        // 4. Current roadmap
+        if !self.meta.roadmap.is_empty() {
+            let items: Vec<String> = self.meta.roadmap
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let mark = if item.done { "x" } else { " " };
+                    format!("  [{}] {}. {}", mark, i + 1, item.description)
+                })
+                .collect();
+            sections.push(format!("## Roadmap\n{}", items.join("\n")));
+        }
+
+        // 5. Current plan
+        if !self.meta.plan.is_empty() {
+            let steps: Vec<String> = self.meta.plan
+                .iter()
+                .enumerate()
+                .map(|(i, step)| {
+                    let mark = match step.status {
+                        PlanStatus::Done => "x",
+                        PlanStatus::Failed => "!",
+                        PlanStatus::InProgress => ">",
+                        PlanStatus::Pending => " ",
+                    };
+                    format!("  [{}] {}. {}", mark, i + 1, step.description)
+                })
+                .collect();
+            sections.push(format!("## Plan\n{}", steps.join("\n")));
+        }
+
+        if sections.is_empty() {
+            "AdapsisOS restarted. No prior context available.".to_string()
+        } else {
+            format!(
+                "AdapsisOS restarted. Here is what happened before:\n\n{}",
+                sections.join("\n\n")
+            )
+        }
     }
 
     /// Save session to a JSON file.

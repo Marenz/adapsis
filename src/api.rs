@@ -3187,8 +3187,13 @@ pub async fn ask_stream(
                                             Ok(b) if b.status.success() => {
                                                 log_activity(&config_clone.log_file, "opencode-restart", "rebuild successful, attempting restart").await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Restarting...", "success": true})).await;
-                                                // Save session before restart — snapshot current tiers
+                                                // Save session before restart — include opencode output
+                                                // so the AI has context after the execvp restart.
                                                 {
+                                                    let opencode_text = last_text.lock().unwrap().clone();
+                                                    if !opencode_text.is_empty() {
+                                                        config_clone.meta.lock().unwrap().last_opencode_output = Some(opencode_text);
+                                                    }
                                                     let snap = config_clone.snapshot_working_set().await;
                                                     if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
                                                         let snap = crate::session::Session { program: snap.program, runtime: snap.runtime, meta: snap.meta, sandbox: snap.sandbox };

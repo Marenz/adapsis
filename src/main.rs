@@ -788,6 +788,15 @@ async fn main() -> Result<()> {
             }
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
+
+            // Build restart context before the session is split into tier locks.
+            // This consumes last_opencode_output so it's only shown once.
+            let restart_context = if sess.meta.chat_messages.len() > 1 {
+                Some(sess.restart_context())
+            } else {
+                None
+            };
+
             let initial_runtime = sess.runtime.clone();
             let shared_runtime: crate::session::SharedRuntime =
                 std::sync::Arc::new(std::sync::RwLock::new(initial_runtime));
@@ -1081,48 +1090,35 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Autonomous mode: inject goal as the first message after startup
-            // Skip if session already has chat history (e.g. after !opencode restart)
-            let session_has_history = shared_meta.lock().unwrap().chat_messages.len() > 1;
-            // Autonomous loop: always runs. If --autonomous is given, use it as the
-            // initial goal. Otherwise, check the roadmap — if there are undone items,
-            // continue working on them automatically.
+            // Autonomous mode: build the initial message from restart context + goal.
             {
                 let goal = autonomous;
-                let goal_message = if session_has_history && goal.is_some() {
-                    // Session has history but an explicit goal was given — include it.
-                    eprintln!("[autonomous] session has history, forwarding explicit goal");
-                    format!(
-                        "AdapsisOS was restarted. Your goal:\n\n{}\n\n\
-                         Check !roadmap and ?symbols, then keep working on this goal.",
-                        goal.as_deref().unwrap()
-                    )
-                } else if session_has_history {
-                    eprintln!("[autonomous] session has history, using continue message");
-                    "AdapsisOS was restarted. Continue where you left off — check !roadmap and ?symbols, then keep working.".to_string()
+                let goal_message = if let Some(context) = restart_context {
+                    // Restarted with prior session — include full context
+                    eprintln!("[autonomous] restarting with context");
+                    match goal {
+                        Some(ref g) => format!("{context}\n\n## Goal\n{g}"),
+                        None => format!("{context}\n\nContinue where you left off."),
+                    }
                 } else if goal.as_deref() == Some("roadmap") {
-                    // Read the current priority from ROADMAP.md
                     let roadmap_path = format!("{}/ROADMAP.md", project_dir);
                     match std::fs::read_to_string(&roadmap_path) {
                         Ok(content) => format!(
-                            "You are running in autonomous mode. Here is the project roadmap:\n\n{}\n\n\
+                            "You are running in autonomous mode. Here is the project roadmap:\n\n{content}\n\n\
                              First, use !roadmap add to populate your roadmap with the undone items above. \
                              Then check !roadmap, pick the first undone item, create a !plan, and start working. \
                              Use !roadmap done N when you finish an item. Use !opencode for Rust-level changes. \
-                             Keep going — when one item is done, move to the next.",
-                            content
+                             Keep going — when one item is done, move to the next."
                         ),
                         Err(_) => "You are running in autonomous mode. Check !roadmap for tasks. If empty, identify improvements and !roadmap add them. Then start working.".to_string(),
                     }
-                } else if let Some(ref goal) = goal {
+                } else if let Some(ref g) = goal {
                     format!(
-                        "You are running in autonomous mode. Your goal:\n\n{}\n\n\
+                        "You are running in autonomous mode. Your goal:\n\n{g}\n\n\
                          Create a plan, then start building. Use !opencode when you need Rust-level changes. \
-                         Keep going until the goal is complete or you get stuck and need user input.",
-                        goal
+                         Keep going until the goal is complete or you get stuck and need user input."
                     )
                 } else {
-                    // No explicit goal — check roadmap
                     "Check !roadmap for undone items. If there are any, pick the first one, create a !plan, and start working. If empty, idle.".to_string()
                 };
 
