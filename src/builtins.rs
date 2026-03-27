@@ -810,7 +810,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "sse_broadcast",
         aliases: &[],
         short: "broadcast an SSE event: sse_broadcast(event, data) -> String",
-        long: "Broadcasts a Server-Sent Event payload to `/api/events` listeners as a JSON string like `{\"event\":\"name\",\"data\":\"value\"}`. Takes `(event_type:String, data:String)`. Returns `ok`. Requires `+await`.",
+        long: "Broadcasts a Server-Sent Event payload to `/api/events` listeners as a JSON string like `{\"type\":\"name\",\"detail\":\"value\"}`. Takes `(event_type:String, data:String)`. Returns `ok`. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {
