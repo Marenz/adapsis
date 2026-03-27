@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::response::Html;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -56,6 +57,45 @@ impl AppConfig {
             }
         }
     }
+
+    /// Pull state that async eval/top-level IO can mutate via SHARED_META/
+    /// SHARED_RUNTIME back into the local working snapshot before it gets
+    /// written over by stale data.
+    fn sync_async_side_effects_into(&self, ws: &mut WorkingSet) {
+        if let Ok(meta) = self.meta.lock() {
+            ws.meta.roadmap = meta.roadmap.clone();
+            ws.meta.plan = meta.plan.clone();
+            ws.meta.agent_mailbox = meta.agent_mailbox.clone();
+            ws.meta.io_mocks = meta.io_mocks.clone();
+        }
+        if let Ok(runtime) = self.runtime.read() {
+            ws.runtime = runtime.clone();
+        }
+    }
+}
+
+fn make_sse_event(event: &str, data: impl Into<String>) -> String {
+    serde_json::json!({"event": event, "data": data.into()}).to_string()
+}
+
+fn broadcast_sse_event(sender: &tokio::sync::broadcast::Sender<String>, event: &str, data: impl Into<String>) {
+    let _ = sender.send(make_sse_event(event, data));
+}
+
+fn encode_broadcast_event(event: &serde_json::Value) -> String {
+    if let (Some(kind), Some(data)) = (event.get("event").and_then(|v| v.as_str()), event.get("data")) {
+        return make_sse_event(kind, data.as_str().map(str::to_owned).unwrap_or_else(|| data.to_string()));
+    }
+
+    let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("message");
+    let data = event.get("message")
+        .or_else(|| event.get("detail"))
+        .or_else(|| event.get("text"))
+        .or_else(|| event.get("code"))
+        .or_else(|| event.get("result"))
+        .map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
+        .unwrap_or_else(|| event.to_string());
+    make_sse_event(kind, data)
 }
 
 /// Temporary mutable working state used by complex handlers.
@@ -98,7 +138,7 @@ pub struct AppConfig {
     /// JIT compilation cache — reuses compiled modules across evals when revision unchanged
     pub jit_cache: crate::eval::JitCache,
     /// Broadcast channel for SSE events — all activity visible to all subscribers (web UI)
-    pub event_broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
+    pub event_broadcast: tokio::sync::broadcast::Sender<String>,
     /// Directory where !opencode runs and builds (fixed checkout, AdapsisOS must run from here)
     pub opencode_git_dir: String,
     /// Sequential lock for !opencode — only one at a time
@@ -144,24 +184,30 @@ pub async fn mutate(
     let mut sandbox = None;
     match crate::session::apply_to_tiers_async(&mut program, &mut runtime, &mut meta, &mut sandbox, &req.source, config.io_sender.as_ref()).await {
         Ok(results) => {
+            let response_results: Vec<MutationResult> = results
+                .into_iter()
+                .map(|(message, success)| MutationResult { message, success })
+                .collect();
+            let summary = response_results.iter()
+                .map(|r| format!("{}: {}", if r.success { "ok" } else { "err" }, r.message))
+                .collect::<Vec<_>>()
+                .join("; ");
             *config.program.write().await = program;
             *config.runtime.write().unwrap() = runtime;
             *config.meta.lock().unwrap() = meta.clone();
-            Json(MutateResponse {
-                revision: meta.revision,
-                results: results
-                    .into_iter()
-                    .map(|(message, success)| MutationResult { message, success })
-                    .collect(),
-            })
+            broadcast_sse_event(&config.event_broadcast, "mutation", summary);
+            Json(MutateResponse { revision: meta.revision, results: response_results })
         }
-        Err(e) => Json(MutateResponse {
+        Err(e) => {
+            let message = format!("error: {e}");
+            broadcast_sse_event(&config.event_broadcast, "mutation", message.clone());
+            Json(MutateResponse {
             revision: meta.revision,
             results: vec![MutationResult {
-                message: format!("error: {e}"),
+                message,
                 success: false,
             }],
-        }),
+        })},
     }
 }
 
@@ -189,18 +235,21 @@ pub async fn eval_fn(
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-        crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
 
     // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
     if let Some(ref expr_str) = req.expression {
         eprintln!("[web:eval] inline: {expr_str}");
         let expr_str = expr_str.trim();
         if expr_str.is_empty() {
-            return Json(EvalResponse {
+            let response = EvalResponse {
                 result: "empty expression".to_string(),
                 success: false,
                 compiled: None,
-            });
+            };
+            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            return Json(response);
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
@@ -212,10 +261,12 @@ pub async fn eval_fn(
                         let program_mut_clone = program_mut.clone();
                         let sender = sender.clone();
                         let runtime_for_blocking = config.runtime.clone();
-                            let meta_for_blocking = config.meta.clone();
+                        let meta_for_blocking = config.meta.clone();
+                        let event_broadcast = config.event_broadcast.clone();
                         let eval_result = tokio::task::spawn_blocking(move || {
                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+                            eval::set_shared_meta(Some(meta_for_blocking));
+                            eval::set_shared_event_broadcast(Some(event_broadcast));
                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                             eval::eval_inline_expr_with_io(&program, &expr, sender)
@@ -224,23 +275,25 @@ pub async fn eval_fn(
                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                             *config.program.write().await = mutated;
                         }
-                        return match eval_result {
-                            Ok(Ok(val)) => Json(EvalResponse {
+                        let response = match eval_result {
+                            Ok(Ok(val)) => EvalResponse {
                                 result: format!("{val}"),
                                 success: true,
                                 compiled: Some(false),
-                            }),
-                            Ok(Err(e)) => Json(EvalResponse {
+                            },
+                            Ok(Err(e)) => EvalResponse {
                                 result: format!("{e}"),
                                 success: false,
                                 compiled: None,
-                            }),
-                            Err(e) => Json(EvalResponse {
+                            },
+                            Err(e) => EvalResponse {
                                 result: format!("task error: {e}"),
                                 success: false,
                                 compiled: None,
-                            }),
+                            },
                         };
+                        broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                        return Json(response);
                     }
                     // No IO sender available — fall through to sync eval which will error
                 }
@@ -248,27 +301,33 @@ pub async fn eval_fn(
                 let program = config.program.read().await;
                 match eval::eval_inline_expr(&program, &expr) {
                     Ok(val) => {
-                        return Json(EvalResponse {
+                        let response = EvalResponse {
                             result: format!("{val}"),
                             success: true,
                             compiled: Some(false),
-                        });
+                        };
+                        broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                        return Json(response);
                     }
                     Err(e) => {
-                        return Json(EvalResponse {
+                        let response = EvalResponse {
                             result: format!("{e}"),
                             success: false,
                             compiled: None,
-                        });
+                        };
+                        broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                        return Json(response);
                     }
                 }
             }
             Err(e) => {
-                return Json(EvalResponse {
+                let response = EvalResponse {
                     result: format!("parse error: {e}"),
                     success: false,
                     compiled: None,
-                });
+                };
+                broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                return Json(response);
             }
         }
     }
@@ -283,11 +342,13 @@ pub async fn eval_fn(
         match parser::parse_test_input(0, &req.input) {
             Ok(expr) => expr,
             Err(e) => {
-                return Json(EvalResponse {
+                let response = EvalResponse {
                     result: format!("parse error: {e}"),
                     success: false,
                     compiled: None,
-                });
+                };
+                broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                return Json(response);
             }
         }
     };
@@ -308,11 +369,13 @@ pub async fn eval_fn(
             if let Some(func) = program.get_function(&ev.function_name) {
                 let is_tested = !func.tests.is_empty() && func.tests.iter().all(|t| t.passed);
                 if func.body.len() > 2 && !is_tested {
-                    return Json(EvalResponse {
+                    let response = EvalResponse {
                         result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
                         success: false,
                         compiled: None,
-                    });
+                    };
+                    broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+                    return Json(response);
                 }
             }
         }
@@ -334,11 +397,13 @@ pub async fn eval_fn(
             let input = ev.input.clone();
             let sender = sender.clone();
             let runtime_for_blocking = config.runtime.clone();
-                            let meta_for_blocking = config.meta.clone();
+            let meta_for_blocking = config.meta.clone();
+            let event_broadcast = config.event_broadcast.clone();
 
             let eval_result = tokio::task::spawn_blocking(move || {
                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+                eval::set_shared_meta(Some(meta_for_blocking));
+                eval::set_shared_event_broadcast(Some(event_broadcast));
                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 crate::eval::set_shared_program_mut(Some(program_mut_clone));
                 let func = program.get_function(&fn_name)
@@ -357,23 +422,25 @@ pub async fn eval_fn(
                 *config.program.write().await = mutated;
             }
 
-            return match eval_result {
-                Ok(Ok(val)) => Json(EvalResponse {
+            let response = match eval_result {
+                Ok(Ok(val)) => EvalResponse {
                     result: format!("{val}"),
                     success: true,
                     compiled: Some(false),
-                }),
-                Ok(Err(e)) => Json(EvalResponse {
+                },
+                Ok(Err(e)) => EvalResponse {
                     result: format!("{e}"),
                     success: false,
                     compiled: None,
-                }),
-                Err(e) => Json(EvalResponse {
+                },
+                Err(e) => EvalResponse {
                     result: format!("task error: {e}"),
                     success: false,
                     compiled: None,
-                }),
+                },
             };
+            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            return Json(response);
         }
     }
 
@@ -393,18 +460,22 @@ pub async fn eval_fn(
                     result: result.clone(),
                 });
             }
-            Json(EvalResponse {
+            let response = EvalResponse {
                 result,
                 success: true,
                 compiled: Some(compiled),
-            })
+            };
+            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            Json(response)
         }
         Err(e) => {
-            Json(EvalResponse {
+            let response = EvalResponse {
                 result: format!("{e}"),
                 success: false,
                 compiled: None,
-            })
+            };
+            broadcast_sse_event(&config.event_broadcast, "eval", response.result.clone());
+            Json(response)
         }
     }
 }
@@ -432,18 +503,21 @@ pub async fn test_fn(
     Json(req): Json<TestRequest>,
 ) -> Json<TestResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-        crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
     let operations = match parser::parse(&req.source) {
         Ok(ops) => ops,
         Err(e) => {
-            return Json(TestResponse {
+            let response = TestResponse {
                 passed: 0,
                 failed: 1,
                 results: vec![TestCaseResult {
                     message: format!("parse error: {e}"),
                     pass: false,
                 }],
-            });
+            };
+            broadcast_sse_event(&config.event_broadcast, "test", format!("{} passed; {} failed", response.passed, response.failed));
+            return Json(response);
         }
     };
 
@@ -536,11 +610,13 @@ pub async fn test_fn(
         }
     }
 
-    Json(TestResponse {
+    let response = TestResponse {
         passed,
         failed,
         results,
-    })
+    };
+    broadcast_sse_event(&config.event_broadcast, "test", format!("{} passed; {} failed", response.passed, response.failed));
+    Json(response)
 }
 
 #[derive(Deserialize)]
@@ -969,20 +1045,20 @@ pub struct AskResponse {
 /// + `eprintln!()` calls.
 struct EventSender {
     tx: Option<tokio::sync::mpsc::Sender<serde_json::Value>>,
-    broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
+    broadcast: tokio::sync::broadcast::Sender<String>,
     log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 }
 
 impl EventSender {
     /// Broadcast-only sender (used by plain `/api/ask`).
-    fn broadcast_only(broadcast: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
+    fn broadcast_only(broadcast: tokio::sync::broadcast::Sender<String>) -> Self {
         Self { tx: None, broadcast, log_file: None }
     }
 
     /// Broadcast + per-request mpsc sender (used by `/api/ask-stream`).
     fn with_mpsc(
         tx: tokio::sync::mpsc::Sender<serde_json::Value>,
-        broadcast: tokio::sync::broadcast::Sender<serde_json::Value>,
+        broadcast: tokio::sync::broadcast::Sender<String>,
         log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     ) -> Self {
         Self { tx: Some(tx), broadcast, log_file }
@@ -990,7 +1066,8 @@ impl EventSender {
 
     /// Send a raw event value to broadcast + mpsc.
     async fn send(&self, event: serde_json::Value) {
-        let _ = self.broadcast.send(event.clone());
+        let encoded = encode_broadcast_event(&event);
+        let _ = self.broadcast.send(encoded);
         if let Some(tx) = &self.tx {
             let _ = tx.send(event).await;
         } else {
@@ -1418,7 +1495,8 @@ pub async fn ask(
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-        crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
     eprintln!("\n[web:user] {}", req.message);
     let tx = EventSender::broadcast_only(config.event_broadcast.clone());
     tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
@@ -1567,6 +1645,7 @@ pub async fn ask(
                         }
                     }
                 }
+                let has_plan_ops = ops.iter().any(|op| matches!(op, crate::parser::Operation::Plan(_)));
                 for op in &ops {
                     if let crate::parser::Operation::Plan(action) = op {
                         match action {
@@ -1605,6 +1684,9 @@ pub async fn ask(
                             }
                         }
                     }
+                }
+                if has_plan_ops {
+                    config.write_back_working_set(&session).await;
                 }
 
                 // Apply mutations
@@ -1688,10 +1770,12 @@ pub async fn ask(
                                         let expr = expr.clone();
                                         let sender = sender.clone();
                                         let runtime_for_blocking = config.runtime.clone();
-                            let meta_for_blocking = config.meta.clone();
+                                        let meta_for_blocking = config.meta.clone();
+                                        let event_broadcast = config.event_broadcast.clone();
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_event_broadcast(Some(event_broadcast));
                                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
@@ -1708,6 +1792,7 @@ pub async fn ask(
                                             session.program = mutated.clone();
                                             *config.program.write().await = mutated;
                                         }
+                                        config.sync_async_side_effects_into(&mut session);
                                         continue;
                                     }
                                     // No IO sender — fall through to sync eval which will error
@@ -1755,10 +1840,12 @@ pub async fn ask(
                                     let input = ev.input.clone();
                                     let sender = sender.clone();
                                     let runtime_for_blocking = config.runtime.clone();
-                            let meta_for_blocking = config.meta.clone();
+                                    let meta_for_blocking = config.meta.clone();
+                                    let event_broadcast = config.event_broadcast.clone();
                                     let eval_result = tokio::task::spawn_blocking(move || {
                                         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+                                        eval::set_shared_meta(Some(meta_for_blocking));
+                                        eval::set_shared_event_broadcast(Some(event_broadcast));
                                         crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                         crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                         let func = program.get_function(&fn_name)
@@ -1783,6 +1870,7 @@ pub async fn ask(
                                         session.program = mutated.clone();
                                         *config.program.write().await = mutated;
                                     }
+                                    config.sync_async_side_effects_into(&mut session);
                                 }
                             } else {
                                 match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
@@ -2036,6 +2124,7 @@ pub async fn ask(
                         crate::parser::Operation::Message { to, content } => {
                             eprintln!("[web:msg] → {to}: {content}");
                             crate::session::send_agent_message(&mut session.meta, "main", &to, &content);
+                            config.write_back_working_set(&session).await;
                             iter_results.push(MutationResult {
                                 message: format!("Message sent to '{to}'"),
                                 success: true,
@@ -2122,6 +2211,7 @@ pub async fn ask(
                                             iter_results.push(MutationResult { message: msg, success: false });
                                         }
                                     }
+                                    config.sync_async_side_effects_into(&mut session);
                                 }
                                 Err(e) => {
                                     iter_has_errors = true;
@@ -2338,6 +2428,7 @@ pub async fn ask_stream(
     tokio::spawn(async move {
         crate::eval::set_shared_runtime(Some(config_clone.runtime.clone()));
         crate::eval::set_shared_meta(Some(config_clone.meta.clone()));
+        crate::eval::set_shared_event_broadcast(Some(config_clone.event_broadcast.clone()));
         let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone(), config_clone.log_file.clone());
         let llm = crate::llm::LlmClient::new_with_model_and_key(
             &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
@@ -2497,10 +2588,14 @@ pub async fn ask_stream(
                     }
 
                     // Handle plan
+                    let has_plan_ops = ops.iter().any(|op| matches!(op, crate::parser::Operation::Plan(_)));
                     for op in &ops {
                         if let crate::parser::Operation::Plan(action) = op {
                             process_plan(action, &mut session.meta, &tx, &mut op_result).await;
                         }
+                    }
+                    if has_plan_ops {
+                        config_clone.write_back_working_set(&session).await;
                     }
 
                     let has_mutations = ops.iter().any(|op| !matches!(op,
@@ -2592,10 +2687,12 @@ pub async fn ask_stream(
                                             let expr = expr.clone();
                                             let sender = sender.clone();
                                             let runtime_for_blocking = config_clone.runtime.clone();
-                            let meta_for_blocking = config_clone.meta.clone();
+                                            let meta_for_blocking = config_clone.meta.clone();
+                                            let event_broadcast = config_clone.event_broadcast.clone();
                                             let eval_result = tokio::task::spawn_blocking(move || {
                                                 crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+                                                eval::set_shared_meta(Some(meta_for_blocking));
+                                                eval::set_shared_event_broadcast(Some(event_broadcast));
                                                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                                 crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                                 crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
@@ -2616,6 +2713,7 @@ pub async fn ask_stream(
                                                 session.program = mutated.clone();
                                                 *config_clone.program.write().await = mutated;
                                             }
+                                            config_clone.sync_async_side_effects_into(&mut session);
                                             continue;
                                         }
                                         // No IO sender — fall through to sync eval which will error
@@ -2660,10 +2758,12 @@ pub async fn ask_stream(
                                         let input = ev.input.clone();
                                         let sender = sender.clone();
                                         let runtime_for_blocking = config_clone.runtime.clone();
-                            let meta_for_blocking = config_clone.meta.clone();
+                                        let meta_for_blocking = config_clone.meta.clone();
+                                        let event_broadcast = config_clone.event_broadcast.clone();
                                         let eval_result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_event_broadcast(Some(event_broadcast));
                                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             let func = program.get_function(&fn_name)
@@ -2692,6 +2792,7 @@ pub async fn ask_stream(
                                             session.program = mutated.clone();
                                             *config_clone.program.write().await = mutated;
                                         }
+                                        config_clone.sync_async_side_effects_into(&mut session);
                                     } else {
                                         op_result.error(format!("eval {}() = async not available [FAILED]", ev.function_name));
                                         let _ = tx.send(serde_json::json!({"type": "eval", "result": "async not available", "function": ev.function_name, "success": false})).await;
@@ -2739,10 +2840,12 @@ pub async fn ask_stream(
                                         let program_mut = crate::eval::make_shared_program_mut(&program);
                                         let program_mut_clone = program_mut.clone();
                                         let runtime_for_blocking = config_clone.runtime.clone();
-                            let meta_for_blocking = config_clone.meta.clone();
+                                        let meta_for_blocking = config_clone.meta.clone();
+                                        let event_broadcast = config_clone.event_broadcast.clone();
                                         let result = tokio::task::spawn_blocking(move || {
                                             crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_event_broadcast(Some(event_broadcast));
                                             crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                                             crate::eval::set_shared_program_mut(Some(program_mut_clone));
                                             crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
@@ -2767,6 +2870,7 @@ pub async fn ask_stream(
                                             session.program = mutated.clone();
                                             *config_clone.program.write().await = mutated;
                                         }
+                                        config_clone.sync_async_side_effects_into(&mut session);
                                     }
                                     Err(e) => {
                                         op_result.error(format!("statement error: {e}"));
@@ -2783,16 +2887,19 @@ pub async fn ask_stream(
                             }
                             crate::parser::Operation::Mock { operation, patterns, response } => {
                                 process_mock(operation, patterns, response, &mut session.meta, &mut op_result);
+                                config_clone.write_back_working_set(&session).await;
                                 let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("mock: {operation} {pattern_display}"), "success": true})).await;
                             }
                             crate::parser::Operation::Unmock => {
                                 let count = session.meta.io_mocks.len();
                                 process_unmock(&mut session.meta, &mut op_result);
+                                config_clone.write_back_working_set(&session).await;
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("cleared {count} mocks"), "success": true})).await;
                             }
                             crate::parser::Operation::Message { to, content } => {
                                 crate::session::send_agent_message(&mut session.meta, "main", to, content);
+                                config_clone.write_back_working_set(&session).await;
                                 op_result.ok(format!("Message sent to '{to}'"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Message sent to '{to}'"), "success": true})).await;
                             }
@@ -3598,6 +3705,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
     use axum::routing::{get, post};
 
     let config_routes = axum::Router::new()
+        .route("/ui", get(ui_page))
         // Read-only handlers (migrated to tier locks)
         .route("/api/status", get(status))
         .route("/api/program", get(program))
@@ -3665,7 +3773,8 @@ async fn adapsis_route_dispatch(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-        crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_meta(Some(config.meta.clone()));
+    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
@@ -3706,7 +3815,8 @@ async fn adapsis_route_dispatch(
     let body_str = String::from_utf8_lossy(&body).to_string();
 
     let runtime_for_blocking = config.runtime.clone();
-                            let meta_for_blocking = config.meta.clone();
+    let meta_for_blocking = config.meta.clone();
+    let event_broadcast = config.event_broadcast.clone();
     let program_mut = crate::eval::make_shared_program_mut(&program);
     let program_mut_clone = program_mut.clone();
 
@@ -3715,7 +3825,8 @@ async fn adapsis_route_dispatch(
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
+        eval::set_shared_meta(Some(meta_for_blocking));
+        eval::set_shared_event_broadcast(Some(event_broadcast));
         crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
         crate::eval::set_shared_program_mut(Some(program_mut_clone));
         let func = program
@@ -3796,16 +3907,101 @@ async fn drain_queue(
 
 async fn events_stream(
     State(config): State<AppConfig>,
-) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+) -> impl axum::response::IntoResponse {
     use axum::response::sse::{Event, KeepAlive};
     let mut rx = config.event_broadcast.subscribe();
     let stream = async_stream::stream! {
-        while let Ok(event) = rx.recv().await {
-            let data = serde_json::to_string(&event).unwrap_or_default();
-            yield Ok(Event::default().data(data));
+        loop {
+            match rx.recv().await {
+                Ok(event) => yield Ok::<Event, std::convert::Infallible>(Event::default().data(event)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     };
-    axum::response::sse::Sse::new(stream).keep_alive(KeepAlive::default())
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-cache")],
+        axum::response::sse::Sse::new(stream).keep_alive(KeepAlive::default()),
+    )
+}
+
+async fn ui_page() -> Html<&'static str> {
+    Html(r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AdapsisOS Dashboard</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font: 14px/1.5 monospace; background: #020617; color: #e2e8f0; }
+    header { padding: 16px 20px; background: linear-gradient(135deg, #111827, #1e293b); border-bottom: 1px solid #334155; }
+    h1 { margin: 0; font-size: 20px; }
+    .layout { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; min-height: calc(100vh - 73px); }
+    .panel { padding: 18px 20px; box-sizing: border-box; }
+    .controls { border-right: 1px solid #334155; background: #0f172a; }
+    textarea { width: 100%; min-height: 280px; margin: 12px 0; padding: 12px; box-sizing: border-box; border: 1px solid #475569; border-radius: 8px; background: #111827; color: #e2e8f0; }
+    .actions { display: flex; gap: 10px; }
+    button { padding: 10px 14px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+    button.secondary { background: #0f766e; }
+    #status { margin-top: 12px; color: #93c5fd; white-space: pre-wrap; }
+    #log { height: calc(100vh - 109px); overflow: auto; }
+    .event { margin: 0 0 10px; padding: 10px 12px; background: #111827; border-left: 4px solid #38bdf8; border-radius: 6px; white-space: pre-wrap; }
+    .meta { color: #94a3b8; margin-bottom: 4px; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .controls { border-right: 0; border-bottom: 1px solid #334155; } #log { height: auto; min-height: 40vh; } }
+  </style>
+</head>
+<body>
+  <header><h1>AdapsisOS Dashboard</h1></header>
+  <main class="layout">
+    <section class="panel controls">
+      <div>Use the editor for inline eval expressions or mutation source.</div>
+      <textarea id="source" spellcheck="false" placeholder='1 + 2
+
+or
+
++fn hello ()->String
+  +return "hi"
++end'></textarea>
+      <div class="actions">
+        <button id="eval">Eval</button>
+        <button id="apply" class="secondary">Apply</button>
+      </div>
+      <div id="status"></div>
+    </section>
+    <section class="panel"><div id="log"></div></section>
+  </main>
+  <script>
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+    const editor = document.getElementById('source');
+    const append = (payload) => {
+      const el = document.createElement('div');
+      el.className = 'event';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = `${new Date().toLocaleTimeString()} - ${payload.event || payload.type || 'message'}`;
+      const body = document.createElement('div');
+      body.textContent = payload.data || payload.detail || payload.message || payload.result || JSON.stringify(payload);
+      el.append(meta, body);
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+    };
+    const postJson = async (url, body) => {
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      status.textContent = await response.text();
+    };
+    const source = new EventSource('/api/events');
+    source.onmessage = (event) => {
+      try { append(JSON.parse(event.data)); }
+      catch (_) { append({ event: 'raw', data: event.data }); }
+    };
+    source.onerror = () => append({ event: 'status', data: 'connection issue, retrying...' });
+    document.getElementById('eval').onclick = () => postJson('/api/eval', { function: '', input: '', expression: editor.value });
+    document.getElementById('apply').onclick = () => postJson('/api/mutate', { source: editor.value });
+  </script>
+</body>
+</html>"#)
 }
 
 /// GET /api/log?tail=N — get recent log entries.
@@ -3866,6 +4062,19 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
         }
+    }
+
+    async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<String>) -> serde_json::Value {
+        let raw = rx.recv().await.unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn events_stream_sets_sse_headers() {
+        let config = test_config();
+        let response = events_stream(State(config)).await.into_response();
+        assert_eq!(response.headers()[axum::http::header::CONTENT_TYPE], "text/event-stream");
+        assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-cache");
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -4229,6 +4438,131 @@ mod tests {
         )
         .await;
         assert!(!resp_b.success, "session-b should not have session-a's function");
+    }
+
+    #[tokio::test]
+    async fn sync_async_side_effects_preserves_live_roadmap_and_runtime_state() {
+        let config = test_config();
+        let mut session = config.snapshot_working_set().await;
+
+        session.meta.plan.push(crate::session::PlanStep {
+            description: "keep local plan".to_string(),
+            status: crate::session::PlanStatus::Pending,
+        });
+        config.write_back_working_set(&session).await;
+
+        {
+            let mut meta = config.meta.lock().unwrap();
+            crate::session::roadmap_add(&mut meta.roadmap, "#30 Sync GitHub issues");
+            meta.io_mocks.push(crate::session::IoMock {
+                operation: "http_get".to_string(),
+                patterns: vec!["api.github.com".to_string()],
+                response: "[]".to_string(),
+            });
+            crate::session::send_agent_message(&mut meta, "main", "worker", "hello");
+        }
+        {
+            let mut runtime = config.runtime.write().unwrap();
+            runtime.http_routes.push(crate::ast::HttpRoute {
+                method: "GET".to_string(),
+                path: "/health".to_string(),
+                handler_fn: "health_check".to_string(),
+            });
+        }
+
+        config.sync_async_side_effects_into(&mut session);
+        config.write_back_working_set(&session).await;
+
+        let meta = config.meta.lock().unwrap();
+        assert_eq!(meta.plan.len(), 1, "local plan should survive sync");
+        assert_eq!(meta.roadmap.len(), 1, "async roadmap additions should survive write-back");
+        assert_eq!(meta.io_mocks.len(), 1, "async mock mutations should survive write-back");
+        assert_eq!(meta.agent_mailbox.get("worker").map(Vec::len), Some(1));
+        drop(meta);
+
+        let runtime = config.runtime.read().unwrap();
+        assert_eq!(runtime.http_routes.len(), 1, "async runtime mutations should survive write-back");
+    }
+
+    #[tokio::test]
+    async fn mutate_broadcasts_sse_event() {
+        let config = test_config();
+        let mut rx = config.event_broadcast.subscribe();
+
+        let Json(response) = mutate(
+            State(config),
+            Json(MutateRequest {
+                source: "+fn ping ()->String\n  +return \"pong\"\n+end".to_string(),
+            }),
+        ).await;
+
+        assert!(response.results.iter().all(|r| r.success));
+        let event = recv_event(&mut rx).await;
+        assert_eq!(event["type"], "mutation");
+        assert!(event["detail"].as_str().unwrap().contains("ping"));
+    }
+
+    #[tokio::test]
+    async fn eval_broadcasts_sse_event() {
+        let config = test_config();
+        let mut rx = config.event_broadcast.subscribe();
+        let _ = mutate(
+            State(config.clone()),
+            Json(MutateRequest {
+                source: "+fn forty_two ()->Int\n  +return 42\n+end".to_string(),
+            }),
+        ).await;
+        let _ = recv_event(&mut rx).await;
+
+        let Json(response) = eval_fn(
+            State(config),
+            Json(EvalRequest {
+                function: "forty_two".to_string(),
+                input: "".to_string(),
+                expression: None,
+            }),
+        ).await;
+
+        assert!(response.success);
+        let event = recv_event(&mut rx).await;
+        assert_eq!(event["type"], "eval");
+        assert!(event["detail"].as_str().unwrap().contains("42"));
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_broadcasts_sse_event() {
+        let config = test_config();
+        let mut rx = config.event_broadcast.subscribe();
+        let _ = mutate(
+            State(config.clone()),
+            Json(MutateRequest {
+                source: "+fn one ()->Int\n  +return 1\n+end".to_string(),
+            }),
+        ).await;
+        let _ = recv_event(&mut rx).await;
+
+        let Json(response) = test_fn(
+            State(config),
+            Json(TestRequest {
+                source: "!test one\n  +with -> expect 1".to_string(),
+            }),
+        ).await;
+
+        assert_eq!(response.passed, 1);
+        let event = recv_event(&mut rx).await;
+        assert_eq!(event["type"], "test");
+        assert_eq!(event["detail"], "1 passed; 0 failed");
+    }
+
+    #[tokio::test]
+    async fn ui_page_contains_event_source_client() {
+        let Html(page) = ui_page().await;
+        assert!(page.contains("AdapsisOS Dashboard"));
+        assert!(page.contains("textarea"));
+        assert!(page.contains("Eval"));
+        assert!(page.contains("Apply"));
+        assert!(page.contains("/api/events"));
+        assert!(page.contains("EventSource"));
     }
 }
 
