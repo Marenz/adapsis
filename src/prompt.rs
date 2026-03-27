@@ -665,13 +665,14 @@ Example:
 
 ### Programmatic Command Builtins
 
-These IO builtins are programmatic equivalents of `!move`, `!watch`, `!agent`, `!msg`, `!trace`, `!undo`, `!sandbox`, `!mock`/`!unmock`, and route commands.
+These IO builtins are programmatic equivalents of `!move`, `!watch`, `!agent`, `!msg`, `?inbox`, `!trace`, `!undo`, `!sandbox`, `!mock`/`!unmock`, and route commands.
 They allow Adapsis code to perform these operations via `+await` instead of using `!`-commands directly.
 
 - `+await result:String = move_symbols(symbols, target_module)` — move comma-separated symbol names (functions, types, modules) into a target module. Updates all call sites automatically. Same as `!move sym1 sym2 Module`.
 - `+await result:String = watch_start(fn_name, interval_ms)` — start watching a function periodically. Same as `!watch fn_name interval_ms`. Queues the watch for API-layer processing.
 - `+await result:String = agent_spawn(name, scope, task)` — spawn a background agent with the given name, scope, and task. Same as `!agent name --scope scope task`. Scope: \"read-only\", \"new-only\", \"module X\", \"full\".
 - `+await result:String = msg_send(target, message)` — send a message to an agent or \"main\". Same as `!msg target message`. The recipient sees it in `?inbox`.
+- `+await result:String = inbox_read()` — read and clear the pending inbox for the main session. Returns a JSON array string of message contents like `["msg1","msg2"]`, or `[]` when empty. Same message stream as `?inbox`, but consuming.
 - `+await result:String = trace_run(fn_name, args)` — run a function with step-by-step tracing. Same as `!trace fn_name args`. Returns the trace output as a formatted String. `args` is the input expression text (empty string for no args).
 - `+await result:String = route_list()` — list all registered HTTP routes. Returns one route per line: `METHOD /path -> \`handler\``. Returns 'No routes registered.' if none.
 - `+await result:String = route_add(method, path, handler)` — register an HTTP route. Method is GET/POST/PUT/DELETE/PATCH, path starts with '/', handler is 'Module.func'. Upserts if route already exists.
@@ -697,6 +698,11 @@ Example:
 
 +fn notify_agent (agent:String, msg:String)->String [io,async]
   +await r:String = msg_send(agent, msg)
+  +return r
++end
+
++fn drain_inbox ()->String [io,async]
+  +await r:String = inbox_read()
   +return r
 +end
 
