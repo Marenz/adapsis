@@ -78,13 +78,24 @@ fn emit_event(state: &AppConfig, event_json: &str) {
     let _ = state.event_broadcast.send(event_json.to_string());
 }
 
-fn make_sse_event(event: &str, data: impl Into<String>) -> String {
-    serde_json::json!({"type": event, "data": data.into()}).to_string()
+fn make_sse_event(event: &str, payload: serde_json::Value) -> String {
+    let mut obj = match payload {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("data".to_string(), other);
+            map
+        }
+    };
+    obj.insert("type".to_string(), serde_json::Value::String(event.to_string()));
+    serde_json::Value::Object(obj).to_string()
 }
 
 fn encode_broadcast_event(event: &serde_json::Value) -> String {
     if let (Some(kind), Some(data)) = (event.get("event").and_then(|v| v.as_str()), event.get("data")) {
-        return make_sse_event(kind, data.as_str().map(str::to_owned).unwrap_or_else(|| data.to_string()));
+        return make_sse_event(kind, serde_json::json!({
+            "data": data.as_str().map(str::to_owned).unwrap_or_else(|| data.to_string())
+        }));
     }
 
     let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("message");
@@ -95,7 +106,7 @@ fn encode_broadcast_event(event: &serde_json::Value) -> String {
         .or_else(|| event.get("result"))
         .map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
         .unwrap_or_else(|| event.to_string());
-    make_sse_event(kind, data)
+    make_sse_event(kind, serde_json::json!({"data": data}))
 }
 
 /// Temporary mutable working state used by complex handlers.
@@ -188,11 +199,21 @@ pub async fn mutate(
                 .into_iter()
                 .map(|(message, success)| MutationResult { message, success })
                 .collect();
-            let summary = format!("Applied {} mutations", response_results.len());
+            let summary = if response_results.is_empty() {
+                "Applied 0 mutations".to_string()
+            } else {
+                response_results.iter()
+                    .map(|r| r.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
             *config.program.write().await = program;
             *config.runtime.write().unwrap() = runtime;
             *config.meta.lock().unwrap() = meta.clone();
-            emit_event(&config, &make_sse_event("mutation", summary));
+            emit_event(&config, &make_sse_event("mutation", serde_json::json!({
+                "revision": meta.revision,
+                "summary": summary,
+            })));
             Json(MutateResponse { revision: meta.revision, results: response_results })
         }
         Err(e) => {
@@ -244,7 +265,10 @@ pub async fn eval_fn(
                 success: false,
                 compiled: None,
             };
-            emit_event(&config, &make_sse_event("eval", response.result.clone()));
+            emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                "expression": expr_str,
+                "result": response.result.clone(),
+            })));
             return Json(response);
         }
         match parser::parse_expr_pub(0, expr_str) {
@@ -288,7 +312,10 @@ pub async fn eval_fn(
                                 compiled: None,
                             },
                         };
-                        emit_event(&config, &make_sse_event("eval", response.result.clone()));
+                        emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                            "expression": expr_str,
+                            "result": response.result.clone(),
+                        })));
                         return Json(response);
                     }
                     // No IO sender available — fall through to sync eval which will error
@@ -302,7 +329,10 @@ pub async fn eval_fn(
                             success: true,
                             compiled: Some(false),
                         };
-                        emit_event(&config, &make_sse_event("eval", response.result.clone()));
+                        emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                            "expression": expr_str,
+                            "result": response.result.clone(),
+                        })));
                         return Json(response);
                     }
                     Err(e) => {
@@ -311,7 +341,10 @@ pub async fn eval_fn(
                             success: false,
                             compiled: None,
                         };
-                        emit_event(&config, &make_sse_event("eval", response.result.clone()));
+                        emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                            "expression": expr_str,
+                            "result": response.result.clone(),
+                        })));
                         return Json(response);
                     }
                 }
@@ -322,7 +355,10 @@ pub async fn eval_fn(
                     success: false,
                     compiled: None,
                 };
-                emit_event(&config, &make_sse_event("eval", response.result.clone()));
+                emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                    "expression": expr_str,
+                    "result": response.result.clone(),
+                })));
                 return Json(response);
             }
         }
@@ -343,7 +379,10 @@ pub async fn eval_fn(
                     success: false,
                     compiled: None,
                 };
-                emit_event(&config, &make_sse_event("eval", response.result.clone()));
+                emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                    "expression": req.input,
+                    "result": response.result.clone(),
+                })));
                 return Json(response);
             }
         }
@@ -370,7 +409,10 @@ pub async fn eval_fn(
                         success: false,
                         compiled: None,
                     };
-                    emit_event(&config, &make_sse_event("eval", response.result.clone()));
+                    emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                        "expression": ev.function_name,
+                        "result": response.result.clone(),
+                    })));
                     return Json(response);
                 }
             }
@@ -435,7 +477,10 @@ pub async fn eval_fn(
                     compiled: None,
                 },
             };
-            emit_event(&config, &make_sse_event("eval", response.result.clone()));
+            emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                "expression": ev.function_name,
+                "result": response.result.clone(),
+            })));
             return Json(response);
         }
     }
@@ -461,7 +506,10 @@ pub async fn eval_fn(
                 success: true,
                 compiled: Some(compiled),
             };
-            emit_event(&config, &make_sse_event("eval", response.result.clone()));
+            emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                "expression": ev.function_name,
+                "result": response.result.clone(),
+            })));
             Json(response)
         }
         Err(e) => {
@@ -470,7 +518,10 @@ pub async fn eval_fn(
                 success: false,
                 compiled: None,
             };
-            emit_event(&config, &make_sse_event("eval", response.result.clone()));
+            emit_event(&config, &make_sse_event("eval", serde_json::json!({
+                "expression": ev.function_name,
+                "result": response.result.clone(),
+            })));
             Json(response)
         }
     }
@@ -512,7 +563,11 @@ pub async fn test_fn(
                     pass: false,
                 }],
             };
-            emit_event(&config, &make_sse_event("test", format!("(parse): {} passed, {} failed", response.passed, response.failed)));
+            emit_event(&config, &make_sse_event("test", serde_json::json!({
+                "function": "(parse)",
+                "passed": response.passed,
+                "failed": response.failed,
+            })));
             return Json(response);
         }
     };
@@ -606,10 +661,11 @@ pub async fn test_fn(
             let mut program = config.program.write().await;
             crate::session::store_test(&mut program, &test.function_name, &test.cases);
         }
-        emit_event(&config, &make_sse_event(
-            "test",
-            format!("{}: {} passed, {} failed", test.function_name, passed - start_passed, failed - start_failed),
-        ));
+        emit_event(&config, &make_sse_event("test", serde_json::json!({
+            "function": test.function_name,
+            "passed": passed - start_passed,
+            "failed": failed - start_failed,
+        })));
     }
 
     let response = TestResponse {
@@ -3919,7 +3975,16 @@ async fn events_stream(
     let stream = async_stream::stream! {
         loop {
             match rx.recv().await {
-                Ok(event) => yield Ok::<Event, std::convert::Infallible>(Event::default().data(event)),
+                Ok(event) => {
+                    let sse_event = match serde_json::from_str::<serde_json::Value>(&event)
+                        .ok()
+                        .and_then(|value| value.get("type").and_then(|v| v.as_str()).map(str::to_owned))
+                    {
+                        Some(kind) => Event::default().event(kind).data(event),
+                        None => Event::default().data(event),
+                    };
+                    yield Ok::<Event, std::convert::Infallible>(sse_event)
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -4515,7 +4580,8 @@ mod tests {
         assert!(response.results.iter().all(|r| r.success));
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "mutation");
-        assert_eq!(event["data"], "Applied 1 mutations");
+        assert_eq!(event["revision"], 1);
+        assert_eq!(event["summary"], response.results[0].message);
     }
 
     #[tokio::test]
@@ -4542,7 +4608,8 @@ mod tests {
         assert!(response.success);
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "eval");
-        assert_eq!(event["data"], "42");
+        assert_eq!(event["expression"], "forty_two");
+        assert_eq!(event["result"], "42");
     }
 
     #[tokio::test]
@@ -4562,7 +4629,8 @@ mod tests {
         assert!(!response.success);
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "eval");
-        assert_eq!(event["data"], "empty expression");
+        assert_eq!(event["expression"], "");
+        assert_eq!(event["result"], "empty expression");
     }
 
     #[tokio::test]
@@ -4587,7 +4655,9 @@ mod tests {
         assert_eq!(response.passed, 1);
         let event = recv_event(&mut rx).await;
         assert_eq!(event["type"], "test");
-        assert_eq!(event["data"], "one: 1 passed, 0 failed");
+        assert_eq!(event["function"], "one");
+        assert_eq!(event["passed"], 1);
+        assert_eq!(event["failed"], 0);
     }
 
     #[tokio::test]
