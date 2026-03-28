@@ -81,6 +81,15 @@ fn emit_event(state: &AppConfig, event_json: &str) {
     let _ = state.event_broadcast.send(event_json.to_string());
 }
 
+fn collect_opencode_tasks(ops: &[crate::parser::Operation]) -> Vec<String> {
+    ops.iter()
+        .filter_map(|op| match op {
+            crate::parser::Operation::OpenCode(task) => Some(task.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn make_sse_event(event: &str, payload: serde_json::Value) -> String {
     let mut obj = match payload {
         serde_json::Value::Object(map) => map,
@@ -1685,6 +1694,8 @@ pub async fn ask(
 
         match crate::parser::parse(&code) {
             Ok(ops) => {
+                let opencode_tasks = collect_opencode_tasks(&ops);
+                let mut needs_opencode_restart = false;
                 // Remove duplicates
                 let mut fns_removed = false;
                 for op in &ops {
@@ -2209,52 +2220,7 @@ pub async fn ask(
                                 success: true,
                             });
                         }
-                        crate::parser::Operation::OpenCode(task) => {
-                            eprintln!("[web:opencode] {task}");
-                            let oc_result = tokio::time::timeout(
-                                std::time::Duration::from_secs(3600),
-                                tokio::process::Command::new("opencode")
-                                    .arg("run").arg("--format").arg("json")
-                                    .arg("--attach").arg("http://localhost:4096")
-                                    .arg("--dir").arg(&config.project_dir)
-                                    .arg(task)
-                                    .current_dir(&config.project_dir)
-                                    .output()
-                            ).await;
-                            match oc_result {
-                                Ok(Ok(output)) if output.status.success() => {
-                                    eprintln!("[web:opencode:done] rebuilding...");
-                                    let build = tokio::process::Command::new("cargo")
-                                        .arg("build").arg("--release").current_dir(&config.project_dir).output().await;
-                                    match build {
-                                        Ok(b) if b.status.success() => {
-                                            iter_results.push(MutationResult {
-                                                message: "OpenCode + rebuild successful. Restart to apply.".to_string(), success: true,
-                                            });
-                                            tokio::spawn(async {
-                                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                                // Use args[0] instead of current_exe() — after rebuild the old
-                                                // inode is deleted and /proc/self/exe shows "(deleted)".
-                                                let exe = std::env::args().next()
-                                                    .map(std::path::PathBuf::from)
-                                                    .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
-                                                    .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
-                                                let args: Vec<String> = std::env::args().collect();
-                                                let _ = exec::execvp(&exe, &args);
-                                            });
-                                        }
-                                        _ => {
-                                            iter_has_errors = true;
-                                            iter_results.push(MutationResult { message: "OpenCode done but build failed".to_string(), success: false });
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    iter_has_errors = true;
-                                    iter_results.push(MutationResult { message: "OpenCode failed or timed out".to_string(), success: false });
-                                }
-                            }
-                        }
+                        crate::parser::Operation::OpenCode(_) => {}
                         // Top-level statements: execute immediately
                         op @ (crate::parser::Operation::Call(_)
                         | crate::parser::Operation::Let(_)
@@ -2300,6 +2266,55 @@ pub async fn ask(
                         }
                         _ => {}
                     }
+                }
+
+                for task in opencode_tasks {
+                    eprintln!("[web:opencode] {task}");
+                            let oc_result = tokio::time::timeout(
+                                std::time::Duration::from_secs(3600),
+                                tokio::process::Command::new("opencode")
+                                    .arg("run").arg("--format").arg("json")
+                                    .arg("--attach").arg("http://localhost:4096")
+                                    .arg("--dir").arg(&config.project_dir)
+                                    .arg(task)
+                                    .current_dir(&config.project_dir)
+                                    .output()
+                            ).await;
+                            match oc_result {
+                                Ok(Ok(output)) if output.status.success() => {
+                                    eprintln!("[web:opencode:done] rebuilding...");
+                                    let build = tokio::process::Command::new("cargo")
+                                        .arg("build").arg("--release").current_dir(&config.project_dir).output().await;
+                                    match build {
+                                        Ok(b) if b.status.success() => {
+                                            iter_results.push(MutationResult {
+                                                message: "OpenCode + rebuild successful. Restart to apply.".to_string(), success: true,
+                                            });
+                                            needs_opencode_restart = true;
+                                        }
+                                        _ => {
+                                            iter_has_errors = true;
+                                            iter_results.push(MutationResult { message: "OpenCode done but build failed".to_string(), success: false });
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    iter_has_errors = true;
+                                    iter_results.push(MutationResult { message: "OpenCode failed or timed out".to_string(), success: false });
+                                }
+                            }
+                }
+
+                if needs_opencode_restart {
+                    tokio::spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let exe = std::env::args().next()
+                            .map(std::path::PathBuf::from)
+                            .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+                            .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
+                        let args: Vec<String> = std::env::args().collect();
+                        let _ = exec::execvp(&exe, &args);
+                    });
                 }
             }
             Err(e) => {
@@ -4206,6 +4221,20 @@ mod tests {
         } else {
             value
         }
+    }
+
+    #[test]
+    fn collect_opencode_tasks_keeps_all_in_order() {
+        let ops = crate::parser::parse("!opencode First task\n!opencode Second task\n+fn hi ()->Int\n  +return 1\n").unwrap();
+        let tasks = collect_opencode_tasks(&ops);
+        assert_eq!(tasks, vec!["First task".to_string(), "Second task".to_string()]);
+    }
+
+    #[test]
+    fn collect_opencode_tasks_ignores_non_opencode_ops() {
+        let ops = crate::parser::parse("+fn hi ()->Int\n  +return 1\n!eval hi\n").unwrap();
+        let tasks = collect_opencode_tasks(&ops);
+        assert!(tasks.is_empty());
     }
 
     #[tokio::test]
