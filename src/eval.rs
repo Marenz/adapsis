@@ -1195,6 +1195,7 @@ fn fork_runtime_for_test(
         pending_commands: Vec::new(),
         library_errors: Vec::new(),
         library_load_errors: Vec::new(),
+        failure_history: Vec::new(),
     };
     Some(std::sync::Arc::new(std::sync::RwLock::new(forked)))
 }
