@@ -869,6 +869,20 @@ pub static IO_BUILTINS: &[Builtin] = &[
                Takes no arguments. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
+    Builtin {
+        name: "failure_history",
+        aliases: &[],
+        short: "show recent mutation failures: failure_history() -> String",
+        long: "Returns the last 20 recorded mutation failures from the current session as a formatted string. Each entry includes the revision number and error message. Returns \"No recent mutation failures.\" if empty. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "failure_patterns",
+        aliases: &[],
+        short: "summarize repeated failures: failure_patterns() -> String",
+        long: "Analyzes recent mutation failures and groups repeated mistakes such as undefined variable errors, type mismatch errors, parse errors, and validation errors. Returns a compact summary string to help the AI avoid repeating the same mistake. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
 ];
 
 /// Registered query commands (?-prefixed).
