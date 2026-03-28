@@ -2707,6 +2707,7 @@ pub async fn ask_stream(
                     }
 
                     // Tests and evals
+                    let mut needs_opencode_restart = false;
                     for op in &ops {
                         match op {
                             crate::parser::Operation::Test(test) => {
@@ -3287,20 +3288,11 @@ pub async fn ask_stream(
                                                         let _ = snap.save(std::path::Path::new(&path));
                                                     }
                                                 }
-                                                // execvp replaces the process — if it returns, it failed
-                                                // Use args[0] instead of current_exe() because after cargo rebuild
-                                                // the old inode is deleted and /proc/self/exe shows "(deleted)".
-                                                let exe = std::env::args().next()
-                                                    .map(std::path::PathBuf::from)
-                                                    .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
-                                                    .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
-                                                let args: Vec<String> = std::env::args().collect();
-                                                let err = exec::execvp(&exe, &args);
-                                                // If we get here, execvp failed
-                                                let msg = format!("RESTART FAILED: exec::execvp returned: {err}. The new binary is built but NOT running. Manual restart required.");
-                                                eprintln!("[opencode] {msg}");
-                                                log_activity(&config_clone.log_file, "opencode-restart-FAILED", &msg).await;
-                                                op_result.error(&msg);
+                                                // Defer restart until all operations are processed
+                                                needs_opencode_restart = true;
+                                                let _ = tx.send(serde_json::json!({"type": "result", "message": "OpenCode + rebuild successful. Will restart after remaining operations.", "success": true})).await;
+                                                log_activity(&config_clone.log_file, "opencode-restart", "deferred restart after remaining ops").await;
+                                                op_result.ok("OpenCode + rebuild successful. Restart deferred.");
                                             }
                                             Ok(b) => {
                                                 let stderr = String::from_utf8_lossy(&b.stderr);
@@ -3340,6 +3332,27 @@ pub async fn ask_stream(
                             }
                             _ => {}
                         }
+                    }
+
+                    // Deferred restart after all operations processed
+                    if needs_opencode_restart {
+                        // Save session one more time (may have changed since first opencode)
+                        {
+                            let snap = config_clone.snapshot_working_set().await;
+                            if let Some(path) = std::env::args().nth(std::env::args().position(|a| a == "--session").unwrap_or(999) + 1) {
+                                let snap = crate::session::Session { program: snap.program, runtime: snap.runtime, meta: snap.meta, sandbox: snap.sandbox };
+                                let _ = snap.save(std::path::Path::new(&path));
+                            }
+                        }
+                        let exe = std::env::args().next()
+                            .map(std::path::PathBuf::from)
+                            .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+                            .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
+                        let args: Vec<String> = std::env::args().collect();
+                        let err = exec::execvp(&exe, &args);
+                        let msg = format!("RESTART FAILED: exec::execvp returned: {err}. The new binary is built but NOT running. Manual restart required.");
+                        eprintln!("[opencode] {msg}");
+                        op_result.error(&msg);
                     }
                 }
                 Err(e) => {
