@@ -1017,7 +1017,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("run_module_startups: could not acquire program read lock"))?;
 
                 // Collect modules with startup blocks, sorted alphabetically
-                let mut modules_with_startup: Vec<(String, std::sync::Arc<crate::ast::FunctionDecl>)> = program.modules.iter()
+                let mut modules_with_startup: Vec<(String, crate::ast::LifecycleBlock)> = program.modules.iter()
                     .filter_map(|m| m.startup.as_ref().map(|s| (m.name.clone(), s.clone())))
                     .collect();
                 modules_with_startup.sort_by(|a, b| a.0.cmp(&b.0));

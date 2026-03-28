@@ -322,7 +322,11 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 if m.startup.is_some() {
                     bail!("duplicate +startup in module `{}`", decl.name);
                 }
-                m.startup = Some(std::sync::Arc::new(converted));
+                m.startup = Some(ast::LifecycleBlock {
+                    id: format!("{}.startup", decl.name),
+                    effects: converted.effects,
+                    body: converted.body,
+                });
             }
             parser::Operation::Shutdown(fd) => {
                 let converted = convert_function(fd)?;
@@ -337,7 +341,11 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 if m.shutdown.is_some() {
                     bail!("duplicate +shutdown in module `{}`", decl.name);
                 }
-                m.shutdown = Some(std::sync::Arc::new(converted));
+                m.shutdown = Some(ast::LifecycleBlock {
+                    id: format!("{}.shutdown", decl.name),
+                    effects: converted.effects,
+                    body: converted.body,
+                });
             }
             parser::Operation::ModuleSource(src_decl) => {
                 let m = &mut program.modules[mod_idx];
@@ -2237,7 +2245,7 @@ mod tests {
         assert!(result.is_ok(), "expected valid startup, got: {result:?}");
         let module = &program.modules[0];
         assert!(module.startup.is_some(), "startup should be set");
-        assert_eq!(module.startup.as_ref().unwrap().name, "startup");
+        assert_eq!(module.startup.as_ref().unwrap().id, "Svc.startup");
     }
 
     #[test]
@@ -2254,7 +2262,7 @@ mod tests {
         assert!(result.is_ok(), "expected valid shutdown, got: {result:?}");
         let module = &program.modules[0];
         assert!(module.shutdown.is_some(), "shutdown should be set");
-        assert_eq!(module.shutdown.as_ref().unwrap().name, "shutdown");
+        assert_eq!(module.shutdown.as_ref().unwrap().id, "Svc.shutdown");
     }
 
     #[test]
