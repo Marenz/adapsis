@@ -203,8 +203,13 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
        +match validate(input)
        +case Ok(validated)
          +return validated
-       +case Err(e)
-         +return concat("failed: ", e)
+        +case Err(e)
+          +return concat("failed: ", e)
+
+Effect validation is enforced when functions are added or replaced:
+- Any function that uses `+await` must declare `[io,async]`.
+- Any function that mutates module `+shared` state with `+set` must declare `[mut]`.
+- Any function that auto-propagates a `[fail]` callee (for example `+call value:T = validate(x)`) must also declare `[fail]`.
        +end
     Use (a) when your function also has [fail]. Use (b) when you handle errors explicitly.
     Do NOT use intermediate variables — match directly on the function call.
