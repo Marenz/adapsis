@@ -779,7 +779,7 @@ API endpoints:
 - `POST /api/sessions/:id/eval` — evaluate in a specific session. Same body as `/api/eval`.
 - `POST /api/sessions/:id/mutate` — apply mutations to a specific session. Same body as `/api/mutate`.
 - `GET /api/events` — subscribe to Server-Sent Events. Runtime events include JSON like `{"type":"mutation","revision":3,"summary":"Added function Math.double"}`, `{"type":"eval","expression":"double","result":"10"}`, and `{"type":"test","function":"double","passed":1,"failed":0}`.
-- `GET /ui` — minimal dashboard for `/api/events`, inline eval, and mutations.
+- `GET /ui` — minimal dashboard for `/api/events`, inline eval, and mutations. The event log shows the event type plus the best available payload field without rendering `undefined`.
 
 Sessions are isolated: functions defined in one session are not visible in another.
 The \"main\" session delegates to the existing `/api/eval` and `/api/mutate` endpoints.

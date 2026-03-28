@@ -4080,14 +4080,29 @@ or
     const log = document.getElementById('log');
     const status = document.getElementById('status');
     const editor = document.getElementById('source');
+    const formatPayload = (payload) => {
+      if (payload == null) return '(empty event)';
+      if (typeof payload === 'string') return payload || '(empty event)';
+      const preferred = ['data', 'detail', 'message', 'result', 'summary'];
+      for (const key of preferred) {
+        const value = payload[key];
+        if (value === undefined || value === null) continue;
+        if (typeof value === 'string') return value || '(empty string)';
+        return JSON.stringify(value);
+      }
+      const filtered = Object.fromEntries(Object.entries(payload).filter(([key, value]) => key !== 'type' && key !== 'event' && value !== undefined));
+      const text = JSON.stringify(filtered);
+      return text && text !== '{}' ? text : JSON.stringify(payload);
+    };
     const append = (payload) => {
       const el = document.createElement('div');
       el.className = 'event';
       const meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = `${new Date().toLocaleTimeString()} - ${payload.event || payload.type || 'message'}`;
+      const type = payload && typeof payload === 'object' ? (payload.event || payload.type || 'message') : 'message';
+      meta.textContent = `${new Date().toLocaleTimeString()} - ${String(type)}`;
       const body = document.createElement('div');
-      body.textContent = payload.data || payload.detail || payload.message || payload.result || JSON.stringify(payload);
+      body.textContent = formatPayload(payload);
       el.append(meta, body);
       log.appendChild(el);
       log.scrollTop = log.scrollHeight;
@@ -4700,6 +4715,8 @@ mod tests {
         assert!(page.contains("Apply"));
         assert!(page.contains("/api/events"));
         assert!(page.contains("EventSource"));
+        assert!(page.contains("const formatPayload = (payload) =>"));
+        assert!(page.contains("(empty event)"));
     }
 }
 
