@@ -222,8 +222,9 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
-            startup: None,
-            shutdown: None,
+            startup: vec![],
+            shutdown: vec![],
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         });
@@ -314,7 +315,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     );
                 }
                 let m = &mut program.modules[mod_idx];
-                m.startup = Some(std::sync::Arc::new(converted));
+                m.startup = converted.body;
             }
             parser::Operation::Shutdown(fd) => {
                 let converted = convert_function(fd)?;
@@ -326,7 +327,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     );
                 }
                 let m = &mut program.modules[mod_idx];
-                m.shutdown = Some(std::sync::Arc::new(converted));
+                m.shutdown = converted.body;
             }
             other => bail!(
                 "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, and !test are allowed",
@@ -1437,8 +1438,9 @@ pub fn apply_move(
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
-            startup: None,
-            shutdown: None,
+            startup: vec![],
+            shutdown: vec![],
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         });
@@ -2205,8 +2207,7 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_ok(), "expected valid startup, got: {result:?}");
         let module = &program.modules[0];
-        assert!(module.startup.is_some());
-        assert_eq!(module.startup.as_ref().unwrap().name, "__startup");
+        assert!(!module.startup.is_empty(), "startup should have statements");
     }
 
     #[test]
@@ -2222,8 +2223,7 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_ok(), "expected valid shutdown, got: {result:?}");
         let module = &program.modules[0];
-        assert!(module.shutdown.is_some());
-        assert_eq!(module.shutdown.as_ref().unwrap().name, "__shutdown");
+        assert!(!module.shutdown.is_empty(), "shutdown should have statements");
     }
 
     #[test]

@@ -117,46 +117,35 @@ pub fn reconstruct_module_source(module: &ast::Module) -> String {
     }
 
     // Startup block
-    if let Some(ref startup) = module.startup {
-        let effects = if startup.effects.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " [{}]",
-                startup
-                    .effects
-                    .iter()
-                    .map(|e| format!("{e:?}").to_lowercase())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        };
-        out.push_str(&format!("+startup{}\n", effects));
-        for stmt in &startup.body {
+    if !module.startup.is_empty() {
+        out.push_str("+startup [io,async]\n");
+        for stmt in &module.startup {
             crate::typeck::reconstruct_stmt_pub(&mut out, stmt, 1);
         }
         out.push('\n');
     }
 
     // Shutdown block
-    if let Some(ref shutdown) = module.shutdown {
-        let effects = if shutdown.effects.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " [{}]",
-                shutdown
-                    .effects
-                    .iter()
-                    .map(|e| format!("{e:?}").to_lowercase())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        };
-        out.push_str(&format!("+shutdown{}\n", effects));
-        for stmt in &shutdown.body {
+    if !module.shutdown.is_empty() {
+        out.push_str("+shutdown [io,async]\n");
+        for stmt in &module.shutdown {
             crate::typeck::reconstruct_stmt_pub(&mut out, stmt, 1);
         }
+        out.push('\n');
+    }
+
+    // Sources
+    for src in &module.sources {
+        match src {
+            ast::SourceDecl::Timer { interval_ms } => {
+                out.push_str(&format!("+source timer({})\n", interval_ms));
+            }
+            ast::SourceDecl::Channel { name } => {
+                out.push_str(&format!("+source channel \"{}\"\n", name));
+            }
+        }
+    }
+    if !module.sources.is_empty() {
         out.push('\n');
     }
 

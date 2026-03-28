@@ -167,12 +167,17 @@ impl Program {
             for sv in &module.shared_vars {
                 self.interner.intern(&sv.name);
             }
-            // Startup/shutdown blocks
-            if let Some(ref startup) = module.startup {
-                Self::intern_function_names(&mut self.interner, startup);
-            }
-            if let Some(ref shutdown) = module.shutdown {
-                Self::intern_function_names(&mut self.interner, shutdown);
+            // Startup/shutdown statement bodies
+            Self::intern_body_names(&mut self.interner, &module.startup);
+            Self::intern_body_names(&mut self.interner, &module.shutdown);
+            // Sources
+            for src in &module.sources {
+                match src {
+                    SourceDecl::Channel { name } => {
+                        self.interner.intern(name);
+                    }
+                    SourceDecl::Timer { .. } => {}
+                }
             }
             // Event declarations
             for ev in &module.event_decls {
@@ -344,11 +349,15 @@ impl Program {
             for sv in &sub.shared_vars {
                 interner.intern(&sv.name);
             }
-            if let Some(ref startup) = sub.startup {
-                Self::intern_function_names(interner, startup);
-            }
-            if let Some(ref shutdown) = sub.shutdown {
-                Self::intern_function_names(interner, shutdown);
+            Self::intern_body_names(interner, &sub.startup);
+            Self::intern_body_names(interner, &sub.shutdown);
+            for src in &sub.sources {
+                match src {
+                    SourceDecl::Channel { name } => {
+                        interner.intern(name);
+                    }
+                    SourceDecl::Timer { .. } => {}
+                }
             }
             for ev in &sub.event_decls {
                 interner.intern(&ev.name);
@@ -527,7 +536,7 @@ pub struct SharedVarDecl {
     pub default: Expr,
 }
 
-/// Source kind for service lifecycle sources.
+/// Source kind for service lifecycle sources (used in statement-level +source operations).
 /// Represents how a source delivers messages to its handler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SourceKind {
@@ -539,12 +548,13 @@ pub enum SourceKind {
     Event(String, String),
 }
 
-/// A source declaration binding a source kind to a handler function.
+/// Module-level source declaration — a static source attached to a module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SourceDecl {
-    pub kind: SourceKind,
-    pub alias: String,
-    pub handler: String,
+pub enum SourceDecl {
+    /// Periodic timer source with interval in milliseconds.
+    Timer { interval_ms: i64 },
+    /// Named channel (mailbox) source.
+    Channel { name: String },
 }
 
 /// An event declaration: what events a module can emit.
@@ -563,12 +573,15 @@ pub struct Module {
     pub modules: Vec<Module>,
     #[serde(default)]
     pub shared_vars: Vec<SharedVarDecl>,
-    /// Optional startup block — runs when the service starts.
+    /// Startup statements — run when the service starts.
     #[serde(default)]
-    pub startup: Option<Arc<FunctionDecl>>,
-    /// Optional shutdown block — runs when the service stops.
+    pub startup: Vec<Statement>,
+    /// Shutdown statements — run when the service stops.
     #[serde(default)]
-    pub shutdown: Option<Arc<FunctionDecl>>,
+    pub shutdown: Vec<Statement>,
+    /// Static sources attached to this module.
+    #[serde(default)]
+    pub sources: Vec<SourceDecl>,
     /// Events this module declares/exports.
     #[serde(default)]
     pub event_decls: Vec<EventDecl>,
@@ -589,6 +602,7 @@ impl PartialEq for Module {
             && self.shared_vars == other.shared_vars
             && self.startup == other.startup
             && self.shutdown == other.shutdown
+            && self.sources == other.sources
             && self.event_decls == other.event_decls
     }
 }
@@ -1028,8 +1042,9 @@ mod tests {
             functions,
             modules: vec![],
             shared_vars: vec![],
-            startup: None,
-            shutdown: None,
+            startup: vec![],
+            shutdown: vec![],
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         }
@@ -2322,8 +2337,9 @@ mod tests {
                 ty: Type::Int,
                 default: Expr::Literal(Literal::Int(0)),
             }],
-            startup: None,
-            shutdown: None,
+            startup: vec![],
+            shutdown: vec![],
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         };
@@ -2627,5 +2643,149 @@ mod tests {
 
         // Top-level wins — returned unqualified
         assert_eq!(program.qualify_function_name("shared_name"), "shared_name");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Service lifecycle: SourceDecl enum, startup/shutdown Vec<Statement>, sources field
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn source_decl_timer_construction() {
+        let src = SourceDecl::Timer { interval_ms: 5000 };
+        match &src {
+            SourceDecl::Timer { interval_ms } => assert_eq!(*interval_ms, 5000),
+            _ => panic!("expected Timer"),
+        }
+    }
+
+    #[test]
+    fn source_decl_channel_construction() {
+        let src = SourceDecl::Channel {
+            name: "inbox".to_string(),
+        };
+        match &src {
+            SourceDecl::Channel { name } => assert_eq!(name, "inbox"),
+            _ => panic!("expected Channel"),
+        }
+    }
+
+    #[test]
+    fn source_decl_equality() {
+        let a = SourceDecl::Timer { interval_ms: 300 };
+        let b = SourceDecl::Timer { interval_ms: 300 };
+        let c = SourceDecl::Timer { interval_ms: 600 };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        let d = SourceDecl::Channel {
+            name: "ch1".to_string(),
+        };
+        let e = SourceDecl::Channel {
+            name: "ch1".to_string(),
+        };
+        let f = SourceDecl::Channel {
+            name: "ch2".to_string(),
+        };
+        assert_eq!(d, e);
+        assert_ne!(d, f);
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn source_decl_serde_roundtrip() {
+        let sources = vec![
+            SourceDecl::Timer { interval_ms: 1000 },
+            SourceDecl::Channel {
+                name: "events".to_string(),
+            },
+        ];
+        let json = serde_json::to_string(&sources).unwrap();
+        let deserialized: Vec<SourceDecl> = serde_json::from_str(&json).unwrap();
+        assert_eq!(sources, deserialized);
+    }
+
+    #[test]
+    fn module_with_startup_shutdown_sources() {
+        let return_stmt = Statement {
+            id: "s1".to_string(),
+            kind: StatementKind::Return {
+                value: Expr::Literal(Literal::String("ok".to_string())),
+            },
+        };
+        let module = Module {
+            id: "svc".to_string(),
+            name: "Svc".to_string(),
+            types: vec![],
+            functions: vec![],
+            modules: vec![],
+            shared_vars: vec![],
+            startup: vec![return_stmt.clone()],
+            shutdown: vec![return_stmt],
+            sources: vec![
+                SourceDecl::Timer { interval_ms: 5000 },
+                SourceDecl::Channel {
+                    name: "inbox".to_string(),
+                },
+            ],
+            event_decls: vec![],
+            fn_index: HashMap::new(),
+        };
+        assert_eq!(module.startup.len(), 1);
+        assert_eq!(module.shutdown.len(), 1);
+        assert_eq!(module.sources.len(), 2);
+    }
+
+    #[test]
+    fn module_empty_startup_shutdown_sources_default() {
+        let module = make_module("Empty", vec![]);
+        assert!(module.startup.is_empty());
+        assert!(module.shutdown.is_empty());
+        assert!(module.sources.is_empty());
+    }
+
+    #[test]
+    fn module_serde_backward_compat_missing_sources() {
+        // Simulate deserializing old JSON that lacks the `sources` field
+        let json = r#"{
+            "id": "m1",
+            "name": "Old",
+            "types": [],
+            "functions": [],
+            "modules": [],
+            "shared_vars": [],
+            "startup": [],
+            "shutdown": [],
+            "event_decls": []
+        }"#;
+        let module: Module = serde_json::from_str(json).unwrap();
+        assert_eq!(module.name, "Old");
+        assert!(
+            module.sources.is_empty(),
+            "sources should default to empty vec"
+        );
+        assert!(module.startup.is_empty());
+        assert!(module.shutdown.is_empty());
+    }
+
+    #[test]
+    fn module_equality_includes_sources() {
+        let a = Module {
+            id: "m".to_string(),
+            name: "M".to_string(),
+            types: vec![],
+            functions: vec![],
+            modules: vec![],
+            shared_vars: vec![],
+            startup: vec![],
+            shutdown: vec![],
+            sources: vec![SourceDecl::Timer { interval_ms: 100 }],
+            event_decls: vec![],
+            fn_index: HashMap::new(),
+        };
+        let mut b = a.clone();
+        assert_eq!(a, b);
+
+        b.sources = vec![SourceDecl::Timer { interval_ms: 200 }];
+        assert_ne!(a, b, "different sources should make modules unequal");
     }
 }
