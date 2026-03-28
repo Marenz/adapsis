@@ -4693,14 +4693,12 @@ mod tests {
         let config = test_config();
         let bad_source = "+fn bad ()->String\n  +let user:String = {first: \"a\" second: \"b\"}\n  +return user\n+end";
 
-        for _ in 0..2 {
-            let Json(response) = mutate(
-                State(config.clone()),
-                Json(MutateRequest { source: bad_source.to_string() }),
-            ).await;
-            assert!(!response.results[0].success);
-            assert!(!response.results[0].message.contains("HINT:"));
-        }
+        let Json(first) = mutate(
+            State(config.clone()),
+            Json(MutateRequest { source: bad_source.to_string() }),
+        ).await;
+        assert!(!first.results[0].success);
+        assert!(!first.results[0].message.contains("Suggestion:"));
 
         let Json(response) = mutate(
             State(config),
@@ -4708,8 +4706,8 @@ mod tests {
         ).await;
 
         assert!(!response.results[0].success);
-        assert!(response.results[0].message.contains("HINT:"), "got: {}", response.results[0].message);
-        assert!(response.results[0].message.contains("Check struct literal syntax"), "got: {}", response.results[0].message);
+        assert!(response.results[0].message.contains("Suggestion:"), "got: {}", response.results[0].message);
+        assert!(response.results[0].message.contains("missing commas between fields"), "got: {}", response.results[0].message);
     }
 
     #[tokio::test]

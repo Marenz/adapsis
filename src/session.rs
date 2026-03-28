@@ -74,6 +74,10 @@ impl FailureHistory {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 /// Thread-safe handle to the runtime state.
@@ -1561,6 +1565,10 @@ pub fn summarize_failure_patterns(runtime: &RuntimeState) -> String {
         .join(", ")
 }
 
+pub fn clear_failure_history(runtime: &mut RuntimeState) {
+    runtime.failure_history.clear();
+}
+
 pub fn recent_failure_hint(runtime: &RuntimeState, message: &str) -> Option<String> {
     let recent = runtime.failure_history.recent_slice(5);
     if recent.is_empty() {
@@ -1573,10 +1581,8 @@ pub fn recent_failure_hint(runtime: &RuntimeState, message: &str) -> Option<Stri
         .filter(|entry| detect_failure_pattern(entry).is_some_and(|(label, _)| label == pattern_label))
         .count();
 
-    if count >= 3 {
-        Some(format!(
-            "HINT: This error has occurred {count} times recently. Try a different approach: {suggestion}"
-        ))
+    if count >= 2 {
+        Some(format!("Suggestion: {suggestion}"))
     } else {
         None
     }
@@ -1597,30 +1603,35 @@ fn classify_failure(message: &str) -> &'static str {
     }
 }
 
-fn detect_failure_pattern(message: &str) -> Option<(&'static str, &'static str)> {
+fn detect_failure_pattern(message: &str) -> Option<(&'static str, String)> {
     let lower = message.to_lowercase();
     if lower.contains("undefined variable") {
-        Some((
-            "undefined variable",
-            "Check variable names and scope. Make sure the value is declared before use or passed as a function parameter.",
-        ))
+        let var_name = extract_failure_hint(message).unwrap_or_else(|| "that variable".to_string());
+        let suggestion = format!(
+            "Variable `{var_name}` is repeatedly undefined. Check spelling, or ensure it's declared with +let before use."
+        );
+        Some(("undefined variable", suggestion))
     } else if lower.contains("expected `,") || lower.contains("expected `}") {
         Some((
             "expected `,` or `}`",
-            "Check struct literal syntax and commas between fields.",
+            "Repeated struct literal parse errors. Check for missing commas between fields.".to_string(),
         ))
     } else if lower.contains("line ") && lower.contains(": expected") {
         Some((
             "line N: expected",
-            "Check indentation and statement syntax around the reported line.",
+            "Check indentation and statement syntax around the reported line.".to_string(),
         ))
     } else if lower.contains("rejected") {
-        Some((
-            "rejected",
-            "Check that existing tests still pass after the mutation.",
-        ))
+        let fn_name = extract_failure_hint(message).unwrap_or_else(|| "the function".to_string());
+        let suggestion = format!(
+            "Function `{fn_name}` keeps failing tests. Try ?source to inspect current definition, or !replace specific statements."
+        );
+        Some(("rejected", suggestion))
     } else {
-        None
+        Some((
+            "generic",
+            "This error has occurred multiple times recently. Try a different approach.".to_string(),
+        ))
     }
 }
 
@@ -2127,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_failure_hint_detects_three_of_last_five() {
+    fn recent_failure_hint_detects_repeated_recent_errors() {
         let mut runtime = RuntimeState::default();
         record_failure(&mut runtime, "undefined variable `a`");
         record_failure(&mut runtime, "type mismatch");
@@ -2135,8 +2146,8 @@ mod tests {
         record_failure(&mut runtime, "undefined variable `c`");
 
         let hint = recent_failure_hint(&runtime, "undefined variable `c`").unwrap();
-        assert!(hint.contains("occurred 3 times recently"), "got: {hint}");
-        assert!(hint.contains("Check variable names and scope"), "got: {hint}");
+        assert!(hint.contains("Suggestion:"), "got: {hint}");
+        assert!(hint.contains("Variable `c` is repeatedly undefined"), "got: {hint}");
     }
 
     // ═════════════════════════════════════════════════════════════════════
