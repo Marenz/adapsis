@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use crate::parser;
@@ -29,6 +29,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             let mut converted = convert_function(fn_decl)?;
             // Resolve union type references: Struct(name) → TaggedUnion(name) where appropriate
             resolve_union_types_in_function(&mut converted, program);
+            validate_function_effects(program, &converted, None)?;
             // Check for builtin name collision
             if is_builtin_name(&converted.name) {
                 bail!(
@@ -251,6 +252,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     }
                     resolve_union_types_in_stmts(&mut converted.body, &union_names);
                 }
+                validate_function_effects(program, &converted, Some(&decl.name))?;
                 // Now mutably access module to add/replace function
                 let m = &mut program.modules[mod_idx];
                 if let Some(pos) = m.functions.iter().position(|f| f.name == converted.name) {
@@ -335,30 +337,34 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
         1 => {
             // function_name — replace entire body
             let fn_name = parts[0];
-            let func = program
-                .functions
-                .iter_mut()
-                .find(|f| f.name == fn_name)
-                .map(|f| std::sync::Arc::make_mut(f))
-                .or_else(|| {
-                    program
-                        .modules
-                        .iter_mut()
-                        .flat_map(|m| m.functions.iter_mut())
-                        .find(|f| f.name == fn_name)
-                        .map(|f| std::sync::Arc::make_mut(f))
-                })
-                .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
             let mut new_body = vec![];
             for (i, op) in replace.body.iter().enumerate() {
                 let mut stmt = convert_statement_op(op)?;
                 stmt.id = format!("{fn_name}.s{}", i + 1);
                 new_body.push(stmt);
             }
-            func.body = new_body;
+            let (func_snapshot, stmt_count) = {
+                let func = program
+                    .functions
+                    .iter_mut()
+                    .find(|f| f.name == fn_name)
+                    .map(|f| std::sync::Arc::make_mut(f))
+                    .or_else(|| {
+                        program
+                            .modules
+                            .iter_mut()
+                            .flat_map(|m| m.functions.iter_mut())
+                            .find(|f| f.name == fn_name)
+                            .map(|f| std::sync::Arc::make_mut(f))
+                    })
+                    .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
+                func.body = new_body;
+                (func.clone(), func.body.len())
+            };
+            validate_function_effects(program, &func_snapshot, None)?;
             Ok(format!(
                 "replaced entire body of `{fn_name}` ({} statements)",
-                func.body.len()
+                stmt_count
             ))
         }
         2 => {
@@ -379,6 +385,42 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 // Module.function — replace entire body
                 let mod_name = parts[0];
                 let fn_name = parts[1];
+                let mut new_body = vec![];
+                for (i, op) in replace.body.iter().enumerate() {
+                    let mut stmt = convert_statement_op(op)?;
+                    stmt.id = format!("{mod_name}.{fn_name}.s{}", i + 1);
+                    new_body.push(stmt);
+                }
+                let (func_snapshot, stmt_count) = {
+                    let module = program
+                        .modules
+                        .iter_mut()
+                        .find(|m| m.name == mod_name)
+                        .ok_or_else(|| anyhow!("module `{mod_name}` not found for replace"))?;
+                    let func = module
+                        .functions
+                        .iter_mut()
+                        .find(|f| f.name == fn_name)
+                        .map(|f| std::sync::Arc::make_mut(f))
+                        .ok_or_else(|| {
+                            anyhow!("function `{fn_name}` not found in module `{mod_name}`")
+                        })?;
+                    func.body = new_body;
+                    (func.clone(), func.body.len())
+                };
+                validate_function_effects(program, &func_snapshot, Some(mod_name))?;
+                Ok(format!(
+                    "replaced entire body of `{mod_name}.{fn_name}` ({} statements)",
+                    stmt_count
+                ))
+            }
+        }
+        3 => {
+            // Module.function.sN
+            let mod_name = parts[0];
+            let fn_name = parts[1];
+            let stmt_id = parts[2];
+            let func_snapshot = {
                 let module = program
                     .modules
                     .iter_mut()
@@ -389,39 +431,11 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                     .iter_mut()
                     .find(|f| f.name == fn_name)
                     .map(|f| std::sync::Arc::make_mut(f))
-                    .ok_or_else(|| {
-                        anyhow!("function `{fn_name}` not found in module `{mod_name}`")
-                    })?;
-                let mut new_body = vec![];
-                for (i, op) in replace.body.iter().enumerate() {
-                    let mut stmt = convert_statement_op(op)?;
-                    stmt.id = format!("{mod_name}.{fn_name}.s{}", i + 1);
-                    new_body.push(stmt);
-                }
-                func.body = new_body;
-                Ok(format!(
-                    "replaced entire body of `{mod_name}.{fn_name}` ({} statements)",
-                    func.body.len()
-                ))
-            }
-        }
-        3 => {
-            // Module.function.sN
-            let mod_name = parts[0];
-            let fn_name = parts[1];
-            let stmt_id = parts[2];
-            let module = program
-                .modules
-                .iter_mut()
-                .find(|m| m.name == mod_name)
-                .ok_or_else(|| anyhow!("module `{mod_name}` not found for replace"))?;
-            let func = module
-                .functions
-                .iter_mut()
-                .find(|f| f.name == fn_name)
-                .map(|f| std::sync::Arc::make_mut(f))
-                .ok_or_else(|| anyhow!("function `{fn_name}` not found in module `{mod_name}`"))?;
-            replace_statement(&mut func.body, stmt_id, &replace.body)?;
+                    .ok_or_else(|| anyhow!("function `{fn_name}` not found in module `{mod_name}`"))?;
+                replace_statement(&mut func.body, stmt_id, &replace.body)?;
+                func.clone()
+            };
+            validate_function_effects(program, &func_snapshot, Some(mod_name))?;
             Ok(format!("replaced `{}`", replace.target))
         }
         _ => bail!(
@@ -459,6 +473,214 @@ fn replace_statement(
     body.splice((index - 1)..index, new_stmts);
     Ok(())
 }
+
+fn validate_function_effects(
+    program: &ast::Program,
+    func: &ast::FunctionDecl,
+    current_module: Option<&str>,
+) -> Result<()> {
+    let shared_names: HashSet<String> = current_module
+        .and_then(|module_name| program.modules.iter().find(|m| m.name == module_name))
+        .map(|module| {
+            module
+                .shared_vars
+                .iter()
+                .flat_map(|sv| [sv.name.clone(), format!("{}.{}", module.name, sv.name)])
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut diagnostics = EffectDiagnostics::default();
+    collect_effect_requirements(program, func, current_module, &shared_names, &func.body, &mut diagnostics);
+
+    if diagnostics.uses_await
+        && !(has_effect(&func.effects, ast::Effect::Io) && has_effect(&func.effects, ast::Effect::Async))
+    {
+        bail!(
+            "function `{}` uses +await but is missing [io,async] effects",
+            func.name
+        );
+    }
+
+    if diagnostics.mutates_shared && !has_effect(&func.effects, ast::Effect::Mut) {
+        bail!(
+            "function `{}` modifies shared state but is missing [mut] effect",
+            func.name
+        );
+    }
+
+    if let Some(callee) = diagnostics.fail_callee
+        && !has_effect(&func.effects, ast::Effect::Fail)
+    {
+        bail!(
+            "function `{}` auto-propagates errors from `{}` but is missing [fail] effect",
+            func.name,
+            callee
+        );
+    }
+
+    Ok(())
+}
+
+fn has_effect(effects: &[ast::Effect], wanted: ast::Effect) -> bool {
+    effects.iter().any(|effect| *effect == wanted)
+}
+
+#[derive(Default)]
+struct EffectDiagnostics {
+    uses_await: bool,
+    mutates_shared: bool,
+    fail_callee: Option<String>,
+}
+
+fn collect_effect_requirements(
+    program: &ast::Program,
+    current_func: &ast::FunctionDecl,
+    current_module: Option<&str>,
+    shared_names: &HashSet<String>,
+    stmts: &[ast::Statement],
+    diagnostics: &mut EffectDiagnostics,
+) {
+    for stmt in stmts {
+        match &stmt.kind {
+            ast::StatementKind::Await { .. } => diagnostics.uses_await = true,
+            ast::StatementKind::Set { name, value } => {
+                if shared_names.contains(name) {
+                    diagnostics.mutates_shared = true;
+                }
+                collect_expr_effect_requirements(program, current_func, current_module, value, diagnostics);
+            }
+            ast::StatementKind::Call { binding, call } => {
+                if diagnostics.fail_callee.is_none()
+                    && binding.as_ref().is_none_or(|b| !matches!(b.ty, ast::Type::Result(_)))
+                    && callee_has_fail_effect(program, current_func, current_module, &call.callee)
+                {
+                    diagnostics.fail_callee = Some(qualify_callee_name(program, current_module, &call.callee));
+                }
+                for arg in &call.args {
+                    collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
+                }
+            }
+            ast::StatementKind::Let { value, .. }
+            | ast::StatementKind::Return { value }
+            | ast::StatementKind::Yield { value } => {
+                collect_expr_effect_requirements(program, current_func, current_module, value, diagnostics);
+            }
+            ast::StatementKind::Check { condition, .. } => {
+                collect_expr_effect_requirements(program, current_func, current_module, condition, diagnostics);
+            }
+            ast::StatementKind::Branch { condition, then_body, else_body } => {
+                collect_expr_effect_requirements(program, current_func, current_module, condition, diagnostics);
+                collect_effect_requirements(program, current_func, current_module, shared_names, then_body, diagnostics);
+                collect_effect_requirements(program, current_func, current_module, shared_names, else_body, diagnostics);
+            }
+            ast::StatementKind::While { condition, body } => {
+                collect_expr_effect_requirements(program, current_func, current_module, condition, diagnostics);
+                collect_effect_requirements(program, current_func, current_module, shared_names, body, diagnostics);
+            }
+            ast::StatementKind::Each { iterator, body, .. } => {
+                collect_expr_effect_requirements(program, current_func, current_module, iterator, diagnostics);
+                collect_effect_requirements(program, current_func, current_module, shared_names, body, diagnostics);
+            }
+            ast::StatementKind::Match { expr, arms } => {
+                collect_expr_effect_requirements(program, current_func, current_module, expr, diagnostics);
+                for arm in arms {
+                    collect_effect_requirements(program, current_func, current_module, shared_names, &arm.body, diagnostics);
+                }
+            }
+            ast::StatementKind::Spawn { call, .. } => {
+                for arg in &call.args {
+                    collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
+                }
+            }
+        }
+    }
+}
+
+fn collect_expr_effect_requirements(
+    program: &ast::Program,
+    current_func: &ast::FunctionDecl,
+    current_module: Option<&str>,
+    expr: &ast::Expr,
+    diagnostics: &mut EffectDiagnostics,
+) {
+    match expr {
+        ast::Expr::Call(call) => {
+            if diagnostics.fail_callee.is_none()
+                && callee_has_fail_effect(program, current_func, current_module, &call.callee)
+            {
+                diagnostics.fail_callee = Some(qualify_callee_name(program, current_module, &call.callee));
+            }
+            for arg in &call.args {
+                collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
+            }
+        }
+        ast::Expr::FieldAccess { base, .. } => {
+            collect_expr_effect_requirements(program, current_func, current_module, base, diagnostics);
+        }
+        ast::Expr::Binary { left, right, .. } => {
+            collect_expr_effect_requirements(program, current_func, current_module, left, diagnostics);
+            collect_expr_effect_requirements(program, current_func, current_module, right, diagnostics);
+        }
+        ast::Expr::Unary { expr, .. } => {
+            collect_expr_effect_requirements(program, current_func, current_module, expr, diagnostics);
+        }
+        ast::Expr::StructInit { fields, .. } => {
+            for field in fields {
+                collect_expr_effect_requirements(program, current_func, current_module, &field.value, diagnostics);
+            }
+        }
+        ast::Expr::Literal(_) | ast::Expr::Identifier(_) => {}
+    }
+}
+
+fn callee_has_fail_effect(
+    program: &ast::Program,
+    current_func: &ast::FunctionDecl,
+    current_module: Option<&str>,
+    callee: &str,
+) -> bool {
+    resolve_callee_function(program, current_func, current_module, callee)
+        .is_some_and(|func| func.effects.contains(&ast::Effect::Fail))
+}
+
+fn qualify_callee_name(program: &ast::Program, current_module: Option<&str>, callee: &str) -> String {
+    if callee.contains('.') {
+        return callee.to_string();
+    }
+    if let Some(module_name) = current_module
+        && let Some(module) = program.modules.iter().find(|m| m.name == module_name)
+        && module.get_function(callee).is_some()
+    {
+        return format!("{}.{}", module_name, callee);
+    }
+    program.qualify_function_name(callee)
+}
+
+fn resolve_callee_function<'a>(
+    program: &'a ast::Program,
+    current_func: &'a ast::FunctionDecl,
+    current_module: Option<&str>,
+    callee: &str,
+) -> Option<&'a ast::FunctionDecl> {
+    if callee == current_func.name {
+        return Some(current_func);
+    }
+    if let Some(module_name) = current_module {
+        let qualified_current = format!("{}.{}", module_name, current_func.name);
+        if callee == qualified_current {
+            return Some(current_func);
+        }
+        if !callee.contains('.')
+            && let Some(module) = program.modules.iter().find(|m| m.name == module_name)
+            && let Some(func) = module.get_function(callee)
+        {
+            return Some(func);
+        }
+    }
+    program.get_function(callee)
+}
+
 
 // --- Conversion from parser types to AST types ---
 
@@ -1845,5 +2067,63 @@ mod tests {
             result
         );
         assert_eq!(program.modules[0].functions.len(), 2);
+    }
+
+    #[test]
+    fn reject_function_with_await_missing_io_async_effects() {
+        let mut program = ast::Program::default();
+        let source = "\
++fn fetch ()->String
+  +await body:String = http_get(\"https://example.com\")
+  +return body
+";
+        let ops = parser::parse(source).unwrap();
+        let err = apply_and_validate(&mut program, &ops[0]).unwrap_err().to_string();
+        assert!(err.contains("uses +await but is missing [io,async] effects"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_module_function_modifying_shared_state_without_mut_effect() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Counter
++shared total:Int = 0
++fn bump ()->Int
+  +set total = total + 1
+  +return total
+";
+        let ops = parser::parse(source).unwrap();
+        let err = apply_and_validate(&mut program, &ops[0]).unwrap_err().to_string();
+        assert!(err.contains("modifies shared state but is missing [mut] effect"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_fail_auto_propagation_without_fail_effect() {
+        let mut program = ast::Program::default();
+        let helper = parser::parse("+fn validate (x:Int)->Result<Int> [fail]\n  +return x\n").unwrap();
+        apply_and_validate(&mut program, &helper[0]).unwrap();
+
+        let caller = parser::parse("+fn run (x:Int)->Int\n  +call y:Int = validate(x)\n  +return y\n").unwrap();
+        let err = apply_and_validate(&mut program, &caller[0]).unwrap_err().to_string();
+        assert!(err.contains("auto-propagates errors from `validate` but is missing [fail] effect"), "got: {err}");
+    }
+
+    #[test]
+    fn allow_effectful_function_when_effects_match_body() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Counter
++shared total:Int = 0
++fn next ()->Int [io,async,mut,fail]
+  +await raw:String = http_get(\"https://example.com\")
+  +set total = total + 1
+  +call parsed:Int = parse_num(raw)
+  +return parsed + total
++fn parse_num (raw:String)->Result<Int> [fail]
+  +return 1
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "expected valid effects, got: {result:?}");
     }
 }
