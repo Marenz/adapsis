@@ -116,6 +116,50 @@ pub fn reconstruct_module_source(module: &ast::Module) -> String {
         out.push('\n');
     }
 
+    // Startup block
+    if let Some(ref startup) = module.startup {
+        let effects = if startup.effects.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [{}]",
+                startup
+                    .effects
+                    .iter()
+                    .map(|e| format!("{e:?}").to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        out.push_str(&format!("+startup{}\n", effects));
+        for stmt in &startup.body {
+            crate::typeck::reconstruct_stmt_pub(&mut out, stmt, 1);
+        }
+        out.push('\n');
+    }
+
+    // Shutdown block
+    if let Some(ref shutdown) = module.shutdown {
+        let effects = if shutdown.effects.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [{}]",
+                shutdown
+                    .effects
+                    .iter()
+                    .map(|e| format!("{e:?}").to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        out.push_str(&format!("+shutdown{}\n", effects));
+        for stmt in &shutdown.body {
+            crate::typeck::reconstruct_stmt_pub(&mut out, stmt, 1);
+        }
+        out.push('\n');
+    }
+
     // Then functions
     for func in &module.functions {
         out.push_str(&reconstruct_function_source(func));

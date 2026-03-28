@@ -167,6 +167,17 @@ impl Program {
             for sv in &module.shared_vars {
                 self.interner.intern(&sv.name);
             }
+            // Startup/shutdown blocks
+            if let Some(ref startup) = module.startup {
+                Self::intern_function_names(&mut self.interner, startup);
+            }
+            if let Some(ref shutdown) = module.shutdown {
+                Self::intern_function_names(&mut self.interner, shutdown);
+            }
+            // Event declarations
+            for ev in &module.event_decls {
+                self.interner.intern(&ev.name);
+            }
             // Sub-modules (recursive)
             Self::intern_module_names_recursive(&mut self.interner, module);
         }
@@ -264,6 +275,24 @@ impl Program {
                 StatementKind::Yield { value } => {
                     Self::intern_expr_names(interner, value);
                 }
+                StatementKind::SourceAdd { alias, handler, .. } => {
+                    interner.intern(alias);
+                    interner.intern(handler);
+                }
+                StatementKind::SourceRemove { alias } => {
+                    interner.intern(alias);
+                }
+                StatementKind::SourceReplace { alias, handler, .. } => {
+                    interner.intern(alias);
+                    interner.intern(handler);
+                }
+                StatementKind::EventRegister { name, .. } => {
+                    interner.intern(name);
+                }
+                StatementKind::EventEmit { name, value } => {
+                    interner.intern(name);
+                    Self::intern_expr_names(interner, value);
+                }
             }
         }
     }
@@ -314,6 +343,15 @@ impl Program {
             }
             for sv in &sub.shared_vars {
                 interner.intern(&sv.name);
+            }
+            if let Some(ref startup) = sub.startup {
+                Self::intern_function_names(interner, startup);
+            }
+            if let Some(ref shutdown) = sub.shutdown {
+                Self::intern_function_names(interner, shutdown);
+            }
+            for ev in &sub.event_decls {
+                interner.intern(&ev.name);
             }
             Self::intern_module_names_recursive(interner, sub);
         }
@@ -489,6 +527,33 @@ pub struct SharedVarDecl {
     pub default: Expr,
 }
 
+/// Source kind for service lifecycle sources.
+/// Represents how a source delivers messages to its handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SourceKind {
+    /// `timer(ms)` — periodic timer with interval in milliseconds
+    Timer(u64),
+    /// `channel` — named mailbox for receiving messages
+    Channel,
+    /// `Module.event_name` — cross-module event subscription
+    Event(String, String),
+}
+
+/// A source declaration binding a source kind to a handler function.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceDecl {
+    pub kind: SourceKind,
+    pub alias: String,
+    pub handler: String,
+}
+
+/// An event declaration: what events a module can emit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventDecl {
+    pub name: String,
+    pub payload_type: Type,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
     pub id: NodeId,
@@ -498,6 +563,15 @@ pub struct Module {
     pub modules: Vec<Module>,
     #[serde(default)]
     pub shared_vars: Vec<SharedVarDecl>,
+    /// Optional startup block — runs when the service starts.
+    #[serde(default)]
+    pub startup: Option<Arc<FunctionDecl>>,
+    /// Optional shutdown block — runs when the service stops.
+    #[serde(default)]
+    pub shutdown: Option<Arc<FunctionDecl>>,
+    /// Events this module declares/exports.
+    #[serde(default)]
+    pub event_decls: Vec<EventDecl>,
     /// Maps interned function name → index in this module's `functions` Vec.
     /// Uses `InternedId` (u32) keys for faster hash + comparison on lookup.
     /// Derived index, not serialized. Public so validators can construct Module literals.
@@ -513,6 +587,9 @@ impl PartialEq for Module {
             && self.functions == other.functions
             && self.modules == other.modules
             && self.shared_vars == other.shared_vars
+            && self.startup == other.startup
+            && self.shutdown == other.shutdown
+            && self.event_decls == other.event_decls
     }
 }
 
@@ -757,6 +834,32 @@ pub enum StatementKind {
     Yield {
         value: Expr,
     },
+    /// `+source add timer(300000) as poll -> on_tick`
+    SourceAdd {
+        kind: SourceKind,
+        alias: String,
+        handler: String,
+    },
+    /// `+source remove poll`
+    SourceRemove {
+        alias: String,
+    },
+    /// `+source replace poll timer(600000) -> on_tick`
+    SourceReplace {
+        alias: String,
+        kind: SourceKind,
+        handler: String,
+    },
+    /// `+event register new_message(String)`
+    EventRegister {
+        name: String,
+        payload_type: Type,
+    },
+    /// `+event emit new_message expr`
+    EventEmit {
+        name: String,
+        value: Expr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -925,6 +1028,9 @@ mod tests {
             functions,
             modules: vec![],
             shared_vars: vec![],
+            startup: None,
+            shutdown: None,
+            event_decls: vec![],
             fn_index: HashMap::new(),
         }
     }
@@ -2216,6 +2322,9 @@ mod tests {
                 ty: Type::Int,
                 default: Expr::Literal(Literal::Int(0)),
             }],
+            startup: None,
+            shutdown: None,
+            event_decls: vec![],
             fn_index: HashMap::new(),
         };
         program.modules.push(module);

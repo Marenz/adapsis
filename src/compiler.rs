@@ -852,6 +852,13 @@ fn compile_statement(ctx: &mut CompilationContext, stmt: &ast::Statement) -> Res
         ast::StatementKind::Yield { .. } => {
             bail!("yield not yet supported in compiler")
         }
+        ast::StatementKind::SourceAdd { .. }
+        | ast::StatementKind::SourceRemove { .. }
+        | ast::StatementKind::SourceReplace { .. }
+        | ast::StatementKind::EventRegister { .. }
+        | ast::StatementKind::EventEmit { .. } => {
+            bail!("source/event statements not supported in compiler")
+        }
     }
 }
 
