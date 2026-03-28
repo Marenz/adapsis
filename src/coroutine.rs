@@ -946,6 +946,24 @@ impl CoroutineHandle {
                     .unwrap_or_else(|| "No library errors.".to_string());
                 return Ok(Value::string(result));
             }
+            "failure_history" => {
+                if !args.is_empty() {
+                    bail!("failure_history expects no arguments");
+                }
+                let result = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| crate::session::format_failure_history(&state)))
+                    .unwrap_or_else(|| "No recent mutation failures.".to_string());
+                return Ok(Value::string(result));
+            }
+            "failure_patterns" => {
+                if !args.is_empty() {
+                    bail!("failure_patterns expects no arguments");
+                }
+                let result = crate::eval::get_shared_runtime()
+                    .and_then(|rt| rt.read().ok().map(|state| crate::session::summarize_failure_patterns(&state)))
+                    .unwrap_or_else(|| "No recent mutation failures.".to_string());
+                return Ok(Value::string(result));
+            }
 
             // ── library_reload — reload module(s) from disk ──
             "library_reload" => {
@@ -2438,6 +2456,42 @@ mod tests {
     }
 
     #[test]
+    fn failure_history_returns_recent_failures() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
+        if let Ok(mut state) = rt.write() {
+            crate::session::record_failure(&mut state, 3, "undefined variable `user_id`");
+            crate::session::record_failure(&mut state, 4, "type mismatch in let binding");
+        }
+        let result = unwrap_string(handle.execute_await("failure_history", &[]).unwrap());
+        assert!(result.contains("r4: type mismatch in let binding"), "got: {result}");
+        assert!(result.contains("r3: undefined variable `user_id`"), "got: {result}");
+    }
+
+    #[test]
+    fn failure_patterns_groups_similar_errors() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
+        if let Ok(mut state) = rt.write() {
+            crate::session::record_failure(&mut state, 1, "undefined variable `user_id`");
+            crate::session::record_failure(&mut state, 2, "undefined variable `account_id`");
+            crate::session::record_failure(&mut state, 3, "parse error: unexpected +end");
+        }
+        let result = unwrap_string(handle.execute_await("failure_patterns", &[]).unwrap());
+        assert!(result.contains("2x undefined variable errors"), "got: {result}");
+        assert!(result.contains("latest: `account_id`"), "got: {result}");
+        assert!(result.contains("1x parse errors"), "got: {result}");
+    }
+
+    #[test]
+    fn failure_patterns_with_args_fails() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let result = handle.execute_await("failure_patterns", &[Value::string("unexpected")]);
+        assert!(result.is_err(), "should fail with extra args");
+        assert!(result.unwrap_err().to_string().contains("expects no arguments"));
+    }
+
+    #[test]
     fn query_no_program_errors() {
         // Clear the thread-local program
         crate::eval::set_shared_program(None);
@@ -3292,7 +3346,7 @@ mod tests {
             "move_symbols", "watch_start", "agent_spawn", "msg_send", "query_inbox", "inbox_read", "inbox_clear", "trace_run",
             "route_list", "route_add", "route_remove",
             "undo", "sandbox_enter", "sandbox_merge", "sandbox_discard",
-            "mock_set", "mock_clear", "sse_send",
+            "mock_set", "mock_clear", "sse_send", "failure_history", "failure_patterns",
             "module_create", "test_run", "fn_replace",
         ] {
             assert!(

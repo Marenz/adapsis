@@ -38,6 +38,8 @@ pub struct RuntimeState {
     /// Each entry is (module_name, error_message). Synced from LibraryState.load_errors.
     #[serde(skip)]
     pub library_load_errors: Vec<(String, String)>,
+    /// Recent mutation failures for pattern detection and self-correction.
+    pub failure_history: Vec<(u64, String)>,
 }
 
 /// Thread-safe handle to the runtime state.
@@ -155,6 +157,8 @@ impl SessionMeta {
         }
     }
 }
+
+const MAX_FAILURE_HISTORY: usize = 20;
 
 /// Snapshot of program + runtime state saved when entering a sandbox.
 #[derive(Debug, Clone)]
@@ -377,6 +381,7 @@ impl AgentBranch {
             }
         }
 
+        record_mutation_failures(&mut self.runtime_state, self.fork_revision as u64, &results);
         self.mutations.push(source.to_string());
         Ok(results)
     }
@@ -1029,6 +1034,8 @@ impl Session {
             }
         }
 
+        record_mutation_failures(&mut self.runtime, self.meta.revision as u64, &results);
+
         // Initialize any newly-declared shared variables
         self.init_shared_vars();
 
@@ -1212,6 +1219,8 @@ impl Session {
                 );
             }
         }
+
+        record_mutation_failures(&mut self.runtime, self.meta.revision as u64, &results);
 
         // Initialize any newly-declared shared variables
         self.init_shared_vars();
@@ -1401,6 +1410,9 @@ pub fn apply_to_tiers(
         sandbox: sandbox.clone(),
     };
     let result = session.apply(source);
+    if let Err(e) = &result {
+        record_failure(&mut session.runtime, session.meta.revision as u64, format!("parse error: {e}"));
+    }
     *program = session.program;
     *runtime = session.runtime;
     *meta = session.meta;
@@ -1424,6 +1436,9 @@ pub async fn apply_to_tiers_async(
         sandbox: sandbox.clone(),
     };
     let result = session.apply_async(source, io_sender).await;
+    if let Err(e) = &result {
+        record_failure(&mut session.runtime, session.meta.revision as u64, format!("parse error: {e}"));
+    }
     *program = session.program;
     *runtime = session.runtime;
     *meta = session.meta;
@@ -1449,6 +1464,96 @@ pub fn drain_messages(meta: &mut SessionMeta, agent_name: &str) -> Vec<AgentMess
 
 pub fn peek_messages<'a>(meta: &'a SessionMeta, agent_name: &str) -> &'a [AgentMessage] {
     meta.agent_mailbox.get(agent_name).map(|v| v.as_slice()).unwrap_or(&[])
+}
+
+pub fn record_failure(runtime: &mut RuntimeState, revision: u64, message: impl Into<String>) {
+    runtime.failure_history.push((revision, message.into()));
+    if runtime.failure_history.len() > MAX_FAILURE_HISTORY {
+        let excess = runtime.failure_history.len() - MAX_FAILURE_HISTORY;
+        runtime.failure_history.drain(0..excess);
+    }
+}
+
+pub fn record_mutation_failures(runtime: &mut RuntimeState, revision: u64, results: &[(String, bool)]) {
+    for (message, ok) in results {
+        if !ok {
+            record_failure(runtime, revision, message.clone());
+        }
+    }
+}
+
+pub fn format_failure_history(runtime: &RuntimeState) -> String {
+    if runtime.failure_history.is_empty() {
+        return "No recent mutation failures.".to_string();
+    }
+
+    runtime.failure_history.iter().rev()
+        .map(|(revision, message)| format!("r{revision}: {message}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn summarize_failure_patterns(runtime: &RuntimeState) -> String {
+    if runtime.failure_history.is_empty() {
+        return "No recent mutation failures.".to_string();
+    }
+
+    #[derive(Default)]
+    struct PatternBucket {
+        count: usize,
+        latest_hint: Option<String>,
+    }
+
+    let mut buckets: HashMap<&'static str, PatternBucket> = HashMap::new();
+    let mut order: Vec<&'static str> = Vec::new();
+
+    for (_, message) in &runtime.failure_history {
+        let category = classify_failure(message);
+        let entry = buckets.entry(category).or_default();
+        if entry.count == 0 {
+            order.push(category);
+        }
+        entry.count += 1;
+        entry.latest_hint = extract_failure_hint(message);
+    }
+
+    order.into_iter()
+        .filter_map(|category| {
+            buckets.get(category).map(|bucket| {
+                let base = format!("{}x {}", bucket.count, category);
+                match &bucket.latest_hint {
+                    Some(hint) => format!("{base} (latest: `{hint}`)"),
+                    None => base,
+                }
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn classify_failure(message: &str) -> &'static str {
+    let lower = message.to_lowercase();
+    if lower.contains("undefined variable") {
+        "undefined variable errors"
+    } else if lower.contains("type mismatch") {
+        "type mismatch errors"
+    } else if lower.contains("parse error") {
+        "parse errors"
+    } else if lower.contains("missing [") || lower.contains("validation failed") {
+        "effect/validation errors"
+    } else {
+        "other errors"
+    }
+}
+
+fn extract_failure_hint(message: &str) -> Option<String> {
+    if let Some((_, rest)) = message.split_once('`')
+        && let Some((hint, _)) = rest.split_once('`')
+        && !hint.is_empty()
+    {
+        return Some(hint.to_string());
+    }
+    None
 }
 
 pub fn is_function_tested(program: &ast::Program, fn_name: &str) -> bool {
@@ -1915,6 +2020,31 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v.get("revision").is_some(), "revision should be top-level: {json}");
         assert!(v.get("meta").is_none(), "meta should not be a separate key: {json}");
+    }
+
+    #[test]
+    fn record_mutation_failures_keeps_last_twenty_entries() {
+        let mut runtime = RuntimeState::default();
+        for i in 0..25_u64 {
+            record_failure(&mut runtime, i, format!("error {i}"));
+        }
+
+        assert_eq!(runtime.failure_history.len(), 20);
+        assert_eq!(runtime.failure_history.first().unwrap().0, 5);
+        assert_eq!(runtime.failure_history.last().unwrap().0, 24);
+    }
+
+    #[test]
+    fn summarize_failure_patterns_groups_common_errors() {
+        let mut runtime = RuntimeState::default();
+        record_failure(&mut runtime, 1, "undefined variable `user_id`");
+        record_failure(&mut runtime, 2, "undefined variable `account_id`");
+        record_failure(&mut runtime, 3, "parse error: unexpected token");
+
+        let summary = summarize_failure_patterns(&runtime);
+        assert!(summary.contains("2x undefined variable errors"), "got: {summary}");
+        assert!(summary.contains("latest: `account_id`"), "got: {summary}");
+        assert!(summary.contains("1x parse errors"), "got: {summary}");
     }
 
     // ═════════════════════════════════════════════════════════════════════
