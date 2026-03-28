@@ -3284,7 +3284,7 @@ pub async fn ask_stream(
                                         if !has_changes && !has_new_commits {
                                             let text = last_text.lock().unwrap().clone();
                                             let preview: String = text.chars().take(500).collect();
-                                            let msg = format!("OpenCode exited without making any file changes. It may have asked for clarification instead of proceeding. OpenCode said: {preview}");
+                                             let msg = format!("ERROR: !opencode made no changes. The task is NOT done. OpenCode said: {preview}\n\nYou must either retry !opencode with a clearer description, or acknowledge this item cannot be completed right now.");
                                             eprintln!("[opencode:no-changes] {msg}");
                                             log_activity(&config_clone.log_file, "opencode-no-changes", &msg).await;
                                             op_result.error(&msg);
@@ -3327,7 +3327,7 @@ pub async fn ask_stream(
                                             }
                                             Ok(b) => {
                                                 let stderr = String::from_utf8_lossy(&b.stderr);
-                                                let msg = format!("OpenCode done but cargo build failed:\n{stderr}");
+                                                let msg = format!("ERROR: !opencode made changes but cargo build failed. The task is NOT done.\n{stderr}\n\nRetry !opencode to fix the build errors.");
                                                 op_result.error(&msg);
                                                 log_activity(&config_clone.log_file, "opencode-build-fail", &msg).await;
                                                 let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
@@ -3340,21 +3340,21 @@ pub async fn ask_stream(
                                     }
                                     Ok(Ok(status)) => {
                                         let context = recent_lines.lock().unwrap().join("\n");
-                                        let msg = format!("OpenCode exited with status: {status}\nLast output:\n{context}");
+                                        let msg = format!("ERROR: !opencode failed (exit {status}). The task is NOT done.\nLast output:\n{context}\n\nRetry with a different approach or acknowledge this item cannot be completed.");
                                         op_result.error(&msg);
                                         log_activity(&config_clone.log_file, "opencode-fail", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
                                     Ok(Err(e)) => {
                                         let context = recent_lines.lock().unwrap().join("\n");
-                                        let msg = format!("OpenCode error: {e}\nLast output:\n{context}");
+                                        let msg = format!("ERROR: !opencode crashed: {e}. The task is NOT done.\nLast output:\n{context}\n\nRetry or acknowledge this item cannot be completed.");
                                         op_result.error(&msg);
                                         log_activity(&config_clone.log_file, "opencode-error", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
                                     Err(_) => {
                                         let context = recent_lines.lock().unwrap().join("\n");
-                                        let msg = format!("OpenCode timed out (30 min limit)\nLast output:\n{context}");
+                                        let msg = format!("ERROR: !opencode timed out (30 min limit). The task is NOT done.\nLast output:\n{context}\n\nBreak the task into smaller pieces and retry, or acknowledge this item cannot be completed.");
                                         op_result.error(&msg);
                                         log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
