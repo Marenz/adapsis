@@ -1,4 +1,5 @@
 !module Poller
++source heartbeat timer interval=60000 -> on_heartbeat
 +startup [io,async]
   +source add timer(300000) as poll -> on_tick
   +source add channel as inbox -> on_message
@@ -14,6 +15,9 @@
 
 +fn on_message (msg:String)->String
   +return concat("received: ", msg)
+
++fn on_heartbeat ()->String
+  +return "beat"
 
 +fn get_interval ()->Int
   +return 300000

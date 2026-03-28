@@ -102,10 +102,21 @@ pub enum Operation {
     SourceReplace(SourceReplaceDecl),
     /// Source list: +source list
     SourceList,
+    /// Module-level source declaration: +source sync_timer timer interval=300000 -> on_tick
+    ModuleSource(ModuleSourceDecl),
     /// Event register: +event register new_message(String)
     EventRegister(EventRegisterDecl),
     /// Event emit: +event emit new_message expr
     EventEmit(EventEmitDecl),
+}
+
+/// Module-level source declaration: `+source sync_timer timer interval=300000 -> on_tick`
+#[derive(Debug, Clone)]
+pub struct ModuleSourceDecl {
+    pub name: String,
+    pub source_type: String,
+    pub config: Vec<(String, String)>,
+    pub handler: String,
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +605,7 @@ impl<'a> Parser<'a> {
                     && !next.text.starts_with("!test")
                     && !next.text.starts_with("+startup")
                     && !next.text.starts_with("+shutdown")
+                    && !next.text.starts_with("+source")
                 {
                     break;
                 }
@@ -990,10 +1002,66 @@ impl<'a> Parser<'a> {
                 self.index += 1;
                 return Ok(Operation::SourceList);
             } else {
-                bail!(
-                    "line {}: expected `add`, `remove`, `replace`, or `list` after +source",
-                    line.number
-                );
+                // Module-level source declaration:
+                // +source sync_timer timer interval=300000 -> on_tick
+                let rest = rest;
+                // Find "->" to split config from handler
+                let arrow_pos = rest.find("->").ok_or_else(|| {
+                    anyhow!(
+                        "line {}: expected `+source <name> <type> [key=value ...] -> <handler>` or `add/remove/replace/list`",
+                        line.number
+                    )
+                })?;
+                let before_arrow = rest[..arrow_pos].trim();
+                let handler = rest[arrow_pos + 2..].trim().to_string();
+                if handler.is_empty() {
+                    bail!(
+                        "line {}: missing handler after `->` in +source",
+                        line.number
+                    );
+                }
+                // Parse: name type key=value ...
+                let mut tokens = before_arrow.split_whitespace();
+                let name = tokens
+                    .next()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "line {}: missing source name in +source declaration",
+                            line.number
+                        )
+                    })?
+                    .to_string();
+                let source_type = tokens
+                    .next()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "line {}: missing source type in +source declaration",
+                            line.number
+                        )
+                    })?
+                    .to_string();
+                // Remaining tokens are key=value pairs
+                let mut config = Vec::new();
+                for tok in tokens {
+                    if let Some(eq_pos) = tok.find('=') {
+                        let key = tok[..eq_pos].to_string();
+                        let val = tok[eq_pos + 1..].trim_matches('"').to_string();
+                        config.push((key, val));
+                    } else {
+                        bail!(
+                            "line {}: expected key=value in +source config, got `{}`",
+                            line.number,
+                            tok
+                        );
+                    }
+                }
+                self.index += 1;
+                return Ok(Operation::ModuleSource(ModuleSourceDecl {
+                    name,
+                    source_type,
+                    config,
+                    handler,
+                }));
             }
         }
 
@@ -6211,5 +6279,66 @@ Add tests
     fn parse_event_bad_subcommand() {
         let result = parse("+event bogus");
         assert!(result.is_err());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Module-level +source declarations
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_module_source_timer() {
+        let ops = parse_ops("!module Svc\n+source sync_timer timer interval=300000 -> on_tick");
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            Operation::Module(m) => {
+                assert_eq!(m.body.len(), 1);
+                match &m.body[0] {
+                    Operation::ModuleSource(s) => {
+                        assert_eq!(s.name, "sync_timer");
+                        assert_eq!(s.source_type, "timer");
+                        assert_eq!(
+                            s.config,
+                            vec![("interval".to_string(), "300000".to_string())]
+                        );
+                        assert_eq!(s.handler, "on_tick");
+                    }
+                    o => panic!("expected ModuleSource, got {:?}", o),
+                }
+            }
+            o => panic!("expected Module, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn parse_module_source_channel_no_config() {
+        let ops = parse_ops("!module Chat\n+source inbox channel -> on_message");
+        match &ops[0] {
+            Operation::Module(m) => match &m.body[0] {
+                Operation::ModuleSource(s) => {
+                    assert_eq!(s.name, "inbox");
+                    assert_eq!(s.source_type, "channel");
+                    assert!(s.config.is_empty());
+                    assert_eq!(s.handler, "on_message");
+                }
+                o => panic!("expected ModuleSource, got {:?}", o),
+            },
+            o => panic!("expected Module, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn parse_module_source_multiple_config() {
+        let ops = parse_ops("!module Svc\n+source poller timer interval=5000 retries=3 -> on_tick");
+        match &ops[0] {
+            Operation::Module(m) => match &m.body[0] {
+                Operation::ModuleSource(s) => {
+                    assert_eq!(s.config.len(), 2);
+                    assert_eq!(s.config[0].0, "interval");
+                    assert_eq!(s.config[1].0, "retries");
+                }
+                o => panic!("expected ModuleSource, got {:?}", o),
+            },
+            o => panic!("expected Module, got {:?}", o),
+        }
     }
 }

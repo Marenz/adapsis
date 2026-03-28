@@ -160,6 +160,30 @@ pub fn reconstruct_module_source(module: &ast::Module) -> String {
         out.push('\n');
     }
 
+    // Source declarations
+    for src in &module.sources {
+        let config_str = src
+            .config
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if config_str.is_empty() {
+            out.push_str(&format!(
+                "+source {} {} -> {}\n",
+                src.name, src.source_type, src.handler
+            ));
+        } else {
+            out.push_str(&format!(
+                "+source {} {} {} -> {}\n",
+                src.name, src.source_type, config_str, src.handler
+            ));
+        }
+    }
+    if !module.sources.is_empty() {
+        out.push('\n');
+    }
+
     // Then functions
     for func in &module.functions {
         out.push_str(&reconstruct_function_source(func));
