@@ -876,6 +876,16 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "query_startups",
+        aliases: &[],
+        short: "list modules with startup/shutdown blocks: query_startups() -> String",
+        long: "Returns a list of all modules that have +startup or +shutdown blocks, \
+               with their effects and statement counts. \
+               Returns \"No modules have startup or shutdown blocks.\" if none exist. \
+               Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "library_errors",
         aliases: &[],
         short: "get library load/save errors: library_errors() -> String",
