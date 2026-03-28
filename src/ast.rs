@@ -174,6 +174,11 @@ impl Program {
             if let Some(ref shutdown) = module.shutdown {
                 Self::intern_function_names(&mut self.interner, shutdown);
             }
+            // Source declarations
+            for src in &module.sources {
+                self.interner.intern(&src.name);
+                self.interner.intern(&src.handler);
+            }
             // Event declarations
             for ev in &module.event_decls {
                 self.interner.intern(&ev.name);
@@ -368,6 +373,10 @@ impl Program {
             }
             if let Some(ref shutdown) = sub.shutdown {
                 Self::intern_function_names(interner, shutdown);
+            }
+            for src in &sub.sources {
+                interner.intern(&src.name);
+                interner.intern(&src.handler);
             }
             for ev in &sub.event_decls {
                 interner.intern(&ev.name);
@@ -590,6 +599,16 @@ pub struct EventDecl {
     pub payload_type: Type,
 }
 
+/// A module-level source declaration: `+source sync_timer timer interval=300000 -> on_tick`.
+/// Declares a named source attached to the module with config key-value pairs and a handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceDecl {
+    pub name: String,
+    pub source_type: String,
+    pub config: Vec<(String, String)>,
+    pub handler: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
     pub id: NodeId,
@@ -605,6 +624,9 @@ pub struct Module {
     /// Optional shutdown function — runs when the service stops.
     #[serde(default)]
     pub shutdown: Option<Arc<FunctionDecl>>,
+    /// Module-level source declarations.
+    #[serde(default)]
+    pub sources: Vec<SourceDecl>,
     /// Events this module declares/exports.
     #[serde(default)]
     pub event_decls: Vec<EventDecl>,
@@ -625,6 +647,7 @@ impl PartialEq for Module {
             && self.shared_vars == other.shared_vars
             && self.startup == other.startup
             && self.shutdown == other.shutdown
+            && self.sources == other.sources
             && self.event_decls == other.event_decls
     }
 }
@@ -1044,6 +1067,7 @@ mod tests {
             shared_vars: vec![],
             startup: None,
             shutdown: None,
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         }
@@ -2338,6 +2362,7 @@ mod tests {
             }],
             startup: None,
             shutdown: None,
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         };

@@ -203,6 +203,9 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::Shutdown(_) => {
             bail!("+shutdown must be inside a module. Use: !module MyModule\\n+shutdown [io,async]\\n  ...\\n+end")
         }
+        parser::Operation::ModuleSource(_) => {
+            bail!("+source declaration must be inside a module. Use: !module MyModule\\n+source name type key=value -> handler")
+        }
     }
 }
 
@@ -225,6 +228,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             shared_vars: vec![],
             startup: None,
             shutdown: None,
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         });
@@ -335,8 +339,17 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 }
                 m.shutdown = Some(std::sync::Arc::new(converted));
             }
+            parser::Operation::ModuleSource(src_decl) => {
+                let m = &mut program.modules[mod_idx];
+                m.sources.push(ast::SourceDecl {
+                    name: src_decl.name.clone(),
+                    source_type: src_decl.source_type.clone(),
+                    config: src_decl.config.clone(),
+                    handler: src_decl.handler.clone(),
+                });
+            }
             other => bail!(
-                "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, and !test are allowed",
+                "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, +source, and !test are allowed",
                 decl.name,
                 std::mem::discriminant(other)
             ),
@@ -1456,6 +1469,7 @@ pub fn apply_move(
             shared_vars: vec![],
             startup: None,
             shutdown: None,
+            sources: vec![],
             event_decls: vec![],
             fn_index: HashMap::new(),
         });
@@ -2594,5 +2608,128 @@ mod tests {
         assert_eq!(startup.body.len(), 3); // event register, source add, return
         assert!(matches!(startup.body[0].kind, ast::StatementKind::Event(ast::EventOp::Register { .. })));
         assert!(matches!(startup.body[1].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Module-level +source declarations
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn module_source_decl_timer() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Poller
++source sync_timer timer interval=300000 -> on_tick
++fn on_tick ()->String
+  +return \"tick\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "module source decl should work: {result:?}");
+        assert_eq!(program.modules[0].sources.len(), 1);
+        let src = &program.modules[0].sources[0];
+        assert_eq!(src.name, "sync_timer");
+        assert_eq!(src.source_type, "timer");
+        assert_eq!(src.config, vec![("interval".to_string(), "300000".to_string())]);
+        assert_eq!(src.handler, "on_tick");
+    }
+
+    #[test]
+    fn module_source_decl_channel() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Chat
++source inbox channel -> on_message
++fn on_message (m:String)->String
+  +return m
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "channel source decl: {result:?}");
+        assert_eq!(program.modules[0].sources.len(), 1);
+        let src = &program.modules[0].sources[0];
+        assert_eq!(src.name, "inbox");
+        assert_eq!(src.source_type, "channel");
+        assert!(src.config.is_empty());
+        assert_eq!(src.handler, "on_message");
+    }
+
+    #[test]
+    fn module_source_decl_multiple_config() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++source poller timer interval=5000 retries=3 -> on_tick
++fn on_tick ()->String
+  +return \"tick\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "multiple config: {result:?}");
+        let src = &program.modules[0].sources[0];
+        assert_eq!(src.config.len(), 2);
+        assert_eq!(src.config[0], ("interval".to_string(), "5000".to_string()));
+        assert_eq!(src.config[1], ("retries".to_string(), "3".to_string()));
+    }
+
+    #[test]
+    fn module_source_decl_round_trip() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Poller
++source sync_timer timer interval=300000 -> on_tick
++fn on_tick ()->String
+  +return \"tick\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok());
+
+        // Reconstruct and reparse
+        let reconstructed = crate::library::reconstruct_module_source(&program.modules[0]);
+        assert!(reconstructed.contains("+source sync_timer timer interval=300000 -> on_tick"),
+            "reconstructed should contain source decl: {reconstructed}");
+
+        let ops2 = parser::parse(&reconstructed).unwrap();
+        let mut program2 = ast::Program::default();
+        let result2 = apply_and_validate(&mut program2, &ops2[0]);
+        assert!(result2.is_ok(), "round-trip should validate: {result2:?}");
+        assert_eq!(program2.modules[0].sources.len(), 1);
+        assert_eq!(program2.modules[0].sources[0].name, "sync_timer");
+    }
+
+    #[test]
+    fn module_source_decl_top_level_rejected() {
+        let result = parser::parse("+source sync_timer timer interval=300000 -> on_tick");
+        assert!(result.is_ok()); // parser succeeds
+        let ops = result.unwrap();
+        let mut program = ast::Program::default();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_err(), "module source at top level should be rejected");
+    }
+
+    #[test]
+    fn module_source_decl_missing_handler() {
+        let result = parser::parse("+source sync_timer timer interval=300000");
+        assert!(result.is_err(), "missing -> handler should error");
+    }
+
+    #[test]
+    fn module_source_with_startup_and_functions() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++source heartbeat timer interval=60000 -> on_heartbeat
++startup [io,async]
+  +return \"started\"
++fn on_heartbeat ()->String
+  +return \"beat\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "source with startup and fn: {result:?}");
+        assert_eq!(program.modules[0].sources.len(), 1);
+        assert!(program.modules[0].startup.is_some());
+        assert_eq!(program.modules[0].functions.len(), 1);
     }
 }
