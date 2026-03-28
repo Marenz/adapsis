@@ -167,17 +167,12 @@ impl Program {
             for sv in &module.shared_vars {
                 self.interner.intern(&sv.name);
             }
-            // Startup/shutdown statement bodies
-            Self::intern_body_names(&mut self.interner, &module.startup);
-            Self::intern_body_names(&mut self.interner, &module.shutdown);
-            // Sources
-            for src in &module.sources {
-                match src {
-                    SourceDecl::Channel { name } => {
-                        self.interner.intern(name);
-                    }
-                    SourceDecl::Timer { .. } => {}
-                }
+            // Startup/shutdown blocks
+            if let Some(ref startup) = module.startup {
+                Self::intern_function_names(&mut self.interner, startup);
+            }
+            if let Some(ref shutdown) = module.shutdown {
+                Self::intern_function_names(&mut self.interner, shutdown);
             }
             // Event declarations
             for ev in &module.event_decls {
@@ -280,24 +275,43 @@ impl Program {
                 StatementKind::Yield { value } => {
                     Self::intern_expr_names(interner, value);
                 }
-                StatementKind::SourceAdd { alias, handler, .. } => {
-                    interner.intern(alias);
-                    interner.intern(handler);
-                }
-                StatementKind::SourceRemove { alias } => {
-                    interner.intern(alias);
-                }
-                StatementKind::SourceReplace { alias, handler, .. } => {
-                    interner.intern(alias);
-                    interner.intern(handler);
-                }
-                StatementKind::EventRegister { name, .. } => {
-                    interner.intern(name);
-                }
-                StatementKind::EventEmit { name, value } => {
-                    interner.intern(name);
-                    Self::intern_expr_names(interner, value);
-                }
+                StatementKind::Source(op) => match op {
+                    SourceOp::Add {
+                        alias,
+                        handler,
+                        source_type,
+                    } => {
+                        interner.intern(alias);
+                        interner.intern(handler);
+                        if let SourceType::Timer(expr) = source_type {
+                            Self::intern_expr_names(interner, expr);
+                        }
+                    }
+                    SourceOp::Replace {
+                        alias,
+                        handler,
+                        source_type,
+                    } => {
+                        interner.intern(alias);
+                        interner.intern(handler);
+                        if let SourceType::Timer(expr) = source_type {
+                            Self::intern_expr_names(interner, expr);
+                        }
+                    }
+                    SourceOp::Remove { alias } => {
+                        interner.intern(alias);
+                    }
+                    SourceOp::List => {}
+                },
+                StatementKind::Event(op) => match op {
+                    EventOp::Register { name, .. } => {
+                        interner.intern(name);
+                    }
+                    EventOp::Emit { name, value } => {
+                        interner.intern(name);
+                        Self::intern_expr_names(interner, value);
+                    }
+                },
             }
         }
     }
@@ -349,15 +363,11 @@ impl Program {
             for sv in &sub.shared_vars {
                 interner.intern(&sv.name);
             }
-            Self::intern_body_names(interner, &sub.startup);
-            Self::intern_body_names(interner, &sub.shutdown);
-            for src in &sub.sources {
-                match src {
-                    SourceDecl::Channel { name } => {
-                        interner.intern(name);
-                    }
-                    SourceDecl::Timer { .. } => {}
-                }
+            if let Some(ref startup) = sub.startup {
+                Self::intern_function_names(interner, startup);
+            }
+            if let Some(ref shutdown) = sub.shutdown {
+                Self::intern_function_names(interner, shutdown);
             }
             for ev in &sub.event_decls {
                 interner.intern(&ev.name);
@@ -536,25 +546,41 @@ pub struct SharedVarDecl {
     pub default: Expr,
 }
 
-/// Source kind for service lifecycle sources (used in statement-level +source operations).
-/// Represents how a source delivers messages to its handler.
+/// Source type for `+source` statements — what kind of source to register.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SourceKind {
-    /// `timer(ms)` — periodic timer with interval in milliseconds
-    Timer(u64),
-    /// `channel` — named mailbox for receiving messages
+pub enum SourceType {
+    /// `timer(expr)` — periodic timer, interval given by expression (ms)
+    Timer(Box<Expr>),
+    /// `channel` — named mailbox
     Channel,
     /// `Module.event_name` — cross-module event subscription
     Event(String, String),
 }
 
-/// Module-level source declaration — a static source attached to a module.
+/// Operations on sources — `+source add/replace/remove/list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SourceDecl {
-    /// Periodic timer source with interval in milliseconds.
-    Timer { interval_ms: i64 },
-    /// Named channel (mailbox) source.
-    Channel { name: String },
+pub enum SourceOp {
+    Add {
+        source_type: SourceType,
+        alias: String,
+        handler: String,
+    },
+    Replace {
+        alias: String,
+        source_type: SourceType,
+        handler: String,
+    },
+    Remove {
+        alias: String,
+    },
+    List,
+}
+
+/// Operations on events — `+event register/emit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EventOp {
+    Register { name: String, payload_type: String },
+    Emit { name: String, value: Box<Expr> },
 }
 
 /// An event declaration: what events a module can emit.
@@ -573,15 +599,12 @@ pub struct Module {
     pub modules: Vec<Module>,
     #[serde(default)]
     pub shared_vars: Vec<SharedVarDecl>,
-    /// Startup statements — run when the service starts.
+    /// Optional startup function — runs when the service starts.
     #[serde(default)]
-    pub startup: Vec<Statement>,
-    /// Shutdown statements — run when the service stops.
+    pub startup: Option<Arc<FunctionDecl>>,
+    /// Optional shutdown function — runs when the service stops.
     #[serde(default)]
-    pub shutdown: Vec<Statement>,
-    /// Static sources attached to this module.
-    #[serde(default)]
-    pub sources: Vec<SourceDecl>,
+    pub shutdown: Option<Arc<FunctionDecl>>,
     /// Events this module declares/exports.
     #[serde(default)]
     pub event_decls: Vec<EventDecl>,
@@ -602,7 +625,6 @@ impl PartialEq for Module {
             && self.shared_vars == other.shared_vars
             && self.startup == other.startup
             && self.shutdown == other.shutdown
-            && self.sources == other.sources
             && self.event_decls == other.event_decls
     }
 }
@@ -848,32 +870,10 @@ pub enum StatementKind {
     Yield {
         value: Expr,
     },
-    /// `+source add timer(300000) as poll -> on_tick`
-    SourceAdd {
-        kind: SourceKind,
-        alias: String,
-        handler: String,
-    },
-    /// `+source remove poll`
-    SourceRemove {
-        alias: String,
-    },
-    /// `+source replace poll timer(600000) -> on_tick`
-    SourceReplace {
-        alias: String,
-        kind: SourceKind,
-        handler: String,
-    },
-    /// `+event register new_message(String)`
-    EventRegister {
-        name: String,
-        payload_type: Type,
-    },
-    /// `+event emit new_message expr`
-    EventEmit {
-        name: String,
-        value: Expr,
-    },
+    /// `+source add/replace/remove/list`
+    Source(SourceOp),
+    /// `+event register/emit`
+    Event(EventOp),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1042,9 +1042,8 @@ mod tests {
             functions,
             modules: vec![],
             shared_vars: vec![],
-            startup: vec![],
-            shutdown: vec![],
-            sources: vec![],
+            startup: None,
+            shutdown: None,
             event_decls: vec![],
             fn_index: HashMap::new(),
         }
@@ -2337,9 +2336,8 @@ mod tests {
                 ty: Type::Int,
                 default: Expr::Literal(Literal::Int(0)),
             }],
-            startup: vec![],
-            shutdown: vec![],
-            sources: vec![],
+            startup: None,
+            shutdown: None,
             event_decls: vec![],
             fn_index: HashMap::new(),
         };
@@ -2650,102 +2648,78 @@ mod tests {
     // ═════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn source_decl_timer_construction() {
-        let src = SourceDecl::Timer { interval_ms: 5000 };
-        match &src {
-            SourceDecl::Timer { interval_ms } => assert_eq!(*interval_ms, 5000),
-            _ => panic!("expected Timer"),
-        }
+    fn source_type_construction() {
+        let timer = SourceType::Timer(Box::new(Expr::Literal(Literal::Int(5000))));
+        assert!(matches!(timer, SourceType::Timer(_)));
+        assert!(matches!(SourceType::Channel, SourceType::Channel));
+        let evt = SourceType::Event("Chat".to_string(), "new_msg".to_string());
+        assert!(matches!(evt, SourceType::Event(..)));
     }
 
     #[test]
-    fn source_decl_channel_construction() {
-        let src = SourceDecl::Channel {
-            name: "inbox".to_string(),
+    fn source_op_variants() {
+        let add = SourceOp::Add {
+            source_type: SourceType::Channel,
+            alias: "inbox".to_string(),
+            handler: "on_msg".to_string(),
         };
-        match &src {
-            SourceDecl::Channel { name } => assert_eq!(name, "inbox"),
-            _ => panic!("expected Channel"),
-        }
+        assert!(matches!(add, SourceOp::Add { .. }));
+
+        let replace = SourceOp::Replace {
+            alias: "poll".to_string(),
+            source_type: SourceType::Timer(Box::new(Expr::Literal(Literal::Int(1000)))),
+            handler: "on_tick".to_string(),
+        };
+        assert!(matches!(replace, SourceOp::Replace { .. }));
+
+        let remove = SourceOp::Remove {
+            alias: "poll".to_string(),
+        };
+        assert!(matches!(remove, SourceOp::Remove { .. }));
+
+        assert!(matches!(SourceOp::List, SourceOp::List));
     }
 
     #[test]
-    fn source_decl_equality() {
-        let a = SourceDecl::Timer { interval_ms: 300 };
-        let b = SourceDecl::Timer { interval_ms: 300 };
-        let c = SourceDecl::Timer { interval_ms: 600 };
-        assert_eq!(a, b);
-        assert_ne!(a, c);
+    fn event_op_variants() {
+        let reg = EventOp::Register {
+            name: "new_message".to_string(),
+            payload_type: "String".to_string(),
+        };
+        assert!(matches!(reg, EventOp::Register { .. }));
 
-        let d = SourceDecl::Channel {
-            name: "ch1".to_string(),
+        let emit = EventOp::Emit {
+            name: "new_message".to_string(),
+            value: Box::new(Expr::Literal(Literal::String("hello".to_string()))),
         };
-        let e = SourceDecl::Channel {
-            name: "ch1".to_string(),
-        };
-        let f = SourceDecl::Channel {
-            name: "ch2".to_string(),
-        };
-        assert_eq!(d, e);
-        assert_ne!(d, f);
-        assert_ne!(a, d);
+        assert!(matches!(emit, EventOp::Emit { .. }));
     }
 
     #[test]
-    fn source_decl_serde_roundtrip() {
-        let sources = vec![
-            SourceDecl::Timer { interval_ms: 1000 },
-            SourceDecl::Channel {
-                name: "events".to_string(),
-            },
-        ];
-        let json = serde_json::to_string(&sources).unwrap();
-        let deserialized: Vec<SourceDecl> = serde_json::from_str(&json).unwrap();
-        assert_eq!(sources, deserialized);
+    fn statement_source_event() {
+        let stmt = make_stmt(StatementKind::Source(SourceOp::List));
+        assert!(matches!(stmt.kind, StatementKind::Source(SourceOp::List)));
+
+        let stmt2 = make_stmt(StatementKind::Event(EventOp::Register {
+            name: "ev".to_string(),
+            payload_type: "Int".to_string(),
+        }));
+        assert!(matches!(
+            stmt2.kind,
+            StatementKind::Event(EventOp::Register { .. })
+        ));
     }
 
     #[test]
-    fn module_with_startup_shutdown_sources() {
-        let return_stmt = Statement {
-            id: "s1".to_string(),
-            kind: StatementKind::Return {
-                value: Expr::Literal(Literal::String("ok".to_string())),
-            },
-        };
-        let module = Module {
-            id: "svc".to_string(),
-            name: "Svc".to_string(),
-            types: vec![],
-            functions: vec![],
-            modules: vec![],
-            shared_vars: vec![],
-            startup: vec![return_stmt.clone()],
-            shutdown: vec![return_stmt],
-            sources: vec![
-                SourceDecl::Timer { interval_ms: 5000 },
-                SourceDecl::Channel {
-                    name: "inbox".to_string(),
-                },
-            ],
-            event_decls: vec![],
-            fn_index: HashMap::new(),
-        };
-        assert_eq!(module.startup.len(), 1);
-        assert_eq!(module.shutdown.len(), 1);
-        assert_eq!(module.sources.len(), 2);
+    fn module_startup_shutdown_option() {
+        let module = make_module("Svc", vec![]);
+        assert!(module.startup.is_none());
+        assert!(module.shutdown.is_none());
     }
 
     #[test]
-    fn module_empty_startup_shutdown_sources_default() {
-        let module = make_module("Empty", vec![]);
-        assert!(module.startup.is_empty());
-        assert!(module.shutdown.is_empty());
-        assert!(module.sources.is_empty());
-    }
-
-    #[test]
-    fn module_serde_backward_compat_missing_sources() {
-        // Simulate deserializing old JSON that lacks the `sources` field
+    fn module_serde_backward_compat() {
+        // Simulate deserializing old JSON that lacks startup/shutdown
         let json = r#"{
             "id": "m1",
             "name": "Old",
@@ -2753,39 +2727,11 @@ mod tests {
             "functions": [],
             "modules": [],
             "shared_vars": [],
-            "startup": [],
-            "shutdown": [],
             "event_decls": []
         }"#;
         let module: Module = serde_json::from_str(json).unwrap();
         assert_eq!(module.name, "Old");
-        assert!(
-            module.sources.is_empty(),
-            "sources should default to empty vec"
-        );
-        assert!(module.startup.is_empty());
-        assert!(module.shutdown.is_empty());
-    }
-
-    #[test]
-    fn module_equality_includes_sources() {
-        let a = Module {
-            id: "m".to_string(),
-            name: "M".to_string(),
-            types: vec![],
-            functions: vec![],
-            modules: vec![],
-            shared_vars: vec![],
-            startup: vec![],
-            shutdown: vec![],
-            sources: vec![SourceDecl::Timer { interval_ms: 100 }],
-            event_decls: vec![],
-            fn_index: HashMap::new(),
-        };
-        let mut b = a.clone();
-        assert_eq!(a, b);
-
-        b.sources = vec![SourceDecl::Timer { interval_ms: 200 }];
-        assert_ne!(a, b, "different sources should make modules unequal");
+        assert!(module.startup.is_none());
+        assert!(module.shutdown.is_none());
     }
 }

@@ -1017,11 +1017,16 @@ fn stmt_summary(kind: &crate::ast::StatementKind) -> (String, String) {
         }
         crate::ast::StatementKind::Match { .. } => ("match".into(), "match ...".into()),
         crate::ast::StatementKind::Yield { .. } => ("yield".into(), "yield ...".into()),
-        crate::ast::StatementKind::SourceAdd { alias, .. } => ("source".into(), format!("source add as {alias}")),
-        crate::ast::StatementKind::SourceRemove { alias } => ("source".into(), format!("source remove {alias}")),
-        crate::ast::StatementKind::SourceReplace { alias, .. } => ("source".into(), format!("source replace {alias}")),
-        crate::ast::StatementKind::EventRegister { name, .. } => ("event".into(), format!("event register {name}")),
-        crate::ast::StatementKind::EventEmit { name, .. } => ("event".into(), format!("event emit {name}")),
+        crate::ast::StatementKind::Source(op) => match op {
+            crate::ast::SourceOp::Add { alias, .. } => ("source".into(), format!("source add as {alias}")),
+            crate::ast::SourceOp::Remove { alias } => ("source".into(), format!("source remove {alias}")),
+            crate::ast::SourceOp::Replace { alias, .. } => ("source".into(), format!("source replace {alias}")),
+            crate::ast::SourceOp::List => ("source".into(), "source list".into()),
+        },
+        crate::ast::StatementKind::Event(op) => match op {
+            crate::ast::EventOp::Register { name, .. } => ("event".into(), format!("event register {name}")),
+            crate::ast::EventOp::Emit { name, .. } => ("event".into(), format!("event emit {name}")),
+        },
     }
 }
 

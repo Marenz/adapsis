@@ -100,6 +100,8 @@ pub enum Operation {
     SourceRemove(String),
     /// Source replace: +source replace poll timer(600000) -> on_tick
     SourceReplace(SourceReplaceDecl),
+    /// Source list: +source list
+    SourceList,
     /// Event register: +event register new_message(String)
     EventRegister(EventRegisterDecl),
     /// Event emit: +event emit new_message expr
@@ -656,7 +658,7 @@ impl<'a> Parser<'a> {
             let body = self.parse_nested_block(indent)?;
             self.consume_end();
             return Ok(Operation::Startup(FunctionDecl {
-                name: "__startup".to_string(),
+                name: "startup".to_string(),
                 params: vec![],
                 return_type: TypeExpr::Named("String".to_string()),
                 effects,
@@ -683,7 +685,7 @@ impl<'a> Parser<'a> {
             let body = self.parse_nested_block(indent)?;
             self.consume_end();
             return Ok(Operation::Shutdown(FunctionDecl {
-                name: "__shutdown".to_string(),
+                name: "shutdown".to_string(),
                 params: vec![],
                 return_type: TypeExpr::Named("String".to_string()),
                 effects,
@@ -984,9 +986,12 @@ impl<'a> Parser<'a> {
                     kind_text,
                     handler,
                 }));
+            } else if rest.starts_with("list") || rest.is_empty() {
+                self.index += 1;
+                return Ok(Operation::SourceList);
             } else {
                 bail!(
-                    "line {}: expected `add`, `remove`, or `replace` after +source",
+                    "line {}: expected `add`, `remove`, `replace`, or `list` after +source",
                     line.number
                 );
             }
@@ -1966,6 +1971,11 @@ fn parse_each_header(line: usize, input: &str) -> Result<(Expr, String, TypeExpr
 /// Public wrapper for parsing a type expression from a string.
 pub fn parse_type_expr(input: &str) -> Result<TypeExpr> {
     parse_type(0, input)
+}
+
+/// Public wrapper for parsing a single expression from a string.
+pub fn parse_single_expr(input: &str) -> Result<Expr> {
+    parse_expr(0, input)
 }
 
 fn parse_type(line: usize, input: &str) -> Result<TypeExpr> {
@@ -6012,7 +6022,7 @@ Add tests
                 assert_eq!(m.body.len(), 1);
                 match &m.body[0] {
                     Operation::Startup(fd) => {
-                        assert_eq!(fd.name, "__startup");
+                        assert_eq!(fd.name, "startup");
                         assert!(fd.effects.iter().any(|e| e == "io"));
                         assert!(fd.effects.iter().any(|e| e == "async"));
                         assert_eq!(fd.body.len(), 1);
@@ -6034,7 +6044,7 @@ Add tests
                 assert_eq!(m.body.len(), 1);
                 match &m.body[0] {
                     Operation::Shutdown(fd) => {
-                        assert_eq!(fd.name, "__shutdown");
+                        assert_eq!(fd.name, "shutdown");
                         assert!(fd.effects.iter().any(|e| e == "io"));
                         assert!(fd.effects.iter().any(|e| e == "async"));
                     }
@@ -6182,6 +6192,13 @@ Add tests
     fn parse_event_register_missing_type() {
         let result = parse("+event register new_message");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_source_list() {
+        let ops = parse_ops("+source list");
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], Operation::SourceList));
     }
 
     #[test]

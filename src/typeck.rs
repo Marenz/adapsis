@@ -301,14 +301,23 @@ fn check_statements(
                 }
             }
             StatementKind::Yield { .. } => {}
-            // Source and event statements — no type checking needed at this level
-            StatementKind::SourceAdd { .. }
-            | StatementKind::SourceRemove { .. }
-            | StatementKind::SourceReplace { .. }
-            | StatementKind::EventRegister { .. } => {}
-            StatementKind::EventEmit { value, .. } => {
-                // Check the emitted value expression
-                let _ = infer_expr_type(table, value, locals);
+            StatementKind::Source(op) => match op {
+                SourceOp::Add {
+                    source_type: SourceType::Timer(expr),
+                    ..
+                }
+                | SourceOp::Replace {
+                    source_type: SourceType::Timer(expr),
+                    ..
+                } => {
+                    let _ = infer_expr_type(table, expr, locals);
+                }
+                _ => {}
+            },
+            StatementKind::Event(op) => {
+                if let EventOp::Emit { value, .. } = op {
+                    let _ = infer_expr_type(table, value, locals);
+                }
             }
         }
     }
@@ -884,55 +893,61 @@ fn reconstruct_stmt(out: &mut String, stmt: &Statement, indent: usize) {
         StatementKind::Yield { value } => {
             out.push_str(&format!("{pad}+yield {}\n", reconstruct_expr(value)));
         }
-        StatementKind::SourceAdd {
-            kind,
-            alias,
-            handler,
-        } => {
-            out.push_str(&format!(
-                "{pad}+source add {} as {} -> {}\n",
-                format_source_kind(kind),
+        StatementKind::Source(op) => match op {
+            SourceOp::Add {
+                source_type,
                 alias,
-                handler
-            ));
-        }
-        StatementKind::SourceRemove { alias } => {
-            out.push_str(&format!("{pad}+source remove {}\n", alias));
-        }
-        StatementKind::SourceReplace {
-            alias,
-            kind,
-            handler,
-        } => {
-            out.push_str(&format!(
-                "{pad}+source replace {} {} -> {}\n",
+                handler,
+            } => {
+                out.push_str(&format!(
+                    "{pad}+source add {} as {} -> {}\n",
+                    format_source_type(source_type),
+                    alias,
+                    handler
+                ));
+            }
+            SourceOp::Remove { alias } => {
+                out.push_str(&format!("{pad}+source remove {}\n", alias));
+            }
+            SourceOp::Replace {
                 alias,
-                format_source_kind(kind),
-                handler
-            ));
-        }
-        StatementKind::EventRegister { name, payload_type } => {
-            out.push_str(&format!(
-                "{pad}+event register {}({})\n",
-                name,
-                format_type_simple(payload_type)
-            ));
-        }
-        StatementKind::EventEmit { name, value } => {
-            out.push_str(&format!(
-                "{pad}+event emit {} {}\n",
-                name,
-                reconstruct_expr(value)
-            ));
-        }
+                source_type,
+                handler,
+            } => {
+                out.push_str(&format!(
+                    "{pad}+source replace {} {} -> {}\n",
+                    alias,
+                    format_source_type(source_type),
+                    handler
+                ));
+            }
+            SourceOp::List => {
+                out.push_str(&format!("{pad}+source list\n"));
+            }
+        },
+        StatementKind::Event(op) => match op {
+            EventOp::Register { name, payload_type } => {
+                out.push_str(&format!(
+                    "{pad}+event register {}({})\n",
+                    name, payload_type
+                ));
+            }
+            EventOp::Emit { name, value } => {
+                out.push_str(&format!(
+                    "{pad}+event emit {} {}\n",
+                    name,
+                    reconstruct_expr(value)
+                ));
+            }
+        },
     }
 }
 
-fn format_source_kind(kind: &crate::ast::SourceKind) -> String {
-    match kind {
-        crate::ast::SourceKind::Timer(ms) => format!("timer({})", ms),
-        crate::ast::SourceKind::Channel => "channel".to_string(),
-        crate::ast::SourceKind::Event(module, event) => format!("{}.{}", module, event),
+fn format_source_type(st: &crate::ast::SourceType) -> String {
+    match st {
+        crate::ast::SourceType::Timer(expr) => format!("timer({})", reconstruct_expr(expr)),
+        crate::ast::SourceType::Channel => "channel".to_string(),
+        crate::ast::SourceType::Event(module, event) => format!("{}.{}", module, event),
     }
 }
 

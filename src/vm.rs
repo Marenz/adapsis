@@ -508,11 +508,7 @@ impl<'a> Compiler<'a> {
                 // Yield is conceptually a return for generators — use Return for now
                 self.emit(Op::Return);
             }
-            ast::StatementKind::SourceAdd { .. }
-            | ast::StatementKind::SourceRemove { .. }
-            | ast::StatementKind::SourceReplace { .. }
-            | ast::StatementKind::EventRegister { .. }
-            | ast::StatementKind::EventEmit { .. } => {
+            ast::StatementKind::Source(_) | ast::StatementKind::Event(_) => {
                 anyhow::bail!("source/event statements not supported in VM")
             }
         }
