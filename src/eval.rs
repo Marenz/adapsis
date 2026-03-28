@@ -3641,7 +3641,7 @@ mod tests {
     #[test]
     fn test_async_function_with_mock_http_get() {
         let source = "\
-+fn fetch_data (url:String)->String [async]
++fn fetch_data (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 ";
@@ -3668,7 +3668,7 @@ mod tests {
         // Tests always use mock-only handles to prevent deadlocks from
         // self-referential HTTP calls.  Unmocked IO should fail, not execute.
         let source = "\
-+fn delayed_value ()->String [async]
++fn delayed_value ()->String [io,async]
   +await _:String = sleep(1)
   +return \"done\"
 ";
@@ -3691,7 +3691,7 @@ mod tests {
     #[test]
     fn test_async_function_with_io_effect_gets_handle() {
         let source = "\
-+fn fetch_data (url:String)->String [io]
++fn fetch_data (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 ";
@@ -3717,7 +3717,7 @@ mod tests {
     fn test_async_function_await_sleep_with_mock() {
         // +await on `sleep` is a builtin IO op — should be intercepted by mock
         let source = "\
-+fn delayed_value (ms:Int)->String [async]
++fn delayed_value (ms:Int)->String [io,async]
   +await _:String = sleep(ms)
   +return \"done\"
 ";
@@ -3770,11 +3770,11 @@ mod tests {
         // An async function that calls another user-defined async function
         // which itself does +await on a builtin — handle must propagate
         let source = "\
-+fn inner_fetch (url:String)->String [async]
++fn inner_fetch (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 
-+fn outer_fetch (url:String)->String [async]
++fn outer_fetch (url:String)->String [io,async]
   +await data:String = inner_fetch(url)
   +return data
 ";
@@ -3802,7 +3802,7 @@ mod tests {
     fn test_mock_http_get_json_consumed_by_json_get() {
         // Mock returns JSON, function uses json_get to extract a field
         let source = "\
-+fn get_name (url:String)->String [async]
++fn get_name (url:String)->String [io,async]
   +await body:String = http_get(url)
   +let name:String = json_get(body, \"name\")
   +return name
@@ -3831,7 +3831,7 @@ mod tests {
     fn test_mock_http_get_json_consumed_by_json_array_len() {
         // Mock returns a JSON array, function uses json_array_len
         let source = "\
-+fn count_items (url:String)->Int [async]
++fn count_items (url:String)->Int [io,async]
   +await body:String = http_get(url)
   +let count:Int = json_array_len(body)
   +return count
@@ -3874,7 +3874,7 @@ mod tests {
     fn test_mock_json_end_to_end_with_parser_escaping() {
         // End-to-end: !mock with escaped JSON → function uses json_get
         let fn_source = "\
-+fn check_status (url:String)->String [async]
++fn check_status (url:String)->String [io,async]
   +await body:String = http_get(url)
   +let status:String = json_get(body, \"status\")
   +return status
@@ -3950,7 +3950,7 @@ mod tests {
     fn test_orchestrator_async_http_get_with_mock() {
         // Simulates LLM output containing +fn [async], !mock, !test
         let source = "\
-+fn fetch_data (url:String)->String [async]
++fn fetch_data (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 
@@ -3967,7 +3967,7 @@ mod tests {
     #[test]
     fn test_orchestrator_async_sleep_with_mock() {
         let source = "\
-+fn delayed (ms:Int)->String [async]
++fn delayed (ms:Int)->String [io,async]
   +await _:String = sleep(ms)
   +return \"done\"
 
@@ -3985,11 +3985,11 @@ mod tests {
     fn test_orchestrator_nested_async_with_mock() {
         // wrapper -> inner_fetch -> http_get (all async, handle must propagate)
         let source = "\
-+fn inner_fetch (url:String)->String [async]
++fn inner_fetch (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 
-+fn wrapper (url:String)->String [async]
++fn wrapper (url:String)->String [io,async]
   +await data:String = inner_fetch(url)
   +return data
 
@@ -4008,7 +4008,7 @@ mod tests {
         // Proves: !mock with escaped JSON → parser decodes → json_get + json_array_len work
         // Adapsis source: !mock http_get "x" -> "{\"ok\":true,\"result\":[]}"
         let fn_source = "\
-+fn check (url:String)->Int [async]
++fn check (url:String)->Int [io,async]
   +await body:String = http_get(url)
   +let arr:String = json_get(body, \"result\")
   +let count:Int = json_array_len(arr)
@@ -4030,7 +4030,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_eval_test_case_with_mocks() {
         let source = "\
-+fn fetch_data (url:String)->String [async]
++fn fetch_data (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 ";
@@ -4062,7 +4062,7 @@ mod tests {
 
         // Define async function
         let define_source = "\
-+fn fetch_data (url:String)->String [async]
++fn fetch_data (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 ";
@@ -4091,11 +4091,11 @@ mod tests {
         let mut session = crate::session::Session::new();
 
         let source = "\
-+fn inner_fetch (url:String)->String [async]
++fn inner_fetch (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return resp
 
-+fn wrapper (url:String)->String [async]
++fn wrapper (url:String)->String [io,async]
   +call data:String = inner_fetch(url)
   +return data
 ";
@@ -4253,7 +4253,7 @@ mod tests {
         let mut session = crate::session::Session::new();
 
         let source = "
-+fn fetch_text (url:String)->String [async]
++fn fetch_text (url:String)->String [io,async]
   +await resp:String = http_get(url)
   +return json_get(resp, \"text\")
 ";
@@ -4280,7 +4280,7 @@ mod tests {
         let mut session = crate::session::Session::new();
 
         let source = "
-+fn ask_llm (prompt:String)->String [async]
++fn ask_llm (prompt:String)->String [io,async]
   +await reply:String = llm_call(prompt, \"echo\")
   +return reply
 ";
@@ -6891,7 +6891,7 @@ mod tests {
         set_shared_program_mut(None);
 
         // Build a function that calls +await move_symbols("helper", "Utils")
-        let fn_source = "+fn do_move ()->String [io]\n  +await result:String = move_symbols(\"helper\", \"Utils\")\n  +return result\n+end";
+        let fn_source = "+fn do_move ()->String [io,async]\n  +await result:String = move_symbols(\"helper\", \"Utils\")\n  +return result\n+end";
         let fn_ops = crate::parser::parse(fn_source).expect("parse fn failed");
         for op in &fn_ops {
             crate::validator::apply_and_validate(&mut program, op).unwrap();
@@ -8119,7 +8119,7 @@ mod tests {
         // field names to parameter names, which requires the thread-local
         // display interner to be populated.
         let source = "\
-+fn fetch_issues (owner:String, repo:String)->String [async]
++fn fetch_issues (owner:String, repo:String)->String [io,async]
   +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
   +return resp
 ";
@@ -8151,7 +8151,7 @@ mod tests {
         // spawn_blocking path). Ensures the display interner is installed
         // on the tokio blocking thread pool thread as well.
         let source = "\
-+fn fetch_issues (owner:String, repo:String)->String [async]
++fn fetch_issues (owner:String, repo:String)->String [io,async]
   +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
   +return resp
 ";
@@ -8184,7 +8184,7 @@ mod tests {
         // Error case: async multi-param function test with wrong expected
         // value should fail cleanly (not with "undefined variable").
         let source = "\
-+fn fetch_issues (owner:String, repo:String)->String [async]
++fn fetch_issues (owner:String, repo:String)->String [io,async]
   +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
   +return resp
 ";
@@ -8222,7 +8222,7 @@ mod tests {
         let mut session = crate::session::Session::new();
 
         let define_source = "\
-+fn fetch_issues (owner:String, repo:String)->String [async]
++fn fetch_issues (owner:String, repo:String)->String [io,async]
   +await resp:String = http_get(concat(\"https://api.github.com/repos/\", owner, \"/\", repo, \"/issues\"))
   +return resp
 ";
