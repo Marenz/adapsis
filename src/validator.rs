@@ -493,29 +493,30 @@ fn validate_function_effects(
     let mut diagnostics = EffectDiagnostics::default();
     collect_effect_requirements(program, func, current_module, &shared_names, &func.body, &mut diagnostics);
 
-    if diagnostics.uses_await
-        && !(has_effect(&func.effects, ast::Effect::Io) && has_effect(&func.effects, ast::Effect::Async))
-    {
+    if diagnostics.uses_await && !has_effect(&func.effects, ast::Effect::Async) {
         bail!(
-            "function `{}` uses +await but is missing [io,async] effects",
+            "function '{}' uses +await but does not declare [async] effect",
             func.name
         );
     }
 
-    if diagnostics.mutates_shared && !has_effect(&func.effects, ast::Effect::Mut) {
-        bail!(
-            "function `{}` modifies shared state but is missing [mut] effect",
-            func.name
-        );
-    }
-
-    if let Some(callee) = diagnostics.fail_callee
-        && !has_effect(&func.effects, ast::Effect::Fail)
+    if let Some(io_builtin) = &diagnostics.io_builtin_awaited
+        && !has_effect(&func.effects, ast::Effect::Io)
     {
         bail!(
-            "function `{}` auto-propagates errors from `{}` but is missing [fail] effect",
+            "function '{}' calls IO builtin '{}' but does not declare [io] effect",
             func.name,
-            callee
+            io_builtin
+        );
+    }
+
+    if let Some(shared_name) = &diagnostics.shared_modified
+        && !has_effect(&func.effects, ast::Effect::Mut)
+    {
+        bail!(
+            "function '{}' modifies shared variable '{}' but does not declare [mut] effect",
+            func.name,
+            shared_name
         );
     }
 
@@ -529,8 +530,8 @@ fn has_effect(effects: &[ast::Effect], wanted: ast::Effect) -> bool {
 #[derive(Default)]
 struct EffectDiagnostics {
     uses_await: bool,
-    mutates_shared: bool,
-    fail_callee: Option<String>,
+    io_builtin_awaited: Option<String>,
+    shared_modified: Option<String>,
 }
 
 fn collect_effect_requirements(
@@ -543,20 +544,22 @@ fn collect_effect_requirements(
 ) {
     for stmt in stmts {
         match &stmt.kind {
-            ast::StatementKind::Await { .. } => diagnostics.uses_await = true,
+            ast::StatementKind::Await { call, .. } => {
+                diagnostics.uses_await = true;
+                if diagnostics.io_builtin_awaited.is_none() && crate::builtins::is_io_builtin(&call.callee) {
+                    diagnostics.io_builtin_awaited = Some(call.callee.clone());
+                }
+                for arg in &call.args {
+                    collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
+                }
+            }
             ast::StatementKind::Set { name, value } => {
-                if shared_names.contains(name) {
-                    diagnostics.mutates_shared = true;
+                if shared_names.contains(name) && diagnostics.shared_modified.is_none() {
+                    diagnostics.shared_modified = Some(name.clone());
                 }
                 collect_expr_effect_requirements(program, current_func, current_module, value, diagnostics);
             }
-            ast::StatementKind::Call { binding, call } => {
-                if diagnostics.fail_callee.is_none()
-                    && binding.as_ref().is_none_or(|b| !matches!(b.ty, ast::Type::Result(_)))
-                    && callee_has_fail_effect(program, current_func, current_module, &call.callee)
-                {
-                    diagnostics.fail_callee = Some(qualify_callee_name(program, current_module, &call.callee));
-                }
+            ast::StatementKind::Call { call, .. } => {
                 for arg in &call.args {
                     collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
                 }
@@ -606,11 +609,6 @@ fn collect_expr_effect_requirements(
 ) {
     match expr {
         ast::Expr::Call(call) => {
-            if diagnostics.fail_callee.is_none()
-                && callee_has_fail_effect(program, current_func, current_module, &call.callee)
-            {
-                diagnostics.fail_callee = Some(qualify_callee_name(program, current_module, &call.callee));
-            }
             for arg in &call.args {
                 collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
             }
@@ -632,53 +630,6 @@ fn collect_expr_effect_requirements(
         }
         ast::Expr::Literal(_) | ast::Expr::Identifier(_) => {}
     }
-}
-
-fn callee_has_fail_effect(
-    program: &ast::Program,
-    current_func: &ast::FunctionDecl,
-    current_module: Option<&str>,
-    callee: &str,
-) -> bool {
-    resolve_callee_function(program, current_func, current_module, callee)
-        .is_some_and(|func| func.effects.contains(&ast::Effect::Fail))
-}
-
-fn qualify_callee_name(program: &ast::Program, current_module: Option<&str>, callee: &str) -> String {
-    if callee.contains('.') {
-        return callee.to_string();
-    }
-    if let Some(module_name) = current_module
-        && let Some(module) = program.modules.iter().find(|m| m.name == module_name)
-        && module.get_function(callee).is_some()
-    {
-        return format!("{}.{}", module_name, callee);
-    }
-    program.qualify_function_name(callee)
-}
-
-fn resolve_callee_function<'a>(
-    program: &'a ast::Program,
-    current_func: &'a ast::FunctionDecl,
-    current_module: Option<&str>,
-    callee: &str,
-) -> Option<&'a ast::FunctionDecl> {
-    if callee == current_func.name {
-        return Some(current_func);
-    }
-    if let Some(module_name) = current_module {
-        let qualified_current = format!("{}.{}", module_name, current_func.name);
-        if callee == qualified_current {
-            return Some(current_func);
-        }
-        if !callee.contains('.')
-            && let Some(module) = program.modules.iter().find(|m| m.name == module_name)
-            && let Some(func) = module.get_function(callee)
-        {
-            return Some(func);
-        }
-    }
-    program.get_function(callee)
 }
 
 
@@ -2070,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_function_with_await_missing_io_async_effects() {
+    fn reject_function_with_await_missing_async_effect() {
         let mut program = ast::Program::default();
         let source = "\
 +fn fetch ()->String
@@ -2079,7 +2030,7 @@ mod tests {
 ";
         let ops = parser::parse(source).unwrap();
         let err = apply_and_validate(&mut program, &ops[0]).unwrap_err().to_string();
-        assert!(err.contains("uses +await but is missing [io,async] effects"), "got: {err}");
+        assert!(err.contains("uses +await but does not declare [async] effect"), "got: {err}");
     }
 
     #[test]
@@ -2094,18 +2045,16 @@ mod tests {
 ";
         let ops = parser::parse(source).unwrap();
         let err = apply_and_validate(&mut program, &ops[0]).unwrap_err().to_string();
-        assert!(err.contains("modifies shared state but is missing [mut] effect"), "got: {err}");
+        assert!(err.contains("modifies shared variable 'total' but does not declare [mut] effect"), "got: {err}");
     }
 
     #[test]
-    fn reject_fail_auto_propagation_without_fail_effect() {
+    fn reject_function_awaiting_io_builtin_without_io_effect() {
         let mut program = ast::Program::default();
-        let helper = parser::parse("+fn validate (x:Int)->Result<Int> [fail]\n  +return x\n").unwrap();
-        apply_and_validate(&mut program, &helper[0]).unwrap();
-
-        let caller = parser::parse("+fn run (x:Int)->Int\n  +call y:Int = validate(x)\n  +return y\n").unwrap();
-        let err = apply_and_validate(&mut program, &caller[0]).unwrap_err().to_string();
-        assert!(err.contains("auto-propagates errors from `validate` but is missing [fail] effect"), "got: {err}");
+        let source = "+fn fetch ()->String [async]\n  +await body:String = http_get(\"https://example.com\")\n  +return body\n";
+        let ops = parser::parse(source).unwrap();
+        let err = apply_and_validate(&mut program, &ops[0]).unwrap_err().to_string();
+        assert!(err.contains("calls IO builtin 'http_get' but does not declare [io] effect"), "got: {err}");
     }
 
     #[test]
@@ -2114,12 +2063,12 @@ mod tests {
         let source = "\
 !module Counter
 +shared total:Int = 0
-+fn next ()->Int [io,async,mut,fail]
++fn next ()->Int [io,async,mut]
   +await raw:String = http_get(\"https://example.com\")
   +set total = total + 1
-  +call parsed:Int = parse_num(raw)
+  +let parsed:Int = to_int(raw)
   +return parsed + total
-+fn parse_num (raw:String)->Result<Int> [fail]
++fn parse_num (raw:String)->Result<Int>
   +return 1
 ";
         let ops = parser::parse(source).unwrap();

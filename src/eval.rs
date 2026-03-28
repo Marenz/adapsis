@@ -2138,6 +2138,30 @@ pub fn eval_builtin_or_user(
                 _ => bail!("len() expects string or list"),
             }
         }
+        "error_suggest" | "failure_suggest" => {
+            if args.len() != 1 {
+                bail!("error_suggest() expects 1 argument");
+            }
+            let message = match &args[0] {
+                Value::String(s) => s.as_ref().clone(),
+                other => format!("{other}"),
+            };
+            let lower = message.to_lowercase();
+            let suggestion = if lower.contains("undefined variable") {
+                "Check variable spelling. Variables must be declared with +let or +call before use. Function parameters use the exact names from the signature.".to_string()
+            } else if lower.contains("expected `,") || lower.contains("expected `}") {
+                "Check struct literal syntax. Use {field: value, field2: value2}. Make sure string values with special chars are properly escaped.".to_string()
+            } else if lower.contains("out of range") {
+                "Statement index is 1-based. Use ?source to check how many statements the function has.".to_string()
+            } else if lower.contains("len() expects string or list") {
+                "The len() builtin only works on String and List types. Convert your value first or use a different approach.".to_string()
+            } else if lower.contains("missing effect") || lower.contains("requires effect") {
+                "Add the missing effect to your function signature, e.g. [io,async] or [fail].".to_string()
+            } else {
+                String::new()
+            };
+            Ok(Value::string(suggestion))
+        }
         "concat" => {
             // Pre-calculate total length to avoid repeated reallocations.
             // For non-String values we format them into a small buffer first
@@ -4600,6 +4624,35 @@ mod tests {
         let result = eval_inline_expr(&program, ev.inline_expr.as_ref().unwrap());
         assert!(result.is_ok(), "inline len: {:?}", result);
         assert_eq!(format!("{}", result.unwrap()), "5");
+    }
+
+    #[test]
+    fn test_error_suggest_matches_known_pattern() {
+        let program = ast::Program::default();
+        let mut env = Env::new();
+        let result = eval_builtin_or_user(
+            &program,
+            "error_suggest",
+            vec![Value::string("undefined variable `user_id`")],
+            &mut env,
+        ).unwrap();
+        assert_eq!(
+            format!("{result}"),
+            r#""Check variable spelling. Variables must be declared with +let or +call before use. Function parameters use the exact names from the signature.""#
+        );
+    }
+
+    #[test]
+    fn test_error_suggest_unknown_pattern_returns_empty_string() {
+        let program = ast::Program::default();
+        let mut env = Env::new();
+        let result = eval_builtin_or_user(
+            &program,
+            "error_suggest",
+            vec![Value::string("weird custom failure")],
+            &mut env,
+        ).unwrap();
+        assert_eq!(format!("{result}"), "\"\"");
     }
 
     #[test]
