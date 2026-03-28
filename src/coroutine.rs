@@ -955,6 +955,17 @@ impl CoroutineHandle {
                     .unwrap_or_else(|| "No recent mutation failures.".to_string());
                 return Ok(Value::string(result));
             }
+            "clear_failure_history" => {
+                if !args.is_empty() {
+                    bail!("clear_failure_history expects no arguments");
+                }
+                if let Some(rt) = crate::eval::get_shared_runtime()
+                    && let Ok(mut state) = rt.write()
+                {
+                    crate::session::clear_failure_history(&mut state);
+                }
+                return Ok(Value::string("cleared"));
+            }
             "failure_patterns" => {
                 if !args.is_empty() {
                     bail!("failure_patterns expects no arguments");
@@ -2491,6 +2502,19 @@ mod tests {
     }
 
     #[test]
+    fn clear_failure_history_clears_entries() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let rt = crate::eval::get_shared_runtime().unwrap();
+        if let Ok(mut state) = rt.write() {
+            crate::session::record_failure(&mut state, "undefined variable `user_id`");
+        }
+        let result = unwrap_string(handle.execute_await("clear_failure_history", &[]).unwrap());
+        assert_eq!(result, "cleared");
+        let history = unwrap_string(handle.execute_await("failure_history", &[]).unwrap());
+        assert_eq!(history, "No recent mutation failures.");
+    }
+
+    #[test]
     fn query_no_program_errors() {
         // Clear the thread-local program
         crate::eval::set_shared_program(None);
@@ -3345,7 +3369,7 @@ mod tests {
             "move_symbols", "watch_start", "agent_spawn", "msg_send", "query_inbox", "inbox_read", "inbox_clear", "trace_run",
             "route_list", "route_add", "route_remove",
             "undo", "sandbox_enter", "sandbox_merge", "sandbox_discard",
-            "mock_set", "mock_clear", "sse_send", "failure_history", "failure_patterns",
+            "mock_set", "mock_clear", "sse_send", "failure_history", "clear_failure_history", "failure_patterns",
             "module_create", "test_run", "fn_replace",
         ] {
             assert!(

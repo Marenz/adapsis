@@ -884,6 +884,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "clear_failure_history",
+        aliases: &[],
+        short: "clear recent mutation failures: clear_failure_history() -> String",
+        long: "Clears the recorded failure history for the current session and returns \"cleared\". Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "failure_patterns",
         aliases: &[],
         short: "summarize repeated failures: failure_patterns() -> String",
