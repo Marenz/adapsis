@@ -130,6 +130,8 @@ Modules can define startup/shutdown blocks and manage event sources:
 - `+event emit <name> <expr>` emits an event with a payload value.
 - Source and event statements can appear inside any function body, including +startup/+shutdown.
 - Duplicate +startup or +shutdown in the same module is an error.
+- `+await result:String = run_module_startups()` — execute all module startup blocks and auto-register
+  module-level source declarations. Use after library_reload or when modules change.
 - Module-level source declarations (inside module, not inside a function):
   `+source <name> <type> [key=value ...] -> <handler>`
   Example: `+source sync_timer timer interval=300000 -> on_tick`

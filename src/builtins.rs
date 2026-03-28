@@ -867,6 +867,15 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "run_module_startups",
+        aliases: &[],
+        short: "execute all module startup blocks: run_module_startups() -> String",
+        long: "Executes the +startup block for every module that has one, in alphabetical order. \
+               Also auto-registers module-level +source declarations (timer sources begin ticking). \
+               Returns a summary of results. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "library_errors",
         aliases: &[],
         short: "get library load/save errors: library_errors() -> String",
