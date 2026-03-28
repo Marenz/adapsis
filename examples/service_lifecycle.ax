@@ -1,0 +1,45 @@
+!module Poller
++startup [io,async]
+  +source add timer(300000) as poll -> on_tick
+  +source add channel as inbox -> on_message
+  +return "Poller started"
+
++shutdown [io,async]
+  +source remove poll
+  +source remove inbox
+  +return "Poller stopped"
+
++fn on_tick ()->String [io,async]
+  +return "tick"
+
++fn on_message (msg:String)->String
+  +return concat("received: ", msg)
+
++fn get_interval ()->Int
+  +return 300000
+
+!test on_message
+  +with msg="hello" -> expect "received: hello"
+  +with msg="" -> expect "received: "
+
+!test get_interval
+  +with -> expect 300000
+
+!module Events
++fn setup ()->String [io,async]
+  +event register new_message(String)
+  +return "events configured"
+
++fn broadcast (text:String)->String [io,async]
+  +event emit new_message text
+  +return concat("broadcast: ", text)
+
++fn subscribe ()->String [io,async]
+  +source add Events.new_message as msg_handler -> on_event
+  +return "subscribed"
+
++fn on_event (payload:String)->String
+  +return concat("event: ", payload)
+
+!test on_event
+  +with payload="test" -> expect "event: test"

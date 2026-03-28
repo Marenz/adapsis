@@ -125,7 +125,18 @@ Modules can define startup/shutdown blocks and manage event sources:
 - `+source list` lists registered sources.
 - `+event register <name>(<Type>)` declares an event this module can emit.
 - `+event emit <name> <expr>` emits an event with a payload value.
-- Source and event statements can appear inside any function body.
+- Source and event statements can appear inside any function body, including +startup/+shutdown.
+- Duplicate +startup or +shutdown in the same module is an error.
+- Complete example:
+  !module Poller
+  +startup [io,async]
+    +source add timer(5000) as poll -> on_tick
+    +return "started"
+  +shutdown [io,async]
+    +source remove poll
+    +return "stopped"
+  +fn on_tick ()->String [io,async]
+    +return "tick"
 
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
