@@ -1416,8 +1416,11 @@ impl Session {
                 (msg, true)
             }
             parser::RoadmapAction::Done(n) => {
-                match roadmap_done(&mut self.meta.roadmap, *n) {
-                    Ok(msg) => (msg, true),
+                match roadmap_done_checked(&self.meta, *n) {
+                    Ok(msg) => {
+                        self.meta.roadmap[n.saturating_sub(1)].done = true;
+                        (msg, true)
+                    }
                     Err(e) => (e.to_string(), false),
                 }
             }
@@ -1781,6 +1784,27 @@ pub fn roadmap_done(roadmap: &mut Vec<RoadmapItem>, n: usize) -> Result<String> 
         Ok(format!("Roadmap: #{n} done."))
     } else {
         Err(anyhow!("Roadmap: #{n} not found."))
+    }
+}
+
+/// Checked version of `roadmap_done` — warns if there's no evidence of work,
+/// but still allows marking done (the item may have been completed in a
+/// previous session or via external changes).
+pub fn roadmap_done_checked(meta: &SessionMeta, n: usize) -> Result<String> {
+    let idx = n.saturating_sub(1);
+    let item = meta.roadmap.get(idx)
+        .ok_or_else(|| anyhow!("Roadmap: #{n} not found."))?;
+    if item.done {
+        return Err(anyhow!("Roadmap: #{n} is already done."));
+    }
+    let has_successful_work = meta.mutations.iter().any(|m| m.success);
+    if has_successful_work {
+        Ok(format!("Roadmap: #{n} done."))
+    } else {
+        Ok(format!(
+            "Roadmap: #{n} done. WARNING: no successful mutations found in this session — \
+             are you sure this item was actually implemented and verified?"
+        ))
     }
 }
 

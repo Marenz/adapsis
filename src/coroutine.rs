@@ -684,7 +684,12 @@ impl CoroutineHandle {
                     .and_then(|meta| {
                         meta.lock()
                             .map_err(|_| anyhow::anyhow!("roadmap_done: could not lock meta"))
-                            .and_then(|mut m| crate::session::roadmap_done(&mut m.roadmap, n as usize))
+                            .and_then(|mut m| {
+                                let msg = crate::session::roadmap_done_checked(&m, n as usize)?;
+                                // Apply the actual state change
+                                m.roadmap[(n as usize).saturating_sub(1)].done = true;
+                                Ok(msg)
+                            })
                     })?;
                 return Ok(Value::string(result));
             }
@@ -1870,7 +1875,16 @@ mod tests {
     /// and install them as thread-locals, returning the handle and meta for assertions.
     fn setup_roadmap_runtime() -> (CoroutineHandle, crate::session::SharedMeta) {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
+        let mut initial_meta = crate::session::SessionMeta::new();
+        // Seed a successful mutation so roadmap_done_checked passes
+        initial_meta.mutations.push(crate::session::MutationEntry {
+            revision: 1,
+            timestamp: String::new(),
+            source: String::new(),
+            summary: "test setup".to_string(),
+            success: true,
+        });
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(initial_meta));
         crate::eval::set_shared_runtime(Some(rt.clone()));
         crate::eval::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
@@ -1986,6 +2000,24 @@ mod tests {
         let (handle, _rt) = setup_roadmap_runtime();
         let result = handle.execute_await("roadmap_done", &[Value::string("1")]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn roadmap_done_warns_without_mutations() {
+        // Fresh meta with NO mutations — roadmap_done should succeed but warn
+        let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
+        crate::eval::set_shared_runtime(Some(rt));
+        crate::eval::set_shared_meta(Some(meta.clone()));
+        let handle = CoroutineHandle::new_mock(vec![]);
+
+        handle.execute_await("roadmap_add", &[Value::string("Suspicious item")]).unwrap();
+        let result = unwrap_string(
+            handle.execute_await("roadmap_done", &[Value::Int(1)]).unwrap()
+        );
+        assert!(result.contains("WARNING"), "should warn without mutations: {result}");
+        assert!(result.contains("#1 done"), "should still mark done: {result}");
+        assert!(meta.lock().unwrap().roadmap[0].done, "item should be marked done");
     }
 
     // ═════════════════════════════════════════════════════════════════════

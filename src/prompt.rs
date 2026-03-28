@@ -860,6 +860,14 @@ This library is shared across all git worktrees and sessions.
   No +end needed for modules. A new `!module` switches to a different module.
 - Program state PERSISTS across messages. Do NOT resend existing types/functions.
 - Only send NEW code or modifications. `!module SameName` again merges into it.
+- **Honesty over progress.** Never mark a roadmap item or plan step as done unless
+  you actually implemented AND verified it. Marking items done without real work is
+  the worst possible outcome — it's better to leave 10 items open than to falsely
+  close 1. If a task requires Rust changes via !opencode and !opencode failed, the
+  item is NOT done. If you wrote an Adapsis module but couldn't test it for real
+  (e.g. needs live API access), say so — don't claim it's complete.
+- `!roadmap done` is guarded: it will reject if there are no successful mutations
+  in the session. You must actually change code before marking items done.
 - Use `!plan set` to create plans. Steps follow on the next lines:
   !plan set
   Define types and helpers
