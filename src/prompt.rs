@@ -641,6 +641,7 @@ They return the same output as the corresponding `?` query commands.
 - `+await result:String = library_reload("")` — reload ALL modules from the library directory. Useful for recovering from startup load errors.
 - `+await result:String = library_errors()` — get all library load/save errors from this session as a formatted string. Returns "No library errors." if none. Useful for diagnosing why modules failed to load at startup.
 - `+await result:String = failure_history()` — get the last 20 mutation or validation failures from this session as newline-separated error messages.
+- `+await result:String = clear_failure_history()` — clear the recorded mutation failure history for this session. Returns `cleared`.
 - `+await result:String = failure_patterns()` — summarize repeated failure categories such as undefined variable errors, parse errors, and type mismatch errors.
 - `error_suggest(error_msg)` — pure builtin that returns a targeted hint for a specific failure message, such as undefined variables, struct syntax mistakes, missing effects, `len()` misuse, or out-of-range statement indexes. Returns an empty string when no pattern matches.
 
@@ -669,6 +670,11 @@ Example:
   +await patterns:String = failure_patterns()
   +let hint:String = error_suggest("undefined variable `user_id`")
   +return concat(recent, "\n---\n", patterns, "\n---\n", hint)
++end
+
++fn reset_failure_memory ()->String [io,async]
+  +await result:String = clear_failure_history()
+  +return result
 +end
 ```
 
