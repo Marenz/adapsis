@@ -209,7 +209,16 @@ pub async fn mutate(
         Ok(results) => {
             let response_results: Vec<MutationResult> = results
                 .into_iter()
-                .map(|(message, success)| MutationResult { message, success })
+                .map(|(message, success)| {
+                    let message = if success {
+                        message
+                    } else if let Some(hint) = crate::session::recent_failure_hint(&runtime, &message) {
+                        format!("{message}\n{hint}")
+                    } else {
+                        message
+                    };
+                    MutationResult { message, success }
+                })
                 .collect();
             let summary = if response_results.is_empty() {
                 "Applied 0 mutations".to_string()
@@ -230,13 +239,20 @@ pub async fn mutate(
         }
         Err(e) => {
             let message = format!("error: {e}");
+            let message = if let Some(hint) = crate::session::recent_failure_hint(&runtime, &message) {
+                format!("{message}\n{hint}")
+            } else {
+                message
+            };
+            *config.runtime.write().unwrap() = runtime;
             Json(MutateResponse {
-            revision: meta.revision,
-            results: vec![MutationResult {
-                message,
-                success: false,
-            }],
-        })},
+                revision: meta.revision,
+                results: vec![MutationResult {
+                    message,
+                    success: false,
+                }],
+            })
+        },
     }
 }
 
@@ -4670,6 +4686,30 @@ mod tests {
         assert_eq!(event["type"], "mutation");
         assert_eq!(event["revision"], 1);
         assert_eq!(event["summary"], response.results[0].message);
+    }
+
+    #[tokio::test]
+    async fn mutate_repeated_errors_add_hint() {
+        let config = test_config();
+        let bad_source = "+fn bad ()->String\n  +let user:String = {first: \"a\" second: \"b\"}\n  +return user\n+end";
+
+        for _ in 0..2 {
+            let Json(response) = mutate(
+                State(config.clone()),
+                Json(MutateRequest { source: bad_source.to_string() }),
+            ).await;
+            assert!(!response.results[0].success);
+            assert!(!response.results[0].message.contains("HINT:"));
+        }
+
+        let Json(response) = mutate(
+            State(config),
+            Json(MutateRequest { source: bad_source.to_string() }),
+        ).await;
+
+        assert!(!response.results[0].success);
+        assert!(response.results[0].message.contains("HINT:"), "got: {}", response.results[0].message);
+        assert!(response.results[0].message.contains("Check struct literal syntax"), "got: {}", response.results[0].message);
     }
 
     #[tokio::test]

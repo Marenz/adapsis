@@ -99,7 +99,7 @@ pub static BUILTINS: &[Builtin] = &[
         name: "error_suggest",
         aliases: &["failure_suggest"],
         short: "suggest a fix for an error message",
-        long: "Returns a suggestion String for a common mutation or validation error. Recognizes patterns like undefined variables, struct syntax errors, missing effects, type mismatches, and out-of-range statement indexes. Alias: `failure_suggest`.",
+        long: "Returns a suggestion String for a common mutation or validation error. Recognizes patterns like undefined variables, struct syntax errors, missing effects, out-of-range statement indexes, and `len()` misuse. Returns an empty String when no pattern matches. Alias: `failure_suggest`.",
         category: BuiltinCategory::String,
     },
     // Conversion
@@ -880,7 +880,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "failure_history",
         aliases: &[],
         short: "show recent mutation failures: failure_history() -> String",
-        long: "Returns the last 20 recorded mutation or validation failures from the current session as a formatted string. Each entry is one line in the form `TIMESTAMP: ERROR_MSG`. Returns \"No recent mutation failures.\" if empty. Takes no arguments. Requires `+await`.",
+        long: "Returns the last 20 recorded mutation or validation failures from the current session as a newline-separated String. Returns \"No recent mutation failures.\" if empty. Takes no arguments. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {
