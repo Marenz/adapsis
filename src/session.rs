@@ -5,8 +5,9 @@
 //! The program state can be reconstructed by replaying mutations 0..N.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -39,8 +40,40 @@ pub struct RuntimeState {
     #[serde(skip)]
     pub library_load_errors: Vec<(String, String)>,
     /// Recent mutation failures for pattern detection and self-correction.
-    #[serde(skip, default = "default_failure_log")]
-    pub failure_log: Arc<Mutex<Vec<String>>>,
+    #[serde(default)]
+    pub failure_history: FailureHistory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FailureHistory {
+    entries: VecDeque<String>,
+}
+
+impl FailureHistory {
+    pub fn push(&mut self, message: impl Into<String>) {
+        self.entries.push_back(message.into());
+        while self.entries.len() > MAX_FAILURE_HISTORY {
+            self.entries.pop_front();
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &String> {
+        self.entries.iter()
+    }
+
+    pub fn recent_slice(&self, count: usize) -> Vec<&str> {
+        let len = self.entries.len();
+        let start = len.saturating_sub(count);
+        self.entries.iter().skip(start).map(String::as_str).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// Thread-safe handle to the runtime state.
@@ -160,10 +193,6 @@ impl SessionMeta {
 }
 
 const MAX_FAILURE_HISTORY: usize = 20;
-
-fn default_failure_log() -> Arc<Mutex<Vec<String>>> {
-    Arc::new(Mutex::new(Vec::new()))
-}
 
 /// Snapshot of program + runtime state saved when entering a sandbox.
 #[derive(Debug, Clone)]
@@ -1472,14 +1501,7 @@ pub fn peek_messages<'a>(meta: &'a SessionMeta, agent_name: &str) -> &'a [AgentM
 }
 
 pub fn record_failure(runtime: &mut RuntimeState, message: impl Into<String>) {
-    let entry = format!("{}: {}", now(), message.into());
-    if let Ok(mut log) = runtime.failure_log.lock() {
-        log.push(entry);
-        if log.len() > MAX_FAILURE_HISTORY {
-            let excess = log.len() - MAX_FAILURE_HISTORY;
-            log.drain(0..excess);
-        }
-    }
+    runtime.failure_history.push(message);
 }
 
 pub fn record_mutation_failures(runtime: &mut RuntimeState, results: &[(String, bool)]) {
@@ -1491,24 +1513,18 @@ pub fn record_mutation_failures(runtime: &mut RuntimeState, results: &[(String, 
 }
 
 pub fn format_failure_history(runtime: &RuntimeState) -> String {
-    let Ok(log) = runtime.failure_log.lock() else {
-        return "No recent mutation failures.".to_string();
-    };
-    if log.is_empty() {
+    if runtime.failure_history.is_empty() {
         return "No recent mutation failures.".to_string();
     }
 
-    log.iter().rev()
+    runtime.failure_history.iter().rev()
         .cloned()
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 pub fn summarize_failure_patterns(runtime: &RuntimeState) -> String {
-    let Ok(log) = runtime.failure_log.lock() else {
-        return "No recent mutation failures.".to_string();
-    };
-    if log.is_empty() {
+    if runtime.failure_history.is_empty() {
         return "No recent mutation failures.".to_string();
     }
 
@@ -1521,8 +1537,7 @@ pub fn summarize_failure_patterns(runtime: &RuntimeState) -> String {
     let mut buckets: HashMap<&'static str, PatternBucket> = HashMap::new();
     let mut order: Vec<&'static str> = Vec::new();
 
-    for entry in log.iter() {
-        let message = entry.split_once(": ").map(|(_, msg)| msg).unwrap_or(entry.as_str());
+    for message in runtime.failure_history.iter() {
         let category = classify_failure(message);
         let entry = buckets.entry(category).or_default();
         if entry.count == 0 {
@@ -1546,6 +1561,27 @@ pub fn summarize_failure_patterns(runtime: &RuntimeState) -> String {
         .join(", ")
 }
 
+pub fn recent_failure_hint(runtime: &RuntimeState, message: &str) -> Option<String> {
+    let recent = runtime.failure_history.recent_slice(5);
+    if recent.is_empty() {
+        return None;
+    }
+
+    let (pattern_label, suggestion) = detect_failure_pattern(message)?;
+    let count = recent
+        .iter()
+        .filter(|entry| detect_failure_pattern(entry).is_some_and(|(label, _)| label == pattern_label))
+        .count();
+
+    if count >= 3 {
+        Some(format!(
+            "HINT: This error has occurred {count} times recently. Try a different approach: {suggestion}"
+        ))
+    } else {
+        None
+    }
+}
+
 fn classify_failure(message: &str) -> &'static str {
     let lower = message.to_lowercase();
     if lower.contains("undefined variable") {
@@ -1558,6 +1594,33 @@ fn classify_failure(message: &str) -> &'static str {
         "effect/validation errors"
     } else {
         "other errors"
+    }
+}
+
+fn detect_failure_pattern(message: &str) -> Option<(&'static str, &'static str)> {
+    let lower = message.to_lowercase();
+    if lower.contains("undefined variable") {
+        Some((
+            "undefined variable",
+            "Check variable names and scope. Make sure the value is declared before use or passed as a function parameter.",
+        ))
+    } else if lower.contains("expected `,") || lower.contains("expected `}") {
+        Some((
+            "expected `,` or `}`",
+            "Check struct literal syntax and commas between fields.",
+        ))
+    } else if lower.contains("line ") && lower.contains(": expected") {
+        Some((
+            "line N: expected",
+            "Check indentation and statement syntax around the reported line.",
+        ))
+    } else if lower.contains("rejected") {
+        Some((
+            "rejected",
+            "Check that existing tests still pass after the mutation.",
+        ))
+    } else {
+        None
     }
 }
 
@@ -2044,8 +2107,8 @@ mod tests {
             record_failure(&mut runtime, format!("error {i}"));
         }
 
-        let log = runtime.failure_log.lock().unwrap();
-        assert_eq!(log.len(), 20);
+        assert_eq!(runtime.failure_history.len(), 20);
+        let log: Vec<&String> = runtime.failure_history.iter().collect();
         assert!(log.first().unwrap().contains("error 5"));
         assert!(log.last().unwrap().contains("error 24"));
     }
@@ -2061,6 +2124,19 @@ mod tests {
         assert!(summary.contains("2x undefined variable errors"), "got: {summary}");
         assert!(summary.contains("latest: `account_id`"), "got: {summary}");
         assert!(summary.contains("1x parse errors"), "got: {summary}");
+    }
+
+    #[test]
+    fn recent_failure_hint_detects_three_of_last_five() {
+        let mut runtime = RuntimeState::default();
+        record_failure(&mut runtime, "undefined variable `a`");
+        record_failure(&mut runtime, "type mismatch");
+        record_failure(&mut runtime, "undefined variable `b`");
+        record_failure(&mut runtime, "undefined variable `c`");
+
+        let hint = recent_failure_hint(&runtime, "undefined variable `c`").unwrap();
+        assert!(hint.contains("occurred 3 times recently"), "got: {hint}");
+        assert!(hint.contains("Check variable names and scope"), "got: {hint}");
     }
 
     // ═════════════════════════════════════════════════════════════════════

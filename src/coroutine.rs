@@ -2463,8 +2463,8 @@ mod tests {
             crate::session::record_failure(&mut state, "type mismatch in let binding");
         }
         let result = unwrap_string(handle.execute_await("failure_history", &[]).unwrap());
-        assert!(result.contains(": type mismatch in let binding"), "got: {result}");
-        assert!(result.contains(": undefined variable `user_id`"), "got: {result}");
+        assert!(result.contains("type mismatch in let binding"), "got: {result}");
+        assert!(result.contains("undefined variable `user_id`"), "got: {result}");
     }
 
     #[test]
