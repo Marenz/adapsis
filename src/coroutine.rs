@@ -134,6 +134,15 @@ pub enum IoRequest {
     Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
     HttpGet { url: String, reply: oneshot::Sender<Result<String>> },
     HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
+    /// Register a source (timer, channel, event) on a module.
+    SourceAdd {
+        module_name: String,
+        source_type: String,  // "timer", "channel", or "event:Module.event_name"
+        interval_ms: Option<u64>,
+        alias: String,
+        handler: String,  // fully-qualified handler like "MyModule.on_tick"
+        reply: oneshot::Sender<Result<String>>,
+    },
 }
 
 /// The coroutine runtime — manages IO resources and dispatches operations.
@@ -405,7 +414,10 @@ impl Runtime {
                 });
             }
             IoRequest::Spawn { .. } => {
-                // Spawn is handled at a higher level
+                // Spawn is handled at a higher level (main.rs IO loop)
+            }
+            IoRequest::SourceAdd { .. } => {
+                // SourceAdd is handled at a higher level (main.rs IO loop)
             }
             IoRequest::LlmCall { model, system, prompt, reply } => {
                 let url = self.llm_url.clone();
