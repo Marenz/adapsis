@@ -114,8 +114,9 @@ Modules can define startup/shutdown blocks and manage event sources:
   +return "stopped"
 +end
 
-- `+startup` and `+shutdown` blocks must be inside a module and must declare `[io,async]` effects.
-  Only one of each per module. Startup blocks run automatically when AdapsisOS starts.
+- `+startup` and `+shutdown` are LifecycleBlocks (id, effects, body — no name/params/return type).
+  Must be inside a module and must declare `[io,async]` effects. One of each per module.
+  Startup blocks run automatically when AdapsisOS starts.
 - `+source add <kind> as <alias> -> <handler>` registers a source (requires async context). Kinds:
   `timer(EXPR)` — periodic timer spawning a background task that calls handler every EXPR ms,
   `channel` — named mailbox,

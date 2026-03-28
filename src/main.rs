@@ -1022,7 +1022,7 @@ async fn main() -> Result<()> {
 
             // Execute module startup blocks and auto-register module-level sources
             {
-                let modules_with_startup: Vec<(String, std::sync::Arc<ast::FunctionDecl>)> = {
+                let modules_with_startup: Vec<(String, ast::LifecycleBlock)> = {
                     let prog = startup_program.blocking_read();
                     prog.modules.iter()
                         .filter_map(|m| m.startup.as_ref().map(|s| (m.name.clone(), s.clone())))

@@ -167,12 +167,12 @@ impl Program {
             for sv in &module.shared_vars {
                 self.interner.intern(&sv.name);
             }
-            // Startup/shutdown blocks
+            // Startup/shutdown lifecycle blocks
             if let Some(ref startup) = module.startup {
-                Self::intern_function_names(&mut self.interner, startup);
+                Self::intern_body_names(&mut self.interner, &startup.body);
             }
             if let Some(ref shutdown) = module.shutdown {
-                Self::intern_function_names(&mut self.interner, shutdown);
+                Self::intern_body_names(&mut self.interner, &shutdown.body);
             }
             // Source declarations
             for src in &module.sources {
@@ -369,10 +369,10 @@ impl Program {
                 interner.intern(&sv.name);
             }
             if let Some(ref startup) = sub.startup {
-                Self::intern_function_names(interner, startup);
+                Self::intern_body_names(interner, &startup.body);
             }
             if let Some(ref shutdown) = sub.shutdown {
-                Self::intern_function_names(interner, shutdown);
+                Self::intern_body_names(interner, &shutdown.body);
             }
             for src in &sub.sources {
                 interner.intern(&src.name);
@@ -555,6 +555,15 @@ pub struct SharedVarDecl {
     pub default: Expr,
 }
 
+/// A lifecycle block (+startup or +shutdown) attached to a module.
+/// Unlike FunctionDecl, has no name, params, or return type — just effects and body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleBlock {
+    pub id: NodeId,
+    pub effects: Vec<Effect>,
+    pub body: Vec<Statement>,
+}
+
 /// Source type for `+source` statements — what kind of source to register.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SourceType {
@@ -618,12 +627,12 @@ pub struct Module {
     pub modules: Vec<Module>,
     #[serde(default)]
     pub shared_vars: Vec<SharedVarDecl>,
-    /// Optional startup function — runs when the service starts.
+    /// Optional startup lifecycle block — runs when the service starts.
     #[serde(default)]
-    pub startup: Option<Arc<FunctionDecl>>,
-    /// Optional shutdown function — runs when the service stops.
+    pub startup: Option<LifecycleBlock>,
+    /// Optional shutdown lifecycle block — runs when the service stops.
     #[serde(default)]
-    pub shutdown: Option<Arc<FunctionDecl>>,
+    pub shutdown: Option<LifecycleBlock>,
     /// Module-level source declarations.
     #[serde(default)]
     pub sources: Vec<SourceDecl>,
@@ -2758,5 +2767,92 @@ mod tests {
         assert_eq!(module.name, "Old");
         assert!(module.startup.is_none());
         assert!(module.shutdown.is_none());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // LifecycleBlock
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn lifecycle_block_construction() {
+        let block = LifecycleBlock {
+            id: "Svc.startup".to_string(),
+            effects: vec![Effect::Io, Effect::Async],
+            body: vec![make_stmt(StatementKind::Return {
+                value: Expr::Literal(Literal::String("started".to_string())),
+            })],
+        };
+        assert_eq!(block.id, "Svc.startup");
+        assert_eq!(block.effects.len(), 2);
+        assert_eq!(block.body.len(), 1);
+    }
+
+    #[test]
+    fn lifecycle_block_equality() {
+        let a = LifecycleBlock {
+            id: "M.startup".to_string(),
+            effects: vec![Effect::Io, Effect::Async],
+            body: vec![],
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let c = LifecycleBlock {
+            id: "M.shutdown".to_string(),
+            effects: vec![Effect::Io, Effect::Async],
+            body: vec![],
+        };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn lifecycle_block_serde_roundtrip() {
+        let block = LifecycleBlock {
+            id: "Test.startup".to_string(),
+            effects: vec![Effect::Io, Effect::Async],
+            body: vec![make_stmt(StatementKind::Return {
+                value: Expr::Literal(Literal::String("ok".to_string())),
+            })],
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let deserialized: LifecycleBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, deserialized);
+    }
+
+    #[test]
+    fn module_with_lifecycle_block() {
+        let mut module = make_module("Svc", vec![]);
+        assert!(module.startup.is_none());
+
+        module.startup = Some(LifecycleBlock {
+            id: "Svc.startup".to_string(),
+            effects: vec![Effect::Io, Effect::Async],
+            body: vec![make_stmt(StatementKind::Return {
+                value: Expr::Literal(Literal::String("started".to_string())),
+            })],
+        });
+        assert!(module.startup.is_some());
+        assert_eq!(module.startup.as_ref().unwrap().body.len(), 1);
+    }
+
+    #[test]
+    fn module_equality_with_lifecycle_blocks() {
+        let mut a = make_module("M", vec![]);
+        let mut b = make_module("M", vec![]);
+        assert_eq!(a, b);
+
+        a.startup = Some(LifecycleBlock {
+            id: "M.startup".to_string(),
+            effects: vec![Effect::Io],
+            body: vec![],
+        });
+        assert_ne!(a, b, "modules with different startup should be unequal");
+
+        b.startup = Some(LifecycleBlock {
+            id: "M.startup".to_string(),
+            effects: vec![Effect::Io],
+            body: vec![],
+        });
+        assert_eq!(a, b, "modules with same startup should be equal");
     }
 }
