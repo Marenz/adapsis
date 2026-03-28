@@ -95,6 +95,13 @@ pub static BUILTINS: &[Builtin] = &[
         long: "Returns the length of a String or List as an Int. Use it to count bytes in a string or items in a list.",
         category: BuiltinCategory::String,
     },
+    Builtin {
+        name: "error_suggest",
+        aliases: &["failure_suggest"],
+        short: "suggest a fix for an error message",
+        long: "Returns a suggestion String for a common mutation or validation error. Recognizes patterns like undefined variables, struct syntax errors, missing effects, type mismatches, and out-of-range statement indexes. Alias: `failure_suggest`.",
+        category: BuiltinCategory::String,
+    },
     // Conversion
     Builtin {
         name: "to_string",
@@ -881,13 +888,6 @@ pub static IO_BUILTINS: &[Builtin] = &[
         aliases: &[],
         short: "summarize repeated failures: failure_patterns() -> String",
         long: "Analyzes recent mutation failures and groups repeated mistakes such as undefined variable errors, type mismatch errors, parse errors, and validation errors. Returns a compact summary string to help the AI avoid repeating the same mistake. Takes no arguments. Requires `+await`.",
-        category: BuiltinCategory::Io,
-    },
-    Builtin {
-        name: "failure_suggest",
-        aliases: &[],
-        short: "suggest fixes for an error: failure_suggest(msg) -> String",
-        long: "Returns a targeted suggestion for a mutation or validation error message. Recognizes common issues like undefined variables, struct syntax mistakes, missing effects, type mismatches, and out-of-bounds access. Falls back to a generic debugging hint when no pattern matches. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
 ];
