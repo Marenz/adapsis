@@ -214,6 +214,8 @@ Effect validation is enforced when functions are added or replaced:
     Use (a) when your function also has [fail]. Use (b) when you handle errors explicitly.
     Do NOT use intermediate variables — match directly on the function call.
 
+Runtime note: the Rust side now includes a minimal bytecode VM scaffold in `src/bytecode.rs` with `Op`, `Chunk`, and `VM` types. It is not yet wired into compilation, but it exists as a foundation for future bytecode execution work.
+
 ## Example 1: Validation with checks
 
 <code>
