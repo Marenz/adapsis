@@ -1092,6 +1092,40 @@ impl CoroutineHandle {
                 return Ok(Value::string(format!("executed {} startup(s): {}", count, results.join("; "))));
             }
 
+            "query_startups" => {
+                let program = crate::eval::get_shared_program()
+                    .ok_or_else(|| anyhow::anyhow!("query_startups: program not available"))?;
+
+                let mut lines = Vec::new();
+                for module in &program.modules {
+                    if let Some(ref startup) = module.startup {
+                        let effects = startup.effects.iter()
+                            .map(|e| format!("{e:?}").to_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let stmt_count = startup.body.len();
+                        lines.push(format!("{}: +startup [{}] ({} statement{})",
+                            module.name, effects, stmt_count,
+                            if stmt_count == 1 { "" } else { "s" }));
+                    }
+                    if let Some(ref shutdown) = module.shutdown {
+                        let effects = shutdown.effects.iter()
+                            .map(|e| format!("{e:?}").to_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let stmt_count = shutdown.body.len();
+                        lines.push(format!("{}: +shutdown [{}] ({} statement{})",
+                            module.name, effects, stmt_count,
+                            if stmt_count == 1 { "" } else { "s" }));
+                    }
+                }
+
+                if lines.is_empty() {
+                    return Ok(Value::string("No modules have startup or shutdown blocks.".to_string()));
+                }
+                return Ok(Value::string(lines.join("\n")));
+            }
+
             // ── Mutation operations — write to program AST via thread-local ──
             "mutate" => {
                 let code = match args.first() {
@@ -4111,5 +4145,73 @@ mod tests {
         // the mock handle's send will succeed silently
         assert!(msg.contains("no modules have startup blocks") || msg.contains("source"),
             "should handle no startups or report source: {msg}");
+    }
+
+    // ── query_startups ──
+
+    #[test]
+    fn query_startups_no_modules() {
+        let (handle, _prog) = setup_mutation_runtime("");
+        let result = handle.execute_await("query_startups", &[]);
+        assert!(result.is_ok());
+        let msg = unwrap_string(result.unwrap());
+        assert!(msg.contains("No modules have startup or shutdown blocks"), "msg: {msg}");
+    }
+
+    #[test]
+    fn query_startups_with_startup() {
+        let source = r#"
+!module Svc
++startup [io,async]
+  +return "started"
++fn greet ()->String
+  +return "hi"
+"#;
+        let (handle, _prog) = setup_mutation_runtime(source);
+        let result = handle.execute_await("query_startups", &[]);
+        assert!(result.is_ok());
+        let msg = unwrap_string(result.unwrap());
+        assert!(msg.contains("Svc: +startup [io,async]"), "should list Svc startup: {msg}");
+        assert!(msg.contains("1 statement"), "should show statement count: {msg}");
+    }
+
+    #[test]
+    fn query_startups_with_both() {
+        let source = r#"
+!module Svc
++startup [io,async]
+  +return "started"
++shutdown [io,async]
+  +return "stopped"
++fn greet ()->String
+  +return "hi"
+"#;
+        let (handle, _prog) = setup_mutation_runtime(source);
+        let result = handle.execute_await("query_startups", &[]);
+        assert!(result.is_ok());
+        let msg = unwrap_string(result.unwrap());
+        assert!(msg.contains("Svc: +startup"), "should list startup: {msg}");
+        assert!(msg.contains("Svc: +shutdown"), "should list shutdown: {msg}");
+    }
+
+    #[test]
+    fn query_startups_multiple_modules() {
+        let source = r#"
+!module Alpha
++startup [io,async]
+  +return "a"
+!module Beta
++startup [io,async]
+  +return "b1"
+  +return "b2"
+"#;
+        let (handle, _prog) = setup_mutation_runtime(source);
+        let result = handle.execute_await("query_startups", &[]);
+        assert!(result.is_ok());
+        let msg = unwrap_string(result.unwrap());
+        assert!(msg.contains("Alpha: +startup"), "should list Alpha: {msg}");
+        assert!(msg.contains("Beta: +startup"), "should list Beta: {msg}");
+        assert!(msg.contains("1 statement"), "Alpha has 1 statement: {msg}");
+        assert!(msg.contains("2 statements"), "Beta has 2 statements: {msg}");
     }
 }
