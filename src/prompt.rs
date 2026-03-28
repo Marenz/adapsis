@@ -638,9 +638,9 @@ They return the same output as the corresponding `?` query commands.
 - `+await result:String = library_reload("ModuleName")` — reload a specific module from disk. Re-reads the .ax file, removes old module, and re-parses. Returns "Reloaded ModuleName successfully" or fails with error.
 - `+await result:String = library_reload("")` — reload ALL modules from the library directory. Useful for recovering from startup load errors.
 - `+await result:String = library_errors()` — get all library load/save errors from this session as a formatted string. Returns "No library errors." if none. Useful for diagnosing why modules failed to load at startup.
-- `+await result:String = failure_history()` — get the last 20 mutation or validation failures from this session. Each line is `TIMESTAMP: ERROR_MSG`.
+- `+await result:String = failure_history()` — get the last 20 mutation or validation failures from this session as newline-separated error messages.
 - `+await result:String = failure_patterns()` — summarize repeated failure categories such as undefined variable errors, parse errors, and type mismatch errors.
-- `error_suggest(error_msg)` — pure builtin that returns a targeted hint for a specific failure message, such as missing effects, undefined variables, or struct syntax mistakes.
+- `error_suggest(error_msg)` — pure builtin that returns a targeted hint for a specific failure message, such as undefined variables, struct syntax mistakes, missing effects, `len()` misuse, or out-of-range statement indexes. Returns an empty string when no pattern matches.
 
 These require `[io,async]` effects and `+await`. Use them for self-modifying or reflective programs
 that need to inspect their own structure at runtime.
