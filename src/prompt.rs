@@ -207,10 +207,10 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
           +return concat("failed: ", e)
 
 Effect validation is enforced when functions are added or replaced:
-- Any function that uses `+await` must declare `[io,async]`.
+- Any function that uses `+await` must declare `[async]`.
+- Any function that awaits an IO builtin such as `http_get`, `file_read`, or `llm_call` must also declare `[io]`.
 - Any function that mutates module `+shared` state with `+set` must declare `[mut]`.
-- Any function that auto-propagates a `[fail]` callee (for example `+call value:T = validate(x)`) must also declare `[fail]`.
-       +end
+        +end
     Use (a) when your function also has [fail]. Use (b) when you handle errors explicitly.
     Do NOT use intermediate variables — match directly on the function call.
 
@@ -640,7 +640,7 @@ They return the same output as the corresponding `?` query commands.
 - `+await result:String = library_errors()` — get all library load/save errors from this session as a formatted string. Returns "No library errors." if none. Useful for diagnosing why modules failed to load at startup.
 - `+await result:String = failure_history()` — get the last 20 mutation or validation failures from this session. Each line is `TIMESTAMP: ERROR_MSG`.
 - `+await result:String = failure_patterns()` — summarize repeated failure categories such as undefined variable errors, parse errors, and type mismatch errors.
-- `+await result:String = failure_suggest(error_msg)` — get a targeted hint for a specific failure message, such as missing effects, undefined variables, or struct syntax mistakes.
+- `error_suggest(error_msg)` — pure builtin that returns a targeted hint for a specific failure message, such as missing effects, undefined variables, or struct syntax mistakes.
 
 These require `[io,async]` effects and `+await`. Use them for self-modifying or reflective programs
 that need to inspect their own structure at runtime.
@@ -665,7 +665,7 @@ Example:
 +fn inspect_failures ()->String [io,async]
   +await recent:String = failure_history()
   +await patterns:String = failure_patterns()
-  +await hint:String = failure_suggest("undefined variable `user_id`")
+  +let hint:String = error_suggest("undefined variable `user_id`")
   +return concat(recent, "\n---\n", patterns, "\n---\n", hint)
 +end
 ```
