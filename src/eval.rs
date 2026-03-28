@@ -1944,16 +1944,21 @@ fn eval_function_body(
             ast::StatementKind::Yield { value } => {
                 let _val = eval_ast_expr(program, value, env)?;
             }
-            // Source and event statements — runtime stubs (Phase 1: parse/validate only)
-            ast::StatementKind::SourceAdd { .. }
-            | ast::StatementKind::SourceRemove { .. }
-            | ast::StatementKind::SourceReplace { .. }
-            | ast::StatementKind::EventRegister { .. } => {
-                // No-op: runtime behavior will be implemented in Phase 2
+            // Source and event statements — runtime stubs
+            ast::StatementKind::Source(op) => {
+                // Evaluate timer expressions but otherwise no-op
+                match op {
+                    ast::SourceOp::Add { source_type: ast::SourceType::Timer(expr), .. }
+                    | ast::SourceOp::Replace { source_type: ast::SourceType::Timer(expr), .. } => {
+                        let _val = eval_ast_expr(program, expr, env)?;
+                    }
+                    _ => {}
+                }
             }
-            ast::StatementKind::EventEmit { value, .. } => {
-                let _val = eval_ast_expr(program, value, env)?;
-                // No-op: event dispatch will be implemented in Phase 2
+            ast::StatementKind::Event(op) => {
+                if let ast::EventOp::Emit { value, .. } = op {
+                    let _val = eval_ast_expr(program, value, env)?;
+                }
             }
         }
     }

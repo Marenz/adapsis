@@ -192,6 +192,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         | parser::Operation::SourceAdd(_)
         | parser::Operation::SourceRemove(_)
         | parser::Operation::SourceReplace(_)
+        | parser::Operation::SourceList
         | parser::Operation::EventRegister(_)
         | parser::Operation::EventEmit(_) => {
             Ok("top-level statement (execute immediately)".to_string())
@@ -222,9 +223,8 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
-            startup: vec![],
-            shutdown: vec![],
-            sources: vec![],
+            startup: None,
+            shutdown: None,
             event_decls: vec![],
             fn_index: HashMap::new(),
         });
@@ -315,7 +315,10 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     );
                 }
                 let m = &mut program.modules[mod_idx];
-                m.startup = converted.body;
+                if m.startup.is_some() {
+                    bail!("duplicate +startup in module `{}`", decl.name);
+                }
+                m.startup = Some(std::sync::Arc::new(converted));
             }
             parser::Operation::Shutdown(fd) => {
                 let converted = convert_function(fd)?;
@@ -327,7 +330,10 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     );
                 }
                 let m = &mut program.modules[mod_idx];
-                m.shutdown = converted.body;
+                if m.shutdown.is_some() {
+                    bail!("duplicate +shutdown in module `{}`", decl.name);
+                }
+                m.shutdown = Some(std::sync::Arc::new(converted));
             }
             other => bail!(
                 "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, and !test are allowed",
@@ -635,15 +641,23 @@ fn collect_effect_requirements(
                     collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
                 }
             }
-            // Source/event statements are inherently IO operations
-            ast::StatementKind::SourceAdd { .. }
-            | ast::StatementKind::SourceRemove { .. }
-            | ast::StatementKind::SourceReplace { .. }
-            | ast::StatementKind::EventRegister { .. } => {
-                // These require [io,async] but validation is done at module level
+            ast::StatementKind::Source(op) => {
+                match op {
+                    ast::SourceOp::Add { source_type, .. } | ast::SourceOp::Replace { source_type, .. } => {
+                        if let ast::SourceType::Timer(expr) = source_type {
+                            collect_expr_effect_requirements(program, current_func, current_module, expr, diagnostics);
+                        }
+                    }
+                    ast::SourceOp::Remove { .. } | ast::SourceOp::List => {}
+                }
             }
-            ast::StatementKind::EventEmit { value, .. } => {
-                collect_expr_effect_requirements(program, current_func, current_module, value, diagnostics);
+            ast::StatementKind::Event(op) => {
+                match op {
+                    ast::EventOp::Register { .. } => {}
+                    ast::EventOp::Emit { value, .. } => {
+                        collect_expr_effect_requirements(program, current_func, current_module, value, diagnostics);
+                    }
+                }
             }
         }
     }
@@ -964,39 +978,40 @@ pub fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
             td.name
         ),
         parser::Operation::SourceAdd(decl) => {
-            let kind = parse_source_kind(&decl.kind_text)?;
-            ast::StatementKind::SourceAdd {
-                kind,
+            let source_type = parse_source_type(&decl.kind_text)?;
+            ast::StatementKind::Source(ast::SourceOp::Add {
+                source_type,
                 alias: decl.alias.clone(),
                 handler: decl.handler.clone(),
-            }
+            })
         }
         parser::Operation::SourceRemove(alias) => {
-            ast::StatementKind::SourceRemove {
+            ast::StatementKind::Source(ast::SourceOp::Remove {
                 alias: alias.clone(),
-            }
+            })
         }
         parser::Operation::SourceReplace(decl) => {
-            let kind = parse_source_kind(&decl.kind_text)?;
-            ast::StatementKind::SourceReplace {
+            let source_type = parse_source_type(&decl.kind_text)?;
+            ast::StatementKind::Source(ast::SourceOp::Replace {
                 alias: decl.alias.clone(),
-                kind,
+                source_type,
                 handler: decl.handler.clone(),
-            }
+            })
+        }
+        parser::Operation::SourceList => {
+            ast::StatementKind::Source(ast::SourceOp::List)
         }
         parser::Operation::EventRegister(decl) => {
-            let ty_expr = parser::parse_type_expr(&decl.payload_type)
-                .map_err(|e| anyhow!("invalid payload type in +event register: {e}"))?;
-            ast::StatementKind::EventRegister {
+            ast::StatementKind::Event(ast::EventOp::Register {
                 name: decl.name.clone(),
-                payload_type: convert_type(&ty_expr)?,
-            }
+                payload_type: decl.payload_type.clone(),
+            })
         }
         parser::Operation::EventEmit(decl) => {
-            ast::StatementKind::EventEmit {
+            ast::StatementKind::Event(ast::EventOp::Emit {
                 name: decl.name.clone(),
-                value: convert_expr(&decl.value)?,
-            }
+                value: Box::new(convert_expr(&decl.value)?),
+            })
         }
         other => bail!(
             "unexpected operation in function body: {:?}",
@@ -1125,19 +1140,20 @@ fn convert_match_pattern(pat: &parser::MatchPatternDecl) -> ast::MatchPattern {
     }
 }
 
-/// Parse a source kind text into an `ast::SourceKind`.
+/// Parse a source kind text into an `ast::SourceType`.
+/// The timer expression is parsed via the parser's expression parser.
 /// Examples: "timer(300000)", "channel", "Module.event_name"
-fn parse_source_kind(text: &str) -> Result<ast::SourceKind> {
+fn parse_source_type(text: &str) -> Result<ast::SourceType> {
     let text = text.trim();
     if text == "channel" {
-        return Ok(ast::SourceKind::Channel);
+        return Ok(ast::SourceType::Channel);
     }
     if let Some(rest) = text.strip_prefix("timer(") {
         let rest = rest.trim_end_matches(')');
-        let ms: u64 = rest.trim().parse().map_err(|_| {
-            anyhow!("invalid timer interval: `{}`", rest)
-        })?;
-        return Ok(ast::SourceKind::Timer(ms));
+        let expr = parser::parse_single_expr(rest.trim())
+            .map_err(|e| anyhow!("invalid timer expression: {e}"))?;
+        let ast_expr = convert_expr(&expr)?;
+        return Ok(ast::SourceType::Timer(Box::new(ast_expr)));
     }
     // Module.event_name pattern
     if let Some(dot_pos) = text.find('.') {
@@ -1146,7 +1162,7 @@ fn parse_source_kind(text: &str) -> Result<ast::SourceKind> {
         if module.is_empty() || event.is_empty() {
             bail!("invalid event source: `{}`", text);
         }
-        return Ok(ast::SourceKind::Event(module, event));
+        return Ok(ast::SourceType::Event(module, event));
     }
     bail!("unknown source kind: `{}` — expected timer(ms), channel, or Module.event", text)
 }
@@ -1438,9 +1454,8 @@ pub fn apply_move(
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
-            startup: vec![],
-            shutdown: vec![],
-            sources: vec![],
+            startup: None,
+            shutdown: None,
             event_decls: vec![],
             fn_index: HashMap::new(),
         });
@@ -2207,7 +2222,8 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_ok(), "expected valid startup, got: {result:?}");
         let module = &program.modules[0];
-        assert!(!module.startup.is_empty(), "startup should have statements");
+        assert!(module.startup.is_some(), "startup should be set");
+        assert_eq!(module.startup.as_ref().unwrap().name, "startup");
     }
 
     #[test]
@@ -2223,7 +2239,8 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_ok(), "expected valid shutdown, got: {result:?}");
         let module = &program.modules[0];
-        assert!(!module.shutdown.is_empty(), "shutdown should have statements");
+        assert!(module.shutdown.is_some(), "shutdown should be set");
+        assert_eq!(module.shutdown.as_ref().unwrap().name, "shutdown");
     }
 
     #[test]
@@ -2282,7 +2299,7 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_ok(), "source add in function body should work: {result:?}");
         let func = &program.modules[0].functions[0];
-        assert!(matches!(func.body[0].kind, ast::StatementKind::SourceAdd { .. }));
+        assert!(matches!(func.body[0].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
     }
 
     #[test]
@@ -2299,8 +2316,8 @@ mod tests {
         assert!(result.is_ok(), "source remove in function body should work: {result:?}");
         let func = &program.modules[0].functions[0];
         match &func.body[0].kind {
-            ast::StatementKind::SourceRemove { alias } => assert_eq!(alias, "poll"),
-            o => panic!("expected SourceRemove, got {:?}", o),
+            ast::StatementKind::Source(ast::SourceOp::Remove { alias }) => assert_eq!(alias, "poll"),
+            o => panic!("expected Source(Remove), got {:?}", o),
         }
     }
 
@@ -2332,27 +2349,27 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_ok(), "event register/emit should work: {result:?}");
         let func = &program.modules[0].functions[0];
-        assert!(matches!(func.body[0].kind, ast::StatementKind::EventRegister { .. }));
-        assert!(matches!(func.body[1].kind, ast::StatementKind::EventEmit { .. }));
+        assert!(matches!(func.body[0].kind, ast::StatementKind::Event(ast::EventOp::Register { .. })));
+        assert!(matches!(func.body[1].kind, ast::StatementKind::Event(ast::EventOp::Emit { .. })));
     }
 
     #[test]
-    fn parse_source_kind_timer() {
-        let kind = parse_source_kind("timer(300000)").unwrap();
-        assert!(matches!(kind, ast::SourceKind::Timer(300000)));
+    fn parse_source_type_timer() {
+        let st = parse_source_type("timer(300000)").unwrap();
+        assert!(matches!(st, ast::SourceType::Timer(_)));
     }
 
     #[test]
-    fn parse_source_kind_channel() {
-        let kind = parse_source_kind("channel").unwrap();
-        assert!(matches!(kind, ast::SourceKind::Channel));
+    fn parse_source_type_channel() {
+        let st = parse_source_type("channel").unwrap();
+        assert!(matches!(st, ast::SourceType::Channel));
     }
 
     #[test]
-    fn parse_source_kind_event() {
-        let kind = parse_source_kind("Chat.new_message").unwrap();
-        match kind {
-            ast::SourceKind::Event(module, event) => {
+    fn parse_source_type_event() {
+        let st = parse_source_type("Chat.new_message").unwrap();
+        match st {
+            ast::SourceType::Event(module, event) => {
                 assert_eq!(module, "Chat");
                 assert_eq!(event, "new_message");
             }
@@ -2361,8 +2378,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_source_kind_unknown() {
-        let result = parse_source_kind("bogus_kind");
+    fn parse_source_type_unknown() {
+        let result = parse_source_type("bogus_kind");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn duplicate_startup_rejected() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++startup [io,async]
+  +return \"first\"
++end
++startup [io,async]
+  +return \"second\"
++end
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_err(), "duplicate startup should be rejected");
+        assert!(result.unwrap_err().to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn duplicate_shutdown_rejected() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++shutdown [io,async]
+  +return \"first\"
++end
++shutdown [io,async]
+  +return \"second\"
++end
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_err(), "duplicate shutdown should be rejected");
     }
 }

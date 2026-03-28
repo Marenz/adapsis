@@ -115,14 +115,14 @@ Modules can define startup/shutdown blocks and manage event sources:
 +end
 
 - `+startup` and `+shutdown` blocks must be inside a module and must declare `[io,async]` effects.
-  The statements are stored directly on the module (as `Vec<Statement>`).
-- Modules can declare static sources via the `sources` field:
-  `SourceDecl::Timer { interval_ms }` — periodic timer source.
-  `SourceDecl::Channel { name }` — named channel (mailbox) source.
-- `+source add <kind> as <alias> -> <handler>` registers a source that delivers messages to a handler function.
-  Source kinds: `timer(ms)` (periodic), `channel` (named mailbox), `Module.event_name` (cross-module event).
-- `+source remove <alias>` removes a previously registered source.
-- `+source replace <alias> <kind> -> <handler>` replaces a source's kind and handler.
+  Only one of each per module. Stored as `Option<Function>` on the module.
+- `+source add <kind> as <alias> -> <handler>` registers a source. Kinds:
+  `timer(EXPR)` — periodic timer (expression evaluated for interval ms),
+  `channel` — named mailbox,
+  `Module.event_name` — cross-module event subscription.
+- `+source remove <alias>` removes a source.
+- `+source replace <alias> <kind> -> <handler>` replaces a source.
+- `+source list` lists registered sources.
 - `+event register <name>(<Type>)` declares an event this module can emit.
 - `+event emit <name> <expr>` emits an event with a payload value.
 - Source and event statements can appear inside any function body.

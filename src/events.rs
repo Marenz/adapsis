@@ -180,21 +180,20 @@ fn snapshot_function(func: &crate::ast::FunctionDecl) -> FunctionSnapshot {
                     }
                     crate::ast::StatementKind::Match { .. } => "match".to_string(),
                     crate::ast::StatementKind::Yield { .. } => "yield".to_string(),
-                    crate::ast::StatementKind::SourceAdd { alias, .. } => {
-                        format!("source add {alias}")
-                    }
-                    crate::ast::StatementKind::SourceRemove { alias } => {
-                        format!("source remove {alias}")
-                    }
-                    crate::ast::StatementKind::SourceReplace { alias, .. } => {
-                        format!("source replace {alias}")
-                    }
-                    crate::ast::StatementKind::EventRegister { name, .. } => {
-                        format!("event register {name}")
-                    }
-                    crate::ast::StatementKind::EventEmit { name, .. } => {
-                        format!("event emit {name}")
-                    }
+                    crate::ast::StatementKind::Source(op) => match op {
+                        crate::ast::SourceOp::Add { alias, .. } => format!("source add {alias}"),
+                        crate::ast::SourceOp::Remove { alias } => format!("source remove {alias}"),
+                        crate::ast::SourceOp::Replace { alias, .. } => {
+                            format!("source replace {alias}")
+                        }
+                        crate::ast::SourceOp::List => "source list".to_string(),
+                    },
+                    crate::ast::StatementKind::Event(op) => match op {
+                        crate::ast::EventOp::Register { name, .. } => {
+                            format!("event register {name}")
+                        }
+                        crate::ast::EventOp::Emit { name, .. } => format!("event emit {name}"),
+                    },
                 },
                 description: format!("{:?}", s.kind),
             })
