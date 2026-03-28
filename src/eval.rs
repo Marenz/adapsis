@@ -8632,4 +8632,6 @@ mod tests {
         // base=7, c()=7, b()=8, a()=10
         assert!(matches!(result, Value::Int(10)), "expected 10, got {result}");
     }
+
+    // bytecode VM placeholder
 }
