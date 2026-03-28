@@ -1020,7 +1020,7 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Execute module startup blocks
+            // Execute module startup blocks and auto-register module-level sources
             {
                 let modules_with_startup: Vec<(String, std::sync::Arc<ast::FunctionDecl>)> = {
                     let prog = startup_program.blocking_read();
@@ -1053,6 +1053,46 @@ async fn main() -> Result<()> {
                             Err(e) => eprintln!("[startup] {}.startup error: {}", mod_name, e),
                         }
                     });
+                }
+
+                // Auto-register module-level source declarations
+                let module_sources: Vec<(String, Vec<ast::SourceDecl>)> = {
+                    let prog = startup_program.blocking_read();
+                    prog.modules.iter()
+                        .filter(|m| !m.sources.is_empty())
+                        .map(|m| (m.name.clone(), m.sources.clone()))
+                        .collect()
+                };
+                for (module_name, sources) in module_sources {
+                    for src in sources {
+                        let interval_ms = src.config.iter()
+                            .find(|(k, _)| k == "interval")
+                            .and_then(|(_, v)| v.parse::<u64>().ok());
+                        let handler = if src.handler.contains('.') {
+                            src.handler.clone()
+                        } else {
+                            format!("{}.{}", module_name, src.handler)
+                        };
+                        eprintln!("[startup] registering source {}.{} ({} {})",
+                            module_name, src.name, src.source_type,
+                            src.config.iter().map(|(k,v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" "));
+                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                        let _ = io_sender_for_startup.blocking_send(
+                            coroutine::IoRequest::SourceAdd {
+                                module_name: module_name.clone(),
+                                source_type: src.source_type.clone(),
+                                interval_ms,
+                                alias: src.name.clone(),
+                                handler,
+                                reply: reply_tx,
+                            }
+                        );
+                        match reply_rx.blocking_recv() {
+                            Ok(Ok(msg)) => eprintln!("[startup] source {}.{}: {}", module_name, src.name, msg),
+                            Ok(Err(e)) => eprintln!("[startup] source {}.{} error: {}", module_name, src.name, e),
+                            Err(_) => eprintln!("[startup] source {}.{}: reply channel closed", module_name, src.name),
+                        }
+                    }
                 }
             }
 

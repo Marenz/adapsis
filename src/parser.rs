@@ -1001,6 +1001,69 @@ impl<'a> Parser<'a> {
             } else if rest.starts_with("list") || rest.is_empty() {
                 self.index += 1;
                 return Ok(Operation::SourceList);
+            } else if let Some(rest_timer) = rest.strip_prefix("timer") {
+                let rest_timer = rest_timer.trim();
+                if rest_timer.contains("->") {
+                    // Module-level: +source timer_name timer interval=300000 -> handler
+                    // But "timer" is the source type here — back up and parse as module-level
+                    // Actually this branch means the first word IS "timer", so parse shorthand or module-level
+                    let arrow_pos = rest.find("->").unwrap();
+                    let before_arrow = rest[..arrow_pos].trim();
+                    let handler = rest[arrow_pos + 2..].trim().to_string();
+                    let mut tokens = before_arrow.split_whitespace();
+                    let name = tokens.next().unwrap_or("").to_string(); // "timer" word itself or first token
+                                                                        // If name is "timer", this is: +source timer <rest> -> handler (shorthand in the wrong form)
+                                                                        // Actually when we stripped "timer", rest starts with "timer ..."
+                                                                        // So `rest` is "timer_name timer interval=300000 -> handler" and before_arrow = "timer_name timer interval=300000"
+                                                                        // Just parse as module-level declaration
+                    let source_type = tokens.next().unwrap_or("timer").to_string();
+                    let mut config = Vec::new();
+                    for tok in tokens {
+                        if let Some(eq_pos) = tok.find('=') {
+                            let key = tok[..eq_pos].to_string();
+                            let val = tok[eq_pos + 1..].trim_matches('"').to_string();
+                            config.push((key, val));
+                        }
+                    }
+                    self.index += 1;
+                    return Ok(Operation::ModuleSource(ModuleSourceDecl {
+                        name,
+                        source_type,
+                        config,
+                        handler,
+                    }));
+                } else {
+                    // Shorthand: +source timer <name> <interval_ms>
+                    // Used inside +startup/+shutdown bodies
+                    let mut tokens = rest_timer.split_whitespace();
+                    let name = tokens
+                        .next()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "line {}: expected `+source timer <name> <interval_ms>`",
+                                line.number
+                            )
+                        })?
+                        .to_string();
+                    let ms_str = tokens.next().ok_or_else(|| {
+                        anyhow!(
+                            "line {}: expected interval_ms in `+source timer {} <ms>`",
+                            line.number,
+                            name
+                        )
+                    })?;
+                    let _ms: u64 = ms_str.parse().map_err(|_| {
+                        anyhow!("line {}: invalid timer interval `{}`", line.number, ms_str)
+                    })?;
+                    // Convert to SourceAdd with timer expression
+                    let kind_text = format!("timer({})", ms_str);
+                    self.index += 1;
+                    return Ok(Operation::SourceAdd(SourceAddDecl {
+                        kind_text,
+                        alias: name.clone(),
+                        handler: name, // shorthand: handler = name (can be overridden by user)
+                    }));
+                }
             } else {
                 // Module-level source declaration:
                 // +source sync_timer timer interval=300000 -> on_tick
@@ -1008,7 +1071,7 @@ impl<'a> Parser<'a> {
                 // Find "->" to split config from handler
                 let arrow_pos = rest.find("->").ok_or_else(|| {
                     anyhow!(
-                        "line {}: expected `+source <name> <type> [key=value ...] -> <handler>` or `add/remove/replace/list`",
+                        "line {}: expected `+source <name> <type> [key=value ...] -> <handler>` or `add/remove/replace/list/timer`",
                         line.number
                     )
                 })?;
@@ -6340,5 +6403,59 @@ Add tests
             },
             o => panic!("expected Module, got {:?}", o),
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // +source timer shorthand inside +startup bodies
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_source_timer_shorthand() {
+        let ops = parse_ops("+source timer sync_timer 300000");
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            Operation::SourceAdd(decl) => {
+                assert_eq!(decl.kind_text, "timer(300000)");
+                assert_eq!(decl.alias, "sync_timer");
+                assert_eq!(decl.handler, "sync_timer");
+            }
+            o => panic!("expected SourceAdd, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn parse_source_timer_shorthand_in_startup() {
+        let ops = parse_ops("!module Svc\n+startup [io,async]\n  +source timer heartbeat 60000\n  +return \"ok\"\n+end");
+        match &ops[0] {
+            Operation::Module(m) => {
+                match &m.body[0] {
+                    Operation::Startup(fd) => {
+                        assert_eq!(fd.body.len(), 2);
+                        // First stmt should be +source timer shorthand parsed as SourceAdd
+                        match &fd.body[0] {
+                            Operation::SourceAdd(decl) => {
+                                assert_eq!(decl.kind_text, "timer(60000)");
+                                assert_eq!(decl.alias, "heartbeat");
+                            }
+                            o => panic!("expected SourceAdd in startup body, got {:?}", o),
+                        }
+                    }
+                    o => panic!("expected Startup, got {:?}", o),
+                }
+            }
+            o => panic!("expected Module, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn parse_source_timer_shorthand_missing_interval() {
+        let result = parse("+source timer my_timer");
+        assert!(result.is_err(), "missing interval should error");
+    }
+
+    #[test]
+    fn parse_source_timer_shorthand_invalid_interval() {
+        let result = parse("+source timer my_timer abc");
+        assert!(result.is_err(), "non-numeric interval should error");
     }
 }
