@@ -1944,17 +1944,77 @@ fn eval_function_body(
             ast::StatementKind::Yield { value } => {
                 let _val = eval_ast_expr(program, value, env)?;
             }
-            // Source and event statements — runtime stubs
+            // Source statements — send IoRequest::SourceAdd in async context
             ast::StatementKind::Source(op) => {
-                // Evaluate timer expressions but otherwise no-op
                 match op {
-                    ast::SourceOp::Add { source_type: ast::SourceType::Timer(expr), .. }
-                    | ast::SourceOp::Replace { source_type: ast::SourceType::Timer(expr), .. } => {
-                        let _val = eval_ast_expr(program, expr, env)?;
+                    ast::SourceOp::Add { source_type, alias, handler } => {
+                        let (src_type_str, interval_ms) = match source_type {
+                            ast::SourceType::Timer(expr) => {
+                                let val = eval_ast_expr(program, expr, env)?;
+                                let ms = match &val {
+                                    Value::Int(n) => *n as u64,
+                                    _ => bail!("timer interval must be Int, got {}", val),
+                                };
+                                ("timer".to_string(), Some(ms))
+                            }
+                            ast::SourceType::Channel => ("channel".to_string(), None),
+                            ast::SourceType::Event(module, event) => {
+                                (format!("event:{}.{}", module, event), None)
+                            }
+                        };
+                        // Determine the current module name
+                        let module_name = match env.get_raw("__module_name") {
+                            Some(Value::String(s)) => s.as_ref().clone(),
+                            _ => {
+                                if let Some(dot) = handler.rfind('.') {
+                                    handler[..dot].to_string()
+                                } else {
+                                    "unknown".to_string()
+                                }
+                            }
+                        };
+                        // Build fully-qualified handler name
+                        let full_handler = if handler.contains('.') {
+                            handler.clone()
+                        } else {
+                            format!("{}.{}", module_name, handler)
+                        };
+                        // Send through coroutine handle if in async context
+                        if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                            let io_tx = handle.io_sender();
+                            let _ = io_tx.blocking_send(crate::coroutine::IoRequest::SourceAdd {
+                                module_name,
+                                source_type: src_type_str,
+                                interval_ms,
+                                alias: alias.clone(),
+                                handler: full_handler,
+                                reply: reply_tx,
+                            });
+                            match reply_rx.blocking_recv() {
+                                Ok(Ok(_msg)) => { /* source registered */ }
+                                Ok(Err(e)) => bail!("source add failed: {}", e),
+                                Err(_) => bail!("source add: reply channel closed"),
+                            }
+                        }
+                        // If no coroutine handle (sync context), silently skip
                     }
-                    _ => {}
+                    ast::SourceOp::Replace { source_type, alias, handler } => {
+                        // Evaluate timer expression if present, but no runtime dispatch yet
+                        if let ast::SourceType::Timer(expr) = source_type {
+                            let _val = eval_ast_expr(program, expr, env)?;
+                        }
+                        let _ = (alias, handler); // suppress unused warnings
+                    }
+                    ast::SourceOp::Remove { alias } => {
+                        let _ = alias; // no-op for now
+                    }
+                    ast::SourceOp::List => {
+                        // no-op for now
+                    }
                 }
             }
+            // Event statements — evaluate emit expressions
             ast::StatementKind::Event(op) => {
                 if let ast::EventOp::Emit { value, .. } = op {
                     let _val = eval_ast_expr(program, value, env)?;
@@ -8647,6 +8707,198 @@ mod tests {
 
         // base=7, c()=7, b()=8, a()=10
         assert!(matches!(result, Value::Int(10)), "expected 10, got {result}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Service runtime: +source add dispatch
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn source_add_timer_in_sync_context_no_error() {
+        // Without a coroutine handle, +source add should silently succeed
+        let source = r#"
+!module Svc
++fn setup ()->String [io,async]
+  +source add timer(5000) as poll -> on_tick
+  +return "ok"
++fn on_tick ()->String
+  +return "tick"
+"#;
+        let program = build_program(source);
+        let func = program.get_function("Svc.setup").expect("Svc.setup not found");
+        let mut env = Env::new();
+        // No __coroutine_handle set — sync context
+        let result = eval_function_body(&program, &func.body, &mut env);
+        assert!(result.is_ok(), "source add without handle should succeed: {result:?}");
+        assert_eq!(result.unwrap().to_string(), "\"ok\"");
+    }
+
+    #[test]
+    fn source_add_channel_in_sync_context() {
+        let source = r#"
+!module Svc
++fn setup ()->String [io,async]
+  +source add channel as inbox -> on_msg
+  +return "ok"
++fn on_msg (m:String)->String
+  +return m
+"#;
+        let program = build_program(source);
+        let func = program.get_function("Svc.setup").expect("Svc.setup not found");
+        let mut env = Env::new();
+        let result = eval_function_body(&program, &func.body, &mut env);
+        assert!(result.is_ok(), "channel source add should succeed: {result:?}");
+    }
+
+    #[test]
+    fn source_add_event_in_sync_context() {
+        let source = r#"
+!module Listener
++fn setup ()->String [io,async]
+  +source add Chat.new_message as msgs -> handle
+  +return "ok"
++fn handle (m:String)->String
+  +return m
+"#;
+        let program = build_program(source);
+        let func = program.get_function("Listener.setup").expect("not found");
+        let mut env = Env::new();
+        let result = eval_function_body(&program, &func.body, &mut env);
+        assert!(result.is_ok(), "event source add should succeed: {result:?}");
+    }
+
+    #[test]
+    fn source_add_timer_with_async_handle() {
+        // Create a real tokio channel to receive the IoRequest
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(16);
+            let source = r#"
+!module Svc
++fn setup ()->String [io,async]
+  +source add timer(3000) as poll -> on_tick
+  +return "ok"
++fn on_tick ()->String
+  +return "tick"
+"#;
+            let program = build_program(source);
+            let func = program.get_function("Svc.setup").expect("not found").clone();
+
+            // Run eval in a blocking thread
+            let prog = program.clone();
+            let join = tokio::task::spawn_blocking(move || {
+                let mut env = Env::new();
+                let handle = crate::coroutine::CoroutineHandle::new(tx);
+                env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+                eval_function_body(&prog, &func.body, &mut env)
+            });
+
+            // Receive the IoRequest and reply
+            if let Some(crate::coroutine::IoRequest::SourceAdd { source_type, interval_ms, alias, handler, reply, .. }) = rx.recv().await {
+                assert_eq!(source_type, "timer");
+                assert_eq!(interval_ms, Some(3000));
+                assert_eq!(alias, "poll");
+                assert!(handler.contains("on_tick"), "handler should contain on_tick: {handler}");
+                let _ = reply.send(Ok("registered".to_string()));
+            } else {
+                panic!("expected SourceAdd request");
+            }
+
+            let result = join.await.unwrap();
+            assert!(result.is_ok(), "should succeed: {result:?}");
+            assert_eq!(result.unwrap().to_string(), "\"ok\"");
+        });
+    }
+
+    #[test]
+    fn source_add_timer_non_int_expr_errors() {
+        let source = r#"
+!module Svc
++fn setup ()->String [io,async]
+  +source add timer("not_a_number") as poll -> on_tick
+  +return "ok"
++fn on_tick ()->String
+  +return "tick"
+"#;
+        let program = build_program(source);
+        let func = program.get_function("Svc.setup").expect("not found");
+        let mut env = Env::new();
+        let result = eval_function_body(&program, &func.body, &mut env);
+        assert!(result.is_err(), "string timer interval should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timer interval must be Int"), "error message: {err}");
+    }
+
+    #[test]
+    fn source_add_module_name_from_handler() {
+        // When __module_name isn't set, module_name is extracted from handler
+        let source = r#"
+!module MyMod
++fn setup ()->String [io,async]
+  +source add channel as inbox -> on_msg
+  +return "ok"
++fn on_msg (m:String)->String
+  +return m
+"#;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(16);
+            let program = build_program(source);
+            let func = program.get_function("MyMod.setup").expect("not found").clone();
+            let prog = program.clone();
+            let join = tokio::task::spawn_blocking(move || {
+                let mut env = Env::new();
+                let handle = crate::coroutine::CoroutineHandle::new(tx);
+                env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+                // No __module_name set — should extract from handler "on_msg" -> "unknown"
+                eval_function_body(&prog, &func.body, &mut env)
+            });
+
+            if let Some(crate::coroutine::IoRequest::SourceAdd { module_name, handler, reply, .. }) = rx.recv().await {
+                assert_eq!(module_name, "unknown");
+                assert_eq!(handler, "unknown.on_msg");
+                let _ = reply.send(Ok("ok".to_string()));
+            }
+
+            let result = join.await.unwrap();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn source_add_with_module_name_env() {
+        // When __module_name IS set, it's used for the module_name and full handler
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(16);
+            let source = r#"
+!module MyMod
++fn setup ()->String [io,async]
+  +source add channel as inbox -> on_msg
+  +return "ok"
++fn on_msg (m:String)->String
+  +return m
+"#;
+            let program = build_program(source);
+            let func = program.get_function("MyMod.setup").expect("not found").clone();
+            let prog = program.clone();
+            let join = tokio::task::spawn_blocking(move || {
+                let mut env = Env::new();
+                let handle = crate::coroutine::CoroutineHandle::new(tx);
+                env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+                env.set("__module_name", Value::String(std::sync::Arc::new("MyMod".to_string())));
+                eval_function_body(&prog, &func.body, &mut env)
+            });
+
+            if let Some(crate::coroutine::IoRequest::SourceAdd { module_name, handler, reply, .. }) = rx.recv().await {
+                assert_eq!(module_name, "MyMod");
+                assert_eq!(handler, "MyMod.on_msg");
+                let _ = reply.send(Ok("ok".to_string()));
+            }
+
+            let result = join.await.unwrap();
+            assert!(result.is_ok());
+        });
     }
 
     // bytecode VM placeholder

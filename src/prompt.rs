@@ -115,11 +115,12 @@ Modules can define startup/shutdown blocks and manage event sources:
 +end
 
 - `+startup` and `+shutdown` blocks must be inside a module and must declare `[io,async]` effects.
-  Only one of each per module. Stored as `Option<Function>` on the module.
-- `+source add <kind> as <alias> -> <handler>` registers a source. Kinds:
-  `timer(EXPR)` — periodic timer (expression evaluated for interval ms),
+  Only one of each per module. Startup blocks run automatically when AdapsisOS starts.
+- `+source add <kind> as <alias> -> <handler>` registers a source (requires async context). Kinds:
+  `timer(EXPR)` — periodic timer spawning a background task that calls handler every EXPR ms,
   `channel` — named mailbox,
   `Module.event_name` — cross-module event subscription.
+  The handler is auto-qualified with the current module name (e.g. `on_tick` → `Svc.on_tick`).
 - `+source remove <alias>` removes a source.
 - `+source replace <alias> <kind> -> <handler>` replaces a source.
 - `+source list` lists registered sources.

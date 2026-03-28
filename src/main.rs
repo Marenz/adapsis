@@ -654,6 +654,55 @@ async fn main() -> Result<()> {
                                 }
                             });
                         }
+                        coroutine::IoRequest::SourceAdd {
+                            module_name, source_type, interval_ms, alias, handler, reply,
+                        } => {
+                            if source_type == "timer" {
+                                if let Some(ms) = interval_ms {
+                                    let _ = reply.send(Ok(format!("timer source '{}' registered ({}ms)", alias, ms)));
+                                    let prog = program_for_spawn.clone();
+                                    let sender = io_sender_for_spawn.clone();
+                                    let registry = task_registry_for_spawn.clone();
+                                    let snap_reg = snap_registry_for_spawn.clone();
+                                    tokio::spawn(async move {
+                                        let mut interval = tokio::time::interval(std::time::Duration::from_millis(ms));
+                                        interval.tick().await; // skip first immediate tick
+                                        loop {
+                                            interval.tick().await;
+                                            let handler_name = handler.clone();
+                                            let prog = prog.clone();
+                                            let sender = sender.clone();
+                                            let registry = registry.clone();
+                                            let snap_reg = snap_reg.clone();
+                                            let alias = alias.clone();
+                                            let module_name = module_name.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
+                                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
+                                                let func = match prog.get_function(&handler_name) {
+                                                    Some(f) => f.clone(),
+                                                    None => { eprintln!("[timer:{}] handler `{}` not found", alias, handler_name); return; }
+                                                };
+                                                let handle = coroutine::CoroutineHandle::new_with_task(sender, 0, registry, snap_reg);
+                                                let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
+                                                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+                                                env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_name)));
+                                                match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
+                                                    Ok(val) => eprintln!("[timer:{}] {} -> {}", alias, handler_name, val),
+                                                    Err(e) => eprintln!("[timer:{}] {} error: {}", alias, handler_name, e),
+                                                }
+                                            });
+                                        }
+                                    });
+                                } else {
+                                    let _ = reply.send(Err(anyhow::anyhow!("timer source requires interval_ms")));
+                                }
+                            } else if source_type == "channel" {
+                                let _ = reply.send(Ok(format!("channel source '{}' registered", alias)));
+                            } else {
+                                let _ = reply.send(Ok(format!("event source '{}' registered ({})", alias, source_type)));
+                            }
+                        }
                         _ => {
                             let rt = rt.clone();
                             tokio::spawn(async move {
@@ -821,6 +870,13 @@ async fn main() -> Result<()> {
             let shared_runtime_for_spawn = shared_runtime.clone();
             let shared_meta_for_spawn = shared_meta.clone();
             let shared_program_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
+            // Clone resources for startup execution (before IO loop moves them)
+            let io_sender_for_startup = runtime.io_sender();
+            let startup_registry = runtime.task_registry.clone();
+            let startup_snap_reg = runtime.snapshot_registry.clone();
+            let startup_runtime = shared_runtime.clone();
+            let startup_meta = shared_meta.clone();
+            let startup_program = shared_program_for_spawn.clone();
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
@@ -888,6 +944,72 @@ async fn main() -> Result<()> {
                                 }
                             });
                         }
+                        coroutine::IoRequest::SourceAdd {
+                            module_name, source_type, interval_ms, alias, handler, reply,
+                        } => {
+                            if source_type == "timer" {
+                                if let Some(ms) = interval_ms {
+                                    let _ = reply.send(Ok(format!("timer source '{}' registered ({}ms)", alias, ms)));
+                                    let program_for_timer = shared_program_for_spawn.clone();
+                                    let sender_for_timer = io_sender_for_spawn.clone();
+                                    let registry_for_timer = task_registry_for_spawn.clone();
+                                    let snap_reg_for_timer = snap_registry_for_spawn2.clone();
+                                    let runtime_for_timer = shared_runtime_for_spawn.clone();
+                                    let meta_for_timer = shared_meta_for_spawn.clone();
+                                    tokio::spawn(async move {
+                                        let mut interval = tokio::time::interval(std::time::Duration::from_millis(ms));
+                                        interval.tick().await; // skip first immediate tick
+                                        loop {
+                                            interval.tick().await;
+                                            let handler_name = handler.clone();
+                                            let prog = program_for_timer.read().await.clone();
+                                            let func = match prog.get_function(&handler_name) {
+                                                Some(f) => f.clone(),
+                                                None => {
+                                                    eprintln!("[timer:{}] handler `{}` not found", alias, handler_name);
+                                                    continue;
+                                                }
+                                            };
+                                            let sender = sender_for_timer.clone();
+                                            let registry = registry_for_timer.clone();
+                                            let snap_reg = snap_reg_for_timer.clone();
+                                            let rt_for_tick = runtime_for_timer.clone();
+                                            let meta_for_tick = meta_for_timer.clone();
+                                            let alias_for_tick = alias.clone();
+                                            let module_for_tick = module_name.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                eval::set_shared_runtime(Some(rt_for_tick));
+                                                eval::set_shared_meta(Some(meta_for_tick));
+                                                eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
+                                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
+                                                let task_id = 0; // timer tasks don't need unique IDs for now
+                                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry, snap_reg);
+                                                let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
+                                                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+                                                env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_for_tick)));
+                                                match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
+                                                    Ok(val) => {
+                                                        eprintln!("[timer:{}] {} -> {}", alias_for_tick, handler_name, val);
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("[timer:{}] {} error: {}", alias_for_tick, handler_name, e);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                                } else {
+                                    let _ = reply.send(Err(anyhow::anyhow!("timer source requires interval_ms")));
+                                }
+                            } else if source_type == "channel" {
+                                let _ = reply.send(Ok(format!("channel source '{}' registered", alias)));
+                                // Channel dispatch will be implemented in a later phase
+                            } else {
+                                // Event source (source_type starts with "event:")
+                                let _ = reply.send(Ok(format!("event source '{}' registered ({})", alias, source_type)));
+                                // Event dispatch will be implemented in a later phase
+                            }
+                        }
                         _ => {
                             let rt = rt.clone();
                             tokio::spawn(async move {
@@ -897,6 +1019,42 @@ async fn main() -> Result<()> {
                     }
                 }
             });
+
+            // Execute module startup blocks
+            {
+                let modules_with_startup: Vec<(String, std::sync::Arc<ast::FunctionDecl>)> = {
+                    let prog = startup_program.blocking_read();
+                    prog.modules.iter()
+                        .filter_map(|m| m.startup.as_ref().map(|s| (m.name.clone(), s.clone())))
+                        .collect()
+                };
+                for (module_name, startup_fn) in modules_with_startup {
+                    eprintln!("[startup] executing {}.startup", module_name);
+                    let prog_clone = startup_program.clone();
+                    let sender = io_sender_for_startup.clone();
+                    let registry = startup_registry.clone();
+                    let snap_reg = startup_snap_reg.clone();
+                    let rt = startup_runtime.clone();
+                    let meta = startup_meta.clone();
+                    let mod_name = module_name.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let prog = prog_clone.blocking_read().clone();
+                        eval::set_shared_runtime(Some(rt));
+                        eval::set_shared_meta(Some(meta));
+                        eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
+                        eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
+                        let task_id = 0;
+                        let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry, snap_reg);
+                        let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
+                        env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+                        env.set("__module_name", eval::Value::String(std::sync::Arc::new(mod_name.clone())));
+                        match eval::eval_function_body_named(&prog, &format!("{}.startup", mod_name), &startup_fn.body, &mut env) {
+                            Ok(val) => eprintln!("[startup] {}.startup -> {}", mod_name, val),
+                            Err(e) => eprintln!("[startup] {}.startup error: {}", mod_name, e),
+                        }
+                    });
+                }
+            }
 
             let project_dir = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
