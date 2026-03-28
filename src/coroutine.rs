@@ -964,6 +964,14 @@ impl CoroutineHandle {
                     .unwrap_or_else(|| "No recent mutation failures.".to_string());
                 return Ok(Value::string(result));
             }
+            "failure_suggest" => {
+                let message = match args.first() {
+                    Some(Value::String(s)) => s.as_ref().clone(),
+                    Some(other) => format!("{other}"),
+                    None => bail!("failure_suggest expects (message:String)"),
+                };
+                return Ok(Value::string(suggest_failure_fix(&message)));
+            }
 
             // ── library_reload — reload module(s) from disk ──
             "library_reload" => {
@@ -1852,6 +1860,23 @@ impl CoroutineHandle {
     }
 }
 
+fn suggest_failure_fix(message: &str) -> String {
+    let lower = message.to_lowercase();
+    if lower.contains("undefined variable") {
+        "Check variable spelling, ensure it's declared with +let or +call before use, or check if it's a function parameter".to_string()
+    } else if lower.contains("expected `,") || lower.contains("expected `}") {
+        "Check struct literal syntax: {field: value, field2: value2}. Ensure no trailing commas or missing commas between fields".to_string()
+    } else if lower.contains("missing effect") || lower.contains("requires effect") {
+        "Add the missing effect annotation to the function signature, e.g. [io,async] or [fail]".to_string()
+    } else if lower.contains("type mismatch") {
+        "Check that the expression type matches what's expected. Use to_string(), to_int() for conversions".to_string()
+    } else if lower.contains("out of range") || lower.contains("out of bounds") {
+        "Check array/list index is within bounds. Use len() to verify size first".to_string()
+    } else {
+        "No specific suggestion available. Check ?source and ?symbols for context.".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2460,12 +2485,12 @@ mod tests {
         let (handle, _meta) = setup_roadmap_runtime();
         let rt = crate::eval::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
-            crate::session::record_failure(&mut state, 3, "undefined variable `user_id`");
-            crate::session::record_failure(&mut state, 4, "type mismatch in let binding");
+            crate::session::record_failure(&mut state, "undefined variable `user_id`");
+            crate::session::record_failure(&mut state, "type mismatch in let binding");
         }
         let result = unwrap_string(handle.execute_await("failure_history", &[]).unwrap());
-        assert!(result.contains("r4: type mismatch in let binding"), "got: {result}");
-        assert!(result.contains("r3: undefined variable `user_id`"), "got: {result}");
+        assert!(result.contains(": type mismatch in let binding"), "got: {result}");
+        assert!(result.contains(": undefined variable `user_id`"), "got: {result}");
     }
 
     #[test]
@@ -2473,9 +2498,9 @@ mod tests {
         let (handle, _meta) = setup_roadmap_runtime();
         let rt = crate::eval::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
-            crate::session::record_failure(&mut state, 1, "undefined variable `user_id`");
-            crate::session::record_failure(&mut state, 2, "undefined variable `account_id`");
-            crate::session::record_failure(&mut state, 3, "parse error: unexpected +end");
+            crate::session::record_failure(&mut state, "undefined variable `user_id`");
+            crate::session::record_failure(&mut state, "undefined variable `account_id`");
+            crate::session::record_failure(&mut state, "parse error: unexpected +end");
         }
         let result = unwrap_string(handle.execute_await("failure_patterns", &[]).unwrap());
         assert!(result.contains("2x undefined variable errors"), "got: {result}");
@@ -2489,6 +2514,20 @@ mod tests {
         let result = handle.execute_await("failure_patterns", &[Value::string("unexpected")]);
         assert!(result.is_err(), "should fail with extra args");
         assert!(result.unwrap_err().to_string().contains("expects no arguments"));
+    }
+
+    #[test]
+    fn failure_suggest_matches_known_patterns() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let result = unwrap_string(handle.execute_await("failure_suggest", &[Value::string("undefined variable `user_id`")]).unwrap());
+        assert!(result.contains("Check variable spelling"), "got: {result}");
+    }
+
+    #[test]
+    fn failure_suggest_falls_back_for_unknown_errors() {
+        let (handle, _meta) = setup_roadmap_runtime();
+        let result = unwrap_string(handle.execute_await("failure_suggest", &[Value::string("weird custom failure")]).unwrap());
+        assert_eq!(result, "No specific suggestion available. Check ?source and ?symbols for context.");
     }
 
     #[test]
@@ -3346,7 +3385,7 @@ mod tests {
             "move_symbols", "watch_start", "agent_spawn", "msg_send", "query_inbox", "inbox_read", "inbox_clear", "trace_run",
             "route_list", "route_add", "route_remove",
             "undo", "sandbox_enter", "sandbox_merge", "sandbox_discard",
-            "mock_set", "mock_clear", "sse_send", "failure_history", "failure_patterns",
+            "mock_set", "mock_clear", "sse_send", "failure_history", "failure_patterns", "failure_suggest",
             "module_create", "test_run", "fn_replace",
         ] {
             assert!(
