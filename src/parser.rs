@@ -412,6 +412,22 @@ struct SourceLine<'a> {
     text: &'a str,
 }
 
+fn starts_new_operation_line(trimmed: &str) -> bool {
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed == "+end" || trimmed == "end" || trimmed == "!done" {
+        return true;
+    }
+    if trimmed.starts_with('+') || trimmed.starts_with('?') {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix('!') {
+        return !rest.trim_start().is_empty();
+    }
+    false
+}
+
 impl<'a> Parser<'a> {
     fn new(source: &'a str) -> Self {
         let mut lines = Vec::new();
@@ -1167,18 +1183,7 @@ impl<'a> Parser<'a> {
             self.index += 1;
             while let Some(next) = self.current() {
                 let t = next.text.trim();
-                // Stop at Forge operations (lines starting with + ! ? that aren't bullets)
-                if t.starts_with("+fn ")
-                    || t.starts_with("+type ")
-                    || t.starts_with("+module ")
-                    || t.starts_with("+let ")
-                    || t.starts_with("+call ")
-                    || t.starts_with("+return")
-                    || t.starts_with("!test ")
-                    || t.starts_with("!eval ")
-                    || t.starts_with("!move ")
-                    || t.starts_with("?")
-                {
+                if starts_new_operation_line(t) {
                     break;
                 }
                 description.push('\n');
@@ -5724,5 +5729,34 @@ Add tests
             }
             _ => panic!("expected Module B"),
         }
+    }
+    #[test]
+    fn multiple_opencode_commands() {
+        let ops = parse_ops("!opencode First task\n!opencode Second task");
+        assert_eq!(ops.len(), 2);
+        match &ops[0] {
+            Operation::OpenCode(d) => assert_eq!(d, "First task"),
+            o => panic!("op0: {o:?}"),
+        }
+        match &ops[1] {
+            Operation::OpenCode(d) => assert_eq!(d, "Second task"),
+            o => panic!("op1: {o:?}"),
+        }
+    }
+
+    #[test]
+    fn opencode_stops_at_any_new_operation_line() {
+        let ops = parse_ops("!opencode First task\n!sandbox status\n!opencode Second task\n!done");
+        assert_eq!(ops.len(), 4);
+        match &ops[0] {
+            Operation::OpenCode(d) => assert_eq!(d, "First task"),
+            o => panic!("op0: {o:?}"),
+        }
+        assert!(matches!(&ops[1], Operation::Sandbox(_)));
+        match &ops[2] {
+            Operation::OpenCode(d) => assert_eq!(d, "Second task"),
+            o => panic!("op2: {o:?}"),
+        }
+        assert!(matches!(&ops[3], Operation::Done));
     }
 }

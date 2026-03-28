@@ -1181,4 +1181,24 @@ mod tests {
         assert!(error.is_retryable());
         assert_eq!(error.retry_after(), Some(Duration::from_secs(9)));
     }
+
+    #[test]
+    fn build_output_keeps_multiple_opencode_directives() {
+        let output = build_output(
+            String::new(),
+            "<code>!opencode First task\n!opencode Second task</code>".to_string(),
+        );
+
+        assert!(output.code.contains("!opencode First task"));
+        assert!(output.code.contains("!opencode Second task"));
+        let ops = crate::parser::parse(&output.code).unwrap();
+        let tasks: Vec<String> = ops
+            .into_iter()
+            .filter_map(|op| match op {
+                crate::parser::Operation::OpenCode(task) => Some(task),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tasks, vec!["First task".to_string(), "Second task".to_string()]);
+    }
 }
