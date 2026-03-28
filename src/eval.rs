@@ -1944,6 +1944,17 @@ fn eval_function_body(
             ast::StatementKind::Yield { value } => {
                 let _val = eval_ast_expr(program, value, env)?;
             }
+            // Source and event statements — runtime stubs (Phase 1: parse/validate only)
+            ast::StatementKind::SourceAdd { .. }
+            | ast::StatementKind::SourceRemove { .. }
+            | ast::StatementKind::SourceReplace { .. }
+            | ast::StatementKind::EventRegister { .. } => {
+                // No-op: runtime behavior will be implemented in Phase 2
+            }
+            ast::StatementKind::EventEmit { value, .. } => {
+                let _val = eval_ast_expr(program, value, env)?;
+                // No-op: event dispatch will be implemented in Phase 2
+            }
         }
     }
 

@@ -99,6 +99,30 @@ Pure functions have no effect annotation.
     +set label = trim(next)
     +return label
 
+### Service Lifecycle
+Modules can define startup/shutdown blocks and manage event sources:
+
++startup [io,async]
+  +await config:String = http_get("http://example.com/config")
+  +source add timer(300000) as poll -> on_tick
+  +source add channel as inbox -> on_message
+  +return "started"
++end
+
++shutdown [io,async]
+  +source remove poll
+  +return "stopped"
++end
+
+- `+startup` and `+shutdown` blocks must be inside a module and must declare `[io,async]` effects.
+- `+source add <kind> as <alias> -> <handler>` registers a source that delivers messages to a handler function.
+  Source kinds: `timer(ms)` (periodic), `channel` (named mailbox), `Module.event_name` (cross-module event).
+- `+source remove <alias>` removes a previously registered source.
+- `+source replace <alias> <kind> -> <handler>` replaces a source's kind and handler.
+- `+event register <name>(<Type>)` declares an event this module can emit.
+- `+event emit <name> <expr>` emits an event with a payload value.
+- Source and event statements can appear inside any function body.
+
 ### Organizing Code
 !move symbol1 symbol2 ... ModuleName
   Move functions, types, or modules into a target module (creates if needed).

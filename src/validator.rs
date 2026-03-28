@@ -188,8 +188,19 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         | parser::Operation::While(_)
         | parser::Operation::Match(_)
         | parser::Operation::Await(_)
-        | parser::Operation::Spawn(_) => {
+        | parser::Operation::Spawn(_)
+        | parser::Operation::SourceAdd(_)
+        | parser::Operation::SourceRemove(_)
+        | parser::Operation::SourceReplace(_)
+        | parser::Operation::EventRegister(_)
+        | parser::Operation::EventEmit(_) => {
             Ok("top-level statement (execute immediately)".to_string())
+        }
+        parser::Operation::Startup(_) => {
+            bail!("+startup must be inside a module. Use: !module MyModule\\n+startup [io,async]\\n  ...\\n+end")
+        }
+        parser::Operation::Shutdown(_) => {
+            bail!("+shutdown must be inside a module. Use: !module MyModule\\n+shutdown [io,async]\\n  ...\\n+end")
         }
     }
 }
@@ -211,6 +222,9 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
+            startup: None,
+            shutdown: None,
+            event_decls: vec![],
             fn_index: HashMap::new(),
         });
     }
@@ -290,8 +304,32 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             ),
             // !test inside a module body is valid — tests are handled separately
             parser::Operation::Test(_) => {}
+            parser::Operation::Startup(fd) => {
+                let converted = convert_function(fd)?;
+                // Validate that startup declares [io,async] effects
+                if !converted.effects.contains(&ast::Effect::Io) || !converted.effects.contains(&ast::Effect::Async) {
+                    bail!(
+                        "+startup in module `{}` must declare [io,async] effects",
+                        decl.name
+                    );
+                }
+                let m = &mut program.modules[mod_idx];
+                m.startup = Some(std::sync::Arc::new(converted));
+            }
+            parser::Operation::Shutdown(fd) => {
+                let converted = convert_function(fd)?;
+                // Validate that shutdown declares [io,async] effects
+                if !converted.effects.contains(&ast::Effect::Io) || !converted.effects.contains(&ast::Effect::Async) {
+                    bail!(
+                        "+shutdown in module `{}` must declare [io,async] effects",
+                        decl.name
+                    );
+                }
+                let m = &mut program.modules[mod_idx];
+                m.shutdown = Some(std::sync::Arc::new(converted));
+            }
             other => bail!(
-                "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, and !test are allowed",
+                "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, and !test are allowed",
                 decl.name,
                 std::mem::discriminant(other)
             ),
@@ -595,6 +633,16 @@ fn collect_effect_requirements(
                 for arg in &call.args {
                     collect_expr_effect_requirements(program, current_func, current_module, arg, diagnostics);
                 }
+            }
+            // Source/event statements are inherently IO operations
+            ast::StatementKind::SourceAdd { .. }
+            | ast::StatementKind::SourceRemove { .. }
+            | ast::StatementKind::SourceReplace { .. }
+            | ast::StatementKind::EventRegister { .. } => {
+                // These require [io,async] but validation is done at module level
+            }
+            ast::StatementKind::EventEmit { value, .. } => {
+                collect_expr_effect_requirements(program, current_func, current_module, value, diagnostics);
             }
         }
     }
@@ -914,6 +962,41 @@ pub fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
             "type declaration `{}` found inside function body — check indentation",
             td.name
         ),
+        parser::Operation::SourceAdd(decl) => {
+            let kind = parse_source_kind(&decl.kind_text)?;
+            ast::StatementKind::SourceAdd {
+                kind,
+                alias: decl.alias.clone(),
+                handler: decl.handler.clone(),
+            }
+        }
+        parser::Operation::SourceRemove(alias) => {
+            ast::StatementKind::SourceRemove {
+                alias: alias.clone(),
+            }
+        }
+        parser::Operation::SourceReplace(decl) => {
+            let kind = parse_source_kind(&decl.kind_text)?;
+            ast::StatementKind::SourceReplace {
+                alias: decl.alias.clone(),
+                kind,
+                handler: decl.handler.clone(),
+            }
+        }
+        parser::Operation::EventRegister(decl) => {
+            let ty_expr = parser::parse_type_expr(&decl.payload_type)
+                .map_err(|e| anyhow!("invalid payload type in +event register: {e}"))?;
+            ast::StatementKind::EventRegister {
+                name: decl.name.clone(),
+                payload_type: convert_type(&ty_expr)?,
+            }
+        }
+        parser::Operation::EventEmit(decl) => {
+            ast::StatementKind::EventEmit {
+                name: decl.name.clone(),
+                value: convert_expr(&decl.value)?,
+            }
+        }
         other => bail!(
             "unexpected operation in function body: {:?}",
             std::mem::discriminant(other)
@@ -1039,6 +1122,32 @@ fn convert_match_pattern(pat: &parser::MatchPatternDecl) -> ast::MatchPattern {
             ast::MatchPattern::Literal(ast::Literal::String(s.clone()))
         }
     }
+}
+
+/// Parse a source kind text into an `ast::SourceKind`.
+/// Examples: "timer(300000)", "channel", "Module.event_name"
+fn parse_source_kind(text: &str) -> Result<ast::SourceKind> {
+    let text = text.trim();
+    if text == "channel" {
+        return Ok(ast::SourceKind::Channel);
+    }
+    if let Some(rest) = text.strip_prefix("timer(") {
+        let rest = rest.trim_end_matches(')');
+        let ms: u64 = rest.trim().parse().map_err(|_| {
+            anyhow!("invalid timer interval: `{}`", rest)
+        })?;
+        return Ok(ast::SourceKind::Timer(ms));
+    }
+    // Module.event_name pattern
+    if let Some(dot_pos) = text.find('.') {
+        let module = text[..dot_pos].to_string();
+        let event = text[dot_pos + 1..].to_string();
+        if module.is_empty() || event.is_empty() {
+            bail!("invalid event source: `{}`", text);
+        }
+        return Ok(ast::SourceKind::Event(module, event));
+    }
+    bail!("unknown source kind: `{}` — expected timer(ms), channel, or Module.event", text)
 }
 
 fn convert_type(ty: &parser::TypeExpr) -> Result<ast::Type> {
@@ -1328,6 +1437,9 @@ pub fn apply_move(
             functions: vec![],
             modules: vec![],
             shared_vars: vec![],
+            startup: None,
+            shutdown: None,
+            event_decls: vec![],
             fn_index: HashMap::new(),
         });
     }
@@ -2074,5 +2186,183 @@ mod tests {
         let ops = parser::parse(source).unwrap();
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_ok(), "expected valid effects, got: {result:?}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Service Lifecycle: +startup / +shutdown validation
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn startup_with_valid_effects() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++startup [io,async]
+  +return \"started\"
++end
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "expected valid startup, got: {result:?}");
+        let module = &program.modules[0];
+        assert!(module.startup.is_some());
+        assert_eq!(module.startup.as_ref().unwrap().name, "__startup");
+    }
+
+    #[test]
+    fn shutdown_with_valid_effects() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++shutdown [io,async]
+  +return \"stopped\"
++end
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "expected valid shutdown, got: {result:?}");
+        let module = &program.modules[0];
+        assert!(module.shutdown.is_some());
+        assert_eq!(module.shutdown.as_ref().unwrap().name, "__shutdown");
+    }
+
+    #[test]
+    fn startup_missing_effects_rejected() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++startup
+  +return \"started\"
++end
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_err(), "startup without [io,async] should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("io,async"), "error should mention io,async: {err}");
+    }
+
+    #[test]
+    fn shutdown_missing_async_rejected() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++shutdown [io]
+  +return \"stopped\"
++end
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_err(), "shutdown without [async] should be rejected");
+    }
+
+    #[test]
+    fn startup_at_top_level_rejected() {
+        let mut program = ast::Program::default();
+        let source = "+startup [io,async]\n  +return \"ok\"\n+end";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_err(), "+startup at top level should be rejected");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Service Lifecycle: +source and +event in function bodies
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn source_add_in_function_body() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++fn setup ()->String [io,async]
+  +source add timer(5000) as poll -> on_tick
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "source add in function body should work: {result:?}");
+        let func = &program.modules[0].functions[0];
+        assert!(matches!(func.body[0].kind, ast::StatementKind::SourceAdd { .. }));
+    }
+
+    #[test]
+    fn source_remove_in_function_body() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++fn teardown ()->String [io,async]
+  +source remove poll
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "source remove in function body should work: {result:?}");
+        let func = &program.modules[0].functions[0];
+        match &func.body[0].kind {
+            ast::StatementKind::SourceRemove { alias } => assert_eq!(alias, "poll"),
+            o => panic!("expected SourceRemove, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn source_replace_in_function_body() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++fn reconfigure ()->String [io,async]
+  +source replace poll timer(10000) -> on_tick_v2
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "source replace should work: {result:?}");
+    }
+
+    #[test]
+    fn event_register_and_emit_in_function_body() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Chat
++fn init ()->String [io,async]
+  +event register new_message(String)
+  +event emit new_message \"hello\"
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "event register/emit should work: {result:?}");
+        let func = &program.modules[0].functions[0];
+        assert!(matches!(func.body[0].kind, ast::StatementKind::EventRegister { .. }));
+        assert!(matches!(func.body[1].kind, ast::StatementKind::EventEmit { .. }));
+    }
+
+    #[test]
+    fn parse_source_kind_timer() {
+        let kind = parse_source_kind("timer(300000)").unwrap();
+        assert!(matches!(kind, ast::SourceKind::Timer(300000)));
+    }
+
+    #[test]
+    fn parse_source_kind_channel() {
+        let kind = parse_source_kind("channel").unwrap();
+        assert!(matches!(kind, ast::SourceKind::Channel));
+    }
+
+    #[test]
+    fn parse_source_kind_event() {
+        let kind = parse_source_kind("Chat.new_message").unwrap();
+        match kind {
+            ast::SourceKind::Event(module, event) => {
+                assert_eq!(module, "Chat");
+                assert_eq!(event, "new_message");
+            }
+            o => panic!("expected Event, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn parse_source_kind_unknown() {
+        let result = parse_source_kind("bogus_kind");
+        assert!(result.is_err());
     }
 }
