@@ -121,6 +121,8 @@ Modules can define startup/shutdown blocks and manage event sources:
   `channel` — named mailbox,
   `Module.event_name` — cross-module event subscription.
   The handler is auto-qualified with the current module name (e.g. `on_tick` → `Svc.on_tick`).
+- `+source timer <name> <ms>` — shorthand for adding a timer source inside +startup/+shutdown bodies.
+  Equivalent to `+source add timer(<ms>) as <name> -> <name>`.
 - `+source remove <alias>` removes a source.
 - `+source replace <alias> <kind> -> <handler>` replaces a source.
 - `+source list` lists registered sources.

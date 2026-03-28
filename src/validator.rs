@@ -2732,4 +2732,50 @@ mod tests {
         assert!(program.modules[0].startup.is_some());
         assert_eq!(program.modules[0].functions.len(), 1);
     }
+
+    #[test]
+    fn source_timer_shorthand_in_startup() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++startup [io,async]
+  +source timer heartbeat 60000
+  +return \"ok\"
++fn heartbeat ()->String
+  +return \"beat\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "timer shorthand in startup: {result:?}");
+        let startup = program.modules[0].startup.as_ref().unwrap();
+        // The shorthand produces a SourceOp::Add with Timer source type
+        assert!(matches!(startup.body[0].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
+    }
+
+    #[test]
+    fn module_sources_and_startup_coexist() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++source poller timer interval=5000 -> on_tick
++startup [io,async]
+  +source add channel as inbox -> on_msg
+  +return \"started\"
++fn on_tick ()->String
+  +return \"tick\"
++fn on_msg (m:String)->String
+  +return m
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "module sources + startup: {result:?}");
+        // Module-level source declaration
+        assert_eq!(program.modules[0].sources.len(), 1);
+        assert_eq!(program.modules[0].sources[0].name, "poller");
+        // Startup block with its own +source add statement
+        let startup = program.modules[0].startup.as_ref().unwrap();
+        assert!(matches!(startup.body[0].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
+        // Two functions
+        assert_eq!(program.modules[0].functions.len(), 2);
+    }
 }
