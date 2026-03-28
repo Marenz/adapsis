@@ -2417,4 +2417,182 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(result.is_err(), "duplicate shutdown should be rejected");
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // End-to-end: parse → validate → reconstruct → reparse round-trips
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn source_list_in_function_body() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++fn status ()->String [io,async]
+  +source list
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "source list should work: {result:?}");
+        let func = &program.modules[0].functions[0];
+        assert!(matches!(func.body[0].kind, ast::StatementKind::Source(ast::SourceOp::List)));
+    }
+
+    #[test]
+    fn full_service_module_round_trip() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Poller
++startup [io,async]
+  +source add timer(5000) as poll -> on_tick
+  +return \"started\"
++shutdown [io,async]
+  +source remove poll
+  +return \"stopped\"
++fn on_tick ()->String [io,async]
+  +return \"tick\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "full service module should validate: {result:?}");
+
+        let module = &program.modules[0];
+        assert_eq!(module.name, "Poller");
+        assert!(module.startup.is_some(), "startup should be set");
+        assert!(module.shutdown.is_some(), "shutdown should be set");
+        assert_eq!(module.functions.len(), 1);
+        assert_eq!(module.functions[0].name, "on_tick");
+
+        // Reconstruct and verify it parses again
+        let reconstructed = crate::library::reconstruct_module_source(module);
+        assert!(reconstructed.contains("+startup"), "reconstructed should contain +startup");
+        assert!(reconstructed.contains("+shutdown"), "reconstructed should contain +shutdown");
+        assert!(reconstructed.contains("+fn on_tick"), "reconstructed should contain +fn on_tick");
+
+        // Reparse the reconstructed source
+        let ops2 = parser::parse(&reconstructed).unwrap();
+        assert!(!ops2.is_empty(), "reparsed should have operations");
+        // Apply to a fresh program to verify it validates
+        let mut program2 = ast::Program::default();
+        let result2 = apply_and_validate(&mut program2, &ops2[0]);
+        assert!(result2.is_ok(), "reconstructed source should validate: {result2:?}");
+        assert!(program2.modules[0].startup.is_some());
+        assert!(program2.modules[0].shutdown.is_some());
+    }
+
+    #[test]
+    fn source_event_statements_round_trip() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Chat
++fn init ()->String [io,async]
+  +event register new_message(String)
+  +source add channel as inbox -> on_msg
+  +source add Chat.new_message as evt -> on_evt
+  +event emit new_message \"hello\"
+  +source list
+  +source replace inbox timer(1000) -> on_tick
+  +source remove inbox
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "source/event statements should validate: {result:?}");
+
+        let func = &program.modules[0].functions[0];
+        assert_eq!(func.body.len(), 8); // 7 source/event stmts + return
+
+        // Check specific statement types
+        assert!(matches!(func.body[0].kind, ast::StatementKind::Event(ast::EventOp::Register { .. })));
+        assert!(matches!(func.body[1].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
+        assert!(matches!(func.body[2].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
+        assert!(matches!(func.body[3].kind, ast::StatementKind::Event(ast::EventOp::Emit { .. })));
+        assert!(matches!(func.body[4].kind, ast::StatementKind::Source(ast::SourceOp::List)));
+        assert!(matches!(func.body[5].kind, ast::StatementKind::Source(ast::SourceOp::Replace { .. })));
+        assert!(matches!(func.body[6].kind, ast::StatementKind::Source(ast::SourceOp::Remove { .. })));
+
+        // Reconstruct and verify
+        let reconstructed = crate::library::reconstruct_module_source(&program.modules[0]);
+        assert!(reconstructed.contains("+event register"), "reconstructed has event register");
+        assert!(reconstructed.contains("+source add channel"), "reconstructed has source add channel");
+        assert!(reconstructed.contains("+source list"), "reconstructed has source list");
+        assert!(reconstructed.contains("+source replace"), "reconstructed has source replace");
+        assert!(reconstructed.contains("+source remove"), "reconstructed has source remove");
+        assert!(reconstructed.contains("+event emit"), "reconstructed has event emit");
+    }
+
+    #[test]
+    fn timer_with_expression_validates() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++fn setup (interval:Int)->String [io,async]
+  +source add timer(interval) as poll -> on_tick
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "timer with variable expr should work: {result:?}");
+        let func = &program.modules[0].functions[0];
+        match &func.body[0].kind {
+            ast::StatementKind::Source(ast::SourceOp::Add { source_type, alias, handler }) => {
+                assert!(matches!(source_type, ast::SourceType::Timer(_)));
+                assert_eq!(alias, "poll");
+                assert_eq!(handler, "on_tick");
+            }
+            o => panic!("expected Source(Add), got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn event_source_subscription_validates() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Listener
++fn subscribe ()->String [io,async]
+  +source add Chat.new_message as msgs -> handle_msg
+  +return \"ok\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "event source subscription should work: {result:?}");
+        let func = &program.modules[0].functions[0];
+        match &func.body[0].kind {
+            ast::StatementKind::Source(ast::SourceOp::Add { source_type, alias, handler }) => {
+                match source_type {
+                    ast::SourceType::Event(module, event) => {
+                        assert_eq!(module, "Chat");
+                        assert_eq!(event, "new_message");
+                    }
+                    o => panic!("expected Event source type, got {:?}", o),
+                }
+                assert_eq!(alias, "msgs");
+                assert_eq!(handler, "handle_msg");
+            }
+            o => panic!("expected Source(Add), got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn startup_with_source_and_event_stmts() {
+        let mut program = ast::Program::default();
+        let source = "\
+!module Svc
++startup [io,async]
+  +event register health_check(String)
+  +source add timer(60000) as heartbeat -> on_heartbeat
+  +return \"started\"
++fn on_heartbeat ()->String [io,async]
+  +event emit health_check \"alive\"
+  +return \"beat\"
+";
+        let ops = parser::parse(source).unwrap();
+        let result = apply_and_validate(&mut program, &ops[0]);
+        assert!(result.is_ok(), "startup with source/event stmts: {result:?}");
+
+        let startup = program.modules[0].startup.as_ref().unwrap();
+        assert_eq!(startup.body.len(), 3); // event register, source add, return
+        assert!(matches!(startup.body[0].kind, ast::StatementKind::Event(ast::EventOp::Register { .. })));
+        assert!(matches!(startup.body[1].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
+    }
 }
