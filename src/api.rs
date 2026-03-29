@@ -3054,6 +3054,8 @@ pub async fn ask_stream(
                                 let recent_for_stream = recent_lines.clone();
                                 let had_tool_calls = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                                 let had_tool_calls_stream = had_tool_calls.clone();
+                                let killed_by_idle = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                let killed_by_idle_inner = killed_by_idle.clone();
                                 let last_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
                                 let last_text_stream = last_text.clone();
                                 let full_task = format!("{task}. IMPORTANT: Do NOT ask for clarification — proceed with your best judgment. When done: 1) Write Rust tests for the changes you made — cover the happy path and at least one error case. 2) Update src/prompt.rs to document any new builtins, IO operations, commands, or language features you added — the AI inside AdapsisOS needs to know about them. 3) Register new builtins in src/builtins.rs. 4) Run `cargo test` and fix any failures. 5) Create clean atomic git commits with descriptive messages for each logical change.");
@@ -3094,7 +3096,7 @@ pub async fn ask_stream(
                                             });
                                         }
 
-                                        let idle_timeout = std::time::Duration::from_secs(600); // 10 min
+                                        let idle_timeout = std::time::Duration::from_secs(7200); // 2 hours
                                         loop {
                                             let line = match tokio::time::timeout(std::time::Duration::from_secs(30), reader.next_line()).await {
                                                 Ok(Ok(Some(line))) => {
@@ -3107,10 +3109,18 @@ pub async fn ask_stream(
                                                     // No stdout line for 30s — check if stderr had activity
                                                     let elapsed = last_activity.lock().unwrap().elapsed();
                                                     if elapsed >= idle_timeout {
-                                                        let msg = format!("[opencode] IDLE TIMEOUT: no output on stdout or stderr for {}s — killing OpenCode process", elapsed.as_secs());
-                                                        eprintln!("{msg}");
+                                                        let context = recent_for_stream.lock().unwrap().join("\n");
+                                                        let msg = format!(
+                                                            "ERROR: !opencode idle timeout — no output for {}s. The task is NOT done.\n\
+                                                             Last output before silence:\n{context}\n\n\
+                                                             The opencode subprocess went silent. This usually means it got stuck on a \
+                                                             long operation or API rate limit. Try breaking the task into smaller pieces.",
+                                                            elapsed.as_secs()
+                                                        );
+                                                        eprintln!("[opencode] IDLE TIMEOUT: {}s", elapsed.as_secs());
                                                         log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
                                                         op_result.error(&msg);
+                                                        killed_by_idle_inner.store(true, std::sync::atomic::Ordering::Relaxed);
                                                         // Kill entire process group to clean up opencode subprocesses
                                                         if let Some(pid) = child.id() {
                                                             unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
@@ -3218,7 +3228,7 @@ pub async fn ask_stream(
                                                         .spawn()?;
                                                     let stdout2 = child2.stdout.take().unwrap();
                                                     let mut reader2 = BufReader::new(stdout2).lines();
-                                                    let idle_timeout = std::time::Duration::from_secs(300);
+                                                    let idle_timeout = std::time::Duration::from_secs(7200); // 2 hours
                                                     loop {
                                                         let line = match tokio::time::timeout(idle_timeout, reader2.next_line()).await {
                                                             Ok(Ok(Some(line))) => line,
@@ -3304,7 +3314,9 @@ pub async fn ask_stream(
                                     }
                                 }
 
-                                match oc_result {
+                                if killed_by_idle.load(std::sync::atomic::Ordering::Relaxed) {
+                                    // Already reported via op_result.error — skip the generic SIGKILL match
+                                } else { match oc_result {
                                     Ok(Ok(status)) if status.success() => {
                                         eprintln!("[web:opencode:stream:done] rebuilding...");
                                         log_activity(&config_clone.log_file, "opencode-done", "rebuilding...").await;
@@ -3369,7 +3381,7 @@ pub async fn ask_stream(
                                         log_activity(&config_clone.log_file, "opencode-timeout", &msg).await;
                                         let _ = tx.send(serde_json::json!({"type": "result", "message": msg, "success": false})).await;
                                     }
-                                }
+                                } } // close match + if/else
                             }
                             _ => {}
                         }
