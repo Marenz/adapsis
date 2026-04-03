@@ -4889,3 +4889,369 @@ async fn tasks(State(config): State<AppConfig>) -> Json<serde_json::Value> {
     }).collect();
     Json(serde_json::json!({"tasks": list}))
 }
+
+/// Handle a `llm_takeover` IO request: call LLM with per-context conversation
+/// history, return text reply immediately, execute any code in background.
+pub async fn handle_llm_takeover(
+    context: String,
+    message: String,
+    reply_fn: Option<String>,
+    reply_arg: Option<String>,
+    meta: crate::session::SharedMeta,
+    program: std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
+    runtime: crate::session::SharedRuntime,
+    llm_url: &str,
+    llm_model: &str,
+    llm_key: Option<String>,
+    io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+    task_registry: crate::coroutine::TaskRegistry,
+    snap_registry: crate::coroutine::TaskSnapshotRegistry,
+) -> anyhow::Result<String> {
+    let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
+
+    // Get or create conversation, update callback info, build messages
+    let messages = {
+        let mut meta_guard = meta.lock().unwrap();
+        let conv = meta_guard.conversations.get_or_create(&context);
+
+        // Update callback info if provided
+        if reply_fn.is_some() {
+            conv.reply_fn = reply_fn.clone();
+        }
+        if reply_arg.is_some() {
+            conv.reply_arg = reply_arg.clone();
+        }
+
+        // Add system prompt if this is a new conversation
+        if conv.messages.is_empty() {
+            let system = conv.system_prompt.clone().unwrap_or_else(|| {
+                format!(
+                    "{}\n\n{}\n\nYou are in conversation context '{context}'. Respond naturally. \
+                     If you need to do work (modify code, create modules, run tasks), include the \
+                     Adapsis commands in your response. For long-running tasks, use `!agent`.",
+                    crate::prompt::system_prompt(),
+                    crate::builtins::format_for_prompt(),
+                )
+            });
+            conv.push_system(system);
+        }
+
+        // Add user message
+        conv.push_user(&message);
+
+        // Build LLM messages from conversation history
+        conv.messages.iter().map(|m| match m.role.as_str() {
+            "system" => crate::llm::ChatMessage::system(m.content.clone()),
+            "assistant" => crate::llm::ChatMessage::assistant(&m.content),
+            _ => crate::llm::ChatMessage::user(m.content.clone()),
+        }).collect::<Vec<_>>()
+    }; // meta_guard dropped here
+
+    eprintln!("[llm_takeover:{context}] calling LLM with {} messages", messages.len());
+
+    // Call LLM
+    let output = llm.generate(messages).await
+        .map_err(|e| anyhow::anyhow!("llm_takeover LLM error: {e}"))?;
+
+    // Store assistant response in conversation
+    {
+        let mut meta_guard = meta.lock().unwrap();
+        if let Some(conv) = meta_guard.conversations.get_mut(&context) {
+            conv.push_assistant(&output.text);
+        }
+    }
+
+    // Extract text reply (prose without code)
+    let reply_text = {
+        let mut clean = output.text.clone();
+        // Strip <think> blocks
+        while let Some(s) = clean.find("<think>") {
+            if let Some(e) = clean[s..].find("</think>") {
+                clean.replace_range(s..s + e + 8, "");
+            } else {
+                break;
+            }
+        }
+        // Strip <code> blocks
+        while let Some(s) = clean.find("<code>") {
+            if let Some(e) = clean[s..].find("</code>") {
+                clean.replace_range(s..s + e + 7, "");
+            } else {
+                break;
+            }
+        }
+        clean.trim().to_string()
+    };
+
+    eprintln!("[llm_takeover:{context}] reply: {}...", reply_text.chars().take(80).collect::<String>());
+
+    // If there's code to execute, do it in background
+    let code = output.code.clone();
+    if !code.trim().is_empty() && code.trim() != "!done" {
+        let context_for_bg = context.clone();
+        let meta_for_bg = meta.clone();
+        let program_for_bg = program.clone();
+        let runtime_for_bg = runtime.clone();
+        let llm_url_bg = llm_url.to_string();
+        let llm_model_bg = llm_model.to_string();
+        let llm_key_bg = llm_key.map(|s| s.to_string());
+        let io_sender_bg = io_sender.clone();
+        let task_registry_bg = task_registry.clone();
+        let snap_registry_bg = snap_registry.clone();
+
+        eprintln!("[llm_takeover:{context}] executing code in background ({} chars)", code.len());
+
+        tokio::spawn(async move {
+            // Parse and execute code
+            let ops = match crate::parser::parse(&code) {
+                Ok(ops) => ops,
+                Err(e) => {
+                    eprintln!("[llm_takeover:{context_for_bg}] parse error: {e}");
+                    // Append error to conversation so LLM sees it next time
+                    if let Ok(mut meta_guard) = meta_for_bg.lock() {
+                        if let Some(conv) = meta_guard.conversations.get_mut(&context_for_bg) {
+                            conv.push_system(format!("Code execution error: {e}"));
+                        }
+                    }
+                    return;
+                }
+            };
+
+            // Build a session snapshot for applying mutations
+            let mut session = {
+                let prog = program_for_bg.read().await.clone();
+                let rt = runtime_for_bg.read().unwrap().clone();
+                let meta_snap = meta_for_bg.lock().unwrap().clone();
+                crate::session::Session {
+                    program: prog,
+                    runtime: rt,
+                    meta: meta_snap,
+                    sandbox: None,
+                }
+            };
+
+            // Check for !agent commands
+            for op in &ops {
+                if let crate::parser::Operation::Agent { name, scope, task } = op {
+                    eprintln!("[llm_takeover:{context_for_bg}] spawning agent '{name}' scope={scope}");
+                    let agent_scope = crate::session::AgentScope::parse(scope);
+                    let branch = crate::session::AgentBranch::fork_from_parts(
+                        name, agent_scope, task,
+                        &session.program, &session.runtime, &session.meta,
+                    );
+                    let program_summary = crate::validator::program_summary_compact(&session.program);
+                    let agent_task = task.clone();
+                    let agent_name = name.clone();
+                    let agent_program = program_for_bg.clone();
+                    let agent_meta = meta_for_bg.clone();
+                    let agent_runtime = runtime_for_bg.clone();
+                    let agent_context = context_for_bg.clone();
+                    let agent_llm_url = llm_url_bg.clone();
+                    let agent_llm_model = llm_model_bg.clone();
+                    let agent_llm_key = llm_key_bg.clone();
+                    let agent_io_sender = io_sender_bg.clone();
+                    let agent_task_registry = task_registry_bg.clone();
+                    let agent_snap_registry = snap_registry_bg.clone();
+
+                    // Spawn agent with completion callback
+                    tokio::spawn(async move {
+                        eprintln!("[agent:{agent_name}] starting (from llm_takeover:{agent_context})");
+                        let agent_llm = crate::llm::LlmClient::new_with_model_and_key(
+                            &agent_llm_url, &agent_llm_model, agent_llm_key,
+                        );
+
+                        let scope_desc = match &branch.scope {
+                            crate::session::AgentScope::ReadOnly =>
+                                "SCOPE: read-only.".to_string(),
+                            crate::session::AgentScope::NewOnly =>
+                                "SCOPE: new-only.".to_string(),
+                            crate::session::AgentScope::Module(m) =>
+                                format!("SCOPE: module {m}."),
+                            crate::session::AgentScope::Full =>
+                                "SCOPE: full.".to_string(),
+                        };
+                        let agent_system = format!(
+                            "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. When done, respond with !done.",
+                            crate::prompt::system_prompt(),
+                            crate::builtins::format_for_prompt()
+                        );
+
+                        let mut agent_messages = vec![
+                            crate::llm::ChatMessage::system(agent_system),
+                            crate::llm::ChatMessage::user(format!("Program state:\n{program_summary}\n\nTask: {agent_task}")),
+                        ];
+
+                        let mut branch = branch;
+                        let mut agent_result = "Agent completed".to_string();
+
+                        for agent_iter in 0..10 {
+                            let output = match agent_llm.generate(agent_messages.clone()).await {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    eprintln!("[agent:{agent_name}] LLM error: {e}");
+                                    agent_result = format!("Agent error: {e}");
+                                    break;
+                                }
+                            };
+
+                            agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));
+
+                            let code = output.code.clone();
+                            if code.trim() == "!done" || code.is_empty() {
+                                eprintln!("[agent:{agent_name}] done at iter {agent_iter}");
+                                // Extract useful info from last response
+                                let mut clean = output.text.clone();
+                                while let Some(s) = clean.find("<think>") {
+                                    if let Some(e) = clean[s..].find("</think>") {
+                                        clean.replace_range(s..s + e + 8, "");
+                                    } else { break; }
+                                }
+                                agent_result = clean.trim().to_string();
+                                break;
+                            }
+
+                            match branch.apply(&code) {
+                                Ok(results) => {
+                                    let feedback = results.iter()
+                                        .map(|(msg, ok)| format!("{}: {msg}", if *ok { "OK" } else { "ERROR" }))
+                                        .collect::<Vec<_>>().join("\n");
+                                    let has_err = results.iter().any(|(_, ok)| !ok);
+                                    if has_err {
+                                        agent_messages.push(crate::llm::ChatMessage::user(format!("Errors:\n{feedback}\nFix and continue.")));
+                                    } else {
+                                        agent_messages.push(crate::llm::ChatMessage::user(format!("Results:\n{feedback}\nContinue or !done.")));
+                                    }
+                                }
+                                Err(e) => {
+                                    agent_messages.push(crate::llm::ChatMessage::user(format!("Error: {e}\nFix and continue.")));
+                                }
+                            }
+                        }
+
+                        // Merge agent results back
+                        let mut prog = agent_program.read().await.clone();
+                        let mut rt = agent_runtime.read().unwrap().clone();
+                        let mut meta_snap = agent_meta.lock().unwrap().clone();
+                        let mut sandbox = None;
+                        let conflicts = branch.merge_into_parts(&mut prog, &mut rt, &mut meta_snap, &mut sandbox);
+                        if conflicts.is_empty() {
+                            eprintln!("[agent:{agent_name}] merged successfully");
+                            *agent_program.write().await = prog;
+                            *agent_runtime.write().unwrap() = rt;
+                            *agent_meta.lock().unwrap() = meta_snap;
+                        } else {
+                            eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
+                            agent_result = format!("Agent had merge conflicts: {}", conflicts.join(", "));
+                        }
+
+                        // Notify the conversation context that spawned this agent
+                        eprintln!("[agent:{agent_name}] notifying context '{agent_context}'");
+                        let notification = format!("Agent '{agent_name}' completed: {}", agent_result.chars().take(500).collect::<String>());
+
+                        // Append result to conversation and call LLM to generate user-facing summary
+                        {
+                            let mut meta_guard = agent_meta.lock().unwrap();
+                            if let Some(conv) = meta_guard.conversations.get_mut(&agent_context) {
+                                conv.push_system(notification.clone());
+                            }
+                        }
+
+                        // Call LLM with updated context to generate reply for user
+                        let reply_messages = {
+                            let meta_guard = agent_meta.lock().unwrap();
+                            if let Some(conv) = meta_guard.conversations.get(&agent_context) {
+                                conv.messages.iter().map(|m| match m.role.as_str() {
+                                    "system" => crate::llm::ChatMessage::system(m.content.clone()),
+                                    "assistant" => crate::llm::ChatMessage::assistant(&m.content),
+                                    _ => crate::llm::ChatMessage::user(m.content.clone()),
+                                }).collect::<Vec<_>>()
+                            } else {
+                                return;
+                            }
+                        };
+
+                        if let Ok(summary_output) = agent_llm.generate(reply_messages).await {
+                            let summary = {
+                                let mut clean = summary_output.text.clone();
+                                while let Some(s) = clean.find("<think>") {
+                                    if let Some(e) = clean[s..].find("</think>") {
+                                        clean.replace_range(s..s + e + 8, "");
+                                    } else { break; }
+                                }
+                                while let Some(s) = clean.find("<code>") {
+                                    if let Some(e) = clean[s..].find("</code>") {
+                                        clean.replace_range(s..s + e + 7, "");
+                                    } else { break; }
+                                }
+                                clean.trim().to_string()
+                            };
+
+                            // Store assistant reply
+                            {
+                                let mut meta_guard = agent_meta.lock().unwrap();
+                                if let Some(conv) = meta_guard.conversations.get_mut(&agent_context) {
+                                    conv.push_assistant(&summary);
+                                }
+                            }
+
+                            // Deliver via callback if configured
+                            let (cb_fn, cb_arg) = {
+                                let meta_guard = agent_meta.lock().unwrap();
+                                meta_guard.conversations.get(&agent_context)
+                                    .map(|c| (c.reply_fn.clone(), c.reply_arg.clone()))
+                                    .unwrap_or((None, None))
+                            };
+
+                            if let (Some(func_name), Some(arg)) = (cb_fn, cb_arg) {
+                                eprintln!("[agent:{agent_name}] delivering reply via {func_name}({arg}, ...)");
+                                // Call the reply function via coroutine
+                                let (tx, _rx) = tokio::sync::oneshot::channel();
+                                let _ = agent_io_sender.send(crate::coroutine::IoRequest::Spawn {
+                                    function_name: func_name,
+                                    args: vec![
+                                        crate::eval::Value::string(arg),
+                                        crate::eval::Value::string(summary),
+                                    ],
+                                    reply: tx,
+                                }).await;
+                            }
+                        }
+                    });
+                    continue;
+                }
+            }
+
+            // Execute non-agent code mutations
+            let results = session.apply_async(&code, Some(&io_sender_bg)).await;
+            match results {
+                Ok(results) => {
+                    let feedback: Vec<String> = results.iter()
+                        .map(|(msg, ok)| format!("{}: {msg}", if *ok { "OK" } else { "ERROR" }))
+                        .collect();
+                    eprintln!("[llm_takeover:{context_for_bg}] code results: {}", feedback.join("; "));
+
+                    // Append feedback to conversation
+                    if let Ok(mut meta_guard) = meta_for_bg.lock() {
+                        if let Some(conv) = meta_guard.conversations.get_mut(&context_for_bg) {
+                            conv.push_system(format!("Code execution results:\n{}", feedback.join("\n")));
+                        }
+                    }
+
+                    // Write back program mutations
+                    *program_for_bg.write().await = session.program;
+                    *runtime_for_bg.write().unwrap() = session.runtime;
+                }
+                Err(e) => {
+                    eprintln!("[llm_takeover:{context_for_bg}] code error: {e}");
+                    if let Ok(mut meta_guard) = meta_for_bg.lock() {
+                        if let Some(conv) = meta_guard.conversations.get_mut(&context_for_bg) {
+                            conv.push_system(format!("Code execution error: {e}"));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    Ok(reply_text)
+}

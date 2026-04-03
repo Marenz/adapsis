@@ -480,6 +480,19 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "llm_takeover",
+        aliases: &[],
+        short: "conversational LLM with per-context history: llm_takeover(context, message[, reply_fn, reply_arg])",
+        long: "Calls the LLM with per-context conversation history and returns the text reply. \
+               The context name (e.g. \"telegram:123\", \"agent:builder\") identifies the conversation — \
+               each context has independent history. If the LLM response contains code, it is executed \
+               in the background. If the code spawns agents (!agent), the agent runs asynchronously and \
+               the reply callback is invoked when it completes. \
+               Optional reply_fn/reply_arg configure a callback function for async notifications: \
+               reply_fn(reply_arg, text) is called to deliver agent completion summaries.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "http_get",
         aliases: &[],
         short: "HTTP GET request, returns response body as String",
