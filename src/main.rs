@@ -1191,8 +1191,10 @@ async fn main() -> Result<()> {
                     let _ = std::process::Command::new("git")
                         .args(["-C", &bare_str, "fetch", "origin"])
                         .output();
+                    // Use session name as branch to avoid conflicts with other sessions
+                    let branch_name = session_stem.to_lowercase().replace(' ', "-");
                     let output = std::process::Command::new("git")
-                        .args(["-C", &bare_str, "worktree", "add", &worktree_dir_str, "master"])
+                        .args(["-C", &bare_str, "worktree", "add", "-b", &branch_name, &worktree_dir_str, "master"])
                         .output();
                     match output {
                         Ok(o) if o.status.success() => {
