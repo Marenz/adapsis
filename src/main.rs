@@ -1452,7 +1452,7 @@ async fn main() -> Result<()> {
                     let client = reqwest::Client::new();
                     let mut is_first = true;
                     loop {
-                        let msg = if is_first {
+                        let mut msg = if is_first {
                             is_first = false;
                             goal_message.clone()
                         } else {
@@ -1500,10 +1500,33 @@ async fn main() -> Result<()> {
                                     } else if has_undone_roadmap {
                                         "Plan completed. Use !roadmap done N to mark the current roadmap item done, then check !roadmap for the next undone item. Create a new !plan and start working on it.".to_string()
                                     } else {
-                                        // Nothing left — idle, but check queue periodically
+                                        // Nothing left — idle, but drain queue on each wake-up
                                         eprintln!("[autonomous] all roadmap items done, idling...");
-                                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                                        continue;
+                                        
+                                        // Drain queue before sleeping
+                                        let injected = match client.post(format!("http://127.0.0.1:{auto_port}/api/drain-queue"))
+                                            .send().await {
+                                                Ok(r) => r.json::<serde_json::Value>().await.ok()
+                                                    .and_then(|q| q.get("messages").cloned())
+                                                    .and_then(|m| m.as_array().cloned())
+                                                    .and_then(|arr| {
+                                                        let non_empty: Vec<String> = arr.iter()
+                                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                                            .filter(|s| !s.is_empty())
+                                                            .collect();
+                                                        if non_empty.is_empty() { None } else { Some(non_empty.join("\n\n")) }
+                                                    }),
+                                                Err(_) => None,
+                                            };
+
+                                        if let Some(injected_msg) = injected {
+                                            eprintln!("[autonomous] processing injected while idle: {}...", injected_msg.chars().take(80).collect::<String>());
+                                            injected_msg
+                                        } else {
+                                            // No injected messages — sleep and retry
+                                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                            continue;
+                                        }
                                     }
                                 } else {
                                     "Continue working. Check !roadmap and !plan for current state.".to_string()
