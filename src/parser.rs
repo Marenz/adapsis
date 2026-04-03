@@ -614,6 +614,7 @@ impl<'a> Parser<'a> {
                     && !next.text.starts_with("+startup")
                     && !next.text.starts_with("+shutdown")
                     && !next.text.starts_with("+source")
+                    && !next.text.starts_with("+route")
                 {
                     break;
                 }

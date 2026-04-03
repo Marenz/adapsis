@@ -849,6 +849,11 @@ async fn main() -> Result<()> {
             if !lib_state.loaded_modules.is_empty() {
                 sess.program.rebuild_function_index();
             }
+            // Drain any routes declared inside library modules via +route
+            let pending_routes: Vec<_> = sess.program.pending_routes.drain(..).collect();
+            for route in pending_routes {
+                sess.add_route(route);
+            }
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
 

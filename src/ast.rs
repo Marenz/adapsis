@@ -56,6 +56,9 @@ pub struct Program {
     /// When true, reject top-level functions — must be inside a module. Set in AdapsisOS mode.
     #[serde(default)]
     pub require_modules: bool,
+    /// Routes declared inside modules via `+route`. Drained by the session layer after apply_module.
+    #[serde(skip)]
+    pub pending_routes: Vec<HttpRoute>,
 }
 
 impl PartialEq for Program {

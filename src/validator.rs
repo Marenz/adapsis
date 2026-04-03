@@ -6,6 +6,8 @@ use crate::parser;
 
 /// Apply a parsed operation to the program state and validate it.
 /// Returns a human-readable success message or an error with diagnostics.
+/// Any `+route` declarations inside modules are stored in `program.pending_routes`
+/// for the caller to drain and register.
 pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) -> Result<String> {
     match op {
         parser::Operation::Module(module_decl) => apply_module(program, module_decl),
@@ -356,6 +358,14 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     source_type: src_decl.source_type.clone(),
                     config: src_decl.config.clone(),
                     handler: src_decl.handler.clone(),
+                });
+            }
+            parser::Operation::Route { method, path, handler_fn } => {
+                // Routes inside a module are collected and registered by the session layer.
+                program.pending_routes.push(ast::HttpRoute {
+                    method: method.clone(),
+                    path: path.clone(),
+                    handler_fn: format!("{}.{}", decl.name, handler_fn),
                 });
             }
             other => bail!(
