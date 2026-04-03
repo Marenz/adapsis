@@ -3423,11 +3423,19 @@ pub async fn ask_stream(
                                 let _ = snap.save(std::path::Path::new(&path));
                             }
                         }
-                        let exe = std::env::args().next()
-                            .map(std::path::PathBuf::from)
-                            .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
-                            .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
+                        // Prefer newly-built binary from the opencode worktree
+                        let worktree_binary = {
+                            let wb = std::path::PathBuf::from(&config_clone.opencode_git_dir).join("target/release/adapsis");
+                            if wb.exists() { Some(wb) } else { None }
+                        };
+                        let exe = worktree_binary.unwrap_or_else(|| {
+                            std::env::args().next()
+                                .map(std::path::PathBuf::from)
+                                .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+                                .unwrap_or_else(|| std::env::current_exe().unwrap_or_default())
+                        });
                         let args: Vec<String> = std::env::args().collect();
+                        eprintln!("[opencode] restarting with binary: {}", exe.display());
                         let err = exec::execvp(&exe, &args);
                         let msg = format!("RESTART FAILED: exec::execvp returned: {err}. The new binary is built but NOT running. Manual restart required.");
                         eprintln!("[opencode] {msg}");
