@@ -280,6 +280,11 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 // Now mutably access module to add/replace function
                 let m = &mut program.modules[mod_idx];
                 if let Some(pos) = m.functions.iter().position(|f| f.name == converted.name) {
+                    // Preserve existing tests when replacing a function
+                    let existing_tests = m.functions[pos].tests.clone();
+                    if !existing_tests.is_empty() && converted.tests.is_empty() {
+                        converted.tests = existing_tests;
+                    }
                     m.functions[pos] = std::sync::Arc::new(converted);
                     replaced_fns += 1;
                 } else {
@@ -2808,5 +2813,47 @@ mod tests {
         assert!(matches!(startup.body[0].kind, ast::StatementKind::Source(ast::SourceOp::Add { .. })));
         // Two functions
         assert_eq!(program.modules[0].functions.len(), 2);
+    }
+
+    #[test]
+    fn replace_function_preserves_existing_tests() {
+        let mut program = ast::Program::default();
+
+        // First: add a module with a function
+        let source1 = "\
+!module Calc
++fn add(a:Int, b:Int) -> Int
+  +return a + b
++end
+";
+        let ops1 = parser::parse(source1).unwrap();
+        apply_and_validate(&mut program, &ops1[0]).unwrap();
+
+        // Manually add tests to the function (simulating what store_test does)
+        let func = program.get_function_mut("Calc.add").unwrap();
+        func.tests = vec![ast::TestCase {
+            input: "a=1 b=2".to_string(),
+            expected: "3".to_string(),
+            passed: true,
+            matcher: None,
+            after_checks: vec![],
+        }];
+        assert_eq!(program.get_function("Calc.add").unwrap().tests.len(), 1);
+
+        // Now replace the function with a new body (no tests in the parsed source)
+        let source2 = "\
+!module Calc
++fn add(a:Int, b:Int) -> Int
+  +let sum:Int = a + b
+  +return sum
++end
+";
+        let ops2 = parser::parse(source2).unwrap();
+        apply_and_validate(&mut program, &ops2[0]).unwrap();
+
+        // Tests should be preserved from the previous version
+        let func = program.get_function("Calc.add").unwrap();
+        assert_eq!(func.tests.len(), 1, "tests should survive function replacement");
+        assert!(func.tests[0].passed, "preserved test should still be marked passed");
     }
 }
