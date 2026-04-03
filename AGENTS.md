@@ -100,8 +100,10 @@ web/
 !plan set / done N    — task planning
 !roadmap add/done/show — persistent long-term roadmap
 +await roadmap_list/roadmap_add/roadmap_done — programmatic roadmap IO builtins
-!mock op "pattern" -> "response"  — IO mocking for tests
-!unmock               — clear mocks
+!mock op "pattern" -> "response"  — IO mocking for tests (returns String, for IO builtins)
+!stub Module.func "pattern" -> expr — function stub (returns typed value, for user functions)
+!unmock               — clear IO mocks
+!unstub               — clear function stubs
 !test Module.fn       — run tests (blocks !eval if untested)
 !eval Module.fn       — evaluate function
 !remove Module.fn     — remove function/type/module
