@@ -1196,6 +1196,10 @@ async fn main() -> Result<()> {
                 if !worktree_dir.exists() {
                     eprintln!("[opencode] Creating worktree for session '{}': {}", session_stem, worktree_dir_str);
                     let bare_str = bare_repo.to_string_lossy();
+                    // Fetch latest before creating worktree
+                    let _ = std::process::Command::new("git")
+                        .args(["-C", &bare_str, "fetch", "origin"])
+                        .output();
                     let output = std::process::Command::new("git")
                         .args(["-C", &bare_str, "worktree", "add", &worktree_dir_str, "master"])
                         .output();
