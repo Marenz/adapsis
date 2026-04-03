@@ -184,6 +184,22 @@ pub fn reconstruct_module_source(module: &ast::Module) -> String {
         out.push('\n');
     }
 
+    // Routes
+    for route in &module.routes {
+        // Strip module prefix from handler_fn for reconstruction
+        let handler = route
+            .handler_fn
+            .strip_prefix(&format!("{}.", module.name))
+            .unwrap_or(&route.handler_fn);
+        out.push_str(&format!(
+            "+route {} \"{}\" -> {}\n",
+            route.method, route.path, handler
+        ));
+    }
+    if !module.routes.is_empty() {
+        out.push('\n');
+    }
+
     // Then functions
     for func in &module.functions {
         out.push_str(&reconstruct_function_source(func));

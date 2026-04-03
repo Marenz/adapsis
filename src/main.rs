@@ -852,8 +852,10 @@ async fn main() -> Result<()> {
             // Drain any routes declared inside library modules via +route
             let pending_routes: Vec<_> = sess.program.pending_routes.drain(..).collect();
             for route in pending_routes {
-                sess.add_route(route);
+                let msg = sess.add_route(route);
+                eprintln!("[library] {msg}");
             }
+            eprintln!("[library] http_routes after drain: {:?}", sess.runtime.http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
 
