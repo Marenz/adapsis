@@ -497,11 +497,13 @@ pub struct CoroutineHandle {
     snapshot_registry: Option<TaskSnapshotRegistry>,
     /// Mock responses for testing — if set, IO calls check here first.
     mocks: Option<Vec<crate::session::IoMock>>,
+    /// Function stubs for testing — intercepts user function calls.
+    stubs: Option<Vec<crate::session::FunctionStub>>,
 }
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None }
     }
 
     pub fn new_with_task(
@@ -510,22 +512,26 @@ impl CoroutineHandle {
         registry: TaskRegistry,
         snapshot_registry: TaskSnapshotRegistry,
     ) -> Self {
-        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None }
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None }
     }
 
     /// Create a mock handle for testing — no real IO, returns mock responses.
-    /// Unmatched operations error with "no mock for..." since there's no real
-    /// IO sender to fall through to.
     #[allow(dead_code)]
     pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
-        let (tx, _) = mpsc::channel(1); // dummy channel, never used
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks) }
+        let (tx, _) = mpsc::channel(1);
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None }
+    }
+
+    /// Create a mock handle with function stubs for testing.
+    pub fn new_mock_with_stubs(mocks: Vec<crate::session::IoMock>, stubs: Vec<crate::session::FunctionStub>) -> Self {
+        let (tx, _) = mpsc::channel(1);
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs) }
     }
 
     /// Create a handle with mocks AND a real IO sender — mocks are checked first,
     /// unmatched operations fall through to real IO via the sender.
     pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks) }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None }
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
@@ -607,7 +613,7 @@ impl CoroutineHandle {
         Ok(result)
     }
 
-    fn try_mock_io(&self, op: &str, args: &[Value], fail_on_missing: bool) -> Result<Option<Value>> {
+    pub fn try_mock_io(&self, op: &str, args: &[Value], fail_on_missing: bool) -> Result<Option<Value>> {
         let Some(mocks) = &self.mocks else {
             return Ok(None);
         };
@@ -639,6 +645,37 @@ impl CoroutineHandle {
             bail!("no mock for {op}({arg_str}) — add !mock {op} \"<pattern>\" -> \"<response>\"");
         }
 
+        Ok(None)
+    }
+
+    /// Check if a function call matches a registered stub.
+    /// Returns the raw expression string if matched.
+    pub fn try_stub(&self, func_name: &str, args: &[Value]) -> Result<Option<String>> {
+        let Some(stubs) = &self.stubs else {
+            return Ok(None);
+        };
+        let arg_strs: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+        let arg_str = arg_strs.join(" ");
+        'stub_loop: for stub in stubs {
+            if stub.function_name != func_name {
+                continue;
+            }
+            if stub.patterns.len() == 1 {
+                if arg_str.contains(&stub.patterns[0]) {
+                    return Ok(Some(stub.response_expr.clone()));
+                }
+            } else {
+                if stub.patterns.len() > arg_strs.len() {
+                    continue;
+                }
+                for (pat, arg) in stub.patterns.iter().zip(arg_strs.iter()) {
+                    if !arg.contains(pat) {
+                        continue 'stub_loop;
+                    }
+                }
+                return Ok(Some(stub.response_expr.clone()));
+            }
+        }
         Ok(None)
     }
 
@@ -2564,6 +2601,7 @@ mod tests {
             task_registry: Some(registry),
             snapshot_registry: None,
             mocks: Some(vec![]),
+            stubs: None,
         };
 
         let result = unwrap_string(handle.execute_await("query_tasks", &[]).unwrap());

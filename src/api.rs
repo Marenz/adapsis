@@ -3035,6 +3035,24 @@ pub async fn ask_stream(
                                 config_clone.write_back_working_set(&session).await;
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("cleared {count} mocks"), "success": true})).await;
                             }
+                            crate::parser::Operation::Stub { function_name, patterns, response_expr } => {
+                                let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
+                                session.meta.function_stubs.push(crate::session::FunctionStub {
+                                    function_name: function_name.clone(),
+                                    patterns: patterns.clone(),
+                                    response_expr: response_expr.clone(),
+                                });
+                                config_clone.write_back_working_set(&session).await;
+                                op_result.ok_silent(format!("stub: {function_name} {pattern_display} -> {}", response_expr.chars().take(60).collect::<String>()));
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("stub: {function_name} {pattern_display}"), "success": true})).await;
+                            }
+                            crate::parser::Operation::Unstub => {
+                                let count = session.meta.function_stubs.len();
+                                session.meta.function_stubs.clear();
+                                config_clone.write_back_working_set(&session).await;
+                                op_result.ok_silent(format!("cleared {count} stubs"));
+                                let _ = tx.send(serde_json::json!({"type": "result", "message": format!("cleared {count} stubs"), "success": true})).await;
+                            }
                             crate::parser::Operation::Message { to, content } => {
                                 crate::session::send_agent_message(&mut session.meta, "main", to, content);
                                 config_clone.write_back_working_set(&session).await;

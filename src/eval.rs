@@ -1224,10 +1224,14 @@ fn eval_test_case_with_runtime(
     let routes = http_routes.to_vec();
     let forked_runtime = fork_runtime_for_test(&program, http_routes);
     // Create an isolated SessionMeta for test execution.
-    // Pre-populate io_mocks so mock_set/mock_clear builtins work in tests.
+    // Pre-populate io_mocks and function_stubs so they're available during tests.
+    let stubs = get_shared_meta()
+        .and_then(|meta| meta.lock().ok().map(|m| m.function_stubs.clone()))
+        .unwrap_or_default();
     let forked_meta: crate::session::SharedMeta = {
         let mut m = crate::session::SessionMeta::new();
         m.io_mocks = mocks.to_vec();
+        m.function_stubs = stubs.clone();
         std::sync::Arc::new(std::sync::Mutex::new(m))
     };
 
@@ -1289,7 +1293,7 @@ fn eval_test_case_with_runtime(
                 // which would deadlock when the test calls back into the same
                 // server (e.g. http_get to /api/status while the session lock
                 // is held).
-                let handle = crate::coroutine::CoroutineHandle::new_mock(mocks);
+                let handle = crate::coroutine::CoroutineHandle::new_mock_with_stubs(mocks, stubs);
                 env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
                 bind_input_to_params(&program, func, &input, &mut env);
@@ -1390,7 +1394,10 @@ pub async fn eval_test_case_async(
 
         // Tests always use mock-only handles — see comment in
         // eval_test_case_with_runtime for rationale.
-        let handle = crate::coroutine::CoroutineHandle::new_mock(mocks);
+        let stubs = get_shared_meta()
+            .and_then(|meta| meta.lock().ok().map(|m| m.function_stubs.clone()))
+            .unwrap_or_default();
+        let handle = crate::coroutine::CoroutineHandle::new_mock_with_stubs(mocks, stubs);
         env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
         bind_input_to_params(&program, func, &input, &mut env);
@@ -2169,6 +2176,24 @@ pub fn eval_builtin_or_user(
     args: Vec<Value>,
     env: &mut Env,
 ) -> Result<Value> {
+    // Function stubs: intercept user function calls during tests.
+    if program.get_function(callee).is_some() {
+        if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+            let qualified = program.qualify_function_name(callee);
+            let stub_expr = handle.try_stub(&qualified, &args)?
+                .or(if qualified != callee {
+                    handle.try_stub(callee, &args)?
+                } else {
+                    None
+                });
+            if let Some(expr_str) = stub_expr {
+                let parsed_expr = crate::parser::parse_single_expr(&expr_str)
+                    .map_err(|e| anyhow::anyhow!("stub expression parse error: {e}"))?;
+                return eval_parser_expr_with_program(&parsed_expr, program);
+            }
+        }
+    }
+
     // User-defined union variants take priority over builtins
     // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
     if is_union_variant(program, callee) {

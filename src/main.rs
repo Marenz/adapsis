@@ -404,6 +404,7 @@ async fn main() -> Result<()> {
             let mut program = ast::Program::default();
             let mut test_ops = vec![];
             let mut io_mocks: Vec<session::IoMock> = vec![];
+            let mut fn_stubs: Vec<session::FunctionStub> = vec![];
             // Standalone registries for ?tasks / ?inspect queries (empty but real).
             let task_registry: coroutine::TaskRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             let snapshot_registry: coroutine::TaskSnapshotRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -436,6 +437,20 @@ async fn main() -> Result<()> {
                         let count = io_mocks.len();
                         io_mocks.clear();
                         println!("OK: cleared {count} mocks");
+                    }
+                    parser::Operation::Stub { function_name, patterns, response_expr } => {
+                        let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
+                        fn_stubs.push(session::FunctionStub {
+                            function_name: function_name.clone(),
+                            patterns: patterns.clone(),
+                            response_expr: response_expr.clone(),
+                        });
+                        println!("OK: stub {function_name} {pattern_display} -> {response_expr}");
+                    }
+                    parser::Operation::Unstub => {
+                        let count = fn_stubs.len();
+                        fn_stubs.clear();
+                        println!("OK: cleared {count} stubs");
                     }
                     parser::Operation::Trace(trace) => {
                         println!("\n--- Tracing {} ---", trace.function_name);
@@ -485,6 +500,13 @@ async fn main() -> Result<()> {
                         Err(e) => eprintln!("ERROR: {e}"),
                     },
                 }
+            }
+            // Set up shared meta so function stubs are accessible during tests
+            {
+                let mut meta = session::SessionMeta::new();
+                meta.io_mocks = io_mocks.clone();
+                meta.function_stubs = fn_stubs.clone();
+                eval::set_shared_meta(Some(std::sync::Arc::new(std::sync::Mutex::new(meta))));
             }
             for test_op in &test_ops {
                 if let parser::Operation::Test(test) = test_op {
