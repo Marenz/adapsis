@@ -1122,11 +1122,71 @@ async fn main() -> Result<()> {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".to_string());
 
-            // Validate: binary must be inside the git dir for !opencode restart to work
-            let resolved_git_dir = opencode_git_dir.as_deref().unwrap_or(&project_dir);
+            // Resolve opencode git directory:
+            // 1. If explicitly set, validate it's a git repo with Cargo.toml
+            // 2. Otherwise, auto-setup at ~/.local/share/adapsis/repo
+            let resolved_git_dir = if let Some(ref dir) = opencode_git_dir {
+                // Validate the explicit directory
+                let p = std::path::Path::new(dir);
+                if !p.join(".git").exists() {
+                    eprintln!("ERROR: --opencode-git-dir '{}' is not a git repository (no .git directory)", dir);
+                    std::process::exit(1);
+                }
+                if !p.join("Cargo.toml").exists() {
+                    eprintln!("ERROR: --opencode-git-dir '{}' does not look like an adapsis repo (no Cargo.toml)", dir);
+                    std::process::exit(1);
+                }
+                dir.clone()
+            } else {
+                // Auto-setup: use ~/.local/share/adapsis/repo
+                let data_dir = dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from(
+                        format!("{}/.local/share", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+                    ))
+                    .join("adapsis")
+                    .join("repo");
+                let data_dir_str = data_dir.to_string_lossy().to_string();
+
+                if !data_dir.join(".git").exists() {
+                    // Need to clone. Find the git repo containing the current binary.
+                    let exe_path = std::env::current_exe().unwrap_or_default();
+                    let source_repo = exe_path.ancestors()
+                        .find(|p| p.join(".git").exists())
+                        .map(|p| p.to_path_buf());
+
+                    if let Some(ref source) = source_repo {
+                        eprintln!("[opencode] Auto-cloning adapsis repo to {}", data_dir_str);
+                        let source_str = source.to_string_lossy();
+                        let output = std::process::Command::new("git")
+                            .args(["clone", "--shared", &source_str, &data_dir_str])
+                            .output();
+                        match output {
+                            Ok(o) if o.status.success() => {
+                                eprintln!("[opencode] Cloned from {} -> {}", source_str, data_dir_str);
+                            }
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                eprintln!("ERROR: Failed to clone adapsis repo to {}: {}", data_dir_str, stderr);
+                                std::process::exit(1);
+                            }
+                            Err(e) => {
+                                eprintln!("ERROR: Failed to run git clone: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        eprintln!("ERROR: Cannot auto-setup opencode repo: binary is not inside a git repo.");
+                        eprintln!("  Use --opencode-git-dir to specify the adapsis source directory.");
+                        std::process::exit(1);
+                    }
+                }
+                data_dir_str
+            };
+
+            // Validate: binary should be inside the git dir for !opencode restart to work
             let exe_path = std::env::current_exe().unwrap_or_default();
             let exe_str = exe_path.to_string_lossy();
-            if !exe_str.contains(resolved_git_dir) {
+            if !exe_str.contains(&resolved_git_dir) {
                 eprintln!("WARNING: AdapsisOS binary ({}) is not inside the opencode git dir ({}).", exe_str, resolved_git_dir);
                 eprintln!("  !opencode self-restart will not pick up rebuilt binaries.");
                 eprintln!("  Run from: {}/target/release/adapsis", resolved_git_dir);
@@ -1170,7 +1230,7 @@ async fn main() -> Result<()> {
                 max_iterations,
                 opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                opencode_git_dir: opencode_git_dir.unwrap_or_else(|| project_dir.clone()),
+                opencode_git_dir: resolved_git_dir,
                 runtime: shared_runtime.clone(),
                 sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             };
