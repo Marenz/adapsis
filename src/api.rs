@@ -1677,10 +1677,10 @@ pub async fn ask(
         // Build reply from thinking + prose
         let mut clean = output.text.clone();
         while let Some(s) = clean.find("<think>") {
-            if let Some(e) = clean.find("</think>") { clean.replace_range(s..e+8, ""); } else { break; }
+            if let Some(e) = clean[s..].find("</think>") { clean.replace_range(s..s+e+8, ""); } else { break; }
         }
         while let Some(s) = clean.find("<code>") {
-            if let Some(e) = clean.find("</code>") { clean.replace_range(s..e+7, ""); } else { break; }
+            if let Some(e) = clean[s..].find("</code>") { clean.replace_range(s..s+e+7, ""); } else { break; }
         }
         let clean = clean.trim();
         if !clean.is_empty() {
@@ -2666,8 +2666,8 @@ pub async fn ask_stream(
 
             // Extract prose and send as a single text event
             let mut clean = output.text.clone();
-            while let Some(s) = clean.find("<think>") { if let Some(e) = clean.find("</think>") { clean.replace_range(s..e+8, ""); } else { break; } }
-            while let Some(s) = clean.find("<code>") { if let Some(e) = clean.find("</code>") { clean.replace_range(s..e+7, ""); } else { break; } }
+            while let Some(s) = clean.find("<think>") { if let Some(e) = clean[s..].find("</think>") { clean.replace_range(s..s+e+8, ""); } else { break; } }
+            while let Some(s) = clean.find("<code>") { if let Some(e) = clean[s..].find("</code>") { clean.replace_range(s..s+e+7, ""); } else { break; } }
             let clean = clean.trim();
             if !clean.is_empty() {
                 write_log_file(&config_clone.log_file, "ai-text", clean).await;
