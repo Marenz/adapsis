@@ -44,6 +44,7 @@ pub enum WaitReason {
     StdinRead,
     HttpGet(String),
     HttpPost(String),
+    LlmTakeover(String),
     Completed(String),
     Failed(String),
 }
@@ -63,6 +64,7 @@ impl std::fmt::Display for WaitReason {
             WaitReason::Sleep(ms) => write!(f, "sleep({ms}ms)"),
             WaitReason::LlmCall => write!(f, "llm_call"),
             WaitReason::LlmAgent => write!(f, "llm_agent"),
+            WaitReason::LlmTakeover(ctx) => write!(f, "llm_takeover({ctx})"),
             WaitReason::StdinRead => write!(f, "stdin_read"),
             WaitReason::HttpGet(url) => write!(f, "http_get({})", url.chars().take(50).collect::<String>()),
             WaitReason::HttpPost(url) => write!(f, "http_post({})", url.chars().take(50).collect::<String>()),
@@ -141,6 +143,15 @@ pub enum IoRequest {
         interval_ms: Option<u64>,
         alias: String,
         handler: String,  // fully-qualified handler like "MyModule.on_tick"
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// Conversational LLM call with per-context history.
+    /// Returns the text reply immediately; code execution happens in background.
+    LlmTakeover {
+        context: String,
+        message: String,
+        reply_fn: Option<String>,
+        reply_arg: Option<String>,
         reply: oneshot::Sender<Result<String>>,
     },
 }
@@ -424,6 +435,9 @@ impl Runtime {
             }
             IoRequest::SourceAdd { .. } => {
                 // SourceAdd is handled at a higher level (main.rs IO loop)
+            }
+            IoRequest::LlmTakeover { .. } => {
+                // LlmTakeover is handled at a higher level (main.rs IO loop)
             }
             IoRequest::LlmCall { model, system, prompt, reply } => {
                 let url = self.llm_url.clone();
@@ -2031,6 +2045,19 @@ impl CoroutineHandle {
                 let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::LlmAgent, IoRequest::LlmAgent { model, system, task, reply: tx }, rx)?;
+                return Ok(Value::string(result));
+            }
+            "llm_takeover" => {
+                let context = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String])") };
+                let message = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String])") };
+                let reply_fn = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
+                let reply_arg = args.get(3).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::LlmTakeover(context.clone()),
+                    IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, reply: tx },
+                    rx,
+                )?;
                 return Ok(Value::string(result));
             }
             _ => bail!("unknown await operation: {op}"),

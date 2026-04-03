@@ -896,6 +896,9 @@ async fn main() -> Result<()> {
             let shared_runtime_for_spawn = shared_runtime.clone();
             let shared_meta_for_spawn = shared_meta.clone();
             let shared_program_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
+            let llm_url_for_spawn = url.clone();
+            let llm_model_for_spawn = model.clone();
+            let llm_key_for_spawn = api_key.clone();
             // Clone resources for startup execution (before IO loop moves them)
             let io_sender_for_startup = runtime.io_sender();
             let startup_registry = runtime.task_registry.clone();
@@ -1035,6 +1038,27 @@ async fn main() -> Result<()> {
                                 let _ = reply.send(Ok(format!("event source '{}' registered ({})", alias, source_type)));
                                 // Event dispatch will be implemented in a later phase
                             }
+                        }
+                        coroutine::IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, reply } => {
+                            let meta = shared_meta_for_spawn.clone();
+                            let program = shared_program_for_spawn.clone();
+                            let runtime = shared_runtime_for_spawn.clone();
+                            let llm_url = llm_url_for_spawn.clone();
+                            let llm_model = llm_model_for_spawn.clone();
+                            let llm_key = llm_key_for_spawn.clone();
+                            let io_sender = io_sender_for_spawn.clone();
+                            let task_registry = task_registry_for_spawn.clone();
+                            let snap_registry = snap_registry_for_spawn2.clone();
+
+                            tokio::spawn(async move {
+                                let result = crate::api::handle_llm_takeover(
+                                    context, message, reply_fn, reply_arg,
+                                    meta, program, runtime,
+                                    &llm_url, &llm_model, llm_key,
+                                    io_sender, task_registry, snap_registry,
+                                ).await;
+                                let _ = reply.send(result);
+                            });
                         }
                         _ => {
                             let rt = rt.clone();
