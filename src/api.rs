@@ -4018,6 +4018,10 @@ async fn adapsis_route_dispatch(
         let func = program
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
+        // Initialize shared runtime vars so +shared defaults are available
+        if let Some(rt) = crate::eval::get_shared_runtime() {
+            crate::eval::init_missing_shared_runtime_vars(&program, &rt);
+        }
         let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.populate_shared_from_program(&program);
         // Set up coroutine handle so async functions (+await) work in route handlers
