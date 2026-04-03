@@ -15,7 +15,6 @@ mod prompt;
 mod repl;
 mod server;
 mod session;
-mod telegram;
 mod typeck;
 mod validator;
 mod vm;
@@ -230,14 +229,6 @@ enum Command {
         /// Maximum iterations per AI request (default 20)
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
-
-        /// Telegram bot token (enables Telegram bot when set)
-        #[arg(long, env = "TELEGRAM_BOT_TOKEN")]
-        telegram_token: Option<String>,
-
-        /// Telegram admin chat ID (messages from this chat route through /api/ask)
-        #[arg(long, env = "TELEGRAM_ADMIN_CHAT_ID", default_value_t = 1815217)]
-        telegram_admin_chat_id: i64,
     },
 
     /// Send a message to a running AdapsisOS instance
@@ -807,7 +798,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations, telegram_token, telegram_admin_chat_id } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations } => {
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -1615,24 +1606,6 @@ async fn main() -> Result<()> {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 });
-            }
-
-            // Telegram bot (long-polling, runs alongside the HTTP server)
-            if let Some(token) = telegram_token {
-                let bot = telegram::TelegramBot::new(
-                    token,
-                    telegram_admin_chat_id,
-                    port,
-                    url.clone(),
-                    model.clone(),
-                    api_key.clone(),
-                );
-                tokio::spawn(async move {
-                    if let Err(e) = bot.run().await {
-                        eprintln!("[telegram] bot exited with error: {e}");
-                    }
-                });
-                eprintln!("[telegram] bot polling started (admin_chat_id={telegram_admin_chat_id})");
             }
 
             match axum::serve(listener, app).await {
