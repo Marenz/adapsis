@@ -1410,6 +1410,14 @@ impl OperationResult {
         self.feedback.push(entry);
     }
 
+    /// Log to stderr but do NOT include in LLM feedback.
+    /// Use for bookkeeping ops (mock registration, plan progress) where
+    /// the information is already conveyed via plan_summary or is noise.
+    fn ok_silent(&self, msg: impl Into<String>) {
+        let entry = format!("OK: {}", msg.into());
+        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+    }
+
     fn pass(&mut self, msg: impl Into<String>) {
         self.tests_passed += 1;
         let entry = format!("PASS: {}", msg.into());
@@ -1466,7 +1474,7 @@ async fn process_plan(
                 })
                 .collect();
             let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
-            result.ok(format!("Plan: {} steps", steps.len()));
+            result.ok_silent(format!("Plan: {} steps", steps.len()));
             let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Plan: {} steps", steps.len()), "success": true})).await;
         }
         crate::parser::PlanAction::Progress(n) => {
@@ -1483,7 +1491,7 @@ async fn process_plan(
                     })
                     .collect();
                 let _ = tx.send(serde_json::json!({"type": "plan", "plan": plan_json})).await;
-                result.ok(format!("Step {n} done"));
+                result.ok_silent(format!("Step {n} done"));
                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Step {n} done"), "success": true})).await;
             }
         }
@@ -1585,14 +1593,14 @@ fn process_mock(
         patterns: patterns.to_vec(),
         response: response.to_string(),
     });
-    result.ok(format!("mock: {operation} {pattern_display}"));
+    result.ok_silent(format!("mock: {operation} {pattern_display}"));
 }
 
 /// Process `!unmock` — clear all IO mocks.
 fn process_unmock(meta: &mut crate::session::SessionMeta, result: &mut OperationResult) {
     let count = meta.io_mocks.len();
     meta.io_mocks.clear();
-    result.ok(format!("cleared {count} mocks"));
+    result.ok_silent(format!("cleared {count} mocks"));
 }
 
 pub async fn ask(
@@ -3030,7 +3038,7 @@ pub async fn ask_stream(
                             crate::parser::Operation::Message { to, content } => {
                                 crate::session::send_agent_message(&mut session.meta, "main", to, content);
                                 config_clone.write_back_working_set(&session).await;
-                                op_result.ok(format!("Message sent to '{to}'"));
+                                op_result.ok_silent(format!("Message sent to '{to}'"));
                                 let _ = tx.send(serde_json::json!({"type": "result", "message": format!("Message sent to '{to}'"), "success": true})).await;
                             }
                             crate::parser::Operation::OpenCode(task) => {
@@ -3976,6 +3984,7 @@ async fn adapsis_route_dispatch(
     let runtime_for_blocking = config.runtime.clone();
     let meta_for_blocking = config.meta.clone();
     let event_broadcast = config.event_broadcast.clone();
+    let io_sender_for_blocking = config.io_sender.clone();
     let program_mut = crate::eval::make_shared_program_mut(&program);
     let program_mut_clone = program_mut.clone();
 
@@ -3993,6 +4002,11 @@ async fn adapsis_route_dispatch(
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
         let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.populate_shared_from_program(&program);
+        // Set up coroutine handle so async functions (+await) work in route handlers
+        if let Some(sender) = io_sender_for_blocking {
+            let handle = crate::coroutine::CoroutineHandle::new(sender);
+            env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
+        }
         let input = eval::Value::string(body_str);
         eval::bind_input_to_params(&program, func, &input, &mut env);
         eval::eval_function_body_pub(&program, &func.body, &mut env)

@@ -521,6 +521,21 @@ impl Session {
         }
     }
 
+    /// Auto-scope a route handler function name: if it has no module prefix (no `.`),
+    /// search program modules for a function with that name and qualify it.
+    fn qualify_route_handler(&self, handler_fn: &str) -> String {
+        if handler_fn.contains('.') {
+            return handler_fn.to_string();
+        }
+        for m in &self.program.modules {
+            let qualified = format!("{}.{}", m.name, handler_fn);
+            if m.functions.iter().any(|f| f.name == qualified) {
+                return qualified;
+            }
+        }
+        handler_fn.to_string()
+    }
+
     /// Remove an HTTP route by method and path.
     pub fn remove_route(&mut self, method: &str, path: &str) -> Result<String> {
         let before = self.runtime.http_routes.len();
@@ -987,10 +1002,11 @@ impl Session {
                     results.push((format!("cleared {count} mocks"), true));
                 }
                 parser::Operation::Route { method, path, handler_fn } => {
+                    let qualified = self.qualify_route_handler(handler_fn);
                     let route = ast::HttpRoute {
                         method: method.clone(),
                         path: path.clone(),
-                        handler_fn: handler_fn.clone(),
+                        handler_fn: qualified,
                     };
                     let msg = self.add_route(route);
                     results.push((msg, true));
@@ -1175,10 +1191,11 @@ impl Session {
                     results.push((format!("cleared {count} mocks"), true));
                 }
                 parser::Operation::Route { method, path, handler_fn } => {
+                    let qualified = self.qualify_route_handler(handler_fn);
                     let route = ast::HttpRoute {
                         method: method.clone(),
                         path: path.clone(),
-                        handler_fn: handler_fn.clone(),
+                        handler_fn: qualified,
                     };
                     let msg = self.add_route(route);
                     results.push((msg, true));
