@@ -1124,7 +1124,9 @@ async fn main() -> Result<()> {
 
             // Resolve opencode git directory:
             // 1. If explicitly set, validate it's a git repo with Cargo.toml
-            // 2. Otherwise, auto-setup at ~/.local/share/adapsis/repo
+            // 2. Otherwise, auto-setup a bare repo + per-session worktree
+            //    Each session gets its own isolated worktree so multiple
+            //    sessions don't interfere with each other.
             let resolved_git_dir = if let Some(ref dir) = opencode_git_dir {
                 // Validate the explicit directory
                 let p = std::path::Path::new(dir);
@@ -1138,35 +1140,46 @@ async fn main() -> Result<()> {
                 }
                 dir.clone()
             } else {
-                // Auto-setup: use ~/.local/share/adapsis/repo
-                let data_dir = dirs::data_dir()
+                // Derive session name for the worktree
+                let session_stem = std::path::Path::new(&session)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| session.clone());
+
+                // Auto-setup: bare repo at ~/.local/share/adapsis/repo.git
+                // Worktrees at ~/.local/share/adapsis/worktrees/<session>/
+                let data_base = dirs::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from(
                         format!("{}/.local/share", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
                     ))
-                    .join("adapsis")
-                    .join("repo");
-                let data_dir_str = data_dir.to_string_lossy().to_string();
+                    .join("adapsis");
+                let bare_repo = data_base.join("repo.git");
+                let worktrees_dir = data_base.join("worktrees");
+                let worktree_dir = worktrees_dir.join(&session_stem);
+                let worktree_dir_str = worktree_dir.to_string_lossy().to_string();
 
-                if !data_dir.join(".git").exists() {
-                    // Need to clone. Find the git repo containing the current binary.
+                // Step 1: Ensure bare repo exists
+                if !bare_repo.exists() {
+                    // Find the git repo containing the current binary
                     let exe_path = std::env::current_exe().unwrap_or_default();
                     let source_repo = exe_path.ancestors()
                         .find(|p| p.join(".git").exists())
                         .map(|p| p.to_path_buf());
 
                     if let Some(ref source) = source_repo {
-                        eprintln!("[opencode] Auto-cloning adapsis repo to {}", data_dir_str);
+                        eprintln!("[opencode] Creating bare repo from {}", source.to_string_lossy());
                         let source_str = source.to_string_lossy();
+                        let bare_str = bare_repo.to_string_lossy();
                         let output = std::process::Command::new("git")
-                            .args(["clone", "--shared", &source_str, &data_dir_str])
+                            .args(["clone", "--bare", "--shared", &source_str, &bare_str])
                             .output();
                         match output {
                             Ok(o) if o.status.success() => {
-                                eprintln!("[opencode] Cloned from {} -> {}", source_str, data_dir_str);
+                                eprintln!("[opencode] Bare repo at {}", bare_str);
                             }
                             Ok(o) => {
                                 let stderr = String::from_utf8_lossy(&o.stderr);
-                                eprintln!("ERROR: Failed to clone adapsis repo to {}: {}", data_dir_str, stderr);
+                                eprintln!("ERROR: Failed to create bare repo at {}: {}", bare_str, stderr);
                                 std::process::exit(1);
                             }
                             Err(e) => {
@@ -1180,7 +1193,39 @@ async fn main() -> Result<()> {
                         std::process::exit(1);
                     }
                 }
-                data_dir_str
+
+                // Step 2: Ensure worktree exists for this session
+                std::fs::create_dir_all(&worktrees_dir).unwrap_or_else(|e| {
+                    eprintln!("ERROR: Failed to create worktrees dir: {}", e);
+                    std::process::exit(1);
+                });
+
+                if !worktree_dir.exists() {
+                    eprintln!("[opencode] Creating worktree for session '{}': {}", session_stem, worktree_dir_str);
+                    let bare_str = bare_repo.to_string_lossy();
+                    let output = std::process::Command::new("git")
+                        .args(["-C", &bare_str, "worktree", "add", &worktree_dir_str, "master"])
+                        .output();
+                    match output {
+                        Ok(o) if o.status.success() => {
+                            eprintln!("[opencode] Worktree ready at {}", worktree_dir_str);
+                        }
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            // If worktree already exists from a previous run, that's fine
+                            if !stderr.contains("already a") && !stderr.contains("already exists") {
+                                eprintln!("ERROR: Failed to create worktree: {}", stderr);
+                                std::process::exit(1);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("ERROR: Failed to run git worktree add: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+
+                worktree_dir_str
             };
 
             // Validate: binary should be inside the git dir for !opencode restart to work
