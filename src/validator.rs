@@ -234,6 +234,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             shutdown: None,
             sources: vec![],
             event_decls: vec![],
+            routes: vec![],
             fn_index: HashMap::new(),
         });
     }
@@ -361,12 +362,21 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 });
             }
             parser::Operation::Route { method, path, handler_fn } => {
-                // Routes inside a module are collected and registered by the session layer.
-                program.pending_routes.push(ast::HttpRoute {
+                // Store in module AST for reconstruction/persistence
+                let route = ast::HttpRoute {
                     method: method.clone(),
                     path: path.clone(),
                     handler_fn: format!("{}.{}", decl.name, handler_fn),
-                });
+                };
+                let m = &mut program.modules[mod_idx];
+                // Replace existing route with same method+path, or add new
+                if let Some(pos) = m.routes.iter().position(|r| r.method == route.method && r.path == route.path) {
+                    m.routes[pos] = route.clone();
+                } else {
+                    m.routes.push(route.clone());
+                }
+                // Also push to pending_routes for runtime registration
+                program.pending_routes.push(route);
             }
             other => bail!(
                 "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, +source, and !test are allowed",
@@ -1491,6 +1501,7 @@ pub fn apply_move(
             shutdown: None,
             sources: vec![],
             event_decls: vec![],
+            routes: vec![],
             fn_index: HashMap::new(),
         });
     }
