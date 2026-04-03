@@ -469,11 +469,16 @@ fn restore_tests_from_operations(
     for op in operations {
         match op {
             parser::Operation::Test(t) => {
+                eprintln!("[library] found top-level !test for `{}`", t.function_name);
                 tests_to_restore.push((&t.function_name, &t.cases));
             }
             parser::Operation::Module(m) => {
                 for body_op in &m.body {
                     if let parser::Operation::Test(t) = body_op {
+                        eprintln!(
+                            "[library] found module-body !test for `{}`",
+                            t.function_name
+                        );
                         tests_to_restore.push((&t.function_name, &t.cases));
                     }
                 }
@@ -482,9 +487,23 @@ fn restore_tests_from_operations(
         }
     }
 
-    for (fn_name, cases) in tests_to_restore {
+    for (fn_name, cases) in &tests_to_restore {
         let qualified = format!("{module_name}.{fn_name}");
         crate::session::store_test(program, &qualified, cases);
+    }
+    if !tests_to_restore.is_empty() {
+        eprintln!(
+            "[library] restored {} test block(s) for module `{module_name}`",
+            tests_to_restore.len()
+        );
+        // Verify tests are actually on the functions
+        for (fn_name, _) in &tests_to_restore {
+            let qualified = format!("{module_name}.{fn_name}");
+            let tested = crate::session::is_function_tested(program, &qualified);
+            if !tested {
+                eprintln!("[library] WARNING: test restore failed for `{qualified}` — function not found or tests empty");
+            }
+        }
     }
 }
 
