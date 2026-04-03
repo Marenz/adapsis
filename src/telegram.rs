@@ -270,15 +270,15 @@ impl TelegramBot {
         // Strip thinking tags and code blocks — just return the prose
         let mut clean = output.text.clone();
         while let Some(s) = clean.find("<think>") {
-            if let Some(e) = clean.find("</think>") {
-                clean.replace_range(s..e + 8, "");
+            if let Some(e) = clean[s..].find("</think>") {
+                clean.replace_range(s..s + e + 8, "");
             } else {
                 break;
             }
         }
         while let Some(s) = clean.find("<code>") {
-            if let Some(e) = clean.find("</code>") {
-                clean.replace_range(s..e + 7, "");
+            if let Some(e) = clean[s..].find("</code>") {
+                clean.replace_range(s..s + e + 7, "");
             } else {
                 break;
             }
