@@ -4016,6 +4016,7 @@ async fn adapsis_route_dispatch(
 
     eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
 
+    let handler_fn_for_log = handler_fn.clone();
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
         crate::eval::set_shared_runtime(Some(runtime_for_blocking));
@@ -4075,16 +4076,22 @@ async fn adapsis_route_dispatch(
             )
                 .into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("handler error: {e}"),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-            .into_response(),
+        Ok(Err(e)) => {
+            eprintln!("[webhook] handler error in {handler_fn_for_log}: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("handler error: {e:#}"),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            eprintln!("[webhook] task panic in {handler_fn_for_log}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+                .into_response()
+        }
     }
 }
 
