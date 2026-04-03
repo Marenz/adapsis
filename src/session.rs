@@ -147,8 +147,12 @@ pub struct SessionMeta {
     /// All raw mutation sources (for replay)
     pub sources: Vec<String>,
     /// Conversation history for the LLM (persists across /api/ask calls)
+    /// DEPRECATED: use conversations manager instead. Kept for backward compat with existing sessions.
     #[serde(default)]
     pub chat_messages: Vec<ChatMessage>,
+    /// Per-context conversation manager (Telegram users, agents, etc.)
+    #[serde(default)]
+    pub conversations: ConversationManager,
     /// Active/completed agent statuses
     #[serde(default)]
     pub agent_log: Vec<AgentStatus>,
@@ -186,6 +190,7 @@ impl SessionMeta {
             revision: 0,
             sources: Vec::new(),
             chat_messages: Vec::new(),
+            conversations: ConversationManager::new(),
             agent_log: Vec::new(),
             roadmap: Vec::new(),
             plan: Vec::new(),
@@ -492,6 +497,104 @@ impl AgentBranch {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+/// A conversation context with its own message history and callback info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    /// Message history for this conversation
+    pub messages: Vec<ChatMessage>,
+    /// If true, drop this conversation when it completes (agent tasks, one-off queries)
+    #[serde(default)]
+    pub temporary: bool,
+    /// Function to call when delivering replies (e.g. "TelegramBot.send_reply")
+    #[serde(default)]
+    pub reply_fn: Option<String>,
+    /// Argument to pass to reply_fn (e.g. chat_id as string)
+    #[serde(default)]
+    pub reply_arg: Option<String>,
+    /// System prompt override for this conversation (if None, uses default)
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+impl Conversation {
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            temporary: false,
+            reply_fn: None,
+            reply_arg: None,
+            system_prompt: None,
+        }
+    }
+
+    pub fn new_temporary() -> Self {
+        Self {
+            temporary: true,
+            ..Self::new()
+        }
+    }
+
+    pub fn with_callback(mut self, reply_fn: String, reply_arg: String) -> Self {
+        self.reply_fn = Some(reply_fn);
+        self.reply_arg = Some(reply_arg);
+        self
+    }
+
+    pub fn push_user(&mut self, content: impl Into<String>) {
+        self.messages.push(ChatMessage { role: "user".to_string(), content: content.into() });
+    }
+
+    pub fn push_assistant(&mut self, content: impl Into<String>) {
+        self.messages.push(ChatMessage { role: "assistant".to_string(), content: content.into() });
+    }
+
+    pub fn push_system(&mut self, content: impl Into<String>) {
+        self.messages.push(ChatMessage { role: "system".to_string(), content: content.into() });
+    }
+}
+
+/// Manages multiple independent conversation contexts.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConversationManager {
+    pub contexts: HashMap<String, Conversation>,
+}
+
+impl ConversationManager {
+    pub fn new() -> Self {
+        Self { contexts: HashMap::new() }
+    }
+
+    /// Get or create a conversation context.
+    pub fn get_or_create(&mut self, context: &str) -> &mut Conversation {
+        self.contexts.entry(context.to_string()).or_insert_with(Conversation::new)
+    }
+
+    /// Get an existing conversation context.
+    pub fn get(&self, context: &str) -> Option<&Conversation> {
+        self.contexts.get(context)
+    }
+
+    /// Get a mutable reference to an existing conversation context.
+    pub fn get_mut(&mut self, context: &str) -> Option<&mut Conversation> {
+        self.contexts.get_mut(context)
+    }
+
+    /// Remove a conversation context (e.g. when a temporary task completes).
+    pub fn remove(&mut self, context: &str) -> Option<Conversation> {
+        self.contexts.remove(context)
+    }
+
+    /// Remove all temporary conversations that are done.
+    pub fn prune_temporary(&mut self) {
+        self.contexts.retain(|_, conv| !conv.temporary);
+    }
+
+    /// List all active context names.
+    pub fn list_contexts(&self) -> Vec<&str> {
+        self.contexts.keys().map(|s| s.as_str()).collect()
+    }
 }
 
 impl Session {
@@ -2473,5 +2576,84 @@ mod tests {
         let _state = RuntimeState::default();
         // These fields have been removed from RuntimeState.
         // Plan and roadmap are now in SessionMeta only.
+    }
+
+    #[test]
+    fn conversation_manager_get_or_create() {
+        let mut mgr = ConversationManager::new();
+        assert!(mgr.contexts.is_empty());
+
+        let conv = mgr.get_or_create("telegram:123");
+        conv.push_user("hello");
+        assert_eq!(mgr.contexts.len(), 1);
+
+        // Second call returns same context
+        let conv = mgr.get_or_create("telegram:123");
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn conversation_manager_separate_contexts() {
+        let mut mgr = ConversationManager::new();
+        mgr.get_or_create("user:alice").push_user("hi from alice");
+        mgr.get_or_create("user:bob").push_user("hi from bob");
+
+        assert_eq!(mgr.contexts.len(), 2);
+        assert_eq!(mgr.get("user:alice").unwrap().messages[0].content, "hi from alice");
+        assert_eq!(mgr.get("user:bob").unwrap().messages[0].content, "hi from bob");
+    }
+
+    #[test]
+    fn conversation_manager_temporary_pruning() {
+        let mut mgr = ConversationManager::new();
+        mgr.get_or_create("permanent");
+        {
+            let temp = mgr.get_or_create("temp-task");
+            temp.temporary = true;
+        }
+        assert_eq!(mgr.contexts.len(), 2);
+
+        mgr.prune_temporary();
+        assert_eq!(mgr.contexts.len(), 1);
+        assert!(mgr.get("permanent").is_some());
+        assert!(mgr.get("temp-task").is_none());
+    }
+
+    #[test]
+    fn conversation_with_callback() {
+        let conv = Conversation::new()
+            .with_callback("TelegramBot.send_reply".to_string(), "1815217".to_string());
+        assert_eq!(conv.reply_fn.as_deref(), Some("TelegramBot.send_reply"));
+        assert_eq!(conv.reply_arg.as_deref(), Some("1815217"));
+        assert!(!conv.temporary);
+    }
+
+    #[test]
+    fn conversation_message_roles() {
+        let mut conv = Conversation::new();
+        conv.push_system("you are helpful");
+        conv.push_user("hello");
+        conv.push_assistant("hi there");
+
+        assert_eq!(conv.messages.len(), 3);
+        assert_eq!(conv.messages[0].role, "system");
+        assert_eq!(conv.messages[1].role, "user");
+        assert_eq!(conv.messages[2].role, "assistant");
+    }
+
+    #[test]
+    fn conversation_manager_serializes() {
+        let mut mgr = ConversationManager::new();
+        let conv = mgr.get_or_create("test-ctx");
+        conv.push_user("hello");
+        conv.reply_fn = Some("MyModule.reply".to_string());
+
+        let json = serde_json::to_string(&mgr).unwrap();
+        let restored: ConversationManager = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.contexts.len(), 1);
+        let conv = restored.get("test-ctx").unwrap();
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.reply_fn.as_deref(), Some("MyModule.reply"));
     }
 }
