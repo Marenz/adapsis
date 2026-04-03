@@ -1160,37 +1160,30 @@ async fn main() -> Result<()> {
 
                 // Step 1: Ensure bare repo exists
                 if !bare_repo.exists() {
-                    // Find the git repo containing the current binary
-                    let exe_path = std::env::current_exe().unwrap_or_default();
-                    let source_repo = exe_path.ancestors()
-                        .find(|p| p.join(".git").exists())
-                        .map(|p| p.to_path_buf());
+                    // Default source: the public GitHub repo.
+                    // Can be overridden via ADAPSIS_OPENCODE_SOURCE env var
+                    // (useful for forks or offline setups).
+                    let source_url = std::env::var("ADAPSIS_OPENCODE_SOURCE")
+                        .unwrap_or_else(|_| "https://github.com/Marenz/adapsis.git".to_string());
 
-                    if let Some(ref source) = source_repo {
-                        eprintln!("[opencode] Creating bare repo from {}", source.to_string_lossy());
-                        let source_str = source.to_string_lossy();
-                        let bare_str = bare_repo.to_string_lossy();
-                        let output = std::process::Command::new("git")
-                            .args(["clone", "--bare", "--shared", &source_str, &bare_str])
-                            .output();
-                        match output {
-                            Ok(o) if o.status.success() => {
-                                eprintln!("[opencode] Bare repo at {}", bare_str);
-                            }
-                            Ok(o) => {
-                                let stderr = String::from_utf8_lossy(&o.stderr);
-                                eprintln!("ERROR: Failed to create bare repo at {}: {}", bare_str, stderr);
-                                std::process::exit(1);
-                            }
-                            Err(e) => {
-                                eprintln!("ERROR: Failed to run git clone: {}", e);
-                                std::process::exit(1);
-                            }
+                    eprintln!("[opencode] Creating bare repo from {}", source_url);
+                    let bare_str = bare_repo.to_string_lossy();
+                    let output = std::process::Command::new("git")
+                        .args(["clone", "--bare", &source_url, &bare_str])
+                        .output();
+                    match output {
+                        Ok(o) if o.status.success() => {
+                            eprintln!("[opencode] Bare repo at {}", bare_str);
                         }
-                    } else {
-                        eprintln!("ERROR: Cannot auto-setup opencode repo: binary is not inside a git repo.");
-                        eprintln!("  Use --opencode-git-dir to specify the adapsis source directory.");
-                        std::process::exit(1);
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            eprintln!("ERROR: Failed to create bare repo at {}: {}", bare_str, stderr);
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("ERROR: Failed to run git clone: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                 }
 
