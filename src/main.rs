@@ -1023,7 +1023,7 @@ async fn main() -> Result<()> {
             // Execute module startup blocks and auto-register module-level sources
             {
                 let modules_with_startup: Vec<(String, ast::LifecycleBlock)> = {
-                    let prog = startup_program.blocking_read();
+                    let prog = startup_program.read().await;
                     prog.modules.iter()
                         .filter_map(|m| m.startup.as_ref().map(|s| (m.name.clone(), s.clone())))
                         .collect()
@@ -1057,7 +1057,7 @@ async fn main() -> Result<()> {
 
                 // Auto-register module-level source declarations
                 let module_sources: Vec<(String, Vec<ast::SourceDecl>)> = {
-                    let prog = startup_program.blocking_read();
+                    let prog = startup_program.read().await;
                     prog.modules.iter()
                         .filter(|m| !m.sources.is_empty())
                         .map(|m| (m.name.clone(), m.sources.clone()))
@@ -1077,7 +1077,7 @@ async fn main() -> Result<()> {
                             module_name, src.name, src.source_type,
                             src.config.iter().map(|(k,v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" "));
                         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                        let _ = io_sender_for_startup.blocking_send(
+                        let _ = io_sender_for_startup.send(
                             coroutine::IoRequest::SourceAdd {
                                 module_name: module_name.clone(),
                                 source_type: src.source_type.clone(),
@@ -1086,8 +1086,8 @@ async fn main() -> Result<()> {
                                 handler,
                                 reply: reply_tx,
                             }
-                        );
-                        match reply_rx.blocking_recv() {
+                        ).await;
+                        match reply_rx.await {
                             Ok(Ok(msg)) => eprintln!("[startup] source {}.{}: {}", module_name, src.name, msg),
                             Ok(Err(e)) => eprintln!("[startup] source {}.{} error: {}", module_name, src.name, e),
                             Err(_) => eprintln!("[startup] source {}.{}: reply channel closed", module_name, src.name),
