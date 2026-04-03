@@ -615,6 +615,24 @@ pattern, the mock value is returned without real IO. This includes command/query
 such as `inbox_read()`, not just network or file operations. Use !unmock to clear all mocks.
 Tests with mocks run async functions through the coroutine executor automatically.
 
+### Stubbing user-defined functions
+
+Use `!stub` to intercept calls to user-defined functions during tests. Unlike `!mock` (which
+intercepts IO builtins and returns raw strings), `!stub` intercepts function calls and returns
+typed values — Ok(), Err(), structs, ints, etc. The expression after `->` is raw Adapsis code:
+
+!stub MusicGen.generate_music "jazz" -> Ok("{\"status\":\"success\"}")
+!test MusicGen.handle_generate
+  +with body="{\"caption\":\"jazz\"}" -> expect contains("success")
+!unstub
+
+More examples:
+  !stub MyModule.get_user "alice" -> Ok({name: "alice", age: 30})
+  !stub MyModule.risky_op "bad" -> Err("connection failed")
+  !stub MyModule.get_count "" -> 42
+
+Use `!mock` for IO builtins, `!stub` for user functions. `!unstub` clears all stubs.
+
 ### Sandbox Mode
 Use `!sandbox` to experiment safely without affecting the main program:
 ```

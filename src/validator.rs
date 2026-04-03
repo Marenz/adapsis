@@ -174,6 +174,8 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         }
         parser::Operation::Mock { .. } => Ok("mock (handled by session)".to_string()),
         parser::Operation::Unmock => Ok("unmock (handled by session)".to_string()),
+        parser::Operation::Stub { .. } => Ok("stub (handled by session)".to_string()),
+        parser::Operation::Unstub => Ok("unstub (handled by session)".to_string()),
         parser::Operation::Route { .. } => Ok("route (handled by session)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements at top level — execute immediately (not stored in AST)

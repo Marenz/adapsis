@@ -1132,6 +1132,18 @@ Side-effect assertions with +after (checked after the function runs, state resto
         long: "Clears all registered IO mocks. Use it when test doubles are no longer needed or are affecting later tests.",
     },
     ActionCommand {
+        name: "!stub",
+        args: "<function> \"<pattern>\" -> <expression>",
+        short: "stub a user function — intercept calls and return a typed expression",
+        long: "Registers a function stub for testing. During `!test`, if a call to the named function matches the pattern, the expression is evaluated and returned instead of the function body. The expression is raw Adapsis code: Ok(\"done\"), Err(\"fail\"), \"text\", 42, etc. Use `!unstub` to clear.",
+    },
+    ActionCommand {
+        name: "!unstub",
+        args: "",
+        short: "clear all function stubs",
+        long: "Clears all registered function stubs.",
+    },
+    ActionCommand {
         name: "!msg",
         args: "<agent> <message>",
         short: "send a message to an agent (or 'main' for the main session). Agents see messages in their feedback.",

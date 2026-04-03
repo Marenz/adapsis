@@ -82,6 +82,14 @@ pub enum Operation {
     },
     /// Clear all mocks: !unmock
     Unmock,
+    /// Stub a user function: !stub <function> "<pattern>" ... -> <expression>
+    Stub {
+        function_name: String,
+        patterns: Vec<String>,
+        response_expr: String,
+    },
+    /// Clear all stubs: !unstub
+    Unstub,
     /// Signal task completion
     Done,
     /// Check inbox: ?inbox [agent_name]
@@ -1543,6 +1551,65 @@ impl<'a> Parser<'a> {
                 operation: operation.to_string(),
                 patterns,
                 response: response_part,
+            });
+        }
+
+        if text.trim() == "!unstub" {
+            self.index += 1;
+            return Ok(Operation::Unstub);
+        }
+
+        if let Some(rest) = text.strip_prefix("!stub") {
+            let rest = rest.trim();
+            let (function_name, rest) = rest.split_once(' ').ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected !stub <function> \"<pattern>\" -> <expression>",
+                    line.number
+                )
+            })?;
+            let mut rest = rest.trim();
+            let mut patterns = Vec::new();
+            loop {
+                let trimmed = rest.trim();
+                if trimmed.starts_with("->") {
+                    rest = trimmed;
+                    break;
+                }
+                if !trimmed.starts_with('"') {
+                    bail!(
+                        "line {}: expected quoted string or '->' in !stub, got `{}`",
+                        line.number,
+                        &trimmed[..trimmed.len().min(20)]
+                    );
+                }
+                let (pat, remaining) = parse_mock_string(line.number, trimmed)?;
+                patterns.push(pat);
+                rest = remaining;
+            }
+            if patterns.is_empty() {
+                bail!(
+                    "line {}: expected at least one pattern string in !stub",
+                    line.number
+                );
+            }
+            let rest = rest.strip_prefix("->").ok_or_else(|| {
+                anyhow!(
+                    "line {}: expected '->' between pattern and expression in !stub",
+                    line.number
+                )
+            })?;
+            let response_expr = rest.trim().to_string();
+            if response_expr.is_empty() {
+                bail!(
+                    "line {}: expected expression after '->' in !stub",
+                    line.number
+                );
+            }
+            self.index += 1;
+            return Ok(Operation::Stub {
+                function_name: function_name.to_string(),
+                patterns,
+                response_expr,
             });
         }
 

@@ -167,6 +167,8 @@ pub struct SessionMeta {
     /// IO mock table: (operation, url_pattern) -> response. Used during !test.
     #[serde(default)]
     pub io_mocks: Vec<IoMock>,
+    #[serde(default)]
+    pub function_stubs: Vec<FunctionStub>,
     /// Output from the last `!opencode` run, persisted so the AI has context
     /// after a restart triggered by `!opencode` → rebuild → execvp.
     #[serde(default)]
@@ -190,6 +192,7 @@ impl SessionMeta {
             agent_mailbox: HashMap::new(),
             opencode_session_id: None,
             io_mocks: Vec::new(),
+            function_stubs: Vec::new(),
             last_opencode_output: None,
             library_state: None,
         }
@@ -235,6 +238,15 @@ pub struct IoMock {
     pub operation: String,      // e.g. "http_get", "http_post", "llm_call"
     pub patterns: Vec<String>,  // One pattern per argument position to match (contains check)
     pub response: String,       // value to return
+}
+
+/// A function stub — intercepts user-defined function calls during tests.
+/// The response is an Adapsis expression evaluated at test time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionStub {
+    pub function_name: String,
+    pub patterns: Vec<String>,
+    pub response_expr: String,
 }
 
 /// A message sent between agents (or between main session and agents).
@@ -1001,6 +1013,20 @@ impl Session {
                     self.meta.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
                 }
+                parser::Operation::Stub { function_name, patterns, response_expr } => {
+                    let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
+                    self.meta.function_stubs.push(FunctionStub {
+                        function_name: function_name.clone(),
+                        patterns: patterns.clone(),
+                        response_expr: response_expr.clone(),
+                    });
+                    results.push((format!("stub: {function_name} {pattern_display} -> {}", response_expr.chars().take(60).collect::<String>()), true));
+                }
+                parser::Operation::Unstub => {
+                    let count = self.meta.function_stubs.len();
+                    self.meta.function_stubs.clear();
+                    results.push((format!("cleared {count} stubs"), true));
+                }
                 parser::Operation::Route { method, path, handler_fn } => {
                     let qualified = self.qualify_route_handler(handler_fn);
                     let route = ast::HttpRoute {
@@ -1189,6 +1215,20 @@ impl Session {
                     let count = self.meta.io_mocks.len();
                     self.meta.io_mocks.clear();
                     results.push((format!("cleared {count} mocks"), true));
+                }
+                parser::Operation::Stub { function_name, patterns, response_expr } => {
+                    let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
+                    self.meta.function_stubs.push(FunctionStub {
+                        function_name: function_name.clone(),
+                        patterns: patterns.clone(),
+                        response_expr: response_expr.clone(),
+                    });
+                    results.push((format!("stub: {function_name} {pattern_display} -> {}", response_expr.chars().take(60).collect::<String>()), true));
+                }
+                parser::Operation::Unstub => {
+                    let count = self.meta.function_stubs.len();
+                    self.meta.function_stubs.clear();
+                    results.push((format!("cleared {count} stubs"), true));
                 }
                 parser::Operation::Route { method, path, handler_fn } => {
                     let qualified = self.qualify_route_handler(handler_fn);
