@@ -425,7 +425,14 @@ impl AgentBranch {
                 | crate::parser::Operation::Query(_)
                 | crate::parser::Operation::Message { .. } => {}
                 _ => match crate::validator::apply_and_validate(&mut self.program, op) {
-                    Ok(msg) => results.push((msg, true)),
+                    Ok(msg) => {
+                        // Drain any routes declared inside modules via +route
+                        let pending: Vec<_> = self.program.pending_routes.drain(..).collect();
+                        for route in pending {
+                            self.runtime_state.http_routes.push(route);
+                        }
+                        results.push((msg, true))
+                    },
                     Err(e) => results.push((format!("{e}"), false)),
                 },
             }
@@ -1052,6 +1059,12 @@ impl Session {
                     let pre_backups = self.backup_affected_bodies(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => {
+                            // Drain any routes declared inside modules via +route
+                            let pending: Vec<_> = self.program.pending_routes.drain(..).collect();
+                            for route in pending {
+                                let route_msg = self.add_route(route);
+                                results.push((route_msg, true));
+                            }
                             results.push((msg, true));
                             for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
                                 results.push((detail, passed));
@@ -1255,6 +1268,12 @@ impl Session {
                     let pre_backups = self.backup_affected_bodies(op);
                     match validator::apply_and_validate(&mut self.program, op) {
                         Ok(msg) => {
+                            // Drain any routes declared inside modules via +route
+                            let pending: Vec<_> = self.program.pending_routes.drain(..).collect();
+                            for route in pending {
+                                let route_msg = self.add_route(route);
+                                results.push((route_msg, true));
+                            }
                             results.push((msg, true));
                             for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
                                 results.push((detail, passed));
