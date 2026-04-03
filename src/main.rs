@@ -281,6 +281,12 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Ensure panics in any thread are logged to stderr
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("[PANIC] {info}");
+        let bt = std::backtrace::Backtrace::force_capture();
+        eprintln!("{bt}");
+    }));
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -1614,13 +1620,16 @@ async fn main() -> Result<()> {
                         // Brief pause between autonomous rounds
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
+                    eprintln!("[autonomous] UNEXPECTED: loop exited");
                 });
             }
 
+            eprintln!("[adapsis] starting HTTP server on port {port}");
             match axum::serve(listener, app).await {
-                Ok(()) => eprintln!("[adapsis] server exited cleanly"),
+                Ok(()) => eprintln!("[adapsis] server exited cleanly — THIS SHOULD NOT HAPPEN"),
                 Err(e) => eprintln!("[adapsis] server error: {e}"),
             }
+            eprintln!("[adapsis] process exiting");
         }
         Command::Ask { message, api } => {
             let msg = message.join(" ");
