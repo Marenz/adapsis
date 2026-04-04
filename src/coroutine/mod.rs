@@ -771,15 +771,28 @@ impl CoroutineHandle {
             }
         }
 
-        // ── Roadmap and plan operations — handled locally via SHARED_META ──
-        // These access SessionMeta directly (the single source of truth).
-        // No IO channel needed; no more syncing between runtime and meta.
+        // Try in-process operations (shared state, queries, mutations, misc)
+        if let Some(result) = self.execute_local_op(op, args)? {
+            return Ok(result);
+        }
+
+        if let Some(result) = self.try_mock_io(op, args, true)? {
+            return Ok(result);
+        }
+
+        self.execute_transport_op(op, args)
+    }
+
+    /// In-process operations handled via thread-local shared state.
+    /// Covers roadmap/plan/inbox/mock ops, queries, AST mutations, and misc commands.
+    /// Returns `Ok(Some(val))` if handled, `Ok(None)` to fall through to transport ops.
+    fn execute_local_op(&self, op: &str, args: &[Value]) -> Result<Option<Value>> {
         match op {
             "roadmap_list" => {
                 let result = crate::shared_state::get_shared_meta()
                     .and_then(|meta| meta.lock().ok().map(|m| crate::session::roadmap_list(&m.roadmap)))
                     .unwrap_or_else(|| "Roadmap is empty.".to_string());
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "roadmap_add" => {
                 let desc = match args.first() {
@@ -800,7 +813,7 @@ impl CoroutineHandle {
                                 desc.clone()
                             })
                     })?;
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "roadmap_done" => {
                 let n = match args.first() {
@@ -822,7 +835,7 @@ impl CoroutineHandle {
                                 Ok(msg)
                             })
                     })?;
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
 
             // ── Plan operations — via SHARED_META ──
@@ -830,7 +843,7 @@ impl CoroutineHandle {
                 let result = crate::shared_state::get_shared_meta()
                     .and_then(|meta| meta.lock().ok().map(|m| crate::session::plan_show(&m.plan)))
                     .unwrap_or_else(|| "No plan set.".to_string());
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "plan_set" => {
                 let steps_str = match args.first() {
@@ -853,7 +866,7 @@ impl CoroutineHandle {
                             .map_err(|_| anyhow::anyhow!("plan_set: could not lock meta"))
                             .map(|mut m| crate::session::plan_set(&mut m.plan, &descriptions))
                     })?;
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "plan_done" => {
                 let n = match args.first() {
@@ -870,7 +883,7 @@ impl CoroutineHandle {
                             .map_err(|_| anyhow::anyhow!("plan_done: could not lock meta"))
                             .and_then(|mut m| crate::session::plan_done(&mut m.plan, n as usize))
                     })?;
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "plan_fail" => {
                 let n = match args.first() {
@@ -887,7 +900,7 @@ impl CoroutineHandle {
                             .map_err(|_| anyhow::anyhow!("plan_fail: could not lock meta"))
                             .and_then(|mut m| crate::session::plan_fail(&mut m.plan, n as usize))
                     })?;
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             // ── Query operations — access program AST via thread-local ──
             // These reuse the same logic as the ? query commands in typeck.rs.
@@ -896,7 +909,7 @@ impl CoroutineHandle {
                     .ok_or_else(|| anyhow::anyhow!("query_symbols: program not available (no async context)"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let result = crate::typeck::handle_query(&program, &table, "?symbols", &[]);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_symbols_detail" => {
                 let name = match args.first() {
@@ -908,7 +921,7 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?symbols {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_source" | "source_get" => {
                 let name = match args.first() {
@@ -920,7 +933,7 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?source {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_callers" | "callers_get" => {
                 let name = match args.first() {
@@ -932,7 +945,7 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?callers {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_callees" | "callees_get" => {
                 let name = match args.first() {
@@ -944,7 +957,7 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?callees {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_deps" => {
                 let name = match args.first() {
@@ -956,7 +969,7 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?deps {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_deps_all" | "deps_get" => {
                 let name = match args.first() {
@@ -968,7 +981,7 @@ impl CoroutineHandle {
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?deps-all {name}");
                 let result = crate::typeck::handle_query(&program, &table, &query, &[]);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_routes" | "routes_list" => {
                 let program = crate::shared_state::get_shared_program()
@@ -979,7 +992,7 @@ impl CoroutineHandle {
                     .unwrap_or_default();
                 let table = crate::typeck::build_symbol_table(&program);
                 let result = crate::typeck::handle_query(&program, &table, "?routes", &routes);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_tasks" => {
                 let result = if let Some(reg) = &self.task_registry {
@@ -987,7 +1000,7 @@ impl CoroutineHandle {
                 } else {
                     "No task registry (not in async context).".to_string()
                 };
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "query_inbox" => {
                 if !args.is_empty() {
@@ -1011,7 +1024,7 @@ impl CoroutineHandle {
                     })
                     .transpose()?
                     .unwrap_or_else(|| "No messages.".to_string());
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "inbox_clear" => {
                 if !args.is_empty() {
@@ -1042,13 +1055,13 @@ impl CoroutineHandle {
                     }
                 }
 
-                return Ok(Value::string(format!("cleared {cleared} messages")));
+                return Ok(Some(Value::string(format!("cleared {cleared} messages"))));
             }
             "query_library" => {
                 let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_library: program not available"))?;
                 let result = crate::library::query_library(&program, None);
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
 
             // ── library_errors — formatted string of all library errors ──
@@ -1080,7 +1093,7 @@ impl CoroutineHandle {
                         }
                     }))
                     .unwrap_or_else(|| "No library errors.".to_string());
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "failure_history" => {
                 if !args.is_empty() {
@@ -1089,7 +1102,7 @@ impl CoroutineHandle {
                 let result = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| crate::session::format_failure_history(&state)))
                     .unwrap_or_else(|| "No recent mutation failures.".to_string());
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             "clear_failure_history" => {
                 if !args.is_empty() {
@@ -1100,7 +1113,7 @@ impl CoroutineHandle {
                 {
                     crate::session::clear_failure_history(&mut state);
                 }
-                return Ok(Value::string("cleared"));
+                return Ok(Some(Value::string("cleared")));
             }
             "failure_patterns" => {
                 if !args.is_empty() {
@@ -1109,7 +1122,7 @@ impl CoroutineHandle {
                 let result = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| crate::session::summarize_failure_patterns(&state)))
                     .unwrap_or_else(|| "No recent mutation failures.".to_string());
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
             // ── library_reload — reload module(s) from disk ──
             "library_reload" => {
@@ -1126,7 +1139,7 @@ impl CoroutineHandle {
                 let result = crate::library::reload_module(&mut program, &name)?;
                 // Update the read-only snapshot so query builtins see the changes
                 crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
 
             "run_module_startups" => {
@@ -1142,7 +1155,7 @@ impl CoroutineHandle {
                 modules_with_startup.sort_by(|a, b| a.0.cmp(&b.0));
 
                 if modules_with_startup.is_empty() {
-                    return Ok(Value::string("no modules have startup blocks".to_string()));
+                    return Ok(Some(Value::string("no modules have startup blocks".to_string())));
                 }
 
                 let mut results = Vec::new();
@@ -1208,7 +1221,7 @@ impl CoroutineHandle {
                 }
 
                 let count = modules_with_startup.len();
-                return Ok(Value::string(format!("executed {} startup(s): {}", count, results.join("; "))));
+                return Ok(Some(Value::string(format!("executed {} startup(s): {}", count, results.join("; ")))));
             }
 
             "query_startups" => {
@@ -1240,9 +1253,9 @@ impl CoroutineHandle {
                 }
 
                 if lines.is_empty() {
-                    return Ok(Value::string("No modules have startup or shutdown blocks.".to_string()));
+                    return Ok(Some(Value::string("No modules have startup or shutdown blocks.".to_string())));
                 }
-                return Ok(Value::string(lines.join("\n")));
+                return Ok(Some(Value::string(lines.join("\n"))));
             }
 
             // ── Mutation operations — write to program AST via thread-local ──
@@ -1294,7 +1307,7 @@ impl CoroutineHandle {
                 } else {
                     format!("Applied {applied} mutations")
                 };
-                return Ok(Value::string(summary));
+                return Ok(Some(Value::string(summary)));
             }
             "fn_remove" => {
                 let name = match args.first() {
@@ -1314,7 +1327,7 @@ impl CoroutineHandle {
                         if m.functions.len() < before {
                             program.rebuild_function_index();
                             crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                            return Ok(Value::string(format!("Removed {name}")));
+                            return Ok(Some(Value::string(format!("Removed {name}"))));
                         }
                         bail!("fn_remove: function `{fn_name}` not found in module `{mod_name}`");
                     }
@@ -1325,7 +1338,7 @@ impl CoroutineHandle {
                     program.functions.remove(pos);
                     program.rebuild_function_index();
                     crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                    return Ok(Value::string(format!("Removed {name}")));
+                    return Ok(Some(Value::string(format!("Removed {name}"))));
                 }
                 bail!("fn_remove: function `{name}` not found");
             }
@@ -1346,7 +1359,7 @@ impl CoroutineHandle {
                         m.types.retain(|t| t.name() != type_name);
                         if m.types.len() < before {
                             crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                            return Ok(Value::string(format!("Removed {name}")));
+                            return Ok(Some(Value::string(format!("Removed {name}"))));
                         }
                         bail!("type_remove: type `{type_name}` not found in module `{mod_name}`");
                     }
@@ -1357,7 +1370,7 @@ impl CoroutineHandle {
                 if let Some(pos) = program.types.iter().position(|t| t.name() == name_str) {
                     program.types.remove(pos);
                     crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                    return Ok(Value::string(format!("Removed {name}")));
+                    return Ok(Some(Value::string(format!("Removed {name}"))));
                 }
                 bail!("type_remove: type `{name}` not found");
             }
@@ -1375,7 +1388,7 @@ impl CoroutineHandle {
                     program.modules.remove(pos);
                     program.rebuild_function_index();
                     crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                    return Ok(Value::string(format!("Removed module {name}")));
+                    return Ok(Some(Value::string(format!("Removed module {name}"))));
                 }
                 bail!("module_remove: module `{name}` not found");
             }
@@ -1415,7 +1428,7 @@ impl CoroutineHandle {
                 let result = crate::validator::apply_move(&mut program, &names, &target_module)?;
                 // Update read-only snapshot
                 crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::string(result));
+                return Ok(Some(Value::string(result)));
             }
 
             // ── trace_run — programmatic !trace ──
@@ -1444,13 +1457,13 @@ impl CoroutineHandle {
                     .map(|s| format!("{s}"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Ok(Value::string(
+                return Ok(Some(Value::string(
                     if output.is_empty() {
                         format!("Trace of {fn_name}: (no steps)")
                     } else {
                         format!("Trace of {fn_name}:\n{output}")
                     },
-                ));
+                )));
             }
 
             // ── msg_send — programmatic !msg ──
@@ -1495,7 +1508,7 @@ impl CoroutineHandle {
                     .or_default()
                     .push(msg);
 
-                return Ok(Value::string(format!("Message sent to '{target}'")));
+                return Ok(Some(Value::string(format!("Message sent to '{target}'"))));
             }
 
             // ── inbox_read — programmatic inbox drain ──
@@ -1529,7 +1542,7 @@ impl CoroutineHandle {
                 let contents: Vec<String> = messages.drain(..).map(|msg| msg.content).collect();
                 let payload = serde_json::to_string(&contents)
                     .map_err(|e| anyhow::anyhow!("inbox_read: failed to serialize inbox: {e}"))?;
-                return Ok(Value::string(payload));
+                return Ok(Some(Value::string(payload)));
             }
 
             // ── watch_start — programmatic !watch ──
@@ -1563,7 +1576,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("watch_start: could not access runtime"))?
                     .pending_commands.push(cmd);
 
-                return Ok(Value::string(format!("Watching {fn_name} every {interval_ms}ms (queued)")));
+                return Ok(Some(Value::string(format!("Watching {fn_name} every {interval_ms}ms (queued)"))));
             }
 
             // ── agent_spawn — programmatic !agent ──
@@ -1595,7 +1608,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("agent_spawn: could not access runtime"))?
                     .pending_commands.push(cmd);
 
-                return Ok(Value::string(format!("Agent '{name}' spawned (scope: {scope})")));
+                return Ok(Some(Value::string(format!("Agent '{name}' spawned (scope: {scope})"))));
             }
 
             // ── route_list — list registered HTTP routes ──
@@ -1604,13 +1617,13 @@ impl CoroutineHandle {
                     .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
                     .unwrap_or_default();
                 if routes.is_empty() {
-                    return Ok(Value::string("No routes registered."));
+                    return Ok(Some(Value::string("No routes registered.")));
                 }
                 let mut out = String::new();
                 for r in &routes {
                     out.push_str(&format!("{} {} -> `{}`\n", r.method, r.path, r.handler_fn));
                 }
-                return Ok(Value::string(out.trim_end().to_string()));
+                return Ok(Some(Value::string(out.trim_end().to_string())));
             }
 
             // ── route_add — register an HTTP route ──
@@ -1644,14 +1657,14 @@ impl CoroutineHandle {
                 {
                     let old_fn = existing.handler_fn.clone();
                     existing.handler_fn = handler.clone();
-                    return Ok(Value::string(format!("updated route {method_upper} {path} -> `{handler}` (was `{old_fn}`)")));
+                    return Ok(Some(Value::string(format!("updated route {method_upper} {path} -> `{handler}` (was `{old_fn}`)"))));
                 }
                 state.http_routes.push(crate::ast::HttpRoute {
                     method: method_upper.clone(),
                     path: path.clone(),
                     handler_fn: handler.clone(),
                 });
-                return Ok(Value::string(format!("added route {method_upper} {path} -> `{handler}`")));
+                return Ok(Some(Value::string(format!("added route {method_upper} {path} -> `{handler}`"))));
             }
 
             // ── route_remove — remove an HTTP route by method+path ──
@@ -1680,10 +1693,10 @@ impl CoroutineHandle {
                     }
                 });
                 if state.http_routes.len() < before {
-                    return Ok(Value::string(format!(
+                    return Ok(Some(Value::string(format!(
                         "removed route {} {} (was -> `{}`)",
                         method_upper, path, removed_handler.unwrap_or_default()
-                    )));
+                    ))));
                 }
                 bail!("route_remove: no route found for {method_upper} {path}");
             }
@@ -1695,7 +1708,7 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("undo: could not access runtime"))?
                     .pending_commands.push("!undo".to_string());
-                return Ok(Value::string("Undo queued — will revert last mutation"));
+                return Ok(Some(Value::string("Undo queued — will revert last mutation")));
             }
 
             // ── sandbox_enter — enter sandbox mode ──
@@ -1705,7 +1718,7 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_enter: could not access runtime"))?
                     .pending_commands.push("!sandbox enter".to_string());
-                return Ok(Value::string("Sandbox enter queued — mutations will be isolated"));
+                return Ok(Some(Value::string("Sandbox enter queued — mutations will be isolated")));
             }
 
             // ── sandbox_merge — merge sandbox changes ──
@@ -1715,7 +1728,7 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_merge: could not access runtime"))?
                     .pending_commands.push("!sandbox merge".to_string());
-                return Ok(Value::string("Sandbox merge queued — changes will be kept"));
+                return Ok(Some(Value::string("Sandbox merge queued — changes will be kept")));
             }
 
             // ── sandbox_discard — discard sandbox changes ──
@@ -1725,7 +1738,7 @@ impl CoroutineHandle {
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_discard: could not access runtime"))?
                     .pending_commands.push("!sandbox discard".to_string());
-                return Ok(Value::string("Sandbox discard queued — changes will be reverted"));
+                return Ok(Some(Value::string("Sandbox discard queued — changes will be reverted")));
             }
 
             // ── mock_set — register an IO mock response ──
@@ -1756,10 +1769,10 @@ impl CoroutineHandle {
                         response: response.clone(),
                     });
                 let pattern_display = if patterns.is_empty() { "*".to_string() } else { patterns.join(" ") };
-                return Ok(Value::string(format!(
+                return Ok(Some(Value::string(format!(
                     "mock: {operation} {pattern_display} -> \"{}\"",
                     response.chars().take(50).collect::<String>()
-                )));
+                ))));
             }
 
             // ── mock_clear — clear all IO mocks ──
@@ -1773,7 +1786,7 @@ impl CoroutineHandle {
                     m.io_mocks.clear();
                     count
                 };
-                return Ok(Value::string(format!("cleared {count} mocks")));
+                return Ok(Some(Value::string(format!("cleared {count} mocks"))));
             }
 
             // ── sse_send — send event to SSE listeners ──
@@ -1795,7 +1808,7 @@ impl CoroutineHandle {
                 let payload = serde_json::json!({"type": event_type, "data": data}).to_string();
                 sender.send(payload)
                     .map_err(|e| anyhow::anyhow!("sse_send: failed to send event: {e}"))?;
-                return Ok(Value::string("sent"));
+                return Ok(Some(Value::string("sent")));
             }
 
             // ── module_create — create/switch to a module ──
@@ -1817,7 +1830,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("module_create: could not acquire program write lock"))?;
                 // Check if module already exists
                 if program.modules.iter().any(|m| m.name == name) {
-                    return Ok(Value::string(format!("module '{name}' already exists")));
+                    return Ok(Some(Value::string(format!("module '{name}' already exists"))));
                 }
                 // Create empty module
                 let code = format!("!module {name}");
@@ -1828,7 +1841,7 @@ impl CoroutineHandle {
                         .map_err(|e| anyhow::anyhow!("module_create: {e}"))?;
                 }
                 crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::string(format!("created module '{name}'")));
+                return Ok(Some(Value::string(format!("created module '{name}'"))));
             }
 
             // ── test_run — run stored tests for a function ──
@@ -1843,7 +1856,7 @@ impl CoroutineHandle {
                     .ok_or_else(|| anyhow::anyhow!("test_run: function `{fn_name}` not found"))?;
                 let ast_cases = func.tests.clone();
                 if ast_cases.is_empty() {
-                    return Ok(Value::string(format!("no stored tests for `{fn_name}`")));
+                    return Ok(Some(Value::string(format!("no stored tests for `{fn_name}`"))));
                 }
                 // Reconstruct test source from stored AST test cases
                 let bare = fn_name.rsplit('.').next().unwrap_or(&fn_name);
@@ -1878,7 +1891,7 @@ impl CoroutineHandle {
                         }
                     }
                 }
-                return Ok(Value::string(results.join("\n")));
+                return Ok(Some(Value::string(results.join("\n"))));
             }
 
             // ── fn_replace — replace a statement in a function ──
@@ -1913,17 +1926,11 @@ impl CoroutineHandle {
                     }
                 }
                 crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                return Ok(Value::string(result_msg));
+                return Ok(Some(Value::string(result_msg)));
             }
 
-            _ => {} // fall through to mock/IO dispatch
+            _ => return Ok(None), // not a local op
         }
-
-        if let Some(result) = self.try_mock_io(op, args, true)? {
-            return Ok(result);
-        }
-
-        self.execute_transport_op(op, args)
     }
 
     /// Channel-based IO operations dispatched to the async runtime via `send_and_wait`.
