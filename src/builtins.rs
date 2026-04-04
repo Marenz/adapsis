@@ -507,6 +507,17 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "http_upload",
+        aliases: &[],
+        short: "multipart file upload: http_upload(url, file_path, file_field, extra_fields) -> String",
+        long: "Uploads a local file via HTTP multipart/form-data POST. Returns the response body as a String. \
+               Takes `(url:String, file_path:String, file_field:String, extra_fields:String)`. \
+               file_field is the form field name for the file (e.g. \"audio\", \"document\", \"photo\"). \
+               extra_fields is optional, format: \"key1=val1&key2=val2\" for additional form fields. \
+               Example: http_upload(concat(\"https://api.telegram.org/bot\", token, \"/sendAudio\"), \"/tmp/song.wav\", \"audio\", concat(\"chat_id=\", to_string(chat_id)))",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "roadmap_list",
         aliases: &[],
         short: "get current roadmap as String",
