@@ -1365,6 +1365,10 @@ async fn main() -> Result<()> {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     let session = snapshot_from_tiers(&autosave_program, &autosave_meta, &autosave_runtime).await;
+                    let conv_count = session.meta.conversations.contexts.len();
+                    if conv_count > 0 {
+                        eprintln!("[autosave] saving {} conversation(s)", conv_count);
+                    }
                     if let Err(e) = session.save(std::path::Path::new(&save_path)) {
                         eprintln!("auto-save failed: {e}");
                     }
