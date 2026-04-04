@@ -1837,7 +1837,10 @@ pub async fn execute_code(
                     crate::parser::Operation::Eval(ev) => {
                         // Inline expression: evaluate directly
                         if let Some(ref expr) = ev.inline_expr {
-                            if crate::eval::expr_contains_io_builtin(expr) {
+                            // Check if expression needs async eval: IO builtins or [io,async] user functions
+                            let needs_async_eval = crate::eval::expr_contains_io_builtin(expr)
+                                || crate::eval::expr_calls_io_function(expr, &session.program);
+                            if needs_async_eval {
                                 if let Some(sender) = &config.io_sender {
                                     let program = session.program.clone();
                                     let program_mut = crate::eval::make_shared_program_mut(&program);
@@ -5038,6 +5041,109 @@ mod tests {
         assert!(page.contains("EventSource"));
         assert!(page.contains("const formatPayload = (payload) =>"));
         assert!(page.contains("(empty event)"));
+    }
+
+    /// Helper: build a test AppConfig with IO sender for async eval tests.
+    fn test_config_with_io() -> (AppConfig, tokio::sync::mpsc::Receiver<crate::coroutine::IoRequest>) {
+        let (io_tx, io_rx) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(32);
+        let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
+        let config = AppConfig {
+            program: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ast::Program::default(),
+            )),
+            meta: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::session::SessionMeta::new(),
+            )),
+            llm_url: String::new(),
+            llm_model: String::new(),
+            llm_api_key: None,
+            project_dir: ".".to_string(),
+            io_sender: Some(io_tx),
+            self_trigger: trigger_tx,
+            task_registry: None,
+            snapshot_registry: None,
+            log_file: None,
+            training_log: None,
+            jit_cache: crate::eval::new_jit_cache(),
+            event_broadcast: tokio::sync::broadcast::channel(16).0,
+            opencode_git_dir: ".".to_string(),
+            opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            max_iterations: 1,
+            runtime: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::session::RuntimeState::default(),
+            )),
+            sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        };
+        (config, io_rx)
+    }
+
+    #[tokio::test]
+    async fn execute_code_eval_io_function_does_not_reject() {
+        // Define an [io,async] function and verify !eval doesn't reject it
+        let (config, _io_rx) = test_config_with_io();
+        let module_code = "!module TestIO\n+fn greet(name:String) -> String [io,async]\n  +return concat(\"hello \", name)\n+end";
+        let mut session = config.snapshot_working_set().await;
+        // First apply the module
+        let res = execute_code(module_code, &config, &mut session, None).await;
+        assert!(!res.has_errors, "module definition should succeed: {:?}", res.mutation_results);
+        config.write_back_working_set(&session).await;
+
+        // Add a test so it's not blocked by "untested" check
+        let test_code = "!test TestIO.greet\n  +with name=\"world\" -> expect \"hello world\"";
+        let mut session = config.snapshot_working_set().await;
+        let res = execute_code(test_code, &config, &mut session, None).await;
+        config.write_back_working_set(&session).await;
+
+        // Now eval it — should NOT get "cannot call in test expression"
+        let eval_code = "!eval TestIO.greet(name=\"test\")";
+        let mut session = config.snapshot_working_set().await;
+        let res = execute_code(eval_code, &config, &mut session, None).await;
+        // Should not contain "side effects" error
+        let has_side_effects_error = res.mutation_results.iter()
+            .any(|r| r.message.contains("side effects"));
+        assert!(!has_side_effects_error,
+            "!eval of [io,async] function should not be rejected. Results: {:?}",
+            res.mutation_results);
+    }
+
+    #[tokio::test]
+    async fn execute_code_eval_io_function_positional_args() {
+        // Test that !eval Module.func("arg1", 42, "arg3") also works for [io,async] functions
+        let (config, _io_rx) = test_config_with_io();
+        let module_code = "!module TestIO2\n+fn process(a:String, b:Int, c:String) -> String [io,async]\n  +return concat(a, to_string(b), c)\n+end";
+        let mut session = config.snapshot_working_set().await;
+        let res = execute_code(module_code, &config, &mut session, None).await;
+        assert!(!res.has_errors, "module definition should succeed: {:?}", res.mutation_results);
+        config.write_back_working_set(&session).await;
+
+        // Add a test
+        let test_code = "!test TestIO2.process\n  +with a=\"x\" b=1 c=\"y\" -> expect \"x1y\"";
+        let mut session = config.snapshot_working_set().await;
+        let res = execute_code(test_code, &config, &mut session, None).await;
+        config.write_back_working_set(&session).await;
+
+        // Eval with positional args — should NOT reject
+        let eval_code = "!eval TestIO2.process(\"hello\", 42, \"/tmp/out\")";
+        let mut session = config.snapshot_working_set().await;
+        let res = execute_code(eval_code, &config, &mut session, None).await;
+        let has_side_effects_error = res.mutation_results.iter()
+            .any(|r| r.message.contains("side effects"));
+        assert!(!has_side_effects_error,
+            "!eval with positional args should not be rejected for [io,async]. Results: {:?}",
+            res.mutation_results);
+    }
+
+    #[tokio::test]
+    async fn execute_code_agent_spawned_flag() {
+        let (config, _io_rx) = test_config_with_io();
+        let code = "!agent test-agent --scope full Just a test task";
+        let mut session = config.snapshot_working_set().await;
+        let res = execute_code(code, &config, &mut session, None).await;
+        assert!(res.agent_spawned, "agent_spawned should be true");
+        assert_eq!(res.spawned_agent_names, vec!["test-agent"]);
     }
 }
 
