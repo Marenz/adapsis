@@ -222,99 +222,60 @@ impl OpenAiBackend {
             .json(&self.request_body(request, true));
         let response = self.send_request(req, "failed to send streaming chat completion request").await?;
 
-        // Buffer raw bytes so multi-byte UTF-8 sequences that are split
-        // across HTTP chunks are not corrupted by from_utf8_lossy.
-        let mut raw_buf: Vec<u8> = Vec::new();
+        let mut parser = SseParser::new();
         let mut thinking_text = String::new();
         let mut content_text = String::new();
         let mut in_thinking = false;
         let mut stdout = io::stdout();
 
-        let chunk_timeout = Duration::from_secs(120); // 2 min max silence between chunks
+        let chunk_timeout = Duration::from_secs(120);
         let mut response = response;
         let mut chunk_count: u64 = 0;
         let stream_start = std::time::Instant::now();
         loop {
             let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
                 Ok(Ok(Some(chunk))) => chunk,
-                Ok(Ok(None)) => break, // stream ended
+                Ok(Ok(None)) => break,
                 Ok(Err(error)) => return Err(anyhow!(LlmError::Streaming(format!("failed to read streaming response chunk: {error}")))),
                 Err(_) => return Err(anyhow!(LlmError::Streaming("streaming response stalled (no data for 120s)".to_string()))),
             };
             chunk_count += 1;
-            raw_buf.extend_from_slice(&chunk);
 
-            // Convert as much valid UTF-8 as possible from the front of
-            // the buffer, leaving any trailing incomplete sequence for the
-            // next chunk to complete.
-            let valid_up_to = match std::str::from_utf8(&raw_buf) {
-                Ok(_) => raw_buf.len(),
-                Err(e) => e.valid_up_to(),
-            };
-            if valid_up_to == 0 {
-                continue;
-            }
-
-            let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
-            // We work on complete SSE events delimited by "\n\n".
-            // Only drain up to the last complete event boundary to avoid
-            // splitting an event across iterations.
-            let mut last_event_end = 0;
-            let mut search_from = 0;
-            while let Some(pos) = text[search_from..].find("\n\n") {
-                last_event_end = search_from + pos + 2;
-                search_from = last_event_end;
-            }
-            if last_event_end == 0 {
-                continue; // no complete event yet
-            }
-
-            let events_str = &text[..last_event_end];
-            // Process each complete SSE event
-            for event in events_str.split("\n\n") {
-                if event.is_empty() {
-                    continue;
+            for data in parser.feed(&chunk) {
+                if data == "[DONE]" {
+                    stdout.flush().ok();
+                    println!();
+                    return Ok(build_output(thinking_text, content_text));
                 }
-                for data in sse_data_lines(event) {
-                    if data == "[DONE]" {
+
+                let chunk: ChatCompletionChunk = serde_json::from_str(&data)
+                    .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to parse SSE chunk: {error}; chunk={data}"))))?;
+
+                for choice in chunk.choices {
+                    if let Some(reasoning) = choice.delta.reasoning_content {
+                        if !in_thinking {
+                            in_thinking = true;
+                            eprintln!("[llm:thinking] started (+{}ms, {} chunks)", stream_start.elapsed().as_millis(), chunk_count);
+                            print!("[thinking] ");
+                        }
+                        print!("{reasoning}");
                         stdout.flush().ok();
-                        println!();
-                        return Ok(build_output(thinking_text, content_text));
+                        thinking_text.push_str(&reasoning);
                     }
 
-                    let chunk: ChatCompletionChunk = serde_json::from_str(&data)
-                        .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to parse SSE chunk: {error}; chunk={data}"))))?;
-
-                    for choice in chunk.choices {
-                        // Handle reasoning_content (Qwen thinking mode)
-                        if let Some(reasoning) = choice.delta.reasoning_content {
-                            if !in_thinking {
-                                in_thinking = true;
-                                eprintln!("[llm:thinking] started (+{}ms, {} chunks)", stream_start.elapsed().as_millis(), chunk_count);
-                                print!("[thinking] ");
-                            }
-                            print!("{reasoning}");
-                            stdout.flush().ok();
-                            thinking_text.push_str(&reasoning);
+                    if let Some(content) = choice.delta.content {
+                        if in_thinking {
+                            in_thinking = false;
+                            eprintln!("[llm:content] thinking done ({}chars), content starting (+{}ms)", thinking_text.len(), stream_start.elapsed().as_millis());
+                            println!();
+                            print!("[code] ");
                         }
-
-                        // Handle regular content
-                        if let Some(content) = choice.delta.content {
-                            if in_thinking {
-                                in_thinking = false;
-                                eprintln!("[llm:content] thinking done ({}chars), content starting (+{}ms)", thinking_text.len(), stream_start.elapsed().as_millis());
-                                println!();
-                                print!("[code] ");
-                            }
-                            print!("{content}");
-                            stdout.flush().ok();
-                            content_text.push_str(&content);
-                        }
+                        print!("{content}");
+                        stdout.flush().ok();
+                        content_text.push_str(&content);
                     }
                 }
             }
-
-            raw_buf.drain(..last_event_end);
         }
 
         stdout.flush().ok();
@@ -339,7 +300,7 @@ impl OpenAiBackend {
             .json(&self.request_body(request, true));
         let response = self.send_request(req, "failed to send streaming chat completion request").await?;
 
-        let mut raw_buf: Vec<u8> = Vec::new();
+        let mut parser = SseParser::new();
         let mut thinking_text = String::new();
         let mut content_text = String::new();
         let mut in_thinking = false;
@@ -364,77 +325,49 @@ impl OpenAiBackend {
                 }
             };
             chunk_count += 1;
-            raw_buf.extend_from_slice(&chunk);
 
-            let valid_up_to = match std::str::from_utf8(&raw_buf) {
-                Ok(_) => raw_buf.len(),
-                Err(e) => e.valid_up_to(),
-            };
-            if valid_up_to == 0 {
-                continue;
-            }
-
-            let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
-            let mut last_event_end = 0;
-            let mut search_from = 0;
-            while let Some(pos) = text[search_from..].find("\n\n") {
-                last_event_end = search_from + pos + 2;
-                search_from = last_event_end;
-            }
-            if last_event_end == 0 {
-                continue;
-            }
-
-            let events_str = &text[..last_event_end];
-            for event in events_str.split("\n\n") {
-                if event.is_empty() {
-                    continue;
+            for data in parser.feed(&chunk) {
+                if data == "[DONE]" {
+                    let output = build_output(thinking_text, content_text);
+                    let _ = chunk_tx.send(StreamChunk::Done(output)).await;
+                    return Ok(());
                 }
-                for data in sse_data_lines(event) {
-                    if data == "[DONE]" {
-                        let output = build_output(thinking_text, content_text);
-                        let _ = chunk_tx.send(StreamChunk::Done(output)).await;
-                        return Ok(());
+
+                let parsed: ChatCompletionChunk = serde_json::from_str(&data)
+                    .map_err(|error| {
+                        anyhow!(LlmError::Streaming(format!(
+                            "failed to parse SSE chunk: {error}; chunk={data}"
+                        )))
+                    })?;
+
+                for choice in parsed.choices {
+                    if let Some(reasoning) = choice.delta.reasoning_content {
+                        if !in_thinking {
+                            in_thinking = true;
+                            debug!(
+                                "[llm:thinking] started (+{}ms, {} chunks)",
+                                stream_start.elapsed().as_millis(),
+                                chunk_count
+                            );
+                        }
+                        thinking_text.push_str(&reasoning);
+                        let _ = chunk_tx.send(StreamChunk::Thinking(reasoning)).await;
                     }
 
-                    let parsed: ChatCompletionChunk = serde_json::from_str(&data)
-                        .map_err(|error| {
-                            anyhow!(LlmError::Streaming(format!(
-                                "failed to parse SSE chunk: {error}; chunk={data}"
-                            )))
-                        })?;
-
-                    for choice in parsed.choices {
-                        if let Some(reasoning) = choice.delta.reasoning_content {
-                            if !in_thinking {
-                                in_thinking = true;
-                                debug!(
-                                    "[llm:thinking] started (+{}ms, {} chunks)",
-                                    stream_start.elapsed().as_millis(),
-                                    chunk_count
-                                );
-                            }
-                            thinking_text.push_str(&reasoning);
-                            let _ = chunk_tx.send(StreamChunk::Thinking(reasoning)).await;
+                    if let Some(content) = choice.delta.content {
+                        if in_thinking {
+                            in_thinking = false;
+                            debug!(
+                                "[llm:content] thinking done ({}chars), content starting (+{}ms)",
+                                thinking_text.len(),
+                                stream_start.elapsed().as_millis()
+                            );
                         }
-
-                        if let Some(content) = choice.delta.content {
-                            if in_thinking {
-                                in_thinking = false;
-                                debug!(
-                                    "[llm:content] thinking done ({}chars), content starting (+{}ms)",
-                                    thinking_text.len(),
-                                    stream_start.elapsed().as_millis()
-                                );
-                            }
-                            content_text.push_str(&content);
-                            let _ = chunk_tx.send(StreamChunk::Content(content)).await;
-                        }
+                        content_text.push_str(&content);
+                        let _ = chunk_tx.send(StreamChunk::Content(content)).await;
                     }
                 }
             }
-
-            raw_buf.drain(..last_event_end);
         }
 
         debug!(
@@ -700,7 +633,7 @@ async fn stream_sse_to_channel(
     mut response: Response,
     tx: tokio::sync::mpsc::Sender<StreamChunk>,
 ) {
-    let mut raw_buf: Vec<u8> = Vec::new();
+    let mut parser = SseParser::new();
     let mut thinking_text = String::new();
     let mut content_text = String::new();
     let mut in_thinking = false;
@@ -723,82 +656,51 @@ async fn stream_sse_to_channel(
             }
         };
         chunk_count += 1;
-        raw_buf.extend_from_slice(&chunk);
 
-        let valid_up_to = match std::str::from_utf8(&raw_buf) {
-            Ok(_) => raw_buf.len(),
-            Err(e) => e.valid_up_to(),
-        };
-        if valid_up_to == 0 {
-            continue;
-        }
-
-        let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
-        let mut last_event_end = 0;
-        let mut search_from = 0;
-        while let Some(pos) = text[search_from..].find("\n\n") {
-            last_event_end = search_from + pos + 2;
-            search_from = last_event_end;
-        }
-        if last_event_end == 0 {
-            continue;
-        }
-
-        let events_str = &text[..last_event_end];
         let mut done = false;
-        for event in events_str.split("\n\n") {
-            if event.is_empty() {
-                continue;
-            }
-            for data in sse_data_lines(event) {
-                if data == "[DONE]" {
-                    let output = build_output(thinking_text.clone(), content_text.clone());
-                    let _ = tx.send(StreamChunk::Done(output)).await;
-                    done = true;
-                    break;
-                }
-
-                let Ok(parsed) = serde_json::from_str::<ChatCompletionChunk>(&data) else {
-                    warn!("failed to parse SSE chunk: {data}");
-                    continue;
-                };
-
-                for choice in parsed.choices {
-                    if let Some(reasoning) = choice.delta.reasoning_content {
-                        if !in_thinking {
-                            in_thinking = true;
-                            debug!(
-                                "[llm:thinking] started (+{}ms, {} chunks)",
-                                stream_start.elapsed().as_millis(),
-                                chunk_count
-                            );
-                        }
-                        thinking_text.push_str(&reasoning);
-                        if tx.send(StreamChunk::Thinking(reasoning)).await.is_err() {
-                            return; // receiver dropped
-                        }
-                    }
-
-                    if let Some(content) = choice.delta.content {
-                        if in_thinking {
-                            in_thinking = false;
-                        }
-                        content_text.push_str(&content);
-                        if tx.send(StreamChunk::Content(content)).await.is_err() {
-                            return; // receiver dropped
-                        }
-                    }
-                }
-            }
-            if done {
+        for data in parser.feed(&chunk) {
+            if data == "[DONE]" {
+                let output = build_output(thinking_text.clone(), content_text.clone());
+                let _ = tx.send(StreamChunk::Done(output)).await;
+                done = true;
                 break;
+            }
+
+            let Ok(parsed) = serde_json::from_str::<ChatCompletionChunk>(&data) else {
+                warn!("failed to parse SSE chunk: {data}");
+                continue;
+            };
+
+            for choice in parsed.choices {
+                if let Some(reasoning) = choice.delta.reasoning_content {
+                    if !in_thinking {
+                        in_thinking = true;
+                        debug!(
+                            "[llm:thinking] started (+{}ms, {} chunks)",
+                            stream_start.elapsed().as_millis(),
+                            chunk_count
+                        );
+                    }
+                    thinking_text.push_str(&reasoning);
+                    if tx.send(StreamChunk::Thinking(reasoning)).await.is_err() {
+                        return; // receiver dropped
+                    }
+                }
+
+                if let Some(content) = choice.delta.content {
+                    if in_thinking {
+                        in_thinking = false;
+                    }
+                    content_text.push_str(&content);
+                    if tx.send(StreamChunk::Content(content)).await.is_err() {
+                        return; // receiver dropped
+                    }
+                }
             }
         }
         if done {
             return;
         }
-
-        raw_buf.drain(..last_event_end);
     }
 
     // Stream ended without [DONE] marker — send what we have.
@@ -1018,6 +920,62 @@ fn sse_data_lines(event: &str) -> Vec<String> {
         .filter_map(|line| line.strip_prefix("data:"))
         .map(|line| line.trim_start().to_string())
         .collect()
+}
+
+/// Reusable SSE byte-stream parser.
+///
+/// Accumulates raw bytes from HTTP chunks, handles multi-byte UTF-8 boundary
+/// splitting, and yields complete SSE data lines. Call `feed()` with each chunk,
+/// then iterate over the returned data lines.
+struct SseParser {
+    raw_buf: Vec<u8>,
+}
+
+impl SseParser {
+    fn new() -> Self {
+        Self { raw_buf: Vec::new() }
+    }
+
+    /// Feed raw bytes from an HTTP chunk and extract all complete SSE data lines.
+    /// Returns a vec of data-line strings (with "data:" prefix already stripped).
+    /// The "[DONE]" sentinel is returned as-is for the caller to handle.
+    fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.raw_buf.extend_from_slice(chunk);
+
+        // Find the valid UTF-8 boundary — don't split multi-byte sequences.
+        let valid_up_to = match std::str::from_utf8(&self.raw_buf) {
+            Ok(_) => self.raw_buf.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        if valid_up_to == 0 {
+            return vec![];
+        }
+
+        let text = std::str::from_utf8(&self.raw_buf[..valid_up_to]).unwrap();
+
+        // Find the end of the last complete SSE event (delimited by "\n\n").
+        let mut last_event_end = 0;
+        let mut search_from = 0;
+        while let Some(pos) = text[search_from..].find("\n\n") {
+            last_event_end = search_from + pos + 2;
+            search_from = last_event_end;
+        }
+        if last_event_end == 0 {
+            return vec![]; // no complete event yet
+        }
+
+        let events_str = text[..last_event_end].to_string();
+        self.raw_buf.drain(..last_event_end);
+
+        // Extract all data lines from all complete events.
+        let mut data_lines = Vec::new();
+        for event in events_str.split("\n\n") {
+            if !event.is_empty() {
+                data_lines.extend(sse_data_lines(event));
+            }
+        }
+        data_lines
+    }
 }
 
 /// Build LlmOutput from separate thinking and content strings.
