@@ -5271,10 +5271,19 @@ pub async fn handle_llm_takeover(
 
         eprintln!("[llm_takeover:{context}] code results: {}", feedback.join("; "));
 
+        let is_last_iteration = iteration == 9;
         let feedback_msg = if exec_result.has_errors {
-            format!("Errors:\n{}\n\nFix and continue.", feedback.join("\n"))
+            if is_last_iteration {
+                format!("Errors:\n{}\n\nThis is the last iteration. Tell the user where you got stuck and ask if they want you to continue.", feedback.join("\n"))
+            } else {
+                format!("Errors:\n{}\n\nFix and continue.", feedback.join("\n"))
+            }
         } else {
-            format!("Results:\n{}\n\nContinue or !done.", feedback.join("\n"))
+            if is_last_iteration {
+                format!("Results:\n{}\n\nThis is the last iteration. Summarize what you accomplished and what remains, then ask if the user wants you to continue.", feedback.join("\n"))
+            } else {
+                format!("Results:\n{}\n\nContinue or !done.", feedback.join("\n"))
+            }
         };
 
         {
@@ -5292,11 +5301,6 @@ pub async fn handle_llm_takeover(
             let args: Vec<String> = std::env::args().collect();
             let _ = exec::execvp(&exe, &args);
         }
-    }
-
-    // If we exhausted iterations without completing, tell the user where we got stuck
-    if reply_text.is_empty() {
-        reply_text = "I hit the iteration limit while working on that. Should I continue?".to_string();
     }
 
     Ok(reply_text)
