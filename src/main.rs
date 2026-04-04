@@ -1,6 +1,5 @@
 mod api;
 mod ast;
-pub mod bytecode;
 pub mod builtins;
 mod compiler;
 mod coroutine;
