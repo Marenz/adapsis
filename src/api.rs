@@ -3428,11 +3428,22 @@ pub async fn ask_stream(
                             let wb = std::path::PathBuf::from(&config_clone.opencode_git_dir).join("target/release/adapsis");
                             if wb.exists() { Some(wb) } else { None }
                         };
-                        let exe = worktree_binary.unwrap_or_else(|| {
+                        // Install to ~/.local/bin/adapsis if we have a worktree build
+                        if let Some(ref wb) = worktree_binary {
+                            let install_path = dirs::home_dir()
+                                .map(|h| h.join(".local/bin/adapsis"))
+                                .filter(|p| p.parent().map(|d| d.exists()).unwrap_or(false));
+                            if let Some(install) = install_path {
+                                match std::fs::copy(wb, &install) {
+                                    Ok(_) => eprintln!("[opencode] installed binary to {}", install.display()),
+                                    Err(e) => eprintln!("[opencode] failed to install binary: {e}"),
+                                }
+                            }
+                        }
+                        let exe = std::env::current_exe().unwrap_or_else(|_| {
                             std::env::args().next()
                                 .map(std::path::PathBuf::from)
-                                .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
-                                .unwrap_or_else(|| std::env::current_exe().unwrap_or_default())
+                                .unwrap_or_default()
                         });
                         let args: Vec<String> = std::env::args().collect();
                         eprintln!("[opencode] restarting with binary: {}", exe.display());

@@ -1255,14 +1255,8 @@ async fn main() -> Result<()> {
                 worktree_dir_str
             };
 
-            // Validate: binary should be inside the git dir for !opencode restart to work
-            let exe_path = std::env::current_exe().unwrap_or_default();
-            let exe_str = exe_path.to_string_lossy();
-            if !exe_str.contains(&resolved_git_dir) {
-                eprintln!("WARNING: AdapsisOS binary ({}) is not inside the opencode git dir ({}).", exe_str, resolved_git_dir);
-                eprintln!("  !opencode self-restart will not pick up rebuilt binaries.");
-                eprintln!("  Run from: {}/target/release/adapsis", resolved_git_dir);
-            }
+            // Note: binary may be installed at ~/.local/bin/adapsis while worktree is separate.
+            // !opencode will copy the rebuilt binary to the installed location before restart.
 
             // Self-trigger channel: events feed back into the AI
             let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<String>(32);
