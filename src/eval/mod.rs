@@ -3193,157 +3193,11 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
 
 /// Evaluate a parser::Expr directly (for test case inputs/expected values).
 /// Evaluate a parser expression with access to the program (can call user functions).
-pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program) -> Result<Value> {
-    match expr {
-        parser::Expr::Ident(name) => {
-            // Check if this is a user-defined union variant first
-            if is_union_variant(program, name) {
-                return Ok(Value::Union {
-                    variant: intern::intern_display(name),
-                    payload: vec![],
-                });
-            }
-            // Check if this is a zero-arg user function (e.g. initial_context_state)
-            if let Some(func) = program.get_function(name) {
-                if func.params.is_empty() {
-                    // Reject functions with side effects in test expressions
-                    let has_side_effects = func.effects.iter().any(|e| {
-                        matches!(
-                            e,
-                            ast::Effect::Io
-                                | ast::Effect::Async
-                                | ast::Effect::Mut
-                                | ast::Effect::Unsafe
-                        )
-                    });
-                    if has_side_effects {
-                        bail!(
-                            "cannot call `{name}` in test expression: function has side effects {:?} — \
-                             use !mock and an async test wrapper instead",
-                            func.effects
-                        );
-                    }
-                    let mut env = Env::new_with_shared_interner(&program.shared_interner);
-                    env.populate_shared_from_program(program);
-                    let qualified = program.qualify_function_name(name);
-                    FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-                    let result = eval_function_body(program, &func.body, &mut env);
-                    FN_NAME_STACK.with(|s| s.borrow_mut().pop());
-                    return result;
-                }
-            }
-            // Fall through to standalone handling
-            eval_parser_expr_standalone(expr)
-        }
-        parser::Expr::Call { callee, args } => {
-            let name = parser_callee_name(callee);
-            // Check if it's a user-defined union constructor
-            if is_union_variant(program, &name) {
-                let payload = args
-                    .iter()
-                    .map(|a| eval_parser_expr_with_program(a, program))
-                    .collect::<Result<Vec<_>>>()?;
-                return Ok(Value::Union {
-                    variant: intern::intern_display(&name),
-                    payload,
-                });
-            }
-            // Try as user function
-            if let Some(func) = program.get_function(&name) {
-                // Reject functions with side effects in test expressions
-                let has_side_effects = func.effects.iter().any(|e| {
-                    matches!(
-                        e,
-                        ast::Effect::Io
-                            | ast::Effect::Async
-                            | ast::Effect::Mut
-                            | ast::Effect::Unsafe
-                    )
-                });
-                if has_side_effects {
-                    bail!(
-                        "cannot call `{name}` in test expression: function has side effects {:?} — \
-                         use !mock and an async test wrapper instead",
-                        func.effects
-                    );
-                }
-                let eval_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| eval_parser_expr_with_program(a, program))
-                    .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new_with_shared_interner(&program.shared_interner);
-                env.populate_shared_from_program(program);
-                for (param, arg) in func.params.iter().zip(eval_args) {
-                    env.set(&param.name, arg);
-                }
-                let qualified = program.qualify_function_name(&name);
-                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-                let result = eval_function_body(program, &func.body, &mut env);
-                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
-                return result;
-            }
-            // Try as builtin function (concat, len, to_string, etc.)
-            // Skip Ok/Err/Some/None — these are handled by eval_parser_expr_standalone
-            // with special parser-level semantics (e.g. Err(bare_ident) as error labels).
-            if crate::builtins::is_builtin(&name)
-                && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
-            {
-                let eval_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| eval_parser_expr_with_program(a, program))
-                    .collect::<Result<Vec<_>>>()?;
-                let mut env = Env::new_with_shared_interner(&program.shared_interner);
-                return eval_builtin_or_user(program, &name, eval_args, &mut env);
-            }
-            // Fall through to standalone (handles union constructors, Ok, Err)
-            eval_parser_expr_standalone(expr)
-        }
-        // StructLiteral needs program access so field values can call user functions
-        parser::Expr::StructLiteral(fields) => {
-            let empty_id = intern::intern_display("");
-            let mut field_map: HashMap<InternedId, Value> = HashMap::new();
-            for f in fields {
-                let val = eval_parser_expr_with_program(&f.value, program)?;
-                field_map.insert(intern::intern_display(&f.name), val);
-            }
-            Ok(Value::strct_interned(empty_id, field_map))
-        }
-        // Unary expressions need program access for their inner expression
-        parser::Expr::Unary { op, expr: inner } => {
-            let val = eval_parser_expr_with_program(inner, program)?;
-            match op {
-                parser::UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
-                parser::UnaryOp::Neg => match val {
-                    Value::Int(n) => Ok(Value::Int(-n)),
-                    Value::Float(n) => Ok(Value::Float(-n)),
-                    _ => bail!("cannot negate {val}"),
-                },
-            }
-        }
-        // Binary expressions need program access for both sides
-        parser::Expr::Binary { left, op, right } => {
-            let l = eval_parser_expr_with_program(left, program)?;
-            let r = eval_parser_expr_with_program(right, program)?;
-            let ast_op = match op {
-                parser::BinaryOp::Add => ast::BinaryOp::Add,
-                parser::BinaryOp::Sub => ast::BinaryOp::Sub,
-                parser::BinaryOp::Mul => ast::BinaryOp::Mul,
-                parser::BinaryOp::Div => ast::BinaryOp::Div,
-                parser::BinaryOp::Mod => ast::BinaryOp::Mod,
-                parser::BinaryOp::Eq => ast::BinaryOp::Equal,
-                parser::BinaryOp::Neq => ast::BinaryOp::NotEqual,
-                parser::BinaryOp::Gt => ast::BinaryOp::GreaterThan,
-                parser::BinaryOp::Lt => ast::BinaryOp::LessThan,
-                parser::BinaryOp::Gte => ast::BinaryOp::GreaterThanOrEqual,
-                parser::BinaryOp::Lte => ast::BinaryOp::LessThanOrEqual,
-                parser::BinaryOp::And => ast::BinaryOp::And,
-                parser::BinaryOp::Or => ast::BinaryOp::Or,
-            };
-            eval_binary_op(&l, &ast_op, &r)
-        }
-        // Everything else delegates to standalone
-        _ => eval_parser_expr_standalone(expr),
-    }
+pub fn eval_parser_expr_with_program(
+    expr: &parser::Expr,
+    program: &ast::Program,
+) -> Result<Value> {
+    eval_parser_expr_impl(expr, program, None)
 }
 
 /// Like `eval_parser_expr_with_program`, but threads an environment through
@@ -3354,25 +3208,88 @@ fn eval_parser_expr_with_env(
     program: &ast::Program,
     env: &mut Env,
 ) -> Result<Value> {
+    eval_parser_expr_impl(expr, program, Some(env))
+}
+
+/// Unified implementation for evaluating parser expressions with optional env.
+///
+/// When `env` is `None`: side-effect guards are applied (reject IO/async/mut functions),
+/// and fresh envs are created from the program for function calls.
+/// When `env` is `Some`: variables are resolved from the env, shared state and
+/// coroutine handles are inherited, and no side-effect guard is applied.
+fn eval_parser_expr_impl(
+    expr: &parser::Expr,
+    program: &ast::Program,
+    mut env: Option<&mut Env>,
+) -> Result<Value> {
+    // Helper: check for side-effect functions (only in "no env" / test-expression mode)
+    fn check_side_effects(func: &ast::FunctionDecl, name: &str, has_env: bool) -> Result<()> {
+        if !has_env {
+            let has_side_effects = func.effects.iter().any(|e| {
+                matches!(
+                    e,
+                    ast::Effect::Io | ast::Effect::Async | ast::Effect::Mut | ast::Effect::Unsafe
+                )
+            });
+            if has_side_effects {
+                bail!(
+                    "cannot call `{name}` in test expression: function has side effects {:?} — \
+                     use !mock and an async test wrapper instead",
+                    func.effects
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // Helper: build an env for calling a user function, inheriting from ambient env if present.
+    fn make_call_env(program: &ast::Program, env: Option<&Env>) -> Env {
+        let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
+        if let Some(ambient) = env {
+            call_env.inherit_shared_from(ambient);
+            if let Some(handle) = ambient.get_raw("__coroutine_handle") {
+                call_env.set("__coroutine_handle", handle.clone());
+            }
+        } else {
+            call_env.populate_shared_from_program(program);
+        }
+        call_env
+    }
+
+    // Helper: evaluate sub-expressions, threading env through when present.
+    // Uses a loop instead of .map() to allow sequential &mut borrows.
+    fn eval_args(
+        args: &[parser::Expr],
+        program: &ast::Program,
+        mut env: Option<&mut Env>,
+    ) -> Result<Vec<Value>> {
+        let mut result = Vec::with_capacity(args.len());
+        for a in args {
+            result.push(eval_parser_expr_impl(a, program, env.as_deref_mut())?);
+        }
+        Ok(result)
+    }
+
     match expr {
         parser::Expr::Ident(name) => {
-            // Check env first (for variables bound by the caller)
-            if let Ok(val) = env.get(name) {
-                return Ok(val);
+            // With env: check variables first
+            if let Some(ref mut env) = env {
+                if let Ok(val) = env.get(name) {
+                    return Ok(val);
+                }
             }
+            // Check union variants
             if is_union_variant(program, name) {
                 return Ok(Value::Union {
                     variant: intern::intern_display(name),
                     payload: vec![],
                 });
             }
+            // Check zero-arg user functions
             if let Some(func) = program.get_function(name) {
                 if func.params.is_empty() {
-                    let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
-                    call_env.inherit_shared_from(env);
-                    if let Some(handle) = env.get_raw("__coroutine_handle") {
-                        call_env.set("__coroutine_handle", handle.clone());
-                    }
+                    check_side_effects(&func, name, env.is_some())?;
+                    let mut call_env = make_call_env(program, env.as_deref());
                     let qualified = program.qualify_function_name(name);
                     FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
                     let result = eval_function_body(program, &func.body, &mut call_env);
@@ -3384,28 +3301,21 @@ fn eval_parser_expr_with_env(
         }
         parser::Expr::Call { callee, args } => {
             let name = parser_callee_name(callee);
+            // Union variant constructor
             if is_union_variant(program, &name) {
-                let payload = args
-                    .iter()
-                    .map(|a| eval_parser_expr_with_env(a, program, env))
-                    .collect::<Result<Vec<_>>>()?;
+                let payload = eval_args(args, program, env)?;
                 return Ok(Value::Union {
                     variant: intern::intern_display(&name),
                     payload,
                 });
             }
+            // User function call
             if let Some(func) = program.get_function(&name) {
-                let eval_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| eval_parser_expr_with_env(a, program, env))
-                    .collect::<Result<Vec<_>>>()?;
-                let mut call_env = Env::new_with_shared_interner(&program.shared_interner);
-                call_env.inherit_shared_from(env);
-                for (param, arg) in func.params.iter().zip(eval_args) {
+                check_side_effects(&func, &name, env.is_some())?;
+                let eval_args_vec = eval_args(args, program, env.as_deref_mut())?;
+                let mut call_env = make_call_env(program, env.as_deref());
+                for (param, arg) in func.params.iter().zip(eval_args_vec) {
                     call_env.set(&param.name, arg);
-                }
-                if let Some(handle) = env.get_raw("__coroutine_handle") {
-                    call_env.set("__coroutine_handle", handle.clone());
                 }
                 let qualified = program.qualify_function_name(&name);
                 FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
@@ -3413,14 +3323,17 @@ fn eval_parser_expr_with_env(
                 FN_NAME_STACK.with(|s| s.borrow_mut().pop());
                 return result;
             }
+            // Builtin function (skip Ok/Err/Some/None — handled by standalone)
             if crate::builtins::is_builtin(&name)
                 && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
             {
-                let eval_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| eval_parser_expr_with_env(a, program, env))
-                    .collect::<Result<Vec<_>>>()?;
-                return eval_builtin_or_user(program, &name, eval_args, env);
+                let eval_args_vec = eval_args(args, program, env.as_deref_mut())?;
+                if let Some(env) = env {
+                    return eval_builtin_or_user(program, &name, eval_args_vec, env);
+                } else {
+                    let mut fresh_env = Env::new_with_shared_interner(&program.shared_interner);
+                    return eval_builtin_or_user(program, &name, eval_args_vec, &mut fresh_env);
+                }
             }
             eval_parser_expr_standalone(expr)
         }
@@ -3428,13 +3341,13 @@ fn eval_parser_expr_with_env(
             let empty_id = intern::intern_display("");
             let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
-                let val = eval_parser_expr_with_env(&f.value, program, env)?;
+                let val = eval_parser_expr_impl(&f.value, program, env.as_deref_mut())?;
                 field_map.insert(intern::intern_display(&f.name), val);
             }
             Ok(Value::strct_interned(empty_id, field_map))
         }
         parser::Expr::Unary { op, expr: inner } => {
-            let val = eval_parser_expr_with_env(inner, program, env)?;
+            let val = eval_parser_expr_impl(inner, program, env)?;
             match op {
                 parser::UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
                 parser::UnaryOp::Neg => match val {
@@ -3445,8 +3358,8 @@ fn eval_parser_expr_with_env(
             }
         }
         parser::Expr::Binary { left, op, right } => {
-            let l = eval_parser_expr_with_env(left, program, env)?;
-            let r = eval_parser_expr_with_env(right, program, env)?;
+            let l = eval_parser_expr_impl(left, program, env.as_deref_mut())?;
+            let r = eval_parser_expr_impl(right, program, env)?;
             let ast_op = match op {
                 parser::BinaryOp::Add => ast::BinaryOp::Add,
                 parser::BinaryOp::Sub => ast::BinaryOp::Sub,
