@@ -5212,8 +5212,7 @@ pub async fn handle_llm_takeover(
         };
 
         if !prose.is_empty() {
-            if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
-            reply_text.push_str(&prose);
+            reply_text = prose.clone();
         }
 
         eprintln!("[llm_takeover:{context}] reply: {}...", prose.chars().take(80).collect::<String>());
