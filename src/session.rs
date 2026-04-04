@@ -553,6 +553,26 @@ impl Conversation {
     pub fn push_system(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMessage { role: "system".to_string(), content: content.into() });
     }
+
+    /// Convert conversation history to LLM-compatible message format.
+    pub fn to_llm_messages(&self) -> Vec<crate::llm::ChatMessage> {
+        self.messages.iter().map(|m| match m.role.as_str() {
+            "system" => crate::llm::ChatMessage::system(m.content.clone()),
+            "assistant" => crate::llm::ChatMessage::assistant(&m.content),
+            _ => crate::llm::ChatMessage::user(m.content.clone()),
+        }).collect()
+    }
+
+    /// Trim conversation to at most `max` messages, preserving the system prompt.
+    pub fn trim(&mut self, max: usize) {
+        if self.messages.len() > max && max >= 2 {
+            let system = self.messages[0].clone();
+            let start = self.messages.len() - (max - 1);
+            let keep: Vec<_> = self.messages[start..].to_vec();
+            self.messages = vec![system];
+            self.messages.extend(keep);
+        }
+    }
 }
 
 /// Manages multiple independent conversation contexts.
@@ -1391,6 +1411,17 @@ impl Session {
 
         // Rebuild function index (not serialized)
         session.program.rebuild_function_index();
+
+        // Migrate legacy chat_messages into ConversationManager("main")
+        if !session.meta.chat_messages.is_empty()
+            && !session.meta.conversations.contexts.contains_key("main")
+        {
+            let mut conv = Conversation::new();
+            conv.messages = std::mem::take(&mut session.meta.chat_messages);
+            session.meta.conversations.contexts.insert("main".to_string(), conv);
+            eprintln!("[session:migrate] moved {} chat_messages into conversations[\"main\"]",
+                session.meta.conversations.get("main").map_or(0, |c| c.messages.len()));
+        }
 
         Ok(session)
     }
