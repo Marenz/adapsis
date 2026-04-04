@@ -102,18 +102,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
                     m.functions.retain(|f| f.name != item_name);
                     if m.functions.len() < fn_before {
                         program.rebuild_function_index();
-                        // Also remove any routes pointing to this handler
-                        let qualified = format!("{mod_name}.{item_name}");
-                        let removed_routes = remove_routes_for_handler(program, &qualified);
-                        let mut msg = format!("removed function `{target}`");
-                        if !removed_routes.is_empty() {
-                            msg.push_str(&format!(
-                                "; also removed {} route(s): {}",
-                                removed_routes.len(),
-                                removed_routes.join(", ")
-                            ));
-                        }
-                        return Ok(msg);
+                        return Ok(format!("removed function `{target}`"));
                     }
                     let ty_before = m.types.len();
                     m.types.retain(|t| t.name() != item_name);
@@ -126,28 +115,9 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             }
             // Remove entire module, top-level type, or top-level function
             if let Some(pos) = program.modules.iter().position(|m| m.name == *target) {
-                // Collect function names from the module before removing it
-                let module_fn_names: Vec<String> = program.modules[pos]
-                    .functions
-                    .iter()
-                    .map(|f| format!("{}.{}", target, f.name))
-                    .collect();
                 program.modules.remove(pos);
                 program.rebuild_function_index();
-                // Remove routes pointing to any function in this module
-                let mut all_removed_routes = Vec::new();
-                for fn_name in &module_fn_names {
-                    all_removed_routes.extend(remove_routes_for_handler(program, fn_name));
-                }
-                let mut msg = format!("removed module `{target}`");
-                if !all_removed_routes.is_empty() {
-                    msg.push_str(&format!(
-                        "; also removed {} route(s): {}",
-                        all_removed_routes.len(),
-                        all_removed_routes.join(", ")
-                    ));
-                }
-                return Ok(msg);
+                return Ok(format!("removed module `{target}`"));
             }
             let target_str: &str = target;
             if let Some(pos) = program.types.iter().position(|t| t.name() == target_str) {
@@ -157,17 +127,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             if let Some(pos) = program.functions.iter().position(|f| f.name == *target) {
                 program.functions.remove(pos);
                 program.rebuild_function_index();
-                // Also remove any routes pointing to this top-level function
-                let removed_routes = remove_routes_for_handler(program, &target);
-                let mut msg = format!("removed function `{target}`");
-                if !removed_routes.is_empty() {
-                    msg.push_str(&format!(
-                        "; also removed {} route(s): {}",
-                        removed_routes.len(),
-                        removed_routes.join(", ")
-                    ));
-                }
-                return Ok(msg);
+                return Ok(format!("removed function `{target}`"));
             }
             bail!("`{target}` not found");
         }
@@ -213,11 +173,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
     }
 }
 
-/// Route cleanup is now handled by Session — validator no longer touches routes.
-/// Returns empty; callers will be updated to use session-level route removal.
-fn remove_routes_for_handler(_program: &mut ast::Program, _handler_name: &str) -> Vec<String> {
-    Vec::new()
-}
+
 
 fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result<String> {
     // Find existing module to merge into, or create new
@@ -317,8 +273,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 nested.name,
                 decl.name
             ),
-            // !test inside a module body is valid — tests are handled separately
-            parser::Operation::Test(_) => {}
+            // (duplicate arm removed — Test already handled above)
             parser::Operation::Startup(fd) => {
                 let converted = convert_function(fd)?;
                 // Validate that startup declares [io,async] effects
