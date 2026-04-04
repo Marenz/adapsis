@@ -1612,7 +1612,18 @@ pub async fn execute_code(
                 | crate::parser::Operation::OpenCode(_)));
 
             if has_mutations {
-                match crate::session::apply_to_tiers_async(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, code, config.io_sender.as_ref()).await {
+                // Filter out !plan lines — already handled in the pre-pass above.
+                // Without this, apply_to_tiers_async re-parses the raw code and
+                // processes Plan operations a second time.
+                let mutation_code: String = code.lines()
+                    .filter(|line| {
+                        let trimmed = line.trim();
+                        !trimmed.starts_with("!plan ")
+                            && trimmed != "!plan"
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                match crate::session::apply_to_tiers_async(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, &mutation_code, config.io_sender.as_ref()).await {
                     Ok(res) => {
                         config.write_back_working_set(session).await;
                         for (msg, ok) in res {
@@ -2176,6 +2187,20 @@ pub async fn execute_code(
                             }
                             Err(e) => {
                                 result.push_err(format!("statement error: {e}"));
+                            }
+                        }
+                    }
+                    crate::parser::Operation::Trace(trace) => {
+                        match crate::eval::trace_function(&session.program, &trace.function_name, &trace.input) {
+                            Ok(steps) => {
+                                let trace_output = steps.iter()
+                                    .map(|s| format!("  > {s}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                result.push_ok(format!("Trace {}:\n{trace_output}", trace.function_name));
+                            }
+                            Err(e) => {
+                                result.push_err(format!("Trace error: {e}"));
                             }
                         }
                     }
