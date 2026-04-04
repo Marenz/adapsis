@@ -1923,6 +1923,13 @@ impl CoroutineHandle {
             return Ok(result);
         }
 
+        self.execute_transport_op(op, args)
+    }
+
+    /// Channel-based IO operations dispatched to the async runtime via `send_and_wait`.
+    /// Handles TCP, file, shell, HTTP, LLM, and other operations that require the
+    /// tokio IO loop.
+    fn execute_transport_op(&self, op: &str, args: &[Value]) -> Result<Value> {
         let op = op.to_string();
         let args: Vec<Value> = args.to_vec();
 
@@ -2151,8 +2158,6 @@ impl CoroutineHandle {
         }
     }
 }
-
-#[cfg(test)]
 
 #[cfg(test)]
 mod tests;
