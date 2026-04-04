@@ -345,11 +345,22 @@ impl Runtime {
                     .and_then(|pos| std::env::args().nth(pos + 1))
                     .map(|d| std::path::PathBuf::from(d).join("target/release/adapsis"))
                     .filter(|p| p.exists());
-                let exe = worktree_binary.unwrap_or_else(|| {
+                // Install to ~/.local/bin/adapsis if we have a worktree build
+                if let Some(ref wb) = worktree_binary {
+                    if let Some(home) = std::env::var_os("HOME") {
+                        let install = std::path::PathBuf::from(home).join(".local/bin/adapsis");
+                        if install.parent().map(|d| d.exists()).unwrap_or(false) {
+                            match std::fs::copy(wb, &install) {
+                                Ok(_) => eprintln!("[restart] installed binary to {}", install.display()),
+                                Err(e) => eprintln!("[restart] failed to install binary: {e}"),
+                            }
+                        }
+                    }
+                }
+                let exe = std::env::current_exe().unwrap_or_else(|_| {
                     std::env::args().next()
                         .map(std::path::PathBuf::from)
-                        .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
-                        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default())
+                        .unwrap_or_default()
                 });
                 let args: Vec<String> = std::env::args().collect();
                 eprintln!("AdapsisOS restarting: {} {}", exe.display(), args[1..].join(" "));
