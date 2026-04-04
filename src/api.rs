@@ -5150,11 +5150,11 @@ pub async fn handle_llm_takeover(
                         eprintln!("[agent:{agent_name}] notifying context '{agent_context}'");
                         let notification = format!("Agent '{agent_name}' completed: {}", agent_result.chars().take(500).collect::<String>());
 
-                        // Append result to conversation and call LLM to generate user-facing summary
+                        // Append result to conversation and prompt for summary
                         {
                             let mut meta_guard = agent_meta.lock().unwrap();
                             if let Some(conv) = meta_guard.conversations.get_mut(&agent_context) {
-                                conv.push_system(notification.clone());
+                                conv.push_user(format!("[System: {}] Summarize the result briefly for the user.", notification));
                             }
                         }
 
@@ -5172,7 +5172,9 @@ pub async fn handle_llm_takeover(
                             }
                         };
 
-                        if let Ok(summary_output) = agent_llm.generate(reply_messages).await {
+                        eprintln!("[agent:{agent_name}] calling LLM for completion summary ({} messages)", reply_messages.len());
+                        match agent_llm.generate(reply_messages).await {
+                            Ok(summary_output) => {
                             let summary = {
                                 let mut clean = summary_output.text.clone();
                                 while let Some(s) = clean.find("<think>") {
@@ -5216,6 +5218,10 @@ pub async fn handle_llm_takeover(
                                     ],
                                     reply: tx,
                                 }).await;
+                            }
+                            }
+                            Err(e) => {
+                                eprintln!("[agent:{agent_name}] summary LLM call failed: {e}");
                             }
                         }
                     });
