@@ -4928,7 +4928,9 @@ pub async fn handle_llm_takeover(
                 format!(
                     "{}\n\n{}\n\nYou are in conversation context '{context}'. Respond naturally. \
                      If you need to do work (modify code, create modules, run tasks), include the \
-                     Adapsis commands in your response. For long-running tasks, use `!agent`.",
+                     Adapsis commands in your response. For long-running tasks, use `!agent`. \
+                     IMPORTANT: Always include a natural language response for the user, even when \
+                     writing code. The user sees only the prose, not the code.",
                     crate::prompt::system_prompt(),
                     crate::builtins::format_for_prompt(),
                 )
