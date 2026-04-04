@@ -136,6 +136,8 @@ pub enum IoRequest {
     Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
     HttpGet { url: String, reply: oneshot::Sender<Result<String>> },
     HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
+    /// Multipart file upload: POST a file with optional extra form fields.
+    HttpUpload { url: String, file_path: String, file_field: String, extra_fields: Vec<(String, String)>, reply: oneshot::Sender<Result<String>> },
     /// Register a source (timer, channel, event) on a module.
     SourceAdd {
         module_name: String,
@@ -431,6 +433,54 @@ impl Runtime {
                         .body(body)
                         .send().await
                     {
+                        Ok(resp) => {
+                            match resp.text().await {
+                                Ok(body) => { let _ = reply.send(Ok(body)); }
+                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                            }
+                        }
+                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                    }
+                });
+            }
+            IoRequest::HttpUpload { url, file_path, file_field, extra_fields, reply } => {
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(120))
+                        .build()
+                        .unwrap_or_default();
+                    let file_bytes = match tokio::fs::read(&file_path).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = reply.send(Err(anyhow::anyhow!("http_upload: cannot read file '{}': {}", file_path, e)));
+                            return;
+                        }
+                    };
+                    let file_name = std::path::Path::new(&file_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
+                    // Guess MIME type from extension
+                    let mime = match std::path::Path::new(&file_path).extension().and_then(|e| e.to_str()) {
+                        Some("wav") => "audio/wav",
+                        Some("mp3") => "audio/mpeg",
+                        Some("ogg") => "audio/ogg",
+                        Some("flac") => "audio/flac",
+                        Some("jpg") | Some("jpeg") => "image/jpeg",
+                        Some("png") => "image/png",
+                        Some("pdf") => "application/pdf",
+                        _ => "application/octet-stream",
+                    };
+                    let file_part = reqwest::multipart::Part::bytes(file_bytes)
+                        .file_name(file_name)
+                        .mime_str(mime)
+                        .unwrap_or_else(|_| reqwest::multipart::Part::bytes(vec![]));
+                    let mut form = reqwest::multipart::Form::new()
+                        .part(file_field, file_part);
+                    for (key, value) in extra_fields {
+                        form = form.text(key, value);
+                    }
+                    match client.post(&url).multipart(form).send().await {
                         Ok(resp) => {
                             match resp.text().await {
                                 Ok(body) => { let _ = reply.send(Ok(body)); }
@@ -2040,6 +2090,31 @@ impl CoroutineHandle {
                 let content_type = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => "application/json".to_string() };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPost { url, body, content_type, reply: tx }, rx)?;
+                return Ok(Value::string(result));
+            }
+            "http_upload" => {
+                let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_upload expects (url:String, file_path:String, file_field:String[, extra_fields:String])") };
+                let file_path = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_upload expects (url:String, file_path:String, file_field:String[, extra_fields:String])") };
+                let file_field = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => "file".to_string() };
+                // Parse extra_fields from "key1=val1&key2=val2" format
+                let extra_fields: Vec<(String, String)> = match args.get(3) {
+                    Some(Value::String(s)) if !s.is_empty() => {
+                        s.split('&').filter_map(|pair| {
+                            let mut parts = pair.splitn(2, '=');
+                            match (parts.next(), parts.next()) {
+                                (Some(k), Some(v)) => Some((k.to_string(), v.to_string())),
+                                _ => None,
+                            }
+                        }).collect()
+                    }
+                    _ => vec![],
+                };
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::HttpPost(url.clone()),
+                    IoRequest::HttpUpload { url, file_path, file_field, extra_fields, reply: tx },
+                    rx,
+                )?;
                 return Ok(Value::string(result));
             }
             "llm_call" => {
