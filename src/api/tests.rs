@@ -1117,3 +1117,64 @@ async fn http_test_endpoint() {
     let cases = json["results"].as_array().expect("should have results array");
     assert!(cases.iter().all(|c| c["pass"].as_bool() == Some(true)), "all tests should pass: {json}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Bug fix regression tests
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Plan commands mixed with mutations should not double-process the plan.
+/// Previously, !plan was handled in execute_code's pre-pass AND re-processed
+/// when apply_to_tiers_async re-parsed the raw code string.
+#[tokio::test]
+async fn plan_not_double_processed_with_mutations() {
+    let config = test_config();
+    // Set a plan (multi-line) together with a function definition (mutation)
+    let code = "!plan set\nStep A\nStep B\n+fn noop() -> Int\n  +return 0\n+end";
+    let res = exec(code, &config).await;
+    assert!(!res.has_errors, "should succeed: {:?}", res.mutation_results);
+
+    // Count how many results mention the plan — should be exactly 1
+    let plan_msgs: Vec<_> = res.mutation_results.iter()
+        .filter(|r| r.message.contains("lan") && r.message.contains("2 step"))
+        .collect();
+    assert_eq!(
+        plan_msgs.len(), 1,
+        "plan should be processed exactly once, got {} messages: {:?}",
+        plan_msgs.len(), res.mutation_results
+    );
+}
+
+/// Plan-only commands (no mutations) should still work.
+#[tokio::test]
+async fn plan_only_processed_once() {
+    let config = test_config();
+    let res = exec("!plan set\nAlpha\nBeta\nGamma", &config).await;
+    assert!(!res.has_errors, "plan-only: {:?}", res.mutation_results);
+    let plan_msgs: Vec<_> = res.mutation_results.iter()
+        .filter(|r| r.message.contains("lan") && r.message.contains("3 step"))
+        .collect();
+    assert_eq!(plan_msgs.len(), 1, "plan should appear once: {:?}", res.mutation_results);
+}
+
+/// !trace should produce output via execute_code (previously silently dropped).
+#[tokio::test]
+async fn trace_not_silently_dropped() {
+    let config = test_config();
+    // Define a function first
+    let res = exec("+fn add(a:Int, b:Int) -> Int\n  +return a + b\n+end", &config).await;
+    assert!(!res.has_errors, "define: {:?}", res.mutation_results);
+
+    // Trace it — syntax is: !trace func_name input_expr
+    // For a single-param function, use a simple value. For multi-param, use a struct literal.
+    // But first, define a simpler function to trace:
+    let res = exec("+fn double(x:Int) -> Int\n  +return x * 2\n+end", &config).await;
+    assert!(!res.has_errors, "define double: {:?}", res.mutation_results);
+    let res = exec("!trace double 5", &config).await;
+    let trace_msgs: Vec<_> = res.mutation_results.iter()
+        .filter(|r| r.message.to_lowercase().contains("trace"))
+        .collect();
+    assert!(
+        !trace_msgs.is_empty(),
+        "!trace should produce output, got: {:?}", res.mutation_results
+    );
+}
