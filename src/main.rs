@@ -14,6 +14,7 @@ mod prompt;
 mod repl;
 mod server;
 mod session;
+mod shared_state;
 mod typeck;
 mod validator;
 mod vm;

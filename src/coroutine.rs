@@ -641,12 +641,13 @@ impl CoroutineHandle {
 
     /// Update the live interpreter snapshot for this task.
     /// Called by the evaluator before each statement.
+    /// `locals` should be pre-computed via `env.snapshot_bindings()` by the caller.
     pub fn update_snapshot(
         &self,
         function_name: &str,
         current_stmt_id: Option<String>,
         frame_depth: usize,
-        env: &crate::eval::Env,
+        locals: Vec<(String, String)>,
     ) {
         if let (Some(id), Some(snap_reg)) = (self.task_id, &self.snapshot_registry) {
             let wait_str = if let Some(task_reg) = &self.task_registry {
@@ -661,7 +662,7 @@ impl CoroutineHandle {
                 function_name: function_name.to_string(),
                 current_stmt_id,
                 frame_depth,
-                locals: env.snapshot_bindings(),
+                locals,
                 wait_reason: wait_str,
             };
             if let Ok(mut snaps) = snap_reg.lock() {
@@ -775,7 +776,7 @@ impl CoroutineHandle {
         // No IO channel needed; no more syncing between runtime and meta.
         match op {
             "roadmap_list" => {
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .and_then(|meta| meta.lock().ok().map(|m| crate::session::roadmap_list(&m.roadmap)))
                     .unwrap_or_else(|| "Roadmap is empty.".to_string());
                 return Ok(Value::string(result));
@@ -789,7 +790,7 @@ impl CoroutineHandle {
                 if desc.trim().is_empty() {
                     bail!("roadmap_add: description must not be empty");
                 }
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .ok_or_else(|| anyhow::anyhow!("roadmap_add: no meta available"))
                     .and_then(|meta| {
                         meta.lock()
@@ -809,7 +810,7 @@ impl CoroutineHandle {
                 if n < 1 {
                     bail!("roadmap_done: index must be >= 1");
                 }
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .ok_or_else(|| anyhow::anyhow!("roadmap_done: no meta available"))
                     .and_then(|meta| {
                         meta.lock()
@@ -826,7 +827,7 @@ impl CoroutineHandle {
 
             // ── Plan operations — via SHARED_META ──
             "plan_show" => {
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .and_then(|meta| meta.lock().ok().map(|m| crate::session::plan_show(&m.plan)))
                     .unwrap_or_else(|| "No plan set.".to_string());
                 return Ok(Value::string(result));
@@ -845,7 +846,7 @@ impl CoroutineHandle {
                 if descriptions.is_empty() {
                     bail!("plan_set: steps must not be empty");
                 }
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .ok_or_else(|| anyhow::anyhow!("plan_set: no meta available"))
                     .and_then(|meta| {
                         meta.lock()
@@ -862,7 +863,7 @@ impl CoroutineHandle {
                 if n < 1 {
                     bail!("plan_done: index must be >= 1");
                 }
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .ok_or_else(|| anyhow::anyhow!("plan_done: no meta available"))
                     .and_then(|meta| {
                         meta.lock()
@@ -879,7 +880,7 @@ impl CoroutineHandle {
                 if n < 1 {
                     bail!("plan_fail: index must be >= 1");
                 }
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .ok_or_else(|| anyhow::anyhow!("plan_fail: no meta available"))
                     .and_then(|meta| {
                         meta.lock()
@@ -891,7 +892,7 @@ impl CoroutineHandle {
             // ── Query operations — access program AST via thread-local ──
             // These reuse the same logic as the ? query commands in typeck.rs.
             "query_symbols" | "symbols_list" => {
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_symbols: program not available (no async context)"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let result = crate::typeck::handle_query(&program, &table, "?symbols", &[]);
@@ -902,7 +903,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_symbols_detail expects (name:String)"),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_symbols_detail: program not available"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?symbols {name}");
@@ -914,7 +915,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_source expects (name:String)"),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_source: program not available"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?source {name}");
@@ -926,7 +927,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_callers expects (name:String)"),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_callers: program not available"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?callers {name}");
@@ -938,7 +939,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_callees expects (name:String)"),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_callees: program not available"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?callees {name}");
@@ -950,7 +951,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_deps expects (name:String)"),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_deps: program not available"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?deps {name}");
@@ -962,7 +963,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("query_deps_all expects (name:String)"),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_deps_all: program not available"))?;
                 let table = crate::typeck::build_symbol_table(&program);
                 let query = format!("?deps-all {name}");
@@ -970,10 +971,10 @@ impl CoroutineHandle {
                 return Ok(Value::string(result));
             }
             "query_routes" | "routes_list" => {
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_routes: program not available"))?;
                 // Get HTTP routes from SharedRuntime
-                let routes = crate::eval::get_shared_runtime()
+                let routes = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
                     .unwrap_or_default();
                 let table = crate::typeck::build_symbol_table(&program);
@@ -992,7 +993,7 @@ impl CoroutineHandle {
                 if !args.is_empty() {
                     bail!("query_inbox expects no arguments");
                 }
-                let result = crate::eval::get_shared_meta()
+                let result = crate::shared_state::get_shared_meta()
                     .map(|meta| {
                         meta.lock()
                             .map_err(|_| anyhow::anyhow!("query_inbox: could not lock meta"))
@@ -1017,7 +1018,7 @@ impl CoroutineHandle {
                     bail!("inbox_clear expects no arguments");
                 }
 
-                let cleared = if let Some(meta) = crate::eval::get_shared_meta() {
+                let cleared = if let Some(meta) = crate::shared_state::get_shared_meta() {
                     meta.lock()
                         .map_err(|_| anyhow::anyhow!("inbox_clear: could not lock meta"))?
                         .agent_mailbox
@@ -1025,7 +1026,7 @@ impl CoroutineHandle {
                         .map(|msgs| msgs.len())
                         .unwrap_or(0)
                 } else {
-                    let rt = crate::eval::get_shared_runtime()
+                    let rt = crate::shared_state::get_shared_runtime()
                         .ok_or_else(|| anyhow::anyhow!("inbox_clear: no runtime available"))?;
                     rt.write()
                         .map_err(|_| anyhow::anyhow!("inbox_clear: could not access runtime"))?
@@ -1035,7 +1036,7 @@ impl CoroutineHandle {
                         .unwrap_or(0)
                 };
 
-                if let Some(rt) = crate::eval::get_shared_runtime() {
+                if let Some(rt) = crate::shared_state::get_shared_runtime() {
                     if let Ok(mut state) = rt.write() {
                         state.agent_mailbox.remove("main");
                     }
@@ -1044,7 +1045,7 @@ impl CoroutineHandle {
                 return Ok(Value::string(format!("cleared {cleared} messages")));
             }
             "query_library" => {
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_library: program not available"))?;
                 let result = crate::library::query_library(&program, None);
                 return Ok(Value::string(result));
@@ -1052,7 +1053,7 @@ impl CoroutineHandle {
 
             // ── library_errors — formatted string of all library errors ──
             "library_errors" => {
-                let result = crate::eval::get_shared_runtime()
+                let result = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| {
                         let mut out = String::new();
                         // Structured load errors (module_name, error_message)
@@ -1085,7 +1086,7 @@ impl CoroutineHandle {
                 if !args.is_empty() {
                     bail!("failure_history expects no arguments");
                 }
-                let result = crate::eval::get_shared_runtime()
+                let result = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| crate::session::format_failure_history(&state)))
                     .unwrap_or_else(|| "No recent mutation failures.".to_string());
                 return Ok(Value::string(result));
@@ -1094,7 +1095,7 @@ impl CoroutineHandle {
                 if !args.is_empty() {
                     bail!("clear_failure_history expects no arguments");
                 }
-                if let Some(rt) = crate::eval::get_shared_runtime()
+                if let Some(rt) = crate::shared_state::get_shared_runtime()
                     && let Ok(mut state) = rt.write()
                 {
                     crate::session::clear_failure_history(&mut state);
@@ -1105,7 +1106,7 @@ impl CoroutineHandle {
                 if !args.is_empty() {
                     bail!("failure_patterns expects no arguments");
                 }
-                let result = crate::eval::get_shared_runtime()
+                let result = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| crate::session::summarize_failure_patterns(&state)))
                     .unwrap_or_else(|| "No recent mutation failures.".to_string());
                 return Ok(Value::string(result));
@@ -1117,19 +1118,19 @@ impl CoroutineHandle {
                     Some(other) => format!("{other}"),
                     None => String::new(),
                 };
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("library_reload: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("library_reload: could not acquire program write lock"))?;
 
                 let result = crate::library::reload_module(&mut program, &name)?;
                 // Update the read-only snapshot so query builtins see the changes
-                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 return Ok(Value::string(result));
             }
 
             "run_module_startups" => {
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("run_module_startups: program not available (no async context)"))?;
                 let program = program_lock.read()
                     .map_err(|_| anyhow::anyhow!("run_module_startups: could not acquire program read lock"))?;
@@ -1211,7 +1212,7 @@ impl CoroutineHandle {
             }
 
             "query_startups" => {
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("query_startups: program not available"))?;
 
                 let mut lines = Vec::new();
@@ -1254,7 +1255,7 @@ impl CoroutineHandle {
                 if code.trim().is_empty() {
                     bail!("mutate: code must not be empty");
                 }
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("mutate: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("mutate: could not acquire program write lock"))?;
@@ -1284,8 +1285,8 @@ impl CoroutineHandle {
                     }
                 }
                 // Update the read-only snapshot so query builtins see the changes
-                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                if let Some(rt) = crate::eval::get_shared_runtime() {
+                crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                if let Some(rt) = crate::shared_state::get_shared_runtime() {
                     crate::eval::init_missing_shared_runtime_vars(&program, &rt);
                 }
                 let summary = if applied == 1 {
@@ -1300,7 +1301,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("fn_remove expects (name:String)"),
                 };
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("fn_remove: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("fn_remove: could not acquire program write lock"))?;
@@ -1312,7 +1313,7 @@ impl CoroutineHandle {
                         m.functions.retain(|f| f.name != fn_name);
                         if m.functions.len() < before {
                             program.rebuild_function_index();
-                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                             return Ok(Value::string(format!("Removed {name}")));
                         }
                         bail!("fn_remove: function `{fn_name}` not found in module `{mod_name}`");
@@ -1323,7 +1324,7 @@ impl CoroutineHandle {
                 if let Some(pos) = program.functions.iter().position(|f| f.name == name) {
                     program.functions.remove(pos);
                     program.rebuild_function_index();
-                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     return Ok(Value::string(format!("Removed {name}")));
                 }
                 bail!("fn_remove: function `{name}` not found");
@@ -1333,7 +1334,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("type_remove expects (name:String)"),
                 };
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("type_remove: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("type_remove: could not acquire program write lock"))?;
@@ -1344,7 +1345,7 @@ impl CoroutineHandle {
                         let before = m.types.len();
                         m.types.retain(|t| t.name() != type_name);
                         if m.types.len() < before {
-                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                            crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                             return Ok(Value::string(format!("Removed {name}")));
                         }
                         bail!("type_remove: type `{type_name}` not found in module `{mod_name}`");
@@ -1355,7 +1356,7 @@ impl CoroutineHandle {
                 let name_str: &str = &name;
                 if let Some(pos) = program.types.iter().position(|t| t.name() == name_str) {
                     program.types.remove(pos);
-                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     return Ok(Value::string(format!("Removed {name}")));
                 }
                 bail!("type_remove: type `{name}` not found");
@@ -1365,7 +1366,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("module_remove expects (name:String)"),
                 };
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("module_remove: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("module_remove: could not acquire program write lock"))?;
@@ -1373,7 +1374,7 @@ impl CoroutineHandle {
                 if let Some(pos) = program.modules.iter().position(|m| m.name == name) {
                     program.modules.remove(pos);
                     program.rebuild_function_index();
-                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                    crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     return Ok(Value::string(format!("Removed module {name}")));
                 }
                 bail!("module_remove: module `{name}` not found");
@@ -1406,14 +1407,14 @@ impl CoroutineHandle {
                     bail!("move_symbols: no valid symbol names found in '{symbols_str}'");
                 }
 
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("move_symbols: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("move_symbols: could not acquire program write lock"))?;
 
                 let result = crate::validator::apply_move(&mut program, &names, &target_module)?;
                 // Update read-only snapshot
-                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 return Ok(Value::string(result));
             }
 
@@ -1428,7 +1429,7 @@ impl CoroutineHandle {
                     Some(other) => format!("{other}"),
                     None => String::new(),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("trace_run: program not available (no async context)"))?;
 
                 let input_expr = if args_str.trim().is_empty() {
@@ -1466,7 +1467,7 @@ impl CoroutineHandle {
                 if target.trim().is_empty() {
                     bail!("msg_send: target must not be empty");
                 }
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("msg_send: no runtime available"))?;
                 let mut state = rt.write()
                     .map_err(|_| anyhow::anyhow!("msg_send: could not access runtime"))?;
@@ -1481,7 +1482,7 @@ impl CoroutineHandle {
                     content: message.clone(),
                     timestamp,
                 };
-                if let Some(meta) = crate::eval::get_shared_meta() {
+                if let Some(meta) = crate::shared_state::get_shared_meta() {
                     if let Ok(mut meta) = meta.lock() {
                         meta.agent_mailbox
                             .entry(target.clone())
@@ -1503,14 +1504,14 @@ impl CoroutineHandle {
                     bail!("inbox_read expects no arguments");
                 }
 
-                let mut messages = if let Some(meta) = crate::eval::get_shared_meta() {
+                let mut messages = if let Some(meta) = crate::shared_state::get_shared_meta() {
                     meta.lock()
                         .map_err(|_| anyhow::anyhow!("inbox_read: could not lock meta"))?
                         .agent_mailbox
                         .remove("main")
                         .unwrap_or_default()
                 } else {
-                    let rt = crate::eval::get_shared_runtime()
+                    let rt = crate::shared_state::get_shared_runtime()
                         .ok_or_else(|| anyhow::anyhow!("inbox_read: no runtime available"))?;
                     rt.write()
                         .map_err(|_| anyhow::anyhow!("inbox_read: could not access runtime"))?
@@ -1519,7 +1520,7 @@ impl CoroutineHandle {
                         .unwrap_or_default()
                 };
 
-                if let Some(rt) = crate::eval::get_shared_runtime() {
+                if let Some(rt) = crate::shared_state::get_shared_runtime() {
                     if let Ok(mut state) = rt.write() {
                         state.agent_mailbox.remove("main");
                     }
@@ -1548,7 +1549,7 @@ impl CoroutineHandle {
                     bail!("watch_start: interval_ms must be > 0");
                 }
                 // Verify the function exists
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("watch_start: program not available (no async context)"))?;
                 if program.get_function(&fn_name).is_none() {
                     bail!("watch_start: function `{fn_name}` not found");
@@ -1556,7 +1557,7 @@ impl CoroutineHandle {
 
                 // Queue the watch command for API-layer processing
                 let cmd = format!("!watch {fn_name} {interval_ms}");
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("watch_start: no runtime available"))?;
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("watch_start: could not access runtime"))?
@@ -1588,7 +1589,7 @@ impl CoroutineHandle {
 
                 // Queue the agent command for API-layer processing
                 let cmd = format!("!agent {name} --scope {scope}\n{task}");
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("agent_spawn: no runtime available"))?;
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("agent_spawn: could not access runtime"))?
@@ -1599,7 +1600,7 @@ impl CoroutineHandle {
 
             // ── route_list — list registered HTTP routes ──
             "route_list" => {
-                let routes = crate::eval::get_shared_runtime()
+                let routes = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
                     .unwrap_or_default();
                 if routes.is_empty() {
@@ -1633,7 +1634,7 @@ impl CoroutineHandle {
                 if !path.starts_with('/') {
                     bail!("route_add: path must start with '/' (got '{path}')");
                 }
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("route_add: no runtime available"))?;
                 let mut state = rt.write()
                     .map_err(|_| anyhow::anyhow!("route_add: could not access runtime"))?;
@@ -1664,7 +1665,7 @@ impl CoroutineHandle {
                     _ => bail!("route_remove expects (method:String, path:String)"),
                 };
                 let method_upper = method.to_uppercase();
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("route_remove: no runtime available"))?;
                 let mut state = rt.write()
                     .map_err(|_| anyhow::anyhow!("route_remove: could not access runtime"))?;
@@ -1689,7 +1690,7 @@ impl CoroutineHandle {
 
             // ── undo — revert the last mutation ──
             "undo" => {
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("undo: no runtime available"))?;
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("undo: could not access runtime"))?
@@ -1699,7 +1700,7 @@ impl CoroutineHandle {
 
             // ── sandbox_enter — enter sandbox mode ──
             "sandbox_enter" => {
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("sandbox_enter: no runtime available"))?;
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_enter: could not access runtime"))?
@@ -1709,7 +1710,7 @@ impl CoroutineHandle {
 
             // ── sandbox_merge — merge sandbox changes ──
             "sandbox_merge" => {
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("sandbox_merge: no runtime available"))?;
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_merge: could not access runtime"))?
@@ -1719,7 +1720,7 @@ impl CoroutineHandle {
 
             // ── sandbox_discard — discard sandbox changes ──
             "sandbox_discard" => {
-                let rt = crate::eval::get_shared_runtime()
+                let rt = crate::shared_state::get_shared_runtime()
                     .ok_or_else(|| anyhow::anyhow!("sandbox_discard: no runtime available"))?;
                 rt.write()
                     .map_err(|_| anyhow::anyhow!("sandbox_discard: could not access runtime"))?
@@ -1745,7 +1746,7 @@ impl CoroutineHandle {
                     bail!("mock_set: operation must not be empty");
                 }
                 let patterns: Vec<String> = pattern.split_whitespace().map(|s| s.to_string()).collect();
-                let meta = crate::eval::get_shared_meta()
+                let meta = crate::shared_state::get_shared_meta()
                     .ok_or_else(|| anyhow::anyhow!("mock_set: no meta available"))?;
                 meta.lock()
                     .map_err(|_| anyhow::anyhow!("mock_set: could not lock meta"))?
@@ -1763,7 +1764,7 @@ impl CoroutineHandle {
 
             // ── mock_clear — clear all IO mocks ──
             "mock_clear" => {
-                let meta = crate::eval::get_shared_meta()
+                let meta = crate::shared_state::get_shared_meta()
                     .ok_or_else(|| anyhow::anyhow!("mock_clear: no meta available"))?;
                 let count = {
                     let mut m = meta.lock()
@@ -1789,7 +1790,7 @@ impl CoroutineHandle {
                 if event_type.trim().is_empty() {
                     bail!("sse_send: event_type must not be empty");
                 }
-                let sender = crate::eval::get_shared_event_broadcast()
+                let sender = crate::shared_state::get_shared_event_broadcast()
                     .ok_or_else(|| anyhow::anyhow!("sse_send: no event broadcast available"))?;
                 let payload = serde_json::json!({"type": event_type, "data": data}).to_string();
                 sender.send(payload)
@@ -1810,7 +1811,7 @@ impl CoroutineHandle {
                 if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                     bail!("module_create: module name must start with an uppercase letter (got '{name}')");
                 }
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("module_create: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("module_create: could not acquire program write lock"))?;
@@ -1826,7 +1827,7 @@ impl CoroutineHandle {
                     crate::validator::apply_and_validate(&mut program, op)
                         .map_err(|e| anyhow::anyhow!("module_create: {e}"))?;
                 }
-                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 return Ok(Value::string(format!("created module '{name}'")));
             }
 
@@ -1836,7 +1837,7 @@ impl CoroutineHandle {
                     Some(Value::String(s)) => s.as_ref().clone(),
                     _ => bail!("test_run expects (fn_name:String)"),
                 };
-                let program = crate::eval::get_shared_program()
+                let program = crate::shared_state::get_shared_program()
                     .ok_or_else(|| anyhow::anyhow!("test_run: program not available"))?;
                 let func = program.get_function(&fn_name)
                     .ok_or_else(|| anyhow::anyhow!("test_run: function `{fn_name}` not found"))?;
@@ -1855,10 +1856,10 @@ impl CoroutineHandle {
                     }
                 }
                 // Get IO mocks from meta and routes from runtime for test execution
-                let io_mocks = crate::eval::get_shared_meta()
+                let io_mocks = crate::shared_state::get_shared_meta()
                     .and_then(|meta| meta.lock().ok().map(|m| m.io_mocks.clone()))
                     .unwrap_or_default();
-                let http_routes = crate::eval::get_shared_runtime()
+                let http_routes = crate::shared_state::get_shared_runtime()
                     .and_then(|rt| rt.read().ok().map(|state| state.http_routes.clone()))
                     .unwrap_or_default();
                 // Parse and run the reconstructed test
@@ -1896,7 +1897,7 @@ impl CoroutineHandle {
                 if new_code.trim().is_empty() {
                     bail!("fn_replace: new_code must not be empty");
                 }
-                let program_lock = crate::eval::get_shared_program_mut()
+                let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("fn_replace: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("fn_replace: could not acquire program write lock"))?;
@@ -1911,7 +1912,7 @@ impl CoroutineHandle {
                         Err(e) => bail!("fn_replace: {e}"),
                     }
                 }
-                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 return Ok(Value::string(result_msg));
             }
 
@@ -2169,8 +2170,8 @@ mod tests {
             success: true,
         });
         let meta = std::sync::Arc::new(std::sync::Mutex::new(initial_meta));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
-        crate::eval::set_shared_meta(Some(meta.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         (handle, meta)
     }
@@ -2291,8 +2292,8 @@ mod tests {
         // Fresh meta with NO mutations — roadmap_done should succeed but warn
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
         let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
-        crate::eval::set_shared_runtime(Some(rt));
-        crate::eval::set_shared_meta(Some(meta.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
 
         handle.execute_await("roadmap_add", &[Value::string("Suspicious item")]).unwrap();
@@ -2496,7 +2497,7 @@ mod tests {
             }
         }
         program.rebuild_function_index();
-        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+        crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program)));
 
         // Also set up a runtime for query_routes/query_tasks
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
@@ -2504,7 +2505,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
 
         CoroutineHandle::new_mock(vec![])
     }
@@ -2674,7 +2675,7 @@ mod tests {
     fn query_routes_with_routes() {
         // Set up runtime with routes
         let program = crate::ast::Program::default();
-        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+        crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program)));
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![crate::ast::HttpRoute {
                 method: "GET".to_string(),
@@ -2684,7 +2685,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
 
         let result = unwrap_string(handle.execute_await("query_routes", &[]).unwrap());
@@ -2758,7 +2759,7 @@ mod tests {
             crate::session::send_agent_message(&mut meta, "agent1", "main", "first");
             crate::session::send_agent_message(&mut meta, "agent2", "main", "second");
         }
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         rt.write().unwrap().agent_mailbox = meta.lock().unwrap().agent_mailbox.clone();
 
         let result = unwrap_string(handle.execute_await("inbox_clear", &[]).unwrap());
@@ -2785,7 +2786,7 @@ mod tests {
     #[test]
     fn failure_history_returns_recent_failures() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
             crate::session::record_failure(&mut state, "undefined variable `user_id`");
             crate::session::record_failure(&mut state, "type mismatch in let binding");
@@ -2798,7 +2799,7 @@ mod tests {
     #[test]
     fn failure_patterns_groups_similar_errors() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
             crate::session::record_failure(&mut state, "undefined variable `user_id`");
             crate::session::record_failure(&mut state, "undefined variable `account_id`");
@@ -2821,7 +2822,7 @@ mod tests {
     #[test]
     fn clear_failure_history_clears_entries() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
             crate::session::record_failure(&mut state, "undefined variable `user_id`");
         }
@@ -2834,13 +2835,13 @@ mod tests {
     #[test]
     fn query_no_program_errors() {
         // Clear the thread-local program
-        crate::eval::set_shared_program(None);
+        crate::shared_state::set_shared_program(None);
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
 
         // All query builtins that need the program should error
@@ -2876,17 +2877,17 @@ mod tests {
             }
         }
         program.rebuild_function_index();
-        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+        crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
 
         let program_mut = std::sync::Arc::new(std::sync::RwLock::new(program));
-        crate::eval::set_shared_program_mut(Some(program_mut.clone()));
+        crate::shared_state::set_shared_program_mut(Some(program_mut.clone()));
 
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
 
         (CoroutineHandle::new_mock(vec![]), program_mut)
     }
@@ -2945,7 +2946,7 @@ mod tests {
 
     #[test]
     fn mutate_no_program_fails() {
-        crate::eval::set_shared_program_mut(None);
+        crate::shared_state::set_shared_program_mut(None);
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("mutate", &[Value::string("+fn x ()->Int\n  +return 1\n+end")]);
         assert!(result.is_err(), "mutate without program should fail");
@@ -3170,7 +3171,7 @@ mod tests {
     #[test]
     fn routes_list_alias_works() {
         let program = crate::ast::Program::default();
-        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+        crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program)));
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![crate::ast::HttpRoute {
                 method: "POST".to_string(),
@@ -3180,7 +3181,7 @@ mod tests {
             shared_vars: std::collections::HashMap::new(),
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
 
         let result = unwrap_string(handle.execute_await("routes_list", &[]).unwrap());
@@ -3191,13 +3192,13 @@ mod tests {
     #[test]
     fn alias_no_program_errors() {
         // Clear the thread-local program
-        crate::eval::set_shared_program(None);
+        crate::shared_state::set_shared_program(None);
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
 
         // All alias builtins that need the program should error
@@ -3307,7 +3308,7 @@ mod tests {
 
     #[test]
     fn move_symbols_no_program_fails() {
-        crate::eval::set_shared_program_mut(None);
+        crate::shared_state::set_shared_program_mut(None);
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("move_symbols", &[
             Value::string("x"),
@@ -3370,13 +3371,13 @@ mod tests {
 
     #[test]
     fn trace_run_no_program_fails() {
-        crate::eval::set_shared_program(None);
+        crate::shared_state::set_shared_program(None);
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
             http_routes: vec![],
             shared_vars: std::collections::HashMap::new(),
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("trace_run", &[
             Value::string("x"),
@@ -3393,7 +3394,7 @@ mod tests {
     #[test]
     fn msg_send_delivers_message() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         let result = unwrap_string(
             handle.execute_await("msg_send", &[
                 Value::string("agent1"),
@@ -3414,7 +3415,7 @@ mod tests {
     #[test]
     fn msg_send_multiple_messages() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         handle.execute_await("msg_send", &[
             Value::string("agent1"),
             Value::string("first"),
@@ -3489,7 +3490,7 @@ mod tests {
             crate::session::send_agent_message(&mut meta, "agent1", "main", "first");
             crate::session::send_agent_message(&mut meta, "agent2", "main", "second");
         }
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         rt.write().unwrap().agent_mailbox = meta.lock().unwrap().agent_mailbox.clone();
 
         let result = unwrap_string(handle.execute_await("inbox_read", &[]).unwrap());
@@ -3550,7 +3551,7 @@ mod tests {
         assert!(result.contains("1000ms"), "should mention interval: {result}");
 
         // Verify command was queued
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         let state = rt.read().unwrap();
         assert_eq!(state.pending_commands.len(), 1);
         assert!(state.pending_commands[0].contains("!watch checker 1000"));
@@ -3628,7 +3629,7 @@ mod tests {
         assert!(result.contains("new-only"), "should mention scope: {result}");
 
         // Verify command was queued
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         let state = rt.read().unwrap();
         assert_eq!(state.pending_commands.len(), 1);
         assert!(state.pending_commands[0].contains("!agent worker1"));
@@ -3710,7 +3711,7 @@ mod tests {
             http_routes: vec![],
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("route_list", &[]).unwrap());
         assert_eq!(result, "No routes registered.");
@@ -3729,7 +3730,7 @@ mod tests {
             ],
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("route_list", &[]).unwrap());
         assert!(result.contains("GET /api/foo -> `Mod.foo`"), "should list first route: {result}");
@@ -3743,7 +3744,7 @@ mod tests {
     #[test]
     fn route_add_new_route() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("route_add", &[
             Value::string("POST"),
@@ -3763,7 +3764,7 @@ mod tests {
             }],
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("route_add", &[
             Value::string("GET"),
@@ -3779,7 +3780,7 @@ mod tests {
     #[test]
     fn route_add_invalid_method() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("route_add", &[
             Value::string("FOOBAR"),
@@ -3793,7 +3794,7 @@ mod tests {
     #[test]
     fn route_add_invalid_path() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("route_add", &[
             Value::string("GET"),
@@ -3815,7 +3816,7 @@ mod tests {
             }],
             ..Default::default()
         }));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("route_remove", &[
             Value::string("POST"),
@@ -3828,7 +3829,7 @@ mod tests {
     #[test]
     fn route_remove_not_found() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("route_remove", &[
             Value::string("GET"),
@@ -3845,7 +3846,7 @@ mod tests {
     #[test]
     fn undo_queues_command() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("undo", &[]).unwrap());
         assert!(result.contains("Undo queued"), "should confirm queued: {result}");
@@ -3861,7 +3862,7 @@ mod tests {
     #[test]
     fn sandbox_enter_queues_command() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("sandbox_enter", &[]).unwrap());
         assert!(result.contains("Sandbox enter queued"), "should confirm queued: {result}");
@@ -3871,7 +3872,7 @@ mod tests {
     #[test]
     fn sandbox_merge_queues_command() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("sandbox_merge", &[]).unwrap());
         assert!(result.contains("Sandbox merge queued"), "should confirm queued: {result}");
@@ -3881,7 +3882,7 @@ mod tests {
     #[test]
     fn sandbox_discard_queues_command() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("sandbox_discard", &[]).unwrap());
         assert!(result.contains("Sandbox discard queued"), "should confirm queued: {result}");
@@ -3896,8 +3897,8 @@ mod tests {
     fn mock_set_adds_mock() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
         let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
-        crate::eval::set_shared_runtime(Some(rt));
-        crate::eval::set_shared_meta(Some(meta.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("mock_set", &[
             Value::string("http_get"),
@@ -3915,8 +3916,8 @@ mod tests {
     fn mock_set_empty_operation_fails() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
         let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
-        crate::eval::set_shared_runtime(Some(rt));
-        crate::eval::set_shared_meta(Some(meta));
+        crate::shared_state::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_meta(Some(meta));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("mock_set", &[
             Value::string(""),
@@ -3943,8 +3944,8 @@ mod tests {
             },
         ];
         let meta = std::sync::Arc::new(std::sync::Mutex::new(initial_meta));
-        crate::eval::set_shared_runtime(Some(rt));
-        crate::eval::set_shared_meta(Some(meta.clone()));
+        crate::shared_state::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_meta(Some(meta.clone()));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("mock_clear", &[]).unwrap());
         assert!(result.contains("cleared 2 mocks"), "should report count: {result}");
@@ -3955,8 +3956,8 @@ mod tests {
     fn mock_clear_empty_returns_zero() {
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
         let meta = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()));
-        crate::eval::set_shared_runtime(Some(rt));
-        crate::eval::set_shared_meta(Some(meta));
+        crate::shared_state::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_meta(Some(meta));
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = unwrap_string(handle.execute_await("mock_clear", &[]).unwrap());
         assert!(result.contains("cleared 0 mocks"), "should report 0: {result}");
@@ -3965,7 +3966,7 @@ mod tests {
     #[test]
     fn sse_send_sends_json_event() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-        crate::eval::set_shared_event_broadcast(Some(tx));
+        crate::shared_state::set_shared_event_broadcast(Some(tx));
         let handle = CoroutineHandle::new_mock(vec![]);
 
         let result = unwrap_string(handle.execute_await("sse_send", &[
@@ -3979,7 +3980,7 @@ mod tests {
 
     #[test]
     fn sse_send_without_sender_fails() {
-        crate::eval::set_shared_event_broadcast(None);
+        crate::shared_state::set_shared_event_broadcast(None);
         let handle = CoroutineHandle::new_mock(vec![]);
         let result = handle.execute_await("sse_send", &[
             Value::string("mutation"),
@@ -4059,9 +4060,9 @@ mod tests {
             }
         }
         program.rebuild_function_index();
-        crate::eval::set_shared_program(Some(std::sync::Arc::new(program)));
+        crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program)));
         let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState::default()));
-        crate::eval::set_shared_runtime(Some(rt));
+        crate::shared_state::set_shared_runtime(Some(rt));
         let handle = CoroutineHandle::new_mock(vec![]);
 
         let result = unwrap_string(
@@ -4189,7 +4190,7 @@ mod tests {
     #[test]
     fn library_errors_with_load_errors() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         // Add some library load errors to the runtime state
         if let Ok(mut state) = rt.write() {
             state.library_load_errors = vec![
@@ -4206,7 +4207,7 @@ mod tests {
     #[test]
     fn library_errors_with_general_errors() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
             state.library_errors = vec![
                 "failed to persist module `Foo`: disk full".to_string(),
@@ -4220,7 +4221,7 @@ mod tests {
     #[test]
     fn library_errors_with_both_error_types() {
         let (handle, _meta) = setup_roadmap_runtime();
-        let rt = crate::eval::get_shared_runtime().unwrap();
+        let rt = crate::shared_state::get_shared_runtime().unwrap();
         if let Ok(mut state) = rt.write() {
             state.library_load_errors = vec![
                 ("FailedMod".to_string(), "syntax error".to_string()),
