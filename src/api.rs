@@ -1772,7 +1772,7 @@ pub async fn execute_code(
                 | crate::parser::Operation::OpenCode(_)));
 
             if has_mutations {
-                match crate::session::apply_to_tiers(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, code) {
+                match crate::session::apply_to_tiers_async(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, code, config.io_sender.as_ref()).await {
                     Ok(res) => {
                         config.write_back_working_set(session).await;
                         for (msg, ok) in res {
