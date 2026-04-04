@@ -562,7 +562,7 @@ pub struct TestResponse {
     pub results: Vec<TestCaseResult>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TestCaseResult {
     pub message: String,
     pub pass: bool,
