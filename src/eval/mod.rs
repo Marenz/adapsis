@@ -2190,66 +2190,8 @@ fn eval_call_inner(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) 
     eval_builtin_or_user(program, &call.callee, args, env)
 }
 
-pub fn eval_builtin_or_user(
-    program: &ast::Program,
-    callee: &str,
-    args: Vec<Value>,
-    env: &mut Env,
-) -> Result<Value> {
-    // Function stubs: intercept user function calls during tests.
-    if program.get_function(callee).is_some() {
-        if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
-            let qualified = program.qualify_function_name(callee);
-            let stub_expr = handle
-                .try_stub(&qualified, &args)?
-                .or(if qualified != callee {
-                    handle.try_stub(callee, &args)?
-                } else {
-                    None
-                });
-            if let Some(expr_str) = stub_expr {
-                let parsed_expr = crate::parser::parse_single_expr(&expr_str)
-                    .map_err(|e| anyhow::anyhow!("stub expression parse error: {e}"))?;
-                return eval_parser_expr_with_program(&parsed_expr, program);
-            }
-        }
-    }
-
-    // User-defined union variants take priority over builtins
-    // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
-    if is_union_variant(program, callee) {
-        return Ok(Value::Union {
-            variant: intern::intern_display(callee),
-            payload: args,
-        });
-    }
-
-    // Check for built-in functions
+fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
     match callee {
-        "Ok" => {
-            if args.len() == 1 {
-                Ok(Value::Ok(Box::new(args.into_iter().next().unwrap())))
-            } else {
-                Ok(Value::Ok(Box::new(Value::None)))
-            }
-        }
-        "Err" => {
-            if args.len() == 1 {
-                match &args[0] {
-                    Value::String(s) => Ok(Value::Err(s.as_ref().clone().into())),
-                    other => Ok(Value::Err(format!("{other}").into())),
-                }
-            } else {
-                Ok(Value::Err("unknown".into()))
-            }
-        }
-        "Some" => {
-            if args.len() == 1 {
-                Ok(Value::Ok(Box::new(args.into_iter().next().unwrap())))
-            } else {
-                Ok(Value::Ok(Box::new(Value::None)))
-            }
-        }
         "len" | "length" => {
             if args.len() != 1 {
                 bail!("len() expects 1 argument");
@@ -2544,7 +2486,12 @@ pub fn eval_builtin_or_user(
                 _ => bail!("base64_encode expects String"),
             }
         }
-        // List operations
+        _ => unreachable!("eval_builtin_string called with non-string callee: {callee}"),
+    }
+}
+
+fn eval_builtin_list(callee: &str, args: Vec<Value>) -> Result<Value> {
+    match callee {
         "list" => {
             // list() creates empty list, list(a, b, c) creates list with items
             Ok(Value::list(args))
@@ -2593,6 +2540,12 @@ pub fn eval_builtin_or_user(
                 _ => bail!("join expects (List, String)"),
             }
         }
+        _ => unreachable!("eval_builtin_list called with non-list callee: {callee}"),
+    }
+}
+
+fn eval_builtin_math(callee: &str, args: Vec<Value>) -> Result<Value> {
+    match callee {
         "abs" => {
             if args.len() != 1 {
                 bail!("abs() expects 1 argument");
@@ -2682,7 +2635,12 @@ pub fn eval_builtin_or_user(
                 _ => Ok(Value::Bool(false)),
             }
         }
-        // Bitwise operations
+        _ => unreachable!("eval_builtin_math called with non-math callee: {callee}"),
+    }
+}
+
+fn eval_builtin_bitwise(callee: &str, args: Vec<Value>) -> Result<Value> {
+    match callee {
         "bit_and" => {
             if args.len() != 2 {
                 bail!("bit_and(a, b) expects 2 arguments");
@@ -2814,6 +2772,106 @@ pub fn eval_builtin_or_user(
                 _ => bail!("min() expects two numbers of same type"),
             }
         }
+        _ => unreachable!("eval_builtin_bitwise called with non-bitwise callee: {callee}"),
+    }
+}
+
+pub fn eval_builtin_or_user(
+    program: &ast::Program,
+    callee: &str,
+    args: Vec<Value>,
+    env: &mut Env,
+) -> Result<Value> {
+    // Function stubs: intercept user function calls during tests.
+    if program.get_function(callee).is_some() {
+        if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+            let qualified = program.qualify_function_name(callee);
+            let stub_expr = handle
+                .try_stub(&qualified, &args)?
+                .or(if qualified != callee {
+                    handle.try_stub(callee, &args)?
+                } else {
+                    None
+                });
+            if let Some(expr_str) = stub_expr {
+                let parsed_expr = crate::parser::parse_single_expr(&expr_str)
+                    .map_err(|e| anyhow::anyhow!("stub expression parse error: {e}"))?;
+                return eval_parser_expr_with_program(&parsed_expr, program);
+            }
+        }
+    }
+
+    // User-defined union variants take priority over builtins
+    // (e.g., user defines Maybe = Some(Int) | None — "Some" should create Union, not Ok)
+    if is_union_variant(program, callee) {
+        return Ok(Value::Union {
+            variant: intern::intern_display(callee),
+            payload: args,
+        });
+    }
+
+    // Check for built-in functions
+    match callee {
+        "Ok" => {
+            if args.len() == 1 {
+                Ok(Value::Ok(Box::new(args.into_iter().next().unwrap())))
+            } else {
+                Ok(Value::Ok(Box::new(Value::None)))
+            }
+        }
+        "Err" => {
+            if args.len() == 1 {
+                match &args[0] {
+                    Value::String(s) => Ok(Value::Err(s.as_ref().clone().into())),
+                    other => Ok(Value::Err(format!("{other}").into())),
+                }
+            } else {
+                Ok(Value::Err("unknown".into()))
+            }
+        }
+        "Some" => {
+            if args.len() == 1 {
+                Ok(Value::Ok(Box::new(args.into_iter().next().unwrap())))
+            } else {
+                Ok(Value::Ok(Box::new(Value::None)))
+            }
+        }
+        // String operations
+        "len" | "length"
+        | "error_suggest" | "failure_suggest"
+        | "concat"
+        | "to_string" | "str"
+        | "char_at"
+        | "substring" | "substr"
+        | "starts_with"
+        | "ends_with"
+        | "contains"
+        | "regex_match"
+        | "regex_replace"
+        | "index_of"
+        | "split"
+        | "trim"
+        | "json_get"
+        | "json_array_len"
+        | "json_escape"
+        | "base64_encode" => eval_builtin_string(callee, args),
+        // List operations
+        "list" | "push" | "get" | "join" => eval_builtin_list(callee, args),
+        // Math operations
+        "abs" | "sqrt" | "pow" | "floor"
+        | "to_int" | "parse_int" | "int"
+        | "digit_value"
+        | "is_digit_char" => eval_builtin_math(callee, args),
+        // Bitwise and numeric operations
+        "bit_and" | "bit_or" | "bit_xor" | "bit_not"
+        | "bit_shl" | "shl"
+        | "bit_shr" | "shr"
+        | "left_rotate" | "rotl"
+        | "to_hex"
+        | "char_code" | "ord"
+        | "from_char_code" | "chr"
+        | "u32_wrap"
+        | "max" | "min" => eval_builtin_bitwise(callee, args),
         _ => {
             // Try to find the function in the program and call it
             if let Some(func) = program.get_function(callee) {
