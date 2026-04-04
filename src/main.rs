@@ -1363,6 +1363,12 @@ async fn main() -> Result<()> {
                     if conv_count > 0 {
                         eprintln!("[autosave] saving {} conversation(s)", conv_count);
                     }
+                    // Persist all library modules (picks up test changes, shared var updates, etc.)
+                    for module in &session.program.modules {
+                        if let Err(e) = crate::library::persist_module(module) {
+                            eprintln!("[autosave] failed to persist module `{}`: {e}", module.name);
+                        }
+                    }
                     if let Err(e) = session.save(std::path::Path::new(&save_path)) {
                         eprintln!("auto-save failed: {e}");
                     }
