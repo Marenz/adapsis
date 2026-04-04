@@ -31,6 +31,17 @@ When modifying the runtime (adding builtins, IO operations, commands, syntax cha
 2. Register new builtins in `src/builtins.rs`
 3. Update this file if the change affects architecture or design
 
+## Code Quality Rules
+- **No file over 2000 lines.** If a file approaches this, refactor by extracting modules/functions.
+- **No function over 100 lines.** Extract helpers. If a function does multiple distinct things, split it.
+- **No duplicated logic.** If two code paths do the same thing (e.g. ask() and llm_takeover() both execute code), extract a shared function.
+- **Every new IO builtin needs a test** in the coroutine test module.
+- **Every new parser feature needs a test** in the parser test module.
+- **Error messages must be actionable.** Include what went wrong, what was expected, and where (function name, module name, line if available).
+- **Prefer returning Result over panicking.** Route handlers, IO handlers, and eval paths must never panic — always return errors gracefully.
+- **Training data matters.** Code execution loops that interact with the LLM should produce training data entries.
+- **Known tech debt:** eval.rs (8900+), parser.rs (6500+), api.rs (5200+), coroutine.rs (4300+) all exceed the 2000 line limit. Refactor these when touching them — don't make them bigger.
+
 ## Build & Test
 ```bash
 cargo build --release
