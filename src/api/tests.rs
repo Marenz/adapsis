@@ -1,4 +1,5 @@
 use super::*;
+use super::execute::collect_opencode_tasks;
 use axum::response::IntoResponse;
 use tower::ServiceExt as _; // for .oneshot()
 
