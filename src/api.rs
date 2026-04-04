@@ -179,6 +179,17 @@ pub struct AppConfig {
     pub sessions: SessionManager,
 }
 
+impl AppConfig {
+    /// Install the shared runtime, meta, and event broadcast into the current
+    /// thread's thread-locals. Call at the top of async handler functions that
+    /// run eval code on the tokio thread (before any spawn_blocking).
+    pub fn install_handler_locals(&self) {
+        crate::eval::set_shared_runtime(Some(self.runtime.clone()));
+        crate::eval::set_shared_meta(Some(self.meta.clone()));
+        crate::eval::set_shared_event_broadcast(Some(self.event_broadcast.clone()));
+    }
+}
+
 #[derive(Deserialize)]
 pub struct MutateRequest {
     pub source: String,
@@ -279,9 +290,7 @@ pub async fn eval_fn(
     State(config): State<AppConfig>,
     Json(req): Json<EvalRequest>,
 ) -> Json<EvalResponse> {
-    crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    crate::eval::set_shared_meta(Some(config.meta.clone()));
-    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
+    config.install_handler_locals();
 
     // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
     if let Some(ref expr_str) = req.expression {
@@ -563,9 +572,7 @@ pub async fn test_fn(
     State(config): State<AppConfig>,
     Json(req): Json<TestRequest>,
 ) -> Json<TestResponse> {
-    crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    crate::eval::set_shared_meta(Some(config.meta.clone()));
-    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
+    config.install_handler_locals();
     let operations = match parser::parse(&req.source) {
         Ok(ops) => ops,
         Err(e) => {
@@ -2350,9 +2357,7 @@ pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
-    crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    crate::eval::set_shared_meta(Some(config.meta.clone()));
-    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
+    config.install_handler_locals();
     eprintln!("\n[web:user] {}", req.message);
     let tx = EventSender::broadcast_only(config.event_broadcast.clone());
     tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
@@ -2686,9 +2691,7 @@ pub async fn ask_stream(
     // Spawn the processing loop
     let config_clone = config.clone();
     tokio::spawn(async move {
-        crate::eval::set_shared_runtime(Some(config_clone.runtime.clone()));
-        crate::eval::set_shared_meta(Some(config_clone.meta.clone()));
-        crate::eval::set_shared_event_broadcast(Some(config_clone.event_broadcast.clone()));
+        config_clone.install_handler_locals();
         let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone(), config_clone.log_file.clone());
         let llm = crate::llm::LlmClient::new_with_model_and_key(
             &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
@@ -4082,9 +4085,7 @@ async fn adapsis_route_dispatch(
     uri: axum::http::Uri,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
-    crate::eval::set_shared_runtime(Some(config.runtime.clone()));
-    crate::eval::set_shared_meta(Some(config.meta.clone()));
-    crate::eval::set_shared_event_broadcast(Some(config.event_broadcast.clone()));
+    config.install_handler_locals();
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
