@@ -5102,8 +5102,11 @@ pub async fn handle_llm_takeover(
                      You are in conversation context '{context}'. Respond naturally. \
                      If you need to do work (modify code, create modules, run tasks), include the \
                      Adapsis commands in your response. For long-running tasks, use `!agent`. \
-                     IMPORTANT: Always include a natural language response for the user, even when \
-                     writing code. The user sees only the prose, not the code.",
+                     IMPORTANT: The user only sees text BEFORE the first <code> block. \
+                     Text after <code> blocks is discarded. Put your response to the user first, \
+                     then the code. Do not narrate what the code does after the <code> block — \
+                     the user won't see it. For !agent tasks, just say what you'll do, then the \
+                     <code> block. The agent completion result will be delivered separately.",
                     crate::prompt::system_prompt(),
                     crate::builtins::format_for_prompt(),
                     program_summary,
@@ -5201,10 +5204,9 @@ pub async fn handle_llm_takeover(
                     clean.replace_range(s..s + e + 8, "");
                 } else { break; }
             }
-            while let Some(s) = clean.find("<code>") {
-                if let Some(e) = clean[s..].find("</code>") {
-                    clean.replace_range(s..s + e + 7, "");
-                } else { break; }
+            // Truncate at first <code> block - everything after is narration about code execution
+            if let Some(s) = clean.find("<code>") {
+                clean.truncate(s);
             }
             clean.trim().to_string()
         };
