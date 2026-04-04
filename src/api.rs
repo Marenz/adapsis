@@ -5106,7 +5106,10 @@ pub async fn handle_llm_takeover(
                      Text after <code> blocks is discarded. Put your response to the user first, \
                      then the code. Do not narrate what the code does after the <code> block — \
                      the user won't see it. For !agent tasks, just say what you'll do, then the \
-                     <code> block. The agent completion result will be delivered separately.",
+                     <code> block. The agent completion result will be delivered separately. \
+                     When you need to understand existing code, use ?source Module.function to read it. \
+                     Don't guess how things work — read the source. Shared vars in modules are accessible \
+                     by name inside that module's functions (e.g. telegram_token in TelegramBot functions).",
                     crate::prompt::system_prompt(),
                     crate::builtins::format_for_prompt(),
                     program_summary,
@@ -5289,6 +5292,11 @@ pub async fn handle_llm_takeover(
             let args: Vec<String> = std::env::args().collect();
             let _ = exec::execvp(&exe, &args);
         }
+    }
+
+    // If we exhausted iterations without completing, tell the user where we got stuck
+    if reply_text.is_empty() {
+        reply_text = "I hit the iteration limit while working on that. Should I continue?".to_string();
     }
 
     Ok(reply_text)
