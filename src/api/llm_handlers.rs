@@ -218,12 +218,14 @@ pub async fn ask(
     // Build messages from conversation history
     let mut session = config.snapshot_working_set().await;
     let mut messages = {
-        if session.meta.chat_messages.is_empty() {
-            session.meta.chat_messages.push(crate::session::ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt,
-            });
+        // Ensure system prompt exists (brief mutable borrow)
+        {
+            let conv = session.meta.conversations.get_or_create("main");
+            if conv.messages.is_empty() {
+                conv.push_system(system_prompt);
+            }
         }
+        // Build context string (immutable borrows)
         let (plan_ctx, needs_plan) = build_plan_context(&session.meta.plan);
         let plan_hint = if needs_plan {
             "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
@@ -238,15 +240,10 @@ pub async fn ask(
             req.message,
             plan_hint
         );
-        session.meta.chat_messages.push(crate::session::ChatMessage {
-            role: "user".to_string(),
-            content: context,
-        });
-        session.meta.chat_messages.iter().map(|m| match m.role.as_str() {
-            "system" => crate::llm::ChatMessage::system(m.content.clone()),
-            "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-            _ => crate::llm::ChatMessage::user(m.content.clone()),
-        }).collect::<Vec<_>>()
+        // Push user message and get LLM messages (brief mutable borrow)
+        let conv = session.meta.conversations.get_or_create("main");
+        conv.push_user(&context);
+        conv.to_llm_messages()
     };
 
     for iteration in 0..max_iterations {
@@ -360,16 +357,9 @@ pub async fn ask(
         let summary = format!("{}\n{}", reply_text.chars().take(200).collect::<String>(),
             all_results.iter().map(|r| format!("{}: {}", if r.success {"OK"} else {"ERR"}, r.message)).collect::<Vec<_>>().join("\n"));
         let mut meta = config.meta.lock().unwrap();
-        meta.chat_messages.push(crate::session::ChatMessage {
-            role: "assistant".to_string(), content: summary,
-        });
-        if meta.chat_messages.len() > 50 {
-            let system = meta.chat_messages[0].clone();
-            let start = meta.chat_messages.len() - 49;
-            let keep: Vec<_> = meta.chat_messages[start..].to_vec();
-            meta.chat_messages = vec![system];
-            meta.chat_messages.extend(keep);
-        }
+        let conv = meta.conversations.get_or_create("main");
+        conv.push_assistant(summary);
+        conv.trim(50);
     }
 
     let has_errors = all_results.iter().any(|r| !r.success) || all_test_results.iter().any(|r| !r.pass);
@@ -426,12 +416,11 @@ pub async fn ask_stream(
             };
             // Tier 3: read/write meta briefly for chat history + plan context
             // Note: guard must be dropped before any .await — std::sync::MutexGuard is not Send.
-            let (context, msgs, _meta_snapshot) = {
+            let (context, msgs) = {
                 let mut meta = config_clone.meta.lock().unwrap();
-                if meta.chat_messages.is_empty() {
-                    meta.chat_messages.push(crate::session::ChatMessage {
-                        role: "system".to_string(), content: system_prompt,
-                    });
+                let conv = meta.conversations.get_or_create("main");
+                if conv.messages.is_empty() {
+                    conv.push_system(system_prompt);
                 }
                 let (plan_ctx, needs_plan) = build_plan_context(&meta.plan);
                 let plan_hint = if needs_plan {
@@ -443,17 +432,11 @@ pub async fn ask_stream(
                     program_summary,
                     load_errors_ctx,
                     plan_ctx, req.message, plan_hint);
-                meta.chat_messages.push(crate::session::ChatMessage {
-                    role: "user".to_string(), content: context.clone(),
-                });
-                let msgs = meta.chat_messages.iter().map(|m| match m.role.as_str() {
-                    "system" => crate::llm::ChatMessage::system(m.content.clone()),
-                    "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-                    _ => crate::llm::ChatMessage::user(m.content.clone()),
-                }).collect::<Vec<_>>();
-                let meta_snapshot = meta.clone();
+                let conv = meta.conversations.get_or_create("main");
+                conv.push_user(&context);
+                let msgs = conv.to_llm_messages();
                 // guard dropped here — before any .await
-                (context, msgs, meta_snapshot)
+                (context, msgs)
             };
             tx.log("user", &context).await;
             msgs

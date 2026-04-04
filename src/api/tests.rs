@@ -1179,3 +1179,70 @@ async fn trace_not_silently_dropped() {
         "!trace should produce output, got: {:?}", res.mutation_results
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// ConversationManager migration tests
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Legacy chat_messages should be migrated into conversations["main"] on session load.
+#[test]
+fn session_migrates_chat_messages_to_conversations() {
+    // Build a session with legacy chat_messages but no conversations["main"]
+    let mut session = crate::session::Session::new();
+    session.meta.chat_messages = vec![
+        crate::session::ChatMessage { role: "system".to_string(), content: "you are helpful".to_string() },
+        crate::session::ChatMessage { role: "user".to_string(), content: "hello".to_string() },
+        crate::session::ChatMessage { role: "assistant".to_string(), content: "hi there".to_string() },
+    ];
+    // Ensure no "main" conversation exists yet
+    assert!(session.meta.conversations.get("main").is_none());
+
+    // Save to temp file and reload (triggers migration)
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test-session.json");
+    session.save(&path).unwrap();
+    let loaded = crate::session::Session::load(&path).unwrap();
+
+    // Legacy chat_messages should be empty (moved out)
+    assert!(loaded.meta.chat_messages.is_empty(), "legacy chat_messages should be empty after migration");
+
+    // conversations["main"] should have the messages
+    let main_conv = loaded.meta.conversations.get("main").expect("should have 'main' conversation");
+    assert_eq!(main_conv.messages.len(), 3, "main conversation should have 3 messages");
+    assert_eq!(main_conv.messages[0].role, "system");
+    assert_eq!(main_conv.messages[1].role, "user");
+    assert_eq!(main_conv.messages[2].role, "assistant");
+}
+
+/// Conversation.trim() should preserve system prompt and keep last N-1 messages.
+#[test]
+fn conversation_trim_preserves_system() {
+    let mut conv = crate::session::Conversation::new();
+    conv.push_system("system prompt");
+    for i in 0..10 {
+        conv.push_user(format!("msg {i}"));
+    }
+    assert_eq!(conv.messages.len(), 11); // 1 system + 10 user
+
+    conv.trim(5);
+    assert_eq!(conv.messages.len(), 5);
+    assert_eq!(conv.messages[0].role, "system");
+    assert_eq!(conv.messages[0].content, "system prompt");
+    // Last 4 messages should be the most recent user messages
+    assert_eq!(conv.messages[4].content, "msg 9");
+}
+
+/// Conversation.to_llm_messages() should produce correct LLM message types.
+#[test]
+fn conversation_to_llm_messages() {
+    let mut conv = crate::session::Conversation::new();
+    conv.push_system("sys");
+    conv.push_user("usr");
+    conv.push_assistant("ast");
+
+    let msgs = conv.to_llm_messages();
+    assert_eq!(msgs.len(), 3);
+    assert!(matches!(msgs[0].role, crate::llm::ChatRole::System));
+    assert!(matches!(msgs[1].role, crate::llm::ChatRole::User));
+    assert!(matches!(msgs[2].role, crate::llm::ChatRole::Assistant));
+}

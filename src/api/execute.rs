@@ -741,20 +741,18 @@ pub async fn execute_code(
                             let conflicts = branch.merge_into_parts(&mut program, &mut runtime, &mut meta, &mut sandbox);
                             if conflicts.is_empty() {
                                 eprintln!("[agent:{agent_name}] merged successfully");
-                                meta.chat_messages.push(crate::session::ChatMessage {
-                                    role: "system".to_string(),
-                                    content: format!("Agent '{agent_name}' completed and merged successfully."),
-                                });
+                                meta.conversations.get_or_create("main").push_system(
+                                    format!("Agent '{agent_name}' completed and merged successfully."),
+                                );
                                 if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
                                     s.status = "merged".to_string();
                                     s.message = "completed and merged".to_string();
                                 }
                             } else {
                                 eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
-                                meta.chat_messages.push(crate::session::ChatMessage {
-                                    role: "system".to_string(),
-                                    content: format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
-                                });
+                                meta.conversations.get_or_create("main").push_system(
+                                    format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
+                                );
                                 if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
                                     s.status = "conflict".to_string();
                                     s.message = conflicts.join("; ");

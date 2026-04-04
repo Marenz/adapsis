@@ -1107,6 +1107,18 @@ pub struct AskRequest {
     pub message: String,
 }
 
+#[derive(Deserialize)]
+pub struct InjectRequest {
+    pub message: String,
+    /// Conversation context to inject into (default: "main").
+    /// Use "main" for the primary conversation, or a specific context
+    /// like "telegram:12345" for a targeted conversation.
+    #[serde(default = "default_inject_context")]
+    pub context: String,
+}
+
+fn default_inject_context() -> String { "main".to_string() }
+
 #[derive(Serialize, Deserialize)]
 pub struct AskResponse {
     pub reply: String,
@@ -1722,14 +1734,33 @@ async fn adapsis_route_dispatch(
 }
 
 /// GET /api/events — SSE stream of all AI activity (subscribe from web UI).
-/// POST /api/inject — queue a message for the autonomous loop (no parallel stream)
+/// POST /api/inject — inject a message into a conversation context.
+///
+/// Body: `{"message": "...", "context": "main"}` (context defaults to "main")
+///
+/// For the "main" context, the message is also pushed to the global message_queue
+/// so that an active `ask_stream` session picks it up mid-flight.
 async fn inject_message(
     State(config): State<AppConfig>,
-    Json(req): Json<AskRequest>,
+    Json(req): Json<InjectRequest>,
 ) -> Json<serde_json::Value> {
-    config.message_queue.lock().await.push(req.message.clone());
-    eprintln!("[inject] queued: {}...", req.message.chars().take(80).collect::<String>());
-    Json(serde_json::json!({"status": "queued", "message": req.message}))
+    let context = req.context.clone();
+    eprintln!("[inject:{context}] {}...", req.message.chars().take(80).collect::<String>());
+
+    // Push into the conversation's message history
+    {
+        let mut meta = config.meta.lock().unwrap();
+        let conv = meta.conversations.get_or_create(&context);
+        conv.push_user(&req.message);
+    }
+
+    // For "main" context, also push to the global queue so an active
+    // ask_stream session picks it up mid-flight.
+    if context == "main" {
+        config.message_queue.lock().await.push(req.message.clone());
+    }
+
+    Json(serde_json::json!({"status": "injected", "context": context, "message": req.message}))
 }
 
 /// POST /api/drain-queue — drain queued messages (called by autonomous loop)

@@ -879,7 +879,7 @@ async fn main() -> Result<()> {
 
             // Build restart context before the session is split into tier locks.
             // This consumes last_opencode_output so it's only shown once.
-            let restart_context = if sess.meta.chat_messages.len() > 1 {
+            let restart_context = if sess.meta.conversations.get("main").is_some_and(|c| c.messages.len() > 1) {
                 Some(sess.restart_context())
             } else {
                 None
@@ -1406,15 +1406,12 @@ async fn main() -> Result<()> {
                     // Add event as tool message — AI decides whether to act
                     let messages = {
                         let mut meta = trigger_meta.lock().unwrap();
-                        meta.chat_messages.push(crate::session::ChatMessage {
+                        let conv = meta.conversations.get_or_create("main");
+                        conv.messages.push(crate::session::ChatMessage {
                             role: "tool".to_string(),
                             content: event_message.clone(),
                         });
-                        meta.chat_messages.iter().map(|m| match m.role.as_str() {
-                            "system" => llm::ChatMessage::system(m.content.clone()),
-                            "assistant" => llm::ChatMessage::assistant(&m.content),
-                            _ => llm::ChatMessage::user(m.content.clone()),
-                        }).collect::<Vec<_>>()
+                        conv.to_llm_messages()
                     };
 
                     match llm.generate(messages).await {
@@ -1446,10 +1443,8 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                 }
-                                meta.chat_messages.push(crate::session::ChatMessage {
-                                    role: "assistant".to_string(),
-                                    content: format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()),
-                                });
+                                let conv = meta.conversations.get_or_create("main");
+                                conv.push_assistant(format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()));
                                 *trigger_program.write().await = program;
                                 *trigger_runtime.write().unwrap() = runtime;
                                 *trigger_meta.lock().unwrap() = meta;
