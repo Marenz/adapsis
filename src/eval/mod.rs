@@ -2241,6 +2241,93 @@ pub fn read_back_program_mutations(
     program_mut.read().ok().map(|p| p.clone())
 }
 
+/// Bundles all shared state that must be installed on each eval worker thread.
+///
+/// Instead of calling 5 separate `set_shared_*()` functions at every
+/// `spawn_blocking` boundary, construct an `EvalContext` once and call
+/// `ctx.install()` inside the closure. This is the first step toward
+/// replacing thread-local globals with explicit parameter passing.
+///
+/// # Usage
+/// ```ignore
+/// let ctx = EvalContext::new(runtime, meta, broadcast, program_snapshot, program_mut);
+/// tokio::task::spawn_blocking(move || {
+///     ctx.install();
+///     // ... eval code ...
+/// });
+/// ```
+#[derive(Clone)]
+pub struct EvalContext {
+    pub runtime: Option<crate::session::SharedRuntime>,
+    pub meta: Option<crate::session::SharedMeta>,
+    pub event_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
+    pub program_snapshot: Option<std::sync::Arc<crate::ast::Program>>,
+    pub program_mut: Option<std::sync::Arc<std::sync::RwLock<crate::ast::Program>>>,
+}
+
+impl EvalContext {
+    /// Create a new context with all fields populated.
+    pub fn new(
+        runtime: crate::session::SharedRuntime,
+        meta: crate::session::SharedMeta,
+        event_broadcast: tokio::sync::broadcast::Sender<String>,
+        program: &crate::ast::Program,
+        program_mut: std::sync::Arc<std::sync::RwLock<crate::ast::Program>>,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime),
+            meta: Some(meta),
+            event_broadcast: Some(event_broadcast),
+            program_snapshot: Some(std::sync::Arc::new(program.clone())),
+            program_mut: Some(program_mut),
+        }
+    }
+
+    /// Create a minimal context (no event broadcast — used by main.rs spawn paths).
+    pub fn new_minimal(
+        runtime: crate::session::SharedRuntime,
+        meta: crate::session::SharedMeta,
+        program: &crate::ast::Program,
+        program_mut: std::sync::Arc<std::sync::RwLock<crate::ast::Program>>,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime),
+            meta: Some(meta),
+            event_broadcast: None,
+            program_snapshot: Some(std::sync::Arc::new(program.clone())),
+            program_mut: Some(program_mut),
+        }
+    }
+
+    /// Create an empty context (for tests or paths that don't need shared state).
+    pub fn empty() -> Self {
+        Self {
+            runtime: None,
+            meta: None,
+            event_broadcast: None,
+            program_snapshot: None,
+            program_mut: None,
+        }
+    }
+
+    /// Install all fields into the current thread's thread-local globals.
+    /// Call this at the top of every `spawn_blocking` closure.
+    pub fn install(&self) {
+        set_shared_runtime(self.runtime.clone());
+        set_shared_meta(self.meta.clone());
+        set_shared_event_broadcast(self.event_broadcast.clone());
+        set_shared_program(self.program_snapshot.clone());
+        set_shared_program_mut(self.program_mut.clone());
+    }
+
+    /// Install and also set up the display interner from a program.
+    /// Use this when the worker thread needs to format `Value` types.
+    pub fn install_with_interner(&self, program: &crate::ast::Program) {
+        self.install();
+        crate::intern::set_display_interner(&program.shared_interner);
+    }
+}
+
 const MAX_CALL_DEPTH: usize = 256;
 
 fn eval_call(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Result<Value> {
