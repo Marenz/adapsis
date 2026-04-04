@@ -123,7 +123,7 @@ fn encode_broadcast_event(event: &serde_json::Value) -> String {
 
 /// Temporary mutable working state used by complex handlers.
 /// Live truth is still the three tiers in AppConfig; this is just a local bag.
-struct WorkingSet {
+pub(crate) struct WorkingSet {
     program: crate::ast::Program,
     runtime: RuntimeState,
     meta: SessionMeta,
@@ -1603,6 +1603,669 @@ fn process_unmock(meta: &mut crate::session::SessionMeta, result: &mut Operation
     result.ok_silent(format!("cleared {count} mocks"));
 }
 
+/// Result returned by `execute_code()` — no SSE events, just data.
+pub struct CodeExecutionResult {
+    pub mutation_results: Vec<MutationResult>,
+    pub test_results: Vec<TestCaseResult>,
+    pub has_errors: bool,
+    /// True when `!opencode` succeeded and we need to `exec` into the new binary.
+    pub needs_opencode_restart: bool,
+    /// True when `!agent` was encountered — caller should know a background agent was spawned.
+    pub agent_spawned: bool,
+}
+
+impl CodeExecutionResult {
+    fn new() -> Self {
+        Self {
+            mutation_results: Vec::new(),
+            test_results: Vec::new(),
+            has_errors: false,
+            needs_opencode_restart: false,
+            agent_spawned: false,
+        }
+    }
+
+    fn push_ok(&mut self, msg: impl Into<String>) {
+        self.mutation_results.push(MutationResult { message: msg.into(), success: true });
+    }
+
+    fn push_err(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        eprintln!("[execute_code:err] {}", msg.chars().take(200).collect::<String>());
+        self.has_errors = true;
+        self.mutation_results.push(MutationResult { message: msg, success: false });
+    }
+
+    fn push_test_pass(&mut self, msg: impl Into<String>) {
+        self.test_results.push(TestCaseResult { message: msg.into(), pass: true });
+    }
+
+    fn push_test_fail(&mut self, msg: impl Into<String>) {
+        self.has_errors = true;
+        self.test_results.push(TestCaseResult { message: msg.into(), pass: false });
+    }
+}
+
+/// Execute a block of Adapsis code against a working snapshot.
+///
+/// All mutations, tests, evals, queries, watches, agents, and `!opencode` are
+/// handled here.  SSE events are **not** sent — the caller is responsible for
+/// inspecting the returned `CodeExecutionResult` and emitting any events it needs.
+pub async fn execute_code(
+    code: &str,
+    config: &AppConfig,
+    session: &mut WorkingSet,
+) -> CodeExecutionResult {
+    let mut result = CodeExecutionResult::new();
+
+    match crate::parser::parse(code) {
+        Ok(ops) => {
+            let opencode_tasks = collect_opencode_tasks(&ops);
+            let mut needs_opencode_restart = false;
+
+            // Remove duplicate function/type definitions before applying mutations
+            let mut fns_removed = false;
+            for op in &ops {
+                match op {
+                    crate::parser::Operation::Function(f) => {
+                        session.program.functions.retain(|existing| existing.name != f.name);
+                        fns_removed = true;
+                    }
+                    crate::parser::Operation::Type(t) => {
+                        let name = t.name.clone();
+                        session.program.types.retain(|existing: &crate::ast::TypeDecl| existing.name() != name);
+                    }
+                    _ => {}
+                }
+            }
+            if fns_removed {
+                session.program.rebuild_function_index();
+            }
+
+            // Handle !undo
+            let has_undo = ops.iter().any(|op| matches!(op, crate::parser::Operation::Undo));
+            if has_undo {
+                if session.meta.revision > 0 {
+                    let prev = session.meta.revision - 1;
+                    match crate::session::rewind_to(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, prev) {
+                        Ok(()) => result.push_ok(format!("Undone to rev {prev}")),
+                        Err(e) => result.push_err(format!("Undo: {e}")),
+                    }
+                }
+            }
+
+            // Handle !plan
+            let has_plan_ops = ops.iter().any(|op| matches!(op, crate::parser::Operation::Plan(_)));
+            for op in &ops {
+                if let crate::parser::Operation::Plan(action) = op {
+                    match action {
+                        crate::parser::PlanAction::Set(steps) => {
+                            session.meta.plan = steps.iter().map(|s| crate::session::PlanStep {
+                                description: s.clone(),
+                                status: crate::session::PlanStatus::Pending,
+                            }).collect();
+                            result.push_ok(format!("Plan set: {} steps", steps.len()));
+                        }
+                        crate::parser::PlanAction::Progress(n) => {
+                            let idx = n.saturating_sub(1);
+                            if let Some(step) = session.meta.plan.get_mut(idx) {
+                                step.status = crate::session::PlanStatus::Done;
+                                result.push_ok(format!("Step {n} done: {}", step.description));
+                            }
+                        }
+                        crate::parser::PlanAction::Fail(n) => {
+                            let idx = n.saturating_sub(1);
+                            if let Some(step) = session.meta.plan.get_mut(idx) {
+                                step.status = crate::session::PlanStatus::Failed;
+                                result.push_ok(format!("Step {n} failed: {}", step.description));
+                            }
+                        }
+                        crate::parser::PlanAction::Show => {
+                            let plan_str = session.meta.plan.iter().enumerate().map(|(i, s)| {
+                                let icon = match s.status {
+                                    crate::session::PlanStatus::Pending => "[ ]",
+                                    crate::session::PlanStatus::InProgress => "[~]",
+                                    crate::session::PlanStatus::Done => "[x]",
+                                    crate::session::PlanStatus::Failed => "[!]",
+                                };
+                                format!("  {} {}: {}", icon, i + 1, s.description)
+                            }).collect::<Vec<_>>().join("\n");
+                            result.push_ok(if plan_str.is_empty() { "No plan set".to_string() } else { format!("Plan:\n{plan_str}") });
+                        }
+                    }
+                }
+            }
+            if has_plan_ops {
+                config.write_back_working_set(session).await;
+            }
+
+            // Apply mutations
+            let has_mutations = ops.iter().any(|op| !matches!(op,
+                crate::parser::Operation::Test(_) | crate::parser::Operation::Trace(_)
+                | crate::parser::Operation::Eval(_) | crate::parser::Operation::Query(_)
+                | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
+                | crate::parser::Operation::Watch { .. }
+                | crate::parser::Operation::Agent { .. }
+                | crate::parser::Operation::Message { .. }
+                | crate::parser::Operation::Done
+                | crate::parser::Operation::OpenCode(_)));
+
+            if has_mutations {
+                match crate::session::apply_to_tiers(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, code) {
+                    Ok(res) => {
+                        config.write_back_working_set(session).await;
+                        for (msg, ok) in res {
+                            eprintln!("[execute_code:{}] {msg}", if ok { "ok" } else { "err" });
+                            if !ok { result.has_errors = true; }
+                            result.mutation_results.push(MutationResult { message: msg, success: ok });
+                        }
+                    }
+                    Err(e) => {
+                        result.push_err(format!("{e}"));
+                    }
+                }
+            }
+
+            // Handle tests, evals, queries, watches, agents, messages
+            for op in &ops {
+                match op {
+                    crate::parser::Operation::Test(test) => {
+                        let mut all_passed = true;
+                        let needs_async = session.program.get_function(&test.function_name)
+                            .is_some_and(|f| f.effects.iter().any(|e|
+                                matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
+                        for case in &test.cases {
+                            let case_result = if needs_async {
+                                if let Some(sender) = &config.io_sender {
+                                    let program = session.program.clone();
+                                    let fn_name = test.function_name.clone();
+                                    let case = case.clone();
+                                    let mocks = session.meta.io_mocks.clone();
+                                    let routes = session.runtime.http_routes.clone();
+                                    let sender = sender.clone();
+                                    crate::eval::eval_test_case_async(
+                                        &program, &fn_name, &case, &mocks, sender, &routes,
+                                    ).await
+                                } else {
+                                    crate::eval::eval_test_case_with_mocks(
+                                        &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
+                                    )
+                                }
+                            } else {
+                                crate::eval::eval_test_case_with_mocks(
+                                    &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
+                                )
+                            };
+                            match case_result {
+                                Ok(msg) => {
+                                    eprintln!("[execute_code:pass] {msg}");
+                                    result.push_test_pass(msg);
+                                }
+                                Err(e) => {
+                                    all_passed = false;
+                                    eprintln!("[execute_code:fail] {e}");
+                                    result.push_test_fail(format!("{e}"));
+                                }
+                            }
+                        }
+                        if all_passed && !test.cases.is_empty() {
+                            crate::session::store_test(&mut session.program, &test.function_name, &test.cases);
+                        }
+                    }
+                    crate::parser::Operation::Eval(ev) => {
+                        // Inline expression: evaluate directly
+                        if let Some(ref expr) = ev.inline_expr {
+                            if crate::eval::expr_contains_io_builtin(expr) {
+                                if let Some(sender) = &config.io_sender {
+                                    let program = session.program.clone();
+                                    let program_mut = crate::eval::make_shared_program_mut(&program);
+                                    let program_mut_clone = program_mut.clone();
+                                    let expr = expr.clone();
+                                    let sender = sender.clone();
+                                    let runtime_for_blocking = config.runtime.clone();
+                                    let meta_for_blocking = config.meta.clone();
+                                    let event_broadcast = config.event_broadcast.clone();
+                                    let eval_result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
+                                        tokio::task::spawn_blocking(move || {
+                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                            eval::set_shared_meta(Some(meta_for_blocking));
+                                            eval::set_shared_event_broadcast(Some(event_broadcast));
+                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                            crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                        })
+                                    ).await;
+                                    let (msg, success) = match &eval_result {
+                                        Ok(Ok(Ok(val))) => (format!("= {val}"), true),
+                                        Ok(Ok(Err(e))) => { (format!("eval error: {e}"), false) }
+                                        Ok(Err(e)) => { (format!("eval task error: {e}"), false) }
+                                        Err(_) => { (format!("eval timed out after {EVAL_TIMEOUT_SECS}s"), false) }
+                                    };
+                                    eprintln!("[execute_code:eval] {msg}");
+                                    if success {
+                                        result.push_ok(msg);
+                                    } else {
+                                        result.push_err(msg);
+                                    }
+                                    if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                        session.program = mutated.clone();
+                                        *config.program.write().await = mutated;
+                                    }
+                                    config.sync_async_side_effects_into(session);
+                                    continue;
+                                }
+                            }
+                            match crate::eval::eval_inline_expr(&session.program, expr) {
+                                Ok(val) => {
+                                    let msg = format!("= {val}");
+                                    eprintln!("[execute_code:eval] {msg}");
+                                    result.push_ok(msg);
+                                }
+                                Err(e) => {
+                                    let msg = format!("eval error: {e}");
+                                    eprintln!("[execute_code:eval:err] {msg}");
+                                    result.push_err(msg);
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Block eval of untested functions in AdapsisOS mode
+                        if session.program.require_modules {
+                            if let Some(func) = session.program.get_function(&ev.function_name) {
+                                if func.body.len() > 2 && !crate::session::is_function_tested(&session.program, &ev.function_name) {
+                                    result.push_err(format!(
+                                        "function `{}` has {} statements but no passing tests. Write !test blocks first.",
+                                        ev.function_name, func.body.len()
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let needs_async = session.program.get_function(&ev.function_name)
+                            .is_some_and(|f| f.effects.iter().any(|e|
+                                matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
+
+                        if needs_async {
+                            if let Some(sender) = &config.io_sender {
+                                let program = session.program.clone();
+                                let program_mut = crate::eval::make_shared_program_mut(&program);
+                                let program_mut_clone = program_mut.clone();
+                                let fn_name = ev.function_name.clone();
+                                let input = ev.input.clone();
+                                let sender = sender.clone();
+                                let runtime_for_blocking = config.runtime.clone();
+                                let meta_for_blocking = config.meta.clone();
+                                let event_broadcast = config.event_broadcast.clone();
+                                let eval_fn_name = ev.function_name.clone();
+                                let eval_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
+                                    tokio::task::spawn_blocking(move || {
+                                        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
+                                        eval::set_shared_meta(Some(meta_for_blocking));
+                                        eval::set_shared_event_broadcast(Some(event_broadcast));
+                                        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                        crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                        let func = program.get_function(&fn_name)
+                                            .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                                        let handle = crate::coroutine::CoroutineHandle::new(sender);
+                                        let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
+                                        env.populate_shared_from_program(&program);
+                                        env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
+                                        let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
+                                        crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
+                                        crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
+                                    })
+                                ).await;
+                                let (msg, success) = match &eval_result {
+                                    Ok(Ok(Ok(val))) => (format!("eval {}() = {val}", eval_fn_name), true),
+                                    Ok(Ok(Err(e))) => { (format!("eval error: {e}"), false) }
+                                    Ok(Err(e)) => { (format!("eval task error: {e}"), false) }
+                                    Err(_) => { (format!("eval {}() timed out after {EVAL_TIMEOUT_SECS}s", eval_fn_name), false) }
+                                };
+                                eprintln!("[execute_code:eval] {msg}");
+                                if success {
+                                    result.push_ok(msg);
+                                } else {
+                                    result.push_err(msg);
+                                }
+                                if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                    session.program = mutated.clone();
+                                    *config.program.write().await = mutated;
+                                }
+                                config.sync_async_side_effects_into(session);
+                            }
+                        } else {
+                            match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
+                                Ok((val, compiled)) => {
+                                    let tag = if compiled { " [compiled]" } else { "" };
+                                    let msg = format!("eval {}() = {val}{tag}", ev.function_name);
+                                    eprintln!("[execute_code:eval] {msg}");
+                                    result.push_ok(msg);
+                                }
+                                Err(e) => {
+                                    let msg = format!("eval error: {e}");
+                                    eprintln!("[execute_code:eval:err] {msg}");
+                                    result.push_err(msg);
+                                }
+                            }
+                        }
+                    }
+                    crate::parser::Operation::Query(query) => {
+                        let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
+                            let msgs = crate::session::peek_messages(&session.meta, "main");
+                            if msgs.is_empty() {
+                                "No messages.".to_string()
+                            } else {
+                                msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n")
+                            }
+                        } else if query.trim() == "?tasks" {
+                            format_tasks(&config.task_registry)
+                        } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
+                            format_inspect_task(&config.task_registry, &config.snapshot_registry, tid)
+                        } else if query.trim() == "?library" {
+                            crate::library::query_library(&session.program, session.meta.library_state.as_ref())
+                        } else {
+                            let table = crate::typeck::build_symbol_table(&session.program);
+                            crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
+                        };
+                        result.push_ok(response);
+                    }
+                    crate::parser::Operation::Watch { function_name, args, interval_ms } => {
+                        eprintln!("[execute_code:watch] {function_name}({args}) every {interval_ms}ms");
+                        let fn_name = function_name.clone();
+                        let fn_args = args.clone();
+                        let interval = *interval_ms;
+                        let watch_program = config.program.clone();
+                        let watch_meta = config.meta.clone();
+                        let trigger = config.self_trigger.clone();
+                        let watch_jit_cache = config.jit_cache.clone();
+
+                        tokio::spawn(async move {
+                            let mut last_result = String::new();
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+                                let result = {
+                                    let program = watch_program.read().await;
+                                    let meta = watch_meta.lock().unwrap();
+                                    let input_expr = if fn_args.trim().is_empty() {
+                                        crate::parser::Expr::StructLiteral(vec![])
+                                    } else {
+                                        match crate::parser::parse_test_input(0, &fn_args) {
+                                            Ok(expr) => expr,
+                                            Err(_) => break,
+                                        }
+                                    };
+                                    match crate::eval::eval_compiled_or_interpreted_cached(
+                                        &program, &fn_name, &input_expr,
+                                        Some(&watch_jit_cache), meta.revision,
+                                    ) {
+                                        Ok((r, _)) => r,
+                                        Err(e) => format!("error: {e}"),
+                                    }
+                                };
+                                if result != last_result && !last_result.is_empty() {
+                                    eprintln!("[execute_code:watch:trigger] {fn_name} changed: {last_result} → {result}");
+                                    let msg = format!("Watcher '{fn_name}' triggered: result changed from '{last_result}' to '{result}'");
+                                    let _ = trigger.send(msg).await;
+                                }
+                                last_result = result;
+                            }
+                        });
+                        result.push_ok(format!("Watching {function_name}({args}) every {interval_ms}ms"));
+                    }
+                    crate::parser::Operation::Agent { name, scope, task } => {
+                        eprintln!("[execute_code:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
+
+                        let agent_scope = crate::session::AgentScope::parse(scope);
+                        let branch = crate::session::AgentBranch::fork_from_parts(name, agent_scope, task, &session.program, &session.runtime, &session.meta);
+                        let program_summary = crate::validator::program_summary_compact(&session.program);
+                        let agent_task = task.clone();
+                        let agent_name = name.clone();
+                        let llm_url = config.llm_url.clone();
+                        let llm_model = config.llm_model.clone();
+                        let llm_key = config.llm_api_key.clone();
+                        let agent_program = config.program.clone();
+                        let agent_meta = config.meta.clone();
+                        let agent_runtime = config.runtime.clone();
+
+                        tokio::spawn(async move {
+                            eprintln!("[agent:{agent_name}] starting");
+                            let agent_llm = crate::llm::LlmClient::new_with_model_and_key(&llm_url, &llm_model, llm_key);
+
+                            let scope_desc = match &branch.scope {
+                                crate::session::AgentScope::ReadOnly =>
+                                    "SCOPE: read-only. You CAN: write !test blocks, use !eval, use ?queries. You CANNOT: define new functions or types, modify existing code.".to_string(),
+                                crate::session::AgentScope::NewOnly =>
+                                    "SCOPE: new-only. You CAN: define NEW functions and types, write !test blocks, use !eval. You CANNOT: modify or replace existing functions.".to_string(),
+                                crate::session::AgentScope::Module(m) =>
+                                    format!("SCOPE: module {m}. You CAN: modify anything in module {m}, add new functions to it. You CANNOT: modify code outside module {m}."),
+                                crate::session::AgentScope::Full =>
+                                    "SCOPE: full. You can modify anything.".to_string(),
+                            };
+                            let agent_system = format!(
+                                "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Adapsis code. When done, respond with !done in a <code> block.",
+                                crate::prompt::system_prompt(),
+                                crate::builtins::format_for_prompt()
+                            );
+
+                            let mut agent_messages = vec![
+                                crate::llm::ChatMessage::system(agent_system),
+                                crate::llm::ChatMessage::user(format!("Program state:\n{program_summary}\n\nTask: {agent_task}")),
+                            ];
+
+                            let mut branch = branch;
+                            for agent_iter in 0..10 {
+                                {
+                                    let mut meta = agent_meta.lock().unwrap();
+                                    let inbox = meta.agent_mailbox.remove(&agent_name).unwrap_or_default();
+                                    if !inbox.is_empty() {
+                                        let inbox_text = inbox.iter()
+                                            .map(|m| format!("[from {}] {}", m.from, m.content))
+                                            .collect::<Vec<_>>().join("\n");
+                                        eprintln!("[agent:{agent_name}] received {} messages", inbox.len());
+                                        agent_messages.push(crate::llm::ChatMessage::user(
+                                            format!("Messages received:\n{inbox_text}\n\nIncorporate this information and continue.")
+                                        ));
+                                    }
+                                }
+
+                                let output = match agent_llm.generate(agent_messages.clone()).await {
+                                    Ok(o) => o,
+                                    Err(e) => { eprintln!("[agent:{agent_name}] LLM error: {e}"); break; }
+                                };
+
+                                agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));
+
+                                let code = output.code.clone();
+                                if code.trim() == "!done" || code.is_empty() {
+                                    eprintln!("[agent:{agent_name}] done at iter {agent_iter}");
+                                    break;
+                                }
+
+                                if let Ok(ops) = crate::parser::parse(&code) {
+                                    for op in &ops {
+                                        if let crate::parser::Operation::Message { to, content } = op {
+                                            eprintln!("[agent:{agent_name}] !msg → {to}: {content}");
+                                            let mut meta = agent_meta.lock().unwrap();
+                                            let msg = crate::session::AgentMessage {
+                                                from: agent_name.clone(),
+                                                to: to.clone(),
+                                                content: content.clone(),
+                                                timestamp: crate::session::now(),
+                                            };
+                                            meta.agent_mailbox.entry(to.clone()).or_default().push(msg);
+                                        }
+                                    }
+                                }
+
+                                match branch.apply(&code) {
+                                    Ok(results) => {
+                                        let mut has_err = false;
+                                        for (msg, ok) in &results {
+                                            eprintln!("[agent:{agent_name}] {}: {msg}", if *ok {"ok"} else {"err"});
+                                            if !*ok { has_err = true; }
+                                        }
+                                        let feedback = results.iter()
+                                            .map(|(msg, ok)| format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}))
+                                            .collect::<Vec<_>>().join("\n");
+                                        if has_err {
+                                            agent_messages.push(crate::llm::ChatMessage::user(format!("Errors:\n{feedback}\nFix and continue.")));
+                                        } else {
+                                            agent_messages.push(crate::llm::ChatMessage::user(format!("Results:\n{feedback}\nContinue or !done.")));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[agent:{agent_name}] apply error: {e}");
+                                        agent_messages.push(crate::llm::ChatMessage::user(format!("Error: {e}\nFix and continue.")));
+                                    }
+                                }
+                            }
+
+                            // Merge branch back
+                            let mut program = agent_program.read().await.clone();
+                            let mut runtime = agent_runtime.read().unwrap().clone();
+                            let mut meta = agent_meta.lock().unwrap().clone();
+                            let mut sandbox = None;
+                            let conflicts = branch.merge_into_parts(&mut program, &mut runtime, &mut meta, &mut sandbox);
+                            if conflicts.is_empty() {
+                                eprintln!("[agent:{agent_name}] merged successfully");
+                                meta.chat_messages.push(crate::session::ChatMessage {
+                                    role: "system".to_string(),
+                                    content: format!("Agent '{agent_name}' completed and merged successfully."),
+                                });
+                                if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                    s.status = "merged".to_string();
+                                    s.message = "completed and merged".to_string();
+                                }
+                            } else {
+                                eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
+                                meta.chat_messages.push(crate::session::ChatMessage {
+                                    role: "system".to_string(),
+                                    content: format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
+                                });
+                                if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
+                                    s.status = "conflict".to_string();
+                                    s.message = conflicts.join("; ");
+                                }
+                            }
+                            *agent_program.write().await = program;
+                            *agent_runtime.write().unwrap() = runtime;
+                            *agent_meta.lock().unwrap() = meta;
+                        });
+
+                        result.push_ok(format!("Agent '{name}' spawned (background)"));
+                        result.agent_spawned = true;
+
+                        session.meta.agent_log.push(crate::session::AgentStatus {
+                            name: name.clone(),
+                            task: task.chars().take(100).collect(),
+                            scope: scope.clone(),
+                            status: "running".to_string(),
+                            message: String::new(),
+                        });
+                    }
+                    crate::parser::Operation::Message { to, content } => {
+                        eprintln!("[execute_code:msg] → {to}: {content}");
+                        crate::session::send_agent_message(&mut session.meta, "main", to, content);
+                        config.write_back_working_set(session).await;
+                        result.push_ok(format!("Message sent to '{to}'"));
+                    }
+                    crate::parser::Operation::OpenCode(_) => {}
+                    // Top-level statements: execute immediately
+                    op @ (crate::parser::Operation::Call(_)
+                    | crate::parser::Operation::Let(_)
+                    | crate::parser::Operation::Set(_)
+                    | crate::parser::Operation::Await(_)
+                    | crate::parser::Operation::Spawn(_)
+                    | crate::parser::Operation::If(_)
+                    | crate::parser::Operation::While(_)
+                    | crate::parser::Operation::Each(_)
+                    | crate::parser::Operation::Match(_)
+                    | crate::parser::Operation::Check(_)
+                    | crate::parser::Operation::Branch(_)
+                    | crate::parser::Operation::Return(_)) => {
+                        match crate::validator::convert_statement_op(op) {
+                            Ok(stmt) => {
+                                let mut env = crate::eval::Env::new_with_shared_interner(&session.program.shared_interner);
+                                env.populate_shared_from_program(&session.program);
+                                if let Some(sender) = &config.io_sender {
+                                    env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
+                                        crate::coroutine::CoroutineHandle::new(sender.clone())
+                                    ));
+                                }
+                                match crate::eval::eval_function_body_pub(&session.program, &[stmt], &mut env) {
+                                    Ok(val) => {
+                                        let msg = format!("executed: {val}");
+                                        eprintln!("[execute_code:exec] {msg}");
+                                        result.push_ok(msg);
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("exec error: {e}");
+                                        eprintln!("[execute_code:exec:err] {msg}");
+                                        result.push_err(msg);
+                                    }
+                                }
+                                config.sync_async_side_effects_into(session);
+                            }
+                            Err(e) => {
+                                result.push_err(format!("statement error: {e}"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Handle !opencode tasks
+            for task in opencode_tasks {
+                eprintln!("[execute_code:opencode] {task}");
+                let oc_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(3600),
+                    tokio::process::Command::new("opencode")
+                        .arg("run").arg("--format").arg("json")
+                        .arg("--attach").arg("http://localhost:4096")
+                        .arg("--dir").arg(&config.project_dir)
+                        .arg(task)
+                        .current_dir(&config.project_dir)
+                        .output()
+                ).await;
+                match oc_result {
+                    Ok(Ok(output)) if output.status.success() => {
+                        eprintln!("[execute_code:opencode:done] rebuilding...");
+                        let build = tokio::process::Command::new("cargo")
+                            .arg("build").arg("--release").current_dir(&config.project_dir).output().await;
+                        match build {
+                            Ok(b) if b.status.success() => {
+                                result.push_ok("OpenCode + rebuild successful. Restart to apply.".to_string());
+                                needs_opencode_restart = true;
+                            }
+                            _ => {
+                                result.push_err("OpenCode done but build failed".to_string());
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push_err("OpenCode failed or timed out".to_string());
+                    }
+                }
+            }
+
+            if needs_opencode_restart {
+                result.needs_opencode_restart = true;
+            }
+        }
+        Err(e) => {
+            result.push_err(format!("Parse error: {e}"));
+        }
+    }
+
+    result
+}
+
 pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
@@ -1719,660 +2382,49 @@ pub async fn ask(
         if !all_code.is_empty() { all_code.push_str("\n\n// --- iteration ---\n"); }
         all_code.push_str(&code);
 
-        // Apply code
-        let mut iter_results: Vec<MutationResult> = vec![];
-        let mut iter_test_results: Vec<TestCaseResult> = vec![];
-        let mut iter_has_errors = false;
-
+        // Execute code via shared execute_code() function
         let mut session = config.snapshot_working_set().await;
+        let exec_result = execute_code(&code, &config, &mut session).await;
 
-        match crate::parser::parse(&code) {
-            Ok(ops) => {
-                let opencode_tasks = collect_opencode_tasks(&ops);
-                let mut needs_opencode_restart = false;
-                // Remove duplicates
-                let mut fns_removed = false;
-                for op in &ops {
-                    match op {
-                        crate::parser::Operation::Function(f) => {
-                            session.program.functions.retain(|existing| existing.name != f.name);
-                            fns_removed = true;
-                        }
-                        crate::parser::Operation::Type(t) => {
-                            let name = t.name.clone();
-                            session.program.types.retain(|existing: &crate::ast::TypeDecl| existing.name() != name);
-                        }
-                        _ => {}
-                    }
-                }
-                if fns_removed {
-                    session.program.rebuild_function_index();
-                }
-
-                // Handle !undo and !plan before apply
-                let has_undo = ops.iter().any(|op| matches!(op, crate::parser::Operation::Undo));
-                if has_undo {
-                    if session.meta.revision > 0 {
-                        let prev = session.meta.revision - 1;
-                        match crate::session::rewind_to(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, prev) {
-                            Ok(()) => iter_results.push(MutationResult { message: format!("Undone to rev {prev}"), success: true }),
-                            Err(e) => { iter_has_errors = true; iter_results.push(MutationResult { message: format!("Undo: {e}"), success: false }); }
-                        }
-                    }
-                }
-                let has_plan_ops = ops.iter().any(|op| matches!(op, crate::parser::Operation::Plan(_)));
-                for op in &ops {
-                    if let crate::parser::Operation::Plan(action) = op {
-                        match action {
-                            crate::parser::PlanAction::Set(steps) => {
-                                session.meta.plan = steps.iter().map(|s| crate::session::PlanStep {
-                                    description: s.clone(),
-                                    status: crate::session::PlanStatus::Pending,
-                                }).collect();
-                                iter_results.push(MutationResult { message: format!("Plan set: {} steps", steps.len()), success: true });
-                            }
-                            crate::parser::PlanAction::Progress(n) => {
-                                let idx = n.saturating_sub(1);
-                                if let Some(step) = session.meta.plan.get_mut(idx) {
-                                    step.status = crate::session::PlanStatus::Done;
-                                    iter_results.push(MutationResult { message: format!("Step {n} done: {}", step.description), success: true });
-                                }
-                            }
-                            crate::parser::PlanAction::Fail(n) => {
-                                let idx = n.saturating_sub(1);
-                                if let Some(step) = session.meta.plan.get_mut(idx) {
-                                    step.status = crate::session::PlanStatus::Failed;
-                                    iter_results.push(MutationResult { message: format!("Step {n} failed: {}", step.description), success: true });
-                                }
-                            }
-                            crate::parser::PlanAction::Show => {
-                                let plan_str = session.meta.plan.iter().enumerate().map(|(i, s)| {
-                                    let icon = match s.status {
-                                        crate::session::PlanStatus::Pending => "[ ]",
-                                        crate::session::PlanStatus::InProgress => "[~]",
-                                        crate::session::PlanStatus::Done => "[x]",
-                                        crate::session::PlanStatus::Failed => "[!]",
-                                    };
-                                    format!("  {} {}: {}", icon, i + 1, s.description)
-                                }).collect::<Vec<_>>().join("\n");
-                                iter_results.push(MutationResult { message: if plan_str.is_empty() { "No plan set".to_string() } else { format!("Plan:\n{plan_str}") }, success: true });
-                            }
-                        }
-                    }
-                }
-                if has_plan_ops {
-                    config.write_back_working_set(&session).await;
-                }
-
-                // Apply mutations
-                let has_mutations = ops.iter().any(|op| !matches!(op,
-                    crate::parser::Operation::Test(_) | crate::parser::Operation::Trace(_)
-                    | crate::parser::Operation::Eval(_) | crate::parser::Operation::Query(_)
-                    | crate::parser::Operation::Undo | crate::parser::Operation::Plan(_)
-                    | crate::parser::Operation::Watch { .. }
-                    | crate::parser::Operation::Agent { .. }
-                    | crate::parser::Operation::Message { .. }
-                    | crate::parser::Operation::OpenCode(_)));
-
-                if has_mutations {
-                    match crate::session::apply_to_tiers(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, &code) {
-                        Ok(res) => {
-                            config.write_back_working_set(&session).await;
-                            for (msg, ok) in res {
-                                eprintln!("[web:{}] {msg}", if ok { "ok" } else { "err" });
-                                if !ok { iter_has_errors = true; }
-                                iter_results.push(MutationResult { message: msg, success: ok });
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[web:err] {e}");
-                            iter_has_errors = true;
-                            iter_results.push(MutationResult { message: format!("{e}"), success: false });
-                        }
-                    }
-                }
-
-                // Handle tests, evals, queries, opencode
-                for op in &ops {
-                    match op {
-                        crate::parser::Operation::Test(test) => {
-                            let mut all_passed = true;
-                            let needs_async = session.program.get_function(&test.function_name)
-                                .is_some_and(|f| f.effects.iter().any(|e|
-                                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
-
-                            for case in &test.cases {
-                                let case_result = if needs_async {
-                                    if let Some(sender) = &config.io_sender {
-                                        let program = session.program.clone();
-                                        let fn_name = test.function_name.clone();
-                                        let case = case.clone();
-                                        let mocks = session.meta.io_mocks.clone();
-                                        let routes = session.runtime.http_routes.clone();
-                                        let sender = sender.clone();
-                                        let result = crate::eval::eval_test_case_async(
-                                            &program, &fn_name, &case, &mocks, sender, &routes,
-                                        ).await;
-                                        result
-                                    } else {
-                                        crate::eval::eval_test_case_with_mocks(
-                                            &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
-                                        )
-                                    }
-                                } else {
-                                    crate::eval::eval_test_case_with_mocks(
-                                        &session.program, &test.function_name, case, &session.meta.io_mocks, &session.runtime.http_routes,
-                                    )
-                                };
-                                match case_result {
-                                    Ok(msg) => { eprintln!("[web:pass] {msg}"); iter_test_results.push(TestCaseResult { message: msg, pass: true }); }
-                                    Err(e) => { all_passed = false; eprintln!("[web:fail] {e}"); iter_has_errors = true; iter_test_results.push(TestCaseResult { message: format!("{e}"), pass: false }); }
-                                }
-                            }
-                            if all_passed && !test.cases.is_empty() {
-                                crate::session::store_test(&mut session.program, &test.function_name, &test.cases);
-                            }
-                        }
-                        crate::parser::Operation::Eval(ev) => {
-                            // Inline expression: evaluate directly
-                            if let Some(ref expr) = ev.inline_expr {
-                                // Check if expression contains IO builtins — run async if so
-                                if crate::eval::expr_contains_io_builtin(expr) {
-                                    if let Some(sender) = &config.io_sender {
-                                        let program = session.program.clone();
-                                        let program_mut = crate::eval::make_shared_program_mut(&program);
-                                        let program_mut_clone = program_mut.clone();
-                                        let expr = expr.clone();
-                                        let sender = sender.clone();
-                                        let runtime_for_blocking = config.runtime.clone();
-                                        let meta_for_blocking = config.meta.clone();
-                                        let event_broadcast = config.event_broadcast.clone();
-                                    let eval_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
-                                        tokio::task::spawn_blocking(move || {
-                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                            eval::set_shared_meta(Some(meta_for_blocking));
-                                            eval::set_shared_event_broadcast(Some(event_broadcast));
-                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
-                                            crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
-                                        })
-                                    ).await;
-                                        let (msg, success) = match &eval_result {
-                                            Ok(Ok(Ok(val))) => (format!("= {val}"), true),
-                                            Ok(Ok(Err(e))) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
-                                            Ok(Err(e)) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
-                                            Err(_) => { iter_has_errors = true; (format!("eval timed out after {EVAL_TIMEOUT_SECS}s"), false) }
-                                        };
-                                        eprintln!("[web:eval] {msg}");
-                                        iter_results.push(MutationResult { message: msg, success });
-                                        // Sync mutations back
-                                        if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-                                            session.program = mutated.clone();
-                                            *config.program.write().await = mutated;
-                                        }
-                                        config.sync_async_side_effects_into(&mut session);
-                                        continue;
-                                    }
-                                    // No IO sender — fall through to sync eval which will error
-                                }
-                                match crate::eval::eval_inline_expr(&session.program, expr) {
-                                    Ok(val) => {
-                                        let msg = format!("= {val}");
-                                        eprintln!("[web:eval] {msg}");
-                                        iter_results.push(MutationResult { message: msg, success: true });
-                                    }
-                                    Err(e) => {
-                                        iter_has_errors = true;
-                                        let msg = format!("eval error: {e}");
-                                        eprintln!("[web:eval:err] {msg}");
-                                        iter_results.push(MutationResult { message: msg, success: false });
-                                    }
-                                }
-                                continue;
-                            }
-
-                            // Block eval of untested functions in AdapsisOS mode
-                            if session.program.require_modules {
-                                if let Some(func) = session.program.get_function(&ev.function_name) {
-                                    if func.body.len() > 2 && !crate::session::is_function_tested(&session.program, &ev.function_name) {
-                                        iter_has_errors = true;
-                                        iter_results.push(MutationResult {
-                                            message: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
-                                            success: false,
-                                        });
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            let needs_async = session.program.get_function(&ev.function_name)
-                                .is_some_and(|f| f.effects.iter().any(|e|
-                                    matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
-
-                            if needs_async {
-                                if let Some(sender) = &config.io_sender {
-                                    let program = session.program.clone();
-                                    let program_mut = crate::eval::make_shared_program_mut(&program);
-                                    let program_mut_clone = program_mut.clone();
-                                    let fn_name = ev.function_name.clone();
-                                    let input = ev.input.clone();
-                                    let sender = sender.clone();
-                                    let runtime_for_blocking = config.runtime.clone();
-                                    let meta_for_blocking = config.meta.clone();
-                                    let event_broadcast = config.event_broadcast.clone();
-                                    let eval_fn_name = ev.function_name.clone();
-                                    let eval_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
-                                        tokio::task::spawn_blocking(move || {
-                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                            eval::set_shared_meta(Some(meta_for_blocking));
-                                            eval::set_shared_event_broadcast(Some(event_broadcast));
-                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
-                                            let func = program.get_function(&fn_name)
-                                                .ok_or_else(|| anyhow::anyhow!("function not found"))?;
-                                            let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                            let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
-                                            env.populate_shared_from_program(&program);
-                                            env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                            let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
-                                            crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
-                                            crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
-                                        })
-                                    ).await;
-                                    let (msg, success) = match &eval_result {
-                                        Ok(Ok(Ok(val))) => (format!("eval {}() = {val}", eval_fn_name), true),
-                                        Ok(Ok(Err(e))) => { iter_has_errors = true; (format!("eval error: {e}"), false) }
-                                        Ok(Err(e)) => { iter_has_errors = true; (format!("eval task error: {e}"), false) }
-                                        Err(_) => { iter_has_errors = true; (format!("eval {}() timed out after {EVAL_TIMEOUT_SECS}s", eval_fn_name), false) }
-                                    };
-                                    eprintln!("[web:eval] {msg}");
-                                    iter_results.push(MutationResult { message: msg, success });
-                                    // Sync mutations back
-                                    if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-                                        session.program = mutated.clone();
-                                        *config.program.write().await = mutated;
-                                    }
-                                    config.sync_async_side_effects_into(&mut session);
-                                }
-                            } else {
-                                match crate::eval::eval_compiled_or_interpreted_cached(&session.program, &ev.function_name, &ev.input, Some(&config.jit_cache), session.meta.revision) {
-                                    Ok((result, compiled)) => {
-                                        let tag = if compiled { " [compiled]" } else { "" };
-                                        let msg = format!("eval {}() = {result}{tag}", ev.function_name);
-                                        eprintln!("[web:eval] {msg}");
-                                        iter_results.push(MutationResult { message: msg, success: true });
-                                    }
-                                    Err(e) => {
-                                        iter_has_errors = true;
-                                        let msg = format!("eval error: {e}");
-                                        eprintln!("[web:eval:err] {msg}");
-                                        iter_results.push(MutationResult { message: msg, success: false });
-                                    }
-                                }
-                            }
-                        }
-                        crate::parser::Operation::Query(query) => {
-                            let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
-                                let msgs = crate::session::peek_messages(&session.meta, "main");
-                                if msgs.is_empty() {
-                                    "No messages.".to_string()
-                                } else {
-                                    msgs.iter().map(|m| format!("[{}] from {}: {}", m.timestamp, m.from, m.content)).collect::<Vec<_>>().join("\n")
-                                }
-                            } else if query.trim() == "?tasks" {
-                                format_tasks(&config.task_registry)
-                            } else if let Some(tid) = parse_inspect_task_query(query.trim()) {
-                                format_inspect_task(&config.task_registry, &config.snapshot_registry, tid)
-                            } else if query.trim() == "?library" {
-                                crate::library::query_library(&session.program, session.meta.library_state.as_ref())
-                            } else {
-                                let table = crate::typeck::build_symbol_table(&session.program);
-                                crate::typeck::handle_query(&session.program, &table, query, &session.runtime.http_routes)
-                            };
-                            iter_results.push(MutationResult { message: response, success: true });
-                        }
-                        crate::parser::Operation::Watch { function_name, args, interval_ms } => {
-                            eprintln!("[web:watch] {function_name}({args}) every {interval_ms}ms");
-                            let fn_name = function_name.clone();
-                            let fn_args = args.clone();
-                            let interval = *interval_ms;
-                            let watch_program = config.program.clone();
-                            let watch_meta = config.meta.clone();
-                            let io_sender = config.io_sender.clone();
-                            let trigger = config.self_trigger.clone();
-                            let watch_jit_cache = config.jit_cache.clone();
-
-                            tokio::spawn(async move {
-                                let mut last_result = String::new();
-                                loop {
-                                    tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
-
-                                    // Evaluate the function
-                                    let result = {
-                                        let program = watch_program.read().await;
-                                        let meta = watch_meta.lock().unwrap();
-                                        let input_expr = if fn_args.trim().is_empty() {
-                                            crate::parser::Expr::StructLiteral(vec![])
-                                        } else {
-                                            match crate::parser::parse_test_input(0, &fn_args) {
-                                                Ok(expr) => expr,
-                                                Err(e) => {
-                                                    format!("parse error: {e}")
-                                                        .clone(); // type doesn't matter, we break below
-                                                    break;
-                                                }
-                                            }
-                                        };
-                                        match crate::eval::eval_compiled_or_interpreted_cached(
-                                            &program, &fn_name, &input_expr,
-                                            Some(&watch_jit_cache), meta.revision,
-                                        ) {
-                                            Ok((r, _)) => r,
-                                            Err(e) => format!("error: {e}"),
-                                        }
-                                    };
-
-                                    if result != last_result && !last_result.is_empty() {
-                                        eprintln!("[web:watch:trigger] {fn_name} changed: {last_result} → {result}");
-                                        let msg = format!("Watcher '{fn_name}' triggered: result changed from '{last_result}' to '{result}'");
-                                        // Trigger the AI to respond
-                                        let _ = trigger.send(msg).await;
-                                    }
-                                    last_result = result;
-                                }
-                            });
-
-                            iter_results.push(MutationResult {
-                                message: format!("Watching {function_name}({args}) every {interval_ms}ms"),
-                                success: true,
-                            });
-                        }
-                        crate::parser::Operation::Agent { name, scope, task } => {
-                            eprintln!("[web:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
-
-                            let agent_scope = crate::session::AgentScope::parse(scope);
-                            let branch = crate::session::AgentBranch::fork_from_parts(name, agent_scope, task, &session.program, &session.runtime, &session.meta);
-                            let program_summary = crate::validator::program_summary_compact(&session.program);
-                            let agent_task = task.clone();
-                            let agent_name = name.clone();
-                            let llm_url = config.llm_url.clone();
-                            let llm_model = config.llm_model.clone();
-                            let llm_key = config.llm_api_key.clone();
-                            let agent_program = config.program.clone();
-                            let agent_meta = config.meta.clone();
-                            let agent_runtime = config.runtime.clone();
-
-                            // Run agent in background
-                            tokio::spawn(async move {
-                                eprintln!("[agent:{agent_name}] starting");
-                                let agent_llm = crate::llm::LlmClient::new_with_model_and_key(&llm_url, &llm_model, llm_key);
-
-                                let scope_desc = match &branch.scope {
-                                    crate::session::AgentScope::ReadOnly => 
-                                        "SCOPE: read-only. You CAN: write !test blocks, use !eval, use ?queries. You CANNOT: define new functions or types, modify existing code.".to_string(),
-                                    crate::session::AgentScope::NewOnly =>
-                                        "SCOPE: new-only. You CAN: define NEW functions and types, write !test blocks, use !eval. You CANNOT: modify or replace existing functions.".to_string(),
-                                    crate::session::AgentScope::Module(m) =>
-                                        format!("SCOPE: module {m}. You CAN: modify anything in module {m}, add new functions to it. You CANNOT: modify code outside module {m}."),
-                                    crate::session::AgentScope::Full =>
-                                        "SCOPE: full. You can modify anything.".to_string(),
-                                };
-                                let agent_system = format!(
-                                    "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Adapsis code. When done, respond with !done in a <code> block.",
-                                    crate::prompt::system_prompt(),
-                                    crate::builtins::format_for_prompt()
-                                );
-
-                                let mut agent_messages = vec![
-                                    crate::llm::ChatMessage::system(agent_system),
-                                    crate::llm::ChatMessage::user(format!("Program state:\n{program_summary}\n\nTask: {agent_task}")),
-                                ];
-
-                                let mut branch = branch;
-                                for agent_iter in 0..10 {
-                                    // Check inbox for messages from other agents or main
-                                    {
-                                        let mut meta = agent_meta.lock().unwrap();
-                                        let inbox = meta.agent_mailbox.remove(&agent_name).unwrap_or_default();
-                                        if !inbox.is_empty() {
-                                            let inbox_text = inbox.iter()
-                                                .map(|m| format!("[from {}] {}", m.from, m.content))
-                                                .collect::<Vec<_>>().join("\n");
-                                            eprintln!("[agent:{agent_name}] received {} messages", inbox.len());
-                                            agent_messages.push(crate::llm::ChatMessage::user(
-                                                format!("Messages received:\n{inbox_text}\n\nIncorporate this information and continue.")
-                                            ));
-                                        }
-                                    }
-
-                                    let output = match agent_llm.generate(agent_messages.clone()).await {
-                                        Ok(o) => o,
-                                        Err(e) => { eprintln!("[agent:{agent_name}] LLM error: {e}"); break; }
-                                    };
-
-                                    agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));
-
-                                    let code = output.code.clone();
-                                    if code.trim() == "!done" || code.is_empty() {
-                                        eprintln!("[agent:{agent_name}] done at iter {agent_iter}");
-                                        break;
-                                    }
-
-                                    // Handle !msg commands from agent code before applying mutations
-                                    if let Ok(ops) = crate::parser::parse(&code) {
-                                        for op in &ops {
-                                            if let crate::parser::Operation::Message { to, content } = op {
-                                                eprintln!("[agent:{agent_name}] !msg → {to}: {content}");
-                                                let mut meta = agent_meta.lock().unwrap();
-                                                let msg = crate::session::AgentMessage {
-                                                    from: agent_name.clone(),
-                                                    to: to.clone(),
-                                                    content: content.clone(),
-                                                    timestamp: crate::session::now(),
-                                                };
-                                                meta.agent_mailbox.entry(to.clone()).or_default().push(msg);
-                                            }
-                                        }
-                                    }
-
-                                    match branch.apply(&code) {
-                                        Ok(results) => {
-                                            let mut has_err = false;
-                                            for (msg, ok) in &results {
-                                                eprintln!("[agent:{agent_name}] {}: {msg}", if *ok {"ok"} else {"err"});
-                                                if !*ok { has_err = true; }
-                                            }
-                                            let feedback = results.iter()
-                                                .map(|(msg, ok)| format!("{}: {msg}", if *ok {"OK"} else {"ERROR"}))
-                                                .collect::<Vec<_>>().join("\n");
-                                            if has_err {
-                                                agent_messages.push(crate::llm::ChatMessage::user(format!("Errors:\n{feedback}\nFix and continue.")));
-                                            } else {
-                                                agent_messages.push(crate::llm::ChatMessage::user(format!("Results:\n{feedback}\nContinue or !done.")));
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!("[agent:{agent_name}] apply error: {e}");
-                                            agent_messages.push(crate::llm::ChatMessage::user(format!("Error: {e}\nFix and continue.")));
-                                        }
-                                    }
-                                }
-
-                                // Merge branch back into main session
-                                let mut program = agent_program.read().await.clone();
-                                let mut runtime = agent_runtime.read().unwrap().clone();
-                                let mut meta = agent_meta.lock().unwrap().clone();
-                                let mut sandbox = None;
-                                let conflicts = branch.merge_into_parts(&mut program, &mut runtime, &mut meta, &mut sandbox);
-                                if conflicts.is_empty() {
-                                    eprintln!("[agent:{agent_name}] merged successfully");
-                                    meta.chat_messages.push(crate::session::ChatMessage {
-                                        role: "system".to_string(),
-                                        content: format!("Agent '{agent_name}' completed and merged successfully."),
-                                    });
-                                    if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
-                                        s.status = "merged".to_string();
-                                        s.message = "completed and merged".to_string();
-                                    }
-                                } else {
-                                    eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
-                                    meta.chat_messages.push(crate::session::ChatMessage {
-                                        role: "system".to_string(),
-                                        content: format!("Agent '{agent_name}' finished but had merge conflicts:\n{}", conflicts.join("\n")),
-                                    });
-                                    if let Some(s) = meta.agent_log.iter_mut().rev().find(|s| s.name == agent_name && s.status == "running") {
-                                        s.status = "conflict".to_string();
-                                        s.message = conflicts.join("; ");
-                                    }
-                                }
-                                *agent_program.write().await = program;
-                                *agent_runtime.write().unwrap() = runtime;
-                                *agent_meta.lock().unwrap() = meta;
-                            });
-
-                            iter_results.push(MutationResult {
-                                message: format!("Agent '{name}' spawned (background)"),
-                                success: true,
-                            });
-
-                            session.meta.agent_log.push(crate::session::AgentStatus {
-                                name: name.clone(),
-                                task: task.chars().take(100).collect(),
-                                scope: scope.clone(),
-                                status: "running".to_string(),
-                                message: String::new(),
-                            });
-                        }
-                        crate::parser::Operation::Message { to, content } => {
-                            eprintln!("[web:msg] → {to}: {content}");
-                            crate::session::send_agent_message(&mut session.meta, "main", &to, &content);
-                            config.write_back_working_set(&session).await;
-                            iter_results.push(MutationResult {
-                                message: format!("Message sent to '{to}'"),
-                                success: true,
-                            });
-                        }
-                        crate::parser::Operation::OpenCode(_) => {}
-                        // Top-level statements: execute immediately
-                        op @ (crate::parser::Operation::Call(_)
-                        | crate::parser::Operation::Let(_)
-                        | crate::parser::Operation::Set(_)
-                        | crate::parser::Operation::Await(_)
-                        | crate::parser::Operation::Spawn(_)
-                        | crate::parser::Operation::If(_)
-                        | crate::parser::Operation::While(_)
-                        | crate::parser::Operation::Each(_)
-                        | crate::parser::Operation::Match(_)
-                        | crate::parser::Operation::Check(_)
-                        | crate::parser::Operation::Branch(_)
-                        | crate::parser::Operation::Return(_)) => {
-                            match crate::validator::convert_statement_op(op) {
-                                Ok(stmt) => {
-                                    let mut env = crate::eval::Env::new_with_shared_interner(&session.program.shared_interner);
-                                    env.populate_shared_from_program(&session.program);
-                                    if let Some(sender) = &config.io_sender {
-                                        env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
-                                            crate::coroutine::CoroutineHandle::new(sender.clone())
-                                        ));
-                                    }
-                                    match crate::eval::eval_function_body_pub(&session.program, &[stmt], &mut env) {
-                                        Ok(val) => {
-                                            let msg = format!("executed: {val}");
-                                            eprintln!("[web:exec] {msg}");
-                                            iter_results.push(MutationResult { message: msg, success: true });
-                                        }
-                                        Err(e) => {
-                                            iter_has_errors = true;
-                                            let msg = format!("exec error: {e}");
-                                            eprintln!("[web:exec:err] {msg}");
-                                            iter_results.push(MutationResult { message: msg, success: false });
-                                        }
-                                    }
-                                    config.sync_async_side_effects_into(&mut session);
-                                }
-                                Err(e) => {
-                                    iter_has_errors = true;
-                                    iter_results.push(MutationResult { message: format!("statement error: {e}"), success: false });
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                for task in opencode_tasks {
-                    eprintln!("[web:opencode] {task}");
-                            let oc_result = tokio::time::timeout(
-                                std::time::Duration::from_secs(3600),
-                                tokio::process::Command::new("opencode")
-                                    .arg("run").arg("--format").arg("json")
-                                    .arg("--attach").arg("http://localhost:4096")
-                                    .arg("--dir").arg(&config.project_dir)
-                                    .arg(task)
-                                    .current_dir(&config.project_dir)
-                                    .output()
-                            ).await;
-                            match oc_result {
-                                Ok(Ok(output)) if output.status.success() => {
-                                    eprintln!("[web:opencode:done] rebuilding...");
-                                    let build = tokio::process::Command::new("cargo")
-                                        .arg("build").arg("--release").current_dir(&config.project_dir).output().await;
-                                    match build {
-                                        Ok(b) if b.status.success() => {
-                                            iter_results.push(MutationResult {
-                                                message: "OpenCode + rebuild successful. Restart to apply.".to_string(), success: true,
-                                            });
-                                            needs_opencode_restart = true;
-                                        }
-                                        _ => {
-                                            iter_has_errors = true;
-                                            iter_results.push(MutationResult { message: "OpenCode done but build failed".to_string(), success: false });
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    iter_has_errors = true;
-                                    iter_results.push(MutationResult { message: "OpenCode failed or timed out".to_string(), success: false });
-                                }
-                            }
-                }
-
-                if needs_opencode_restart {
-                    tokio::spawn(async {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let exe = std::env::args().next()
-                            .map(std::path::PathBuf::from)
-                            .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
-                            .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
-                        let args: Vec<String> = std::env::args().collect();
-                        let _ = exec::execvp(&exe, &args);
-                    });
-                }
-            }
-            Err(e) => {
-                iter_has_errors = true;
-                iter_results.push(MutationResult { message: format!("Parse error: {e}"), success: false });
-            }
+        // Send SSE events for results
+        for r in &exec_result.mutation_results {
+            tx.send(serde_json::json!({"type": "result", "message": r.message, "success": r.success})).await;
+        }
+        for t in &exec_result.test_results {
+            tx.send(serde_json::json!({"type": "test", "pass": t.pass, "message": t.message})).await;
         }
 
-        all_results.extend(iter_results.clone());
-        all_test_results.extend(iter_test_results.clone());
+        let iter_has_errors = exec_result.has_errors;
+
+        // Handle opencode restart
+        if exec_result.needs_opencode_restart {
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let exe = std::env::args().next()
+                    .map(std::path::PathBuf::from)
+                    .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+                    .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
+                let args: Vec<String> = std::env::args().collect();
+                let _ = exec::execvp(&exe, &args);
+            });
+        }
+
+        all_results.extend(exec_result.mutation_results.clone());
+        all_test_results.extend(exec_result.test_results.clone());
         // Write mutations back to tiers after each iteration
         config.write_back_working_set(&session).await;
 
         // Build feedback for next iteration
         if iter_has_errors {
-            let errors: Vec<String> = iter_results.iter().filter(|r| !r.success).map(|r| r.message.clone())
-                .chain(iter_test_results.iter().filter(|r| !r.pass).map(|r| r.message.clone()))
+            let errors: Vec<String> = exec_result.mutation_results.iter().filter(|r| !r.success).map(|r| r.message.clone())
+                .chain(exec_result.test_results.iter().filter(|r| !r.pass).map(|r| r.message.clone()))
                 .collect();
             let feedback = format!("Errors:\n{}\n\nFix and continue.", errors.join("\n"));
             eprintln!("[web:feedback] → retrying");
             messages.push(crate::llm::ChatMessage::user(feedback));
         } else {
             // Success — tell the AI to continue or finish
-            let results_summary: Vec<String> = iter_results.iter().map(|r| r.message.clone()).collect();
+            let results_summary: Vec<String> = exec_result.mutation_results.iter().map(|r| r.message.clone()).collect();
             let feedback = format!(
                 "Results:\n{}\n\nIf the task is complete, respond with !done. Otherwise continue with the next step.",
                 results_summary.join("\n")
@@ -4921,6 +4973,10 @@ pub async fn handle_llm_takeover(
     let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
 
     // Get or create conversation, update callback info, build messages
+    let program_summary = {
+        let prog = program.read().await;
+        crate::validator::program_summary_compact(&prog)
+    };
     let messages = {
         let mut meta_guard = meta.lock().unwrap();
         let conv = meta_guard.conversations.get_or_create(&context);
@@ -4937,13 +4993,15 @@ pub async fn handle_llm_takeover(
         if conv.messages.is_empty() {
             let system = conv.system_prompt.clone().unwrap_or_else(|| {
                 format!(
-                    "{}\n\n{}\n\nYou are in conversation context '{context}'. Respond naturally. \
+                    "{}\n\n{}\n\nCurrent program state:\n{}\n\n\
+                     You are in conversation context '{context}'. Respond naturally. \
                      If you need to do work (modify code, create modules, run tasks), include the \
                      Adapsis commands in your response. For long-running tasks, use `!agent`. \
                      IMPORTANT: Always include a natural language response for the user, even when \
                      writing code. The user sees only the prose, not the code.",
                     crate::prompt::system_prompt(),
                     crate::builtins::format_for_prompt(),
+                    program_summary,
                 )
             });
             conv.push_system(system);
@@ -4962,314 +5020,151 @@ pub async fn handle_llm_takeover(
 
     eprintln!("[llm_takeover:{context}] calling LLM with {} messages", messages.len());
 
-    // Call LLM
-    let output = llm.generate(messages).await
-        .map_err(|e| anyhow::anyhow!("llm_takeover LLM error: {e}"))?;
-
-    // Store assistant response in conversation
-    {
-        let mut meta_guard = meta.lock().unwrap();
-        if let Some(conv) = meta_guard.conversations.get_mut(&context) {
-            conv.push_assistant(&output.text);
-        }
-    }
-
-    // Extract text reply (prose without code)
-    let reply_text = {
-        let mut clean = output.text.clone();
-        // Strip <think> blocks
-        while let Some(s) = clean.find("<think>") {
-            if let Some(e) = clean[s..].find("</think>") {
-                clean.replace_range(s..s + e + 8, "");
-            } else {
-                break;
-            }
-        }
-        // Strip <code> blocks
-        while let Some(s) = clean.find("<code>") {
-            if let Some(e) = clean[s..].find("</code>") {
-                clean.replace_range(s..s + e + 7, "");
-            } else {
-                break;
-            }
-        }
-        clean.trim().to_string()
+    // Build a temporary AppConfig so we can reuse execute_code()
+    let (self_trigger_tx, _self_trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
+    let tmp_config = AppConfig {
+        program: program.clone(),
+        meta: meta.clone(),
+        llm_url: llm_url.to_string(),
+        llm_model: llm_model.to_string(),
+        llm_api_key: llm_key.clone(),
+        project_dir: ".".to_string(),
+        io_sender: Some(io_sender.clone()),
+        self_trigger: self_trigger_tx,
+        task_registry: Some(task_registry.clone()),
+        snapshot_registry: Some(snap_registry.clone()),
+        log_file: None,
+        training_log: None,
+        jit_cache: crate::eval::new_jit_cache(),
+        event_broadcast: tokio::sync::broadcast::channel(16).0,
+        opencode_git_dir: ".".to_string(),
+        opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        max_iterations: 10,
+        runtime: runtime.clone(),
+        sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
-    eprintln!("[llm_takeover:{context}] reply: {}...", reply_text.chars().take(80).collect::<String>());
+    // Iterative loop: call LLM → execute_code → feed results back (max 10 iterations)
+    let mut llm_messages = messages;
+    let mut reply_text = String::new();
 
-    // If there's code to execute, do it in background
-    let code = output.code.clone();
-    if !code.trim().is_empty() && code.trim() != "!done" {
-        let context_for_bg = context.clone();
-        let meta_for_bg = meta.clone();
-        let program_for_bg = program.clone();
-        let runtime_for_bg = runtime.clone();
-        let llm_url_bg = llm_url.to_string();
-        let llm_model_bg = llm_model.to_string();
-        let llm_key_bg = llm_key.map(|s| s.to_string());
-        let io_sender_bg = io_sender.clone();
-        let task_registry_bg = task_registry.clone();
-        let snap_registry_bg = snap_registry.clone();
+    for iteration in 0..10 {
+        eprintln!("[llm_takeover:{context}] iteration {}/{}", iteration + 1, 10);
 
-        eprintln!("[llm_takeover:{context}] executing code in background ({} chars)", code.len());
+        let output = match llm.generate(llm_messages.clone()).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("[llm_takeover:{context}] LLM error: {e}");
+                break;
+            }
+        };
 
-        tokio::spawn(async move {
-            // Parse and execute code
-            let ops = match crate::parser::parse(&code) {
-                Ok(ops) => ops,
-                Err(e) => {
-                    eprintln!("[llm_takeover:{context_for_bg}] parse error: {e}");
-                    // Append error to conversation so LLM sees it next time
-                    if let Ok(mut meta_guard) = meta_for_bg.lock() {
-                        if let Some(conv) = meta_guard.conversations.get_mut(&context_for_bg) {
-                            conv.push_system(format!("Code execution error: {e}"));
-                        }
-                    }
-                    return;
-                }
-            };
+        // Store assistant response in conversation
+        {
+            let mut meta_guard = meta.lock().unwrap();
+            if let Some(conv) = meta_guard.conversations.get_mut(&context) {
+                conv.push_assistant(&output.text);
+            }
+        }
 
-            // Build a session snapshot for applying mutations
-            let mut session = {
-                let prog = program_for_bg.read().await.clone();
-                let rt = runtime_for_bg.read().unwrap().clone();
-                let meta_snap = meta_for_bg.lock().unwrap().clone();
-                crate::session::Session {
-                    program: prog,
-                    runtime: rt,
-                    meta: meta_snap,
+        llm_messages.push(crate::llm::ChatMessage::assistant(&output.text));
+
+        // Extract text reply (prose without code)
+        let prose = {
+            let mut clean = output.text.clone();
+            while let Some(s) = clean.find("<think>") {
+                if let Some(e) = clean[s..].find("</think>") {
+                    clean.replace_range(s..s + e + 8, "");
+                } else { break; }
+            }
+            while let Some(s) = clean.find("<code>") {
+                if let Some(e) = clean[s..].find("</code>") {
+                    clean.replace_range(s..s + e + 7, "");
+                } else { break; }
+            }
+            clean.trim().to_string()
+        };
+
+        if !prose.is_empty() {
+            if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
+            reply_text.push_str(&prose);
+        }
+
+        eprintln!("[llm_takeover:{context}] reply: {}...", prose.chars().take(80).collect::<String>());
+
+        let code = output.code.trim().to_string();
+
+        // If !done or no code, stop iterating
+        if code == "!done" || code.is_empty() {
+            eprintln!("[llm_takeover:{context}] done at iteration {}", iteration + 1);
+            break;
+        }
+
+        // Check for !agent — spawn it and return prose (agent delivers callback later)
+        if let Ok(ops) = crate::parser::parse(&code) {
+            let has_agent = ops.iter().any(|op| matches!(op, crate::parser::Operation::Agent { .. }));
+            if has_agent {
+                eprintln!("[llm_takeover:{context}] !agent detected, spawning via execute_code and breaking");
+                let mut session = WorkingSet {
+                    program: program.read().await.clone(),
+                    runtime: runtime.read().unwrap().clone(),
+                    meta: meta.lock().unwrap().clone(),
                     sandbox: None,
-                }
-            };
-
-            // Check for !agent commands
-            for op in &ops {
-                if let crate::parser::Operation::Agent { name, scope, task } = op {
-                    eprintln!("[llm_takeover:{context_for_bg}] spawning agent '{name}' scope={scope}");
-                    let agent_scope = crate::session::AgentScope::parse(scope);
-                    let branch = crate::session::AgentBranch::fork_from_parts(
-                        name, agent_scope, task,
-                        &session.program, &session.runtime, &session.meta,
-                    );
-                    let program_summary = crate::validator::program_summary_compact(&session.program);
-                    let agent_task = task.clone();
-                    let agent_name = name.clone();
-                    let agent_program = program_for_bg.clone();
-                    let agent_meta = meta_for_bg.clone();
-                    let agent_runtime = runtime_for_bg.clone();
-                    let agent_context = context_for_bg.clone();
-                    let agent_llm_url = llm_url_bg.clone();
-                    let agent_llm_model = llm_model_bg.clone();
-                    let agent_llm_key = llm_key_bg.clone();
-                    let agent_io_sender = io_sender_bg.clone();
-                    let agent_task_registry = task_registry_bg.clone();
-                    let agent_snap_registry = snap_registry_bg.clone();
-
-                    // Spawn agent with completion callback
-                    tokio::spawn(async move {
-                        eprintln!("[agent:{agent_name}] starting (from llm_takeover:{agent_context})");
-                        let agent_llm = crate::llm::LlmClient::new_with_model_and_key(
-                            &agent_llm_url, &agent_llm_model, agent_llm_key,
-                        );
-
-                        let scope_desc = match &branch.scope {
-                            crate::session::AgentScope::ReadOnly =>
-                                "SCOPE: read-only.".to_string(),
-                            crate::session::AgentScope::NewOnly =>
-                                "SCOPE: new-only.".to_string(),
-                            crate::session::AgentScope::Module(m) =>
-                                format!("SCOPE: module {m}."),
-                            crate::session::AgentScope::Full =>
-                                "SCOPE: full.".to_string(),
-                        };
-                        let agent_system = format!(
-                            "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. When done, respond with !done.",
-                            crate::prompt::system_prompt(),
-                            crate::builtins::format_for_prompt()
-                        );
-
-                        let mut agent_messages = vec![
-                            crate::llm::ChatMessage::system(agent_system),
-                            crate::llm::ChatMessage::user(format!("Program state:\n{program_summary}\n\nTask: {agent_task}")),
-                        ];
-
-                        let mut branch = branch;
-                        let mut agent_result = "Agent completed".to_string();
-
-                        for agent_iter in 0..10 {
-                            let output = match agent_llm.generate(agent_messages.clone()).await {
-                                Ok(o) => o,
-                                Err(e) => {
-                                    eprintln!("[agent:{agent_name}] LLM error: {e}");
-                                    agent_result = format!("Agent error: {e}");
-                                    break;
-                                }
-                            };
-
-                            agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));
-
-                            let code = output.code.clone();
-                            if code.trim() == "!done" || code.is_empty() {
-                                eprintln!("[agent:{agent_name}] done at iter {agent_iter}");
-                                // Extract useful info from last response
-                                let mut clean = output.text.clone();
-                                while let Some(s) = clean.find("<think>") {
-                                    if let Some(e) = clean[s..].find("</think>") {
-                                        clean.replace_range(s..s + e + 8, "");
-                                    } else { break; }
-                                }
-                                agent_result = clean.trim().to_string();
-                                break;
-                            }
-
-                            match branch.apply(&code) {
-                                Ok(results) => {
-                                    let feedback = results.iter()
-                                        .map(|(msg, ok)| format!("{}: {msg}", if *ok { "OK" } else { "ERROR" }))
-                                        .collect::<Vec<_>>().join("\n");
-                                    let has_err = results.iter().any(|(_, ok)| !ok);
-                                    if has_err {
-                                        agent_messages.push(crate::llm::ChatMessage::user(format!("Errors:\n{feedback}\nFix and continue.")));
-                                    } else {
-                                        agent_messages.push(crate::llm::ChatMessage::user(format!("Results:\n{feedback}\nContinue or !done.")));
-                                    }
-                                }
-                                Err(e) => {
-                                    agent_messages.push(crate::llm::ChatMessage::user(format!("Error: {e}\nFix and continue.")));
-                                }
-                            }
-                        }
-
-                        // Merge agent results back
-                        let mut prog = agent_program.read().await.clone();
-                        let mut rt = agent_runtime.read().unwrap().clone();
-                        let mut meta_snap = agent_meta.lock().unwrap().clone();
-                        let mut sandbox = None;
-                        let conflicts = branch.merge_into_parts(&mut prog, &mut rt, &mut meta_snap, &mut sandbox);
-                        if conflicts.is_empty() {
-                            eprintln!("[agent:{agent_name}] merged successfully");
-                            *agent_program.write().await = prog;
-                            *agent_runtime.write().unwrap() = rt;
-                            *agent_meta.lock().unwrap() = meta_snap;
-                        } else {
-                            eprintln!("[agent:{agent_name}] merge conflicts: {:?}", conflicts);
-                            agent_result = format!("Agent had merge conflicts: {}", conflicts.join(", "));
-                        }
-
-                        // Notify the conversation context that spawned this agent
-                        eprintln!("[agent:{agent_name}] notifying context '{agent_context}'");
-                        let notification = format!("Agent '{agent_name}' completed: {}", agent_result.chars().take(500).collect::<String>());
-
-                        // Append result to conversation and prompt for summary
-                        {
-                            let mut meta_guard = agent_meta.lock().unwrap();
-                            if let Some(conv) = meta_guard.conversations.get_mut(&agent_context) {
-                                conv.push_user(format!("[System: {}] Summarize the result briefly for the user.", notification));
-                            }
-                        }
-
-                        // Call LLM with updated context to generate reply for user
-                        let reply_messages = {
-                            let meta_guard = agent_meta.lock().unwrap();
-                            if let Some(conv) = meta_guard.conversations.get(&agent_context) {
-                                conv.messages.iter().map(|m| match m.role.as_str() {
-                                    "system" => crate::llm::ChatMessage::system(m.content.clone()),
-                                    "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-                                    _ => crate::llm::ChatMessage::user(m.content.clone()),
-                                }).collect::<Vec<_>>()
-                            } else {
-                                return;
-                            }
-                        };
-
-                        eprintln!("[agent:{agent_name}] calling LLM for completion summary ({} messages)", reply_messages.len());
-                        match agent_llm.generate(reply_messages).await {
-                            Ok(summary_output) => {
-                            let summary = {
-                                let mut clean = summary_output.text.clone();
-                                while let Some(s) = clean.find("<think>") {
-                                    if let Some(e) = clean[s..].find("</think>") {
-                                        clean.replace_range(s..s + e + 8, "");
-                                    } else { break; }
-                                }
-                                while let Some(s) = clean.find("<code>") {
-                                    if let Some(e) = clean[s..].find("</code>") {
-                                        clean.replace_range(s..s + e + 7, "");
-                                    } else { break; }
-                                }
-                                clean.trim().to_string()
-                            };
-
-                            // Store assistant reply
-                            {
-                                let mut meta_guard = agent_meta.lock().unwrap();
-                                if let Some(conv) = meta_guard.conversations.get_mut(&agent_context) {
-                                    conv.push_assistant(&summary);
-                                }
-                            }
-
-                            // Deliver via callback if configured
-                            let (cb_fn, cb_arg) = {
-                                let meta_guard = agent_meta.lock().unwrap();
-                                meta_guard.conversations.get(&agent_context)
-                                    .map(|c| (c.reply_fn.clone(), c.reply_arg.clone()))
-                                    .unwrap_or((None, None))
-                            };
-
-                            if let (Some(func_name), Some(arg)) = (cb_fn, cb_arg) {
-                                eprintln!("[agent:{agent_name}] delivering reply via {func_name}({arg}, ...)");
-                                // Call the reply function via coroutine
-                                let (tx, _rx) = tokio::sync::oneshot::channel();
-                                let _ = agent_io_sender.send(crate::coroutine::IoRequest::Spawn {
-                                    function_name: func_name,
-                                    args: vec![
-                                        crate::eval::Value::string(arg),
-                                        crate::eval::Value::string(summary),
-                                    ],
-                                    reply: tx,
-                                }).await;
-                            }
-                            }
-                            Err(e) => {
-                                eprintln!("[agent:{agent_name}] summary LLM call failed: {e}");
-                            }
-                        }
-                    });
-                    continue;
-                }
+                };
+                execute_code(&code, &tmp_config, &mut session).await;
+                // Write back mutations
+                *program.write().await = session.program;
+                *runtime.write().unwrap() = session.runtime;
+                *meta.lock().unwrap() = session.meta;
+                break;
             }
+        }
 
-            // Execute non-agent code mutations
-            let results = session.apply_async(&code, Some(&io_sender_bg)).await;
-            match results {
-                Ok(results) => {
-                    let feedback: Vec<String> = results.iter()
-                        .map(|(msg, ok)| format!("{}: {msg}", if *ok { "OK" } else { "ERROR" }))
-                        .collect();
-                    eprintln!("[llm_takeover:{context_for_bg}] code results: {}", feedback.join("; "));
+        // Execute code inline
+        let mut session = WorkingSet {
+            program: program.read().await.clone(),
+            runtime: runtime.read().unwrap().clone(),
+            meta: meta.lock().unwrap().clone(),
+            sandbox: None,
+        };
+        let exec_result = execute_code(&code, &tmp_config, &mut session).await;
 
-                    // Append feedback to conversation
-                    if let Ok(mut meta_guard) = meta_for_bg.lock() {
-                        if let Some(conv) = meta_guard.conversations.get_mut(&context_for_bg) {
-                            conv.push_system(format!("Code execution results:\n{}", feedback.join("\n")));
-                        }
-                    }
+        // Write back mutations to shared state
+        *program.write().await = session.program;
+        *runtime.write().unwrap() = session.runtime;
+        *meta.lock().unwrap() = session.meta;
 
-                    // Write back program mutations
-                    *program_for_bg.write().await = session.program;
-                    *runtime_for_bg.write().unwrap() = session.runtime;
-                }
-                Err(e) => {
-                    eprintln!("[llm_takeover:{context_for_bg}] code error: {e}");
-                    if let Ok(mut meta_guard) = meta_for_bg.lock() {
-                        if let Some(conv) = meta_guard.conversations.get_mut(&context_for_bg) {
-                            conv.push_system(format!("Code execution error: {e}"));
-                        }
-                    }
-                }
+        // Build feedback and append to conversation
+        let feedback: Vec<String> = exec_result.mutation_results.iter()
+            .map(|r| format!("{}: {}", if r.success { "OK" } else { "ERROR" }, r.message))
+            .chain(exec_result.test_results.iter()
+                .map(|t| format!("{}: {}", if t.pass { "PASS" } else { "FAIL" }, t.message)))
+            .collect();
+
+        eprintln!("[llm_takeover:{context}] code results: {}", feedback.join("; "));
+
+        let feedback_msg = if exec_result.has_errors {
+            format!("Errors:\n{}\n\nFix and continue.", feedback.join("\n"))
+        } else {
+            format!("Results:\n{}\n\nContinue or !done.", feedback.join("\n"))
+        };
+
+        {
+            let mut meta_guard = meta.lock().unwrap();
+            if let Some(conv) = meta_guard.conversations.get_mut(&context) {
+                conv.push_user(feedback_msg.clone());
             }
-        });
+        }
+        llm_messages.push(crate::llm::ChatMessage::user(feedback_msg));
+
+        // Handle opencode restart if needed
+        if exec_result.needs_opencode_restart {
+            eprintln!("[llm_takeover:{context}] opencode restart triggered");
+            let exe = std::env::current_exe().unwrap_or_default();
+            let args: Vec<String> = std::env::args().collect();
+            let _ = exec::execvp(&exe, &args);
+        }
     }
 
     Ok(reply_text)
