@@ -590,8 +590,12 @@ async fn main() -> Result<()> {
             let program_mut_clone = program_mut.clone();
             let func_clone = func.clone();
             let eval_task = tokio::task::spawn_blocking(move || {
-                eval::set_shared_program(Some(std::sync::Arc::new(program_clone.clone())));
-                eval::set_shared_program_mut(Some(program_mut_clone));
+                let ctx = eval::EvalContext {
+                    runtime: None, meta: None, event_broadcast: None,
+                    program_snapshot: Some(std::sync::Arc::new(program_clone.clone())),
+                    program_mut: Some(program_mut_clone),
+                };
+                ctx.install();
                 let func_decl = program_clone.get_function(&func_clone)
                     .ok_or_else(|| anyhow::anyhow!("function `{func_clone}` not found"))?;
 
@@ -630,8 +634,12 @@ async fn main() -> Result<()> {
                             let registry = task_registry_for_spawn.clone();
                             let snap_reg = snap_registry_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
-                                eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
-                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
+                                let ctx = eval::EvalContext {
+                                    runtime: None, meta: None, event_broadcast: None,
+                                    program_snapshot: Some(std::sync::Arc::new(prog.clone())),
+                                    program_mut: Some(eval::make_shared_program_mut(&prog)),
+                                };
+                                ctx.install();
                                 let func_decl = match prog.get_function(&function_name) {
                                     Some(f) => f,
                                     None => {
@@ -695,8 +703,12 @@ async fn main() -> Result<()> {
                                             let alias = alias.clone();
                                             let module_name = module_name.clone();
                                             tokio::task::spawn_blocking(move || {
-                                                eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
-                                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
+                                                let ctx = eval::EvalContext {
+                                                    runtime: None, meta: None, event_broadcast: None,
+                                                    program_snapshot: Some(std::sync::Arc::new(prog.clone())),
+                                                    program_mut: Some(eval::make_shared_program_mut(&prog)),
+                                                };
+                                                ctx.install();
                                                 let func = match prog.get_function(&handler_name) {
                                                     Some(f) => f.clone(),
                                                     None => { eprintln!("[timer:{}] handler `{}` not found", alias, handler_name); return; }
@@ -927,8 +939,6 @@ async fn main() -> Result<()> {
                             let meta_for_blocking = shared_meta_for_spawn.clone();
                             let program_for_blocking = shared_program_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
-                                eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
                                 let program = program_for_blocking.blocking_read().clone();
                                 let func_decl = match program.get_function(&function_name) {
                                     Some(f) => f.clone(),
@@ -942,8 +952,11 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&program)));
+                                let ctx = eval::EvalContext::new_minimal(
+                                    runtime_for_blocking, meta_for_blocking,
+                                    &program, eval::make_shared_program_mut(&program),
+                                );
+                                ctx.install();
 
                                 let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
@@ -1006,10 +1019,11 @@ async fn main() -> Result<()> {
                                             let alias_for_tick = alias.clone();
                                             let module_for_tick = module_name.clone();
                                             tokio::task::spawn_blocking(move || {
-                                                eval::set_shared_runtime(Some(rt_for_tick));
-                                                eval::set_shared_meta(Some(meta_for_tick));
-                                                eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
-                                                eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
+                                                let ctx = eval::EvalContext::new_minimal(
+                                                    rt_for_tick, meta_for_tick,
+                                                    &prog, eval::make_shared_program_mut(&prog),
+                                                );
+                                                ctx.install();
                                                 let task_id = 0; // timer tasks don't need unique IDs for now
                                                 let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry, snap_reg);
                                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
@@ -1088,10 +1102,11 @@ async fn main() -> Result<()> {
                     let mod_name = module_name.clone();
                     tokio::task::spawn_blocking(move || {
                         let prog = prog_clone.blocking_read().clone();
-                        eval::set_shared_runtime(Some(rt));
-                        eval::set_shared_meta(Some(meta));
-                        eval::set_shared_program(Some(std::sync::Arc::new(prog.clone())));
-                        eval::set_shared_program_mut(Some(eval::make_shared_program_mut(&prog)));
+                        let ctx = eval::EvalContext::new_minimal(
+                            rt, meta,
+                            &prog, eval::make_shared_program_mut(&prog),
+                        );
+                        ctx.install();
                         let task_id = 0;
                         let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry, snap_reg);
                         let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);

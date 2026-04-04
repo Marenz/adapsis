@@ -306,17 +306,10 @@ pub async fn eval_fn(
                     if let Some(sender) = &config.io_sender {
                         let program = config.program.read().await.clone();
                         let program_mut = crate::eval::make_shared_program_mut(&program);
-                        let program_mut_clone = program_mut.clone();
                         let sender = sender.clone();
-                        let runtime_for_blocking = config.runtime.clone();
-                        let meta_for_blocking = config.meta.clone();
-                        let event_broadcast = config.event_broadcast.clone();
+                        let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                         let eval_result = tokio::task::spawn_blocking(move || {
-                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                            eval::set_shared_meta(Some(meta_for_blocking));
-                            eval::set_shared_event_broadcast(Some(event_broadcast));
-                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                            ctx.install();
                             eval::eval_inline_expr_with_io(&program, &expr, sender)
                         }).await;
                         // Sync mutations back to session if any occurred
@@ -458,20 +451,13 @@ pub async fn eval_fn(
             // Tier 1: clone program for the blocking task (lock released before blocking)
             let program = config.program.read().await.clone();
             let program_mut = crate::eval::make_shared_program_mut(&program);
-            let program_mut_clone = program_mut.clone();
             let fn_name = ev.function_name.clone();
             let input = ev.input.clone();
             let sender = sender.clone();
-            let runtime_for_blocking = config.runtime.clone();
-            let meta_for_blocking = config.meta.clone();
-            let event_broadcast = config.event_broadcast.clone();
+            let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
 
             let eval_result = tokio::task::spawn_blocking(move || {
-                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                eval::set_shared_meta(Some(meta_for_blocking));
-                eval::set_shared_event_broadcast(Some(event_broadcast));
-                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                ctx.install();
                 let func = program.get_function(&fn_name)
                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -1844,20 +1830,13 @@ pub async fn execute_code(
                                 if let Some(sender) = &config.io_sender {
                                     let program = session.program.clone();
                                     let program_mut = crate::eval::make_shared_program_mut(&program);
-                                    let program_mut_clone = program_mut.clone();
                                     let expr = expr.clone();
                                     let sender = sender.clone();
-                                    let runtime_for_blocking = config.runtime.clone();
-                                    let meta_for_blocking = config.meta.clone();
-                                    let event_broadcast = config.event_broadcast.clone();
+                                    let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                                     let eval_result = tokio::time::timeout(
                                         std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
                                         tokio::task::spawn_blocking(move || {
-                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                            eval::set_shared_meta(Some(meta_for_blocking));
-                                            eval::set_shared_event_broadcast(Some(event_broadcast));
-                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                            ctx.install();
                                             crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
                                         })
                                     ).await;
@@ -1917,22 +1896,15 @@ pub async fn execute_code(
                             if let Some(sender) = &config.io_sender {
                                 let program = session.program.clone();
                                 let program_mut = crate::eval::make_shared_program_mut(&program);
-                                let program_mut_clone = program_mut.clone();
                                 let fn_name = ev.function_name.clone();
                                 let input = ev.input.clone();
                                 let sender = sender.clone();
-                                let runtime_for_blocking = config.runtime.clone();
-                                let meta_for_blocking = config.meta.clone();
-                                let event_broadcast = config.event_broadcast.clone();
+                                let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                                 let eval_fn_name = ev.function_name.clone();
                                 let eval_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
                                     tokio::task::spawn_blocking(move || {
-                                        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                        eval::set_shared_meta(Some(meta_for_blocking));
-                                        eval::set_shared_event_broadcast(Some(event_broadcast));
-                                        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                        crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                        ctx.install();
                                         let func = program.get_function(&fn_name)
                                             .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                         let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -2972,20 +2944,13 @@ pub async fn ask_stream(
                                         if let Some(sender) = &config_clone.io_sender {
                                             let program = session.program.clone();
                                             let program_mut = crate::eval::make_shared_program_mut(&program);
-                                            let program_mut_clone = program_mut.clone();
                                             let expr = expr.clone();
                                             let sender = sender.clone();
-                                            let runtime_for_blocking = config_clone.runtime.clone();
-                                            let meta_for_blocking = config_clone.meta.clone();
-                                            let event_broadcast = config_clone.event_broadcast.clone();
+                                            let ctx = eval::EvalContext::new(config_clone.runtime.clone(), config_clone.meta.clone(), config_clone.event_broadcast.clone(), &program, program_mut.clone());
                                             let eval_result = tokio::time::timeout(
                                                 std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
                                                 tokio::task::spawn_blocking(move || {
-                                                    crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                                    eval::set_shared_meta(Some(meta_for_blocking));
-                                                    eval::set_shared_event_broadcast(Some(event_broadcast));
-                                                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                                    crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                                    ctx.install();
                                                     crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
                                                 })
                                             ).await;
@@ -3046,22 +3011,15 @@ pub async fn ask_stream(
                                     if let Some(sender) = &config_clone.io_sender {
                                         let program = session.program.clone();
                                         let program_mut = crate::eval::make_shared_program_mut(&program);
-                                        let program_mut_clone = program_mut.clone();
                                         let fn_name = ev.function_name.clone();
                                         let input = ev.input.clone();
                                         let sender = sender.clone();
-                                        let runtime_for_blocking = config_clone.runtime.clone();
-                                        let meta_for_blocking = config_clone.meta.clone();
-                                        let event_broadcast = config_clone.event_broadcast.clone();
+                                        let ctx = eval::EvalContext::new(config_clone.runtime.clone(), config_clone.meta.clone(), config_clone.event_broadcast.clone(), &program, program_mut.clone());
                                         let eval_fn_name = ev.function_name.clone();
                                         let eval_result = tokio::time::timeout(
                                             std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
                                             tokio::task::spawn_blocking(move || {
-                                                crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                                eval::set_shared_meta(Some(meta_for_blocking));
-                                                eval::set_shared_event_broadcast(Some(event_broadcast));
-                                                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                                crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                                ctx.install();
                                                 let func = program.get_function(&fn_name)
                                                     .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                                 let handle = crate::coroutine::CoroutineHandle::new(sender);
@@ -3136,16 +3094,9 @@ pub async fn ask_stream(
                                         }
                                         let program = session.program.clone();
                                         let program_mut = crate::eval::make_shared_program_mut(&program);
-                                        let program_mut_clone = program_mut.clone();
-                                        let runtime_for_blocking = config_clone.runtime.clone();
-                                        let meta_for_blocking = config_clone.meta.clone();
-                                        let event_broadcast = config_clone.event_broadcast.clone();
+                                        let ctx = eval::EvalContext::new(config_clone.runtime.clone(), config_clone.meta.clone(), config_clone.event_broadcast.clone(), &program, program_mut.clone());
                                         let result = tokio::task::spawn_blocking(move || {
-                                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                            eval::set_shared_meta(Some(meta_for_blocking));
-                                            eval::set_shared_event_broadcast(Some(event_broadcast));
-                                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                                            ctx.install();
                                             crate::eval::eval_function_body_pub(&program, &[stmt], &mut env)
                                         }).await;
                                         match result {
@@ -3907,15 +3858,10 @@ async fn session_eval(
                     if let Some(sender) = &config.io_sender {
                         let program = program.clone();
                         let program_mut = crate::eval::make_shared_program_mut(&program);
-                        let program_mut_clone = program_mut.clone();
                         let sender = sender.clone();
-                        let runtime_for_blocking = config.runtime.clone();
-                            let meta_for_blocking = config.meta.clone();
+                        let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                         let eval_result = tokio::task::spawn_blocking(move || {
-                            crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-                                eval::set_shared_meta(Some(meta_for_blocking));
-                            crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                            crate::eval::set_shared_program_mut(Some(program_mut_clone));
+                            ctx.install();
                             eval::eval_inline_expr_with_io(&program, &expr, sender)
                         }).await;
                         // Note: session eval doesn't sync back to main session — mutations
@@ -4178,23 +4124,16 @@ async fn adapsis_route_dispatch(
 
     let body_str = String::from_utf8_lossy(&body).to_string();
 
-    let runtime_for_blocking = config.runtime.clone();
-    let meta_for_blocking = config.meta.clone();
-    let event_broadcast = config.event_broadcast.clone();
     let io_sender_for_blocking = config.io_sender.clone();
     let program_mut = crate::eval::make_shared_program_mut(&program);
-    let program_mut_clone = program_mut.clone();
+    let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
 
     eprintln!("[webhook] {method_str} {path} -> {handler_fn}({} bytes)", body_str.len());
 
     let handler_fn_for_log = handler_fn.clone();
     // Evaluate the handler function with the body as a String argument
     let eval_result = tokio::task::spawn_blocking(move || {
-        crate::eval::set_shared_runtime(Some(runtime_for_blocking));
-        eval::set_shared_meta(Some(meta_for_blocking));
-        eval::set_shared_event_broadcast(Some(event_broadcast));
-        crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-        crate::eval::set_shared_program_mut(Some(program_mut_clone));
+        ctx.install();
         let func = program
             .get_function(&handler_fn)
             .ok_or_else(|| anyhow::anyhow!("function `{handler_fn}` not found"))?;
