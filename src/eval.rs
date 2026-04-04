@@ -884,6 +884,31 @@ pub fn expr_contains_io_builtin(expr: &parser::Expr) -> bool {
     }
 }
 
+/// Check if an expression calls a user function that has [io] or [async] effects.
+pub fn expr_calls_io_function(expr: &parser::Expr, program: &crate::ast::Program) -> bool {
+    match expr {
+        parser::Expr::Call { callee, args } => {
+            let name = parser_callee_name(callee);
+            if let Some(func) = program.get_function(&name) {
+                if func.effects.iter().any(|e| matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)) {
+                    return true;
+                }
+            }
+            args.iter().any(|a| expr_calls_io_function(a, program))
+        }
+        parser::Expr::Binary { left, right, .. } => {
+            expr_calls_io_function(left, program) || expr_calls_io_function(right, program)
+        }
+        parser::Expr::Unary { expr: inner, .. } | parser::Expr::Cast { expr: inner, .. } | parser::Expr::FieldAccess { base: inner, .. } => {
+            expr_calls_io_function(inner, program)
+        }
+        parser::Expr::StructLiteral(fields) => {
+            fields.iter().any(|f| expr_calls_io_function(&f.value, program))
+        }
+        _ => false,
+    }
+}
+
 /// Evaluate a test case against a function in the program.
 /// Bind test input values to function parameters.
 /// Handles three cases:
