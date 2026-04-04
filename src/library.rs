@@ -383,22 +383,28 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
             .to_string();
 
         match std::fs::read_to_string(path) {
-            Ok(source) => match load_module_source(program, &source) {
-                Ok(module_name) => {
-                    eprintln!(
-                        "[library] loaded module `{module_name}` from {}",
-                        path.display()
-                    );
-                    state.loaded_modules.push(module_name);
+            Ok(source) => {
+                // If this module already exists (e.g. from restored session state),
+                // remove it first to prevent "duplicate +startup" errors.
+                program.modules.retain(|m| m.name != file_module_name);
+
+                match load_module_source(program, &source) {
+                    Ok(module_name) => {
+                        eprintln!(
+                            "[library] loaded module `{module_name}` from {}",
+                            path.display()
+                        );
+                        state.loaded_modules.push(module_name);
+                    }
+                    Err(e) => {
+                        let err_msg = format!("{e}");
+                        let msg = format!("failed to load {}: {e}", path.display());
+                        eprintln!("[library] warning: {msg}");
+                        state.record_error(msg);
+                        state.record_load_error(file_module_name, err_msg);
+                    }
                 }
-                Err(e) => {
-                    let err_msg = format!("{e}");
-                    let msg = format!("failed to load {}: {e}", path.display());
-                    eprintln!("[library] warning: {msg}");
-                    state.record_error(msg);
-                    state.record_load_error(file_module_name, err_msg);
-                }
-            },
+            }
             Err(e) => {
                 let err_msg = format!("could not read file: {e}");
                 let msg = format!("could not read {}: {e}", path.display());
@@ -1171,5 +1177,117 @@ mod tests {
             crate::session::is_function_tested(&program2, "TestMod.double"),
             "function should be considered tested after reload"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Tests for library load removing existing modules (duplicate startup fix)
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_load_module_source_over_existing_module_with_startup() {
+        // Simulate the scenario: session state already has a module with +startup,
+        // and library loading tries to parse the same module from an .ax file.
+        // Without the fix, this would fail with "duplicate +startup" error.
+
+        let source_with_startup = concat!(
+            "!module MyMod\n",
+            "+startup [io,async]\n",
+            "  +await _:String = shell(\"echo hello\")\n",
+            "+fn greet ()->String\n",
+            "  +return \"hi\"\n",
+        );
+
+        // First: load the module into the program (simulating session restore)
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source_with_startup).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        assert_eq!(program.modules.len(), 1);
+        assert!(
+            program.modules[0].startup.is_some(),
+            "module should have startup"
+        );
+
+        // Now simulate what load_module_library does: remove existing, then load
+        let file_module_name = "MyMod";
+        program.modules.retain(|m| m.name != file_module_name);
+        assert_eq!(program.modules.len(), 0, "module should be removed");
+
+        let result = load_module_source(&mut program, source_with_startup);
+        assert!(
+            result.is_ok(),
+            "loading over removed module should succeed: {result:?}"
+        );
+        assert_eq!(program.modules.len(), 1);
+        assert_eq!(program.modules[0].name, "MyMod");
+        assert!(
+            program.modules[0].startup.is_some(),
+            "startup should be present after reload"
+        );
+    }
+
+    #[test]
+    fn test_load_module_source_fails_without_removal() {
+        // This test demonstrates the bug: without removing the existing module first,
+        // loading the same module with a +startup block fails.
+
+        let source_with_startup = concat!(
+            "!module DupMod\n",
+            "+startup [io,async]\n",
+            "  +await _:String = shell(\"echo hello\")\n",
+            "+fn greet ()->String\n",
+            "  +return \"hi\"\n",
+        );
+
+        // Load the module once
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source_with_startup).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        assert_eq!(program.modules.len(), 1);
+
+        // Try to load again WITHOUT removing — should fail with duplicate startup
+        let result = load_module_source(&mut program, source_with_startup);
+        assert!(
+            result.is_err(),
+            "loading duplicate module with startup should fail without removal"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate +startup"),
+            "error should mention duplicate startup: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_module_replaces_functions_correctly() {
+        // Verify that when a module is removed and reloaded, the new version's
+        // functions replace the old ones properly.
+
+        let source_v1 = "!module VersionMod\n+fn compute ()->Int\n  +return 1\n";
+        let source_v2 = "!module VersionMod\n+fn compute ()->Int\n  +return 2\n+fn extra ()->String\n  +return \"new\"\n";
+
+        // Load v1
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source_v1).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        assert_eq!(program.modules[0].functions.len(), 1);
+
+        // Remove and load v2 (as library loader now does)
+        program.modules.retain(|m| m.name != "VersionMod");
+        let result = load_module_source(&mut program, source_v2);
+        assert!(result.is_ok(), "v2 load should succeed: {result:?}");
+        assert_eq!(program.modules.len(), 1);
+        assert_eq!(
+            program.modules[0].functions.len(),
+            2,
+            "v2 should have 2 functions"
+        );
+        assert_eq!(program.modules[0].functions[0].name, "compute");
+        assert_eq!(program.modules[0].functions[1].name, "extra");
     }
 }
