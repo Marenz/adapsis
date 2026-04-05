@@ -801,6 +801,7 @@ pub async fn handle_llm_takeover(
         max_iterations: 10,
         runtime: runtime.clone(),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        save_notify: None,
     };
 
     // Build agent completion callback from conversation's reply info
@@ -891,6 +892,7 @@ pub async fn handle_llm_takeover(
                 *program.write().await = session.program;
                 *runtime.write().unwrap() = session.runtime;
                 *meta.lock().unwrap() = session.meta;
+                tmp_config.notify_save();
                 break;
             }
         }
@@ -908,6 +910,7 @@ pub async fn handle_llm_takeover(
         *program.write().await = session.program;
         *runtime.write().unwrap() = session.runtime;
         *meta.lock().unwrap() = session.meta;
+        tmp_config.notify_save();
 
         // Build feedback and append to conversation
         let feedback: Vec<String> = exec_result.mutation_results.iter()

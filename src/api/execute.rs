@@ -639,6 +639,7 @@ pub async fn execute_code(
                         let agent_runtime = config.runtime.clone();
                         let agent_callback = agent_callback.clone();
                         let agent_io_sender = config.io_sender.clone();
+                        let agent_save_notify = config.save_notify.clone();
 
                         tokio::spawn(async move {
                             eprintln!("[agent:{agent_name}] starting");
@@ -761,6 +762,9 @@ pub async fn execute_code(
                             *agent_program.write().await = program;
                             *agent_runtime.write().unwrap() = runtime;
                             *agent_meta.lock().unwrap() = meta;
+                            if let Some(ref tx) = agent_save_notify {
+                                let _ = tx.try_send(());
+                            }
 
                             // Notify conversation context if callback configured
                             if let Some(cb) = agent_callback {
