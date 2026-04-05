@@ -996,46 +996,10 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
     let clean_content = strip_tags(&clean_content, "tool_call");
     let clean_content = strip_tags(&clean_content, "tool_result");
 
-    // Extract code: prefer <code> blocks, but also scan for Forge operations anywhere
+    // Extract code: ONLY from explicit <code> blocks. No prefix scanning.
+    // The LLM must use <code>...</code> to execute commands.
     let code_blocks = extract_tag_contents(&clean_content, "code");
-    let code = if !code_blocks.is_empty() {
-        code_blocks.join("\n\n")
-    } else {
-        // No <code> tags — scan for Forge operation lines in the full response.
-        // Every Forge command starts with +, !, or ? (and `end` for module closing).
-        // Extract contiguous blocks of such lines.
-        let mut adapsis_lines: Vec<String> = Vec::new();
-        let mut in_block = false;
-        let mut block_is_greedy = false; // !plan set, !roadmap add, !opencode, +type eat continuation
-        for line in clean_content.lines() {
-            let trimmed = line.trim();
-            let is_continuation = in_block && !trimmed.is_empty() && (
-                block_is_greedy
-                || trimmed.starts_with("- ") || trimmed.starts_with("* ")
-                || line.starts_with("  ") || line.starts_with("\t")
-                || trimmed.starts_with("//")
-            );
-            let is_adapsis = trimmed.starts_with('+') || trimmed.starts_with('!')
-                || trimmed.starts_with('?') || trimmed == "end" || trimmed == "!done"
-                || is_continuation
-                || (in_block && trimmed.is_empty());
-            if is_adapsis {
-                // Check if this line starts a greedy block
-                if trimmed.starts_with("!plan set") || trimmed.starts_with("!roadmap add")
-                    || trimmed.starts_with("!opencode") || trimmed.starts_with("+type") {
-                    block_is_greedy = true;
-                } else if trimmed.starts_with('+') || trimmed.starts_with('!') || trimmed.starts_with('?') {
-                    block_is_greedy = false; // New adapsis line resets greedy
-                }
-                adapsis_lines.push(line.to_string());
-                in_block = true;
-            } else if in_block && !trimmed.is_empty() {
-                in_block = false;
-                block_is_greedy = false;
-            }
-        }
-        adapsis_lines.join("\n").trim().to_string()
-    };
+    let code = code_blocks.join("\n\n");
 
     let full_text = if thinking.is_empty() {
         content.clone()
