@@ -911,6 +911,10 @@ async fn main() -> Result<()> {
             let llm_url_for_spawn = url.clone();
             let llm_model_for_spawn = model.clone();
             let llm_key_for_spawn = api_key.clone();
+            let opencode_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+            let opencode_lock_for_spawn = opencode_lock.clone();
+            let opencode_git_dir_shared: std::sync::Arc<std::sync::RwLock<String>> = std::sync::Arc::new(std::sync::RwLock::new(".".to_string()));
+            let opencode_git_dir_for_spawn = opencode_git_dir_shared.clone();
             // Clone resources for startup execution (before IO loop moves them)
             let io_sender_for_startup = runtime.io_sender();
             let startup_registry = runtime.task_registry.clone();
@@ -1063,6 +1067,8 @@ async fn main() -> Result<()> {
                             let io_sender = io_sender_for_spawn.clone();
                             let task_registry = task_registry_for_spawn.clone();
                             let snap_registry = snap_registry_for_spawn2.clone();
+                            let oc_lock = opencode_lock_for_spawn.clone();
+                            let oc_git_dir = opencode_git_dir_for_spawn.read().unwrap().clone();
 
                             tokio::spawn(async move {
                                 let result = crate::api::handle_llm_takeover(
@@ -1070,6 +1076,7 @@ async fn main() -> Result<()> {
                                     meta, program, runtime,
                                     &llm_url, &llm_model, llm_key,
                                     io_sender, task_registry, snap_registry,
+                                    oc_lock, oc_git_dir,
                                 ).await;
                                 let _ = reply.send(result);
                             });
@@ -1273,6 +1280,9 @@ async fn main() -> Result<()> {
             // Note: binary may be installed at ~/.local/bin/adapsis while worktree is separate.
             // !opencode will copy the rebuilt binary to the installed location before restart.
 
+            // Update the shared git dir so the IO loop can use it
+            *opencode_git_dir_shared.write().unwrap() = resolved_git_dir.clone();
+
             // Self-trigger channel: events feed back into the AI
             let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<String>(32);
 
@@ -1314,7 +1324,7 @@ async fn main() -> Result<()> {
                 jit_cache: eval::new_jit_cache(),
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
                 max_iterations,
-                opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                opencode_lock: opencode_lock,
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 opencode_git_dir: resolved_git_dir,
                 runtime: shared_runtime.clone(),

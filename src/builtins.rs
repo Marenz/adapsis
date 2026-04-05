@@ -507,6 +507,18 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "http_request",
+        aliases: &[],
+        short: "Generic HTTP request: http_request(method, url, headers, body) -> String",
+        long: "Makes a generic HTTP request with the given method and returns the response body as a String. \
+               Takes `(method:String, url:String, headers:String, body:String)`. \
+               method must be GET, POST, PUT, DELETE, or PATCH (case-insensitive). \
+               headers is a newline-separated string of `Key: Value` pairs (pass \"\" for none). \
+               body is the request body string (pass \"\" for none). \
+               Example: http_request(\"PUT\", \"https://api.example.com/item/1\", \"Authorization: Bearer tok\\nContent-Type: application/json\", \"{\\\"name\\\":\\\"updated\\\"}\")",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "http_upload",
         aliases: &[],
         short: "multipart file upload: http_upload(url, file_path, file_field, extra_fields) -> String",

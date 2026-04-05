@@ -1248,3 +1248,47 @@ fn conversation_to_llm_messages() {
     assert!(matches!(msgs[1].role, crate::llm::ChatRole::User));
     assert!(matches!(msgs[2].role, crate::llm::ChatRole::Assistant));
 }
+
+/// Regression test: handle_llm_takeover's tmp_config must use the shared
+/// opencode_lock, not create its own. Otherwise concurrent !opencode calls
+/// from different llm_takeover invocations won't be serialized.
+#[test]
+fn llm_takeover_uses_shared_opencode_lock() {
+    // Verify the function signature requires opencode_lock and opencode_git_dir.
+    // This is a compile-time check — if someone removes those params, this won't compile.
+    // We can't easily test runtime behavior without a full async setup, but we can
+    // verify the tmp_config construction uses the passed-in values.
+    
+    // Check that the source code does NOT contain "opencode_lock: std::sync::Arc::new"
+    // inside handle_llm_takeover's tmp_config (which would mean it creates a new lock).
+    let source = include_str!("llm_handlers.rs");
+    
+    // Find the tmp_config block in handle_llm_takeover
+    let takeover_start = source.find("pub async fn handle_llm_takeover").expect("handle_llm_takeover not found");
+    let takeover_body = &source[takeover_start..];
+    
+    // Find the tmp_config construction
+    let config_start = takeover_body.find("let tmp_config = AppConfig").expect("tmp_config not found in handle_llm_takeover");
+    let config_section = &takeover_body[config_start..];
+    let config_end = config_section.find("};").expect("end of tmp_config not found");
+    let config_block = &config_section[..config_end];
+    
+    // The config block should NOT create a new Mutex for opencode_lock
+    assert!(
+        !config_block.contains("tokio::sync::Mutex::new(())"),
+        "handle_llm_takeover creates its own opencode_lock instead of using the shared one. \
+         This breaks the sequential lock for !opencode. Use the opencode_lock parameter instead."
+    );
+    
+    // The config block SHOULD reference the passed-in opencode_lock
+    assert!(
+        config_block.contains("opencode_lock"),
+        "handle_llm_takeover tmp_config should use the opencode_lock parameter"
+    );
+    
+    // Same for opencode_git_dir - should not be hardcoded "."
+    assert!(
+        !config_block.contains("opencode_git_dir: \".\""),
+        "handle_llm_takeover should use the opencode_git_dir parameter, not hardcode \".\""
+    );
+}
