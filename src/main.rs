@@ -1417,9 +1417,6 @@ async fn main() -> Result<()> {
                             lib_errors += 1;
                         }
                     }
-                    if lib_errors == 0 && !sess.program.modules.is_empty() {
-                        eprintln!("[save] persisted {} library module(s)", sess.program.modules.len());
-                    }
                     if let Err(e) = sess.save(std::path::Path::new(&save_path)) {
                         eprintln!("[save] failed: {e}");
                     } else {

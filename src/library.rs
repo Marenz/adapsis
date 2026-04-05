@@ -528,11 +528,6 @@ pub fn persist_module(module: &ast::Module) -> Result<()> {
     let dir = ensure_library_dir()?;
     let target = dir.join(format!("{}.ax", module.name));
     let tmp = dir.join(format!(".{}.ax.tmp", module.name));
-    eprintln!(
-        "[library] persist: writing module `{}` to {}",
-        module.name,
-        target.display()
-    );
 
     let source = reconstruct_module_source(module);
 
@@ -675,9 +670,7 @@ pub fn persist_affected_modules(
     for name in module_names {
         if let Some(module) = program.modules.iter().find(|m| &m.name == name) {
             match persist_module(module) {
-                Ok(()) => {
-                    eprintln!("[library] persisted module `{name}` to library");
-                }
+                Ok(()) => {}
                 Err(e) => {
                     let msg = format!("failed to persist module `{name}`: {e}");
                     eprintln!("[library] warning: {msg}");
