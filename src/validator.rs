@@ -139,7 +139,30 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::Stub { .. } => Ok("stub (handled by session)".to_string()),
         parser::Operation::Unstub => Ok("unstub (handled by session)".to_string()),
         parser::Operation::Route { .. } => Ok("route (handled by session)".to_string()),
-        parser::Operation::Doc(_) => Ok("doc (handled by module/function context)".to_string()),
+        parser::Operation::Doc { target, text } => {
+            if let Some(target) = target {
+                // Targeted doc: +doc Module "text" or +doc Module.func "text"
+                if let Some(dot_pos) = target.find('.') {
+                    let func_name = target;
+                    if let Some(func) = program.get_function_mut(func_name) {
+                        func.doc = Some(text.clone());
+                        Ok(format!("doc: {func_name} — {text}"))
+                    } else {
+                        bail!("function `{func_name}` not found for +doc")
+                    }
+                } else {
+                    let module_name = target;
+                    if let Some(module) = program.modules.iter_mut().find(|m| m.name == *module_name) {
+                        module.doc = Some(text.clone());
+                        Ok(format!("doc: module {module_name} — {text}"))
+                    } else {
+                        bail!("module `{module_name}` not found for +doc")
+                    }
+                }
+            } else {
+                Ok("doc (handled by module/function context)".to_string())
+            }
+        },
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements at top level — execute immediately (not stored in AST)
         parser::Operation::Let(_)
@@ -275,7 +298,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 // The parser allows +test inside +module so that it doesn't
                 // break the module context for subsequent +fn definitions.
             }
-            parser::Operation::Doc(doc_text) => {
+            parser::Operation::Doc { target: _, text: doc_text } => {
                 // +doc inside module body — sets the doc on the most recently added function
                 let m = &mut program.modules[mod_idx];
                 if let Some(last_fn) = m.functions.last_mut() {

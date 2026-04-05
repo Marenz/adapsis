@@ -93,7 +93,10 @@ pub enum Operation {
     /// Signal task completion
     Done,
     /// Documentation string: +doc "description"
-    Doc(String),
+    Doc {
+        target: Option<String>,
+        text: String,
+    },
     /// Check inbox: ?inbox [agent_name]
     Query(String),
     /// Shared variable declaration: +shared name:Type = default_expr
@@ -685,13 +688,33 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        // +doc "description" — standalone doc at module level sets the preceding module's doc
-        // (also handled inline in +module and +fn parsing)
+        // +doc "description" — standalone doc for current module context
+        // +doc Module.func "description" — targeted doc for a specific function or module
         if let Some(rest) = text.strip_prefix("+doc") {
             let rest = rest.trim();
-            let doc_text = parse_string_literal(line.number, rest)?;
-            self.index += 1;
-            return Ok(Operation::Doc(doc_text));
+            // Check if it starts with a quote (no target) or an identifier (has target)
+            if rest.starts_with('"') {
+                let doc_text = parse_string_literal(line.number, rest)?;
+                self.index += 1;
+                return Ok(Operation::Doc {
+                    target: None,
+                    text: doc_text,
+                });
+            } else {
+                // Parse target name and then the quoted string
+                let (target, remainder) = rest.split_once(' ').ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "line {}: +doc needs a quoted string or target + quoted string",
+                        line.number
+                    )
+                })?;
+                let doc_text = parse_string_literal(line.number, remainder.trim())?;
+                self.index += 1;
+                return Ok(Operation::Doc {
+                    target: Some(target.to_string()),
+                    text: doc_text,
+                });
+            }
         }
 
         // +startup [io,async] — module startup block (no name, no params)
@@ -6638,6 +6661,8 @@ Add tests
     fn parse_standalone_doc_as_operation() {
         let ops = parse_ops("+doc \"standalone doc\"\n");
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], Operation::Doc(s) if s == "standalone doc"));
+        assert!(
+            matches!(&ops[0], Operation::Doc { target: None, text: s } if s == "standalone doc")
+        );
     }
 }
