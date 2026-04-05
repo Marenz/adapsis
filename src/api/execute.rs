@@ -443,18 +443,14 @@ pub async fn execute_code(
                                     let expr = expr.clone();
                                     let sender = sender.clone();
                                     let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
-                                    let eval_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
-                                        tokio::task::spawn_blocking(move || {
-                                            ctx.install();
-                                            crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
-                                        })
-                                    ).await;
+                                    let eval_result = tokio::task::spawn_blocking(move || {
+                                        ctx.install();
+                                        crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                    }).await;
                                     let (msg, success) = match &eval_result {
-                                        Ok(Ok(Ok(val))) => (format!("= {val}"), true),
-                                        Ok(Ok(Err(e))) => { (format!("eval error: {e}"), false) }
-                                        Ok(Err(e)) => { (format!("eval task error: {e}"), false) }
-                                        Err(_) => { (format!("eval timed out after {EVAL_TIMEOUT_SECS}s"), false) }
+                                        Ok(Ok(val)) => (format!("= {val}"), true),
+                                        Ok(Err(e)) => { (format!("eval error: {e}"), false) }
+                                        Err(e) => { (format!("eval task error: {e}"), false) }
                                     };
                                     eprintln!("[execute_code:eval] {msg}");
                                     if success {
@@ -511,26 +507,22 @@ pub async fn execute_code(
                                 let sender = sender.clone();
                                 let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                                 let eval_fn_name = ev.function_name.clone();
-                                let eval_result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(EVAL_TIMEOUT_SECS),
-                                    tokio::task::spawn_blocking(move || {
-                                        ctx.install();
-                                        let func = program.get_function(&fn_name)
-                                            .ok_or_else(|| anyhow::anyhow!("function not found"))?;
-                                        let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                        let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
-                                        env.populate_shared_from_program(&program);
-                                        env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                        let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
-                                        crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
-                                        crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
-                                    })
-                                ).await;
+                                let eval_result = tokio::task::spawn_blocking(move || {
+                                    ctx.install();
+                                    let func = program.get_function(&fn_name)
+                                        .ok_or_else(|| anyhow::anyhow!("function not found"))?;
+                                    let handle = crate::coroutine::CoroutineHandle::new(sender);
+                                    let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
+                                    env.populate_shared_from_program(&program);
+                                    env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
+                                    let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
+                                    crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
+                                    crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
+                                }).await;
                                 let (msg, success) = match &eval_result {
-                                    Ok(Ok(Ok(val))) => (format!("eval {}() = {val}", eval_fn_name), true),
-                                    Ok(Ok(Err(e))) => { (format!("eval error: {e}"), false) }
-                                    Ok(Err(e)) => { (format!("eval task error: {e}"), false) }
-                                    Err(_) => { (format!("eval {}() timed out after {EVAL_TIMEOUT_SECS}s", eval_fn_name), false) }
+                                    Ok(Ok(val)) => (format!("eval {}() = {val}", eval_fn_name), true),
+                                    Ok(Err(e)) => { (format!("eval error: {e}"), false) }
+                                    Err(e) => { (format!("eval task error: {e}"), false) }
                                 };
                                 eprintln!("[execute_code:eval] {msg}");
                                 if success {
