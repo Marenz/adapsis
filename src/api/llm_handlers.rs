@@ -761,7 +761,11 @@ pub async fn handle_llm_takeover(
                      <code> block. The agent completion result will be delivered separately. \
                      When you need to understand existing code, use ?source Module.function to read it. \
                      Don't guess how things work — read the source. Shared vars in modules are accessible \
-                     by name inside that module's functions (e.g. telegram_token in TelegramBot functions).",
+                     by name inside that module's functions (e.g. telegram_token in TelegramBot functions). \
+                     REUSE existing functions — do NOT create new modules or wrapper functions for \
+                     one-off tasks. To generate and send music, just !eval the existing functions \
+                     directly (e.g. MusicGen.generate_music then TelegramBot.send_audio_file). \
+                     Music generation takes ~60 seconds for a 60s track — do not retry if it seems slow.",
                     crate::prompt::system_prompt(),
                     crate::builtins::format_for_prompt(),
                     program_summary,
