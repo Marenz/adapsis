@@ -71,7 +71,7 @@ fn test_sync_function_passes() {
   +let sum:Int = a + b
   +return sum
 
-!test add
++test add
   +with a=2 b=3 -> expect 5
 ";
     let program = build_program(source);
@@ -91,7 +91,7 @@ fn test_sync_function_fails_on_wrong_expected() {
   +let sum:Int = a + b
   +return sum
 
-!test add
++test add
   +with a=2 b=3 -> expect 99
 ";
     let program = build_program(source);
@@ -113,7 +113,7 @@ fn test_async_function_with_mock_http_get() {
     let program = build_program(source);
 
     let test_source = "\
-!test fetch_data
++test fetch_data
   +with url=\"https://example.com\" -> expect \"hello\"
 ";
     let cases = extract_test_cases(test_source);
@@ -144,7 +144,7 @@ fn test_async_function_without_mock_errors_on_unmocked_io() {
     let program = build_program(source);
 
     let test_source = "\
-!test delayed_value
++test delayed_value
   +with -> expect \"done\"
 ";
     let cases = extract_test_cases(test_source);
@@ -174,7 +174,7 @@ fn test_async_function_with_io_effect_gets_handle() {
     let program = build_program(source);
 
     let test_source = "\
-!test fetch_data
++test fetch_data
   +with url=\"https://example.com\" -> expect \"world\"
 ";
     let cases = extract_test_cases(test_source);
@@ -204,7 +204,7 @@ fn test_async_function_await_sleep_with_mock() {
     let program = build_program(source);
 
     let test_source = "\
-!test delayed_value
++test delayed_value
   +with ms=1000 -> expect \"done\"
 ";
     let cases = extract_test_cases(test_source);
@@ -230,7 +230,7 @@ fn test_async_function_with_mock_inbox_read() {
     let program = build_program(source);
 
     let test_source = "\
-!test drain_inbox
++test drain_inbox
   +with -> expect \"[\\\"mocked\\\"]\"
 ";
     let cases = extract_test_cases(test_source);
@@ -265,7 +265,7 @@ fn test_async_function_nested_await_propagates_handle() {
     let program = build_program(source);
 
     let test_source = "\
-!test outer_fetch
++test outer_fetch
   +with url=\"https://api.test.com\" -> expect \"nested_ok\"
 ";
     let cases = extract_test_cases(test_source);
@@ -298,7 +298,7 @@ fn test_mock_http_get_json_consumed_by_json_get() {
     let program = build_program(source);
 
     let test_source = "\
-!test get_name
++test get_name
   +with url=\"https://api.example.com/user\" -> expect \"alice\"
 ";
     let cases = extract_test_cases(test_source);
@@ -331,7 +331,7 @@ fn test_mock_http_get_json_consumed_by_json_array_len() {
     let program = build_program(source);
 
     let test_source = "\
-!test count_items
++test count_items
   +with url=\"https://api.example.com/items\" -> expect 3
 ";
     let cases = extract_test_cases(test_source);
@@ -384,7 +384,7 @@ fn test_mock_json_end_to_end_with_parser_escaping() {
     let mocks = extract_mocks(mock_source);
 
     let test_source = "\
-!test check_status
++test check_status
   +with url=\"https://api.svc.local/health\" -> expect \"healthy\"
 ";
     let cases = extract_test_cases(test_source);
@@ -469,7 +469,7 @@ fn test_orchestrator_async_http_get_with_mock() {
 
 !mock http_get \"example.com\" -> \"hello world\"
 
-!test fetch_data
++test fetch_data
   +with url=\"https://example.com/api\" -> expect \"hello world\"
 ";
     let results = run_orchestrator_style(source);
@@ -490,7 +490,7 @@ fn test_orchestrator_async_sleep_with_mock() {
 
 !mock sleep \"500\" -> \"\"
 
-!test delayed
++test delayed
   +with ms=500 -> expect \"done\"
 ";
     let results = run_orchestrator_style(source);
@@ -516,7 +516,7 @@ fn test_orchestrator_nested_async_with_mock() {
 
 !mock http_get \"api.test\" -> \"nested result\"
 
-!test wrapper
++test wrapper
   +with url=\"https://api.test/v1\" -> expect \"nested result\"
 ";
     let results = run_orchestrator_style(source);
@@ -541,7 +541,7 @@ fn test_orchestrator_mock_json_escape_json_get_json_array_len() {
 ";
     let mock_source = "!mock http_get \"x\" -> \"{\\\"ok\\\":true,\\\"result\\\":[]}\"";
     let test_source = "\
-!test check
++test check
   +with url=\"x\" -> expect 0
 ";
     let full_source = format!("{fn_source}\n{mock_source}\n\n{test_source}");
@@ -566,7 +566,7 @@ async fn test_async_eval_test_case_with_mocks() {
     let program = build_program(source);
 
     let test_source = "\
-!test fetch_data
++test fetch_data
   +with url=\"https://example.com\" -> expect \"async_hello\"
 ";
     let cases = extract_test_cases(test_source);
@@ -586,7 +586,7 @@ async fn test_async_eval_test_case_with_mocks() {
 #[tokio::test]
 async fn test_session_apply_async_runs_async_tests_with_mocks() {
     // Simulate the full session flow: define an async function,
-    // register mocks, then run !test — all through apply_async.
+    // register mocks, then run +test — all through apply_async.
     let mut session = crate::session::Session::new();
 
     // Define async function
@@ -605,7 +605,7 @@ async fn test_session_apply_async_runs_async_tests_with_mocks() {
 
     // Run test — async function with mock, no io_sender needed (mock-only)
     let test_source = "\
-!test fetch_data
++test fetch_data
   +with url=\"https://example.com/api\" -> expect \"mocked_response\"
 ";
     let results = session.apply_async(test_source, None).await.unwrap();
@@ -642,7 +642,7 @@ async fn test_session_apply_async_nested_async_with_mocks() {
     let _ = session.apply_async(mock_source, None).await;
 
     let test_source = "\
-!test wrapper
++test wrapper
   +with url=\"https://api.test/v1\" -> expect \"nested_result\"
 ";
     let results = session.apply_async(test_source, None).await.unwrap();
@@ -664,7 +664,7 @@ async fn test_async_eval_delegates_sync_to_sync_path() {
     let program = build_program(source);
 
     let test_source = "\
-!test add
++test add
   +with a=10 b=20 -> expect 30
 ";
     let cases = extract_test_cases(test_source);
@@ -855,7 +855,7 @@ async fn test_mocked_http_utf8_roundtrip() {
     let _ = session.apply_async(mock_source, None).await;
 
     let test_source = "
-!test fetch_text
++test fetch_text
   +with url=\"https://unicode-test.example.com\" -> expect \"café — 你好 ✓\"
 ";
     let results = session.apply_async(test_source, None).await.unwrap();
@@ -889,7 +889,7 @@ async fn test_mocked_llm_utf8_roundtrip() {
     let _ = session.apply_async(mock_source, None).await;
 
     let test_source = "
-!test ask_llm
++test ask_llm
   +with prompt=\"test prompt\" -> expect \"café — 你好 ✓ ★\"
 ";
     let results = session.apply_async(test_source, None).await.unwrap();
@@ -917,7 +917,7 @@ fn test_zero_arg_function_as_test_param_value() {
 +fn get_host (c:Config)->String
   +return c.host
 
-!test get_host
++test get_host
   +with c=make_default() -> expect \"localhost\"
 ";
     let program = build_program(source);
@@ -946,7 +946,7 @@ fn test_bare_function_name_as_test_param_value() {
 +fn get_host (c:Config)->String
   +return c.host
 
-!test get_host
++test get_host
   +with c=make_default -> expect \"localhost\"
 ";
     let program = build_program(source);
@@ -974,7 +974,7 @@ fn test_function_call_with_args_in_test_param() {
 +fn get_port (c:Config)->Int
   +return c.port
 
-!test get_port
++test get_port
   +with c=make_config(\"example.com\", 3000) -> expect 3000
 ";
     let program = build_program(source);
@@ -1002,7 +1002,7 @@ fn test_function_call_in_expected_value() {
 +fn identity (c:Config)->Config
   +return c
 
-!test identity
++test identity
   +with c=make_default() -> expect make_default()
 ";
     let program = build_program(source);
@@ -1105,7 +1105,7 @@ fn test_with_positional_strings() {
   +let result:String = concat(a, b)
   +return result
 
-!test concat_two
++test concat_two
   +with \"hello\" \"world\" -> expect \"helloworld\"
 ";
     let program = build_program(source);
@@ -1742,7 +1742,7 @@ fn test_impure_function_rejected_in_test_param_bare() {
 +fn get_name (state:State)->String
   +return state.name
 
-!test get_name
++test get_name
   +with state=fetch_state -> expect \"default\"
 ";
     let program = build_program(source);
@@ -1779,7 +1779,7 @@ fn test_impure_function_rejected_in_test_param_call() {
 +fn get_name (state:State)->String
   +return state.name
 
-!test get_name
++test get_name
   +with state=fetch_state() -> expect \"default\"
 ";
     let program = build_program(source);
@@ -1812,7 +1812,7 @@ fn test_fail_effect_allowed_in_test_param() {
 +fn get_host (cfg:Config)->String
   +return cfg.host
 
-!test get_host
++test get_host
   +with cfg=validated_config(\"localhost\", 8080) -> expect \"localhost\"
 ";
     let program = build_program(source);
@@ -1836,7 +1836,7 @@ fn test_escaped_quotes_in_key_value_string() {
 +fn identity (s:String)->String
   +return s
 
-!test identity
++test identity
   +with s="hello\"world" -> expect "hello\"world"
 "#;
     let program = build_program(source);
@@ -1858,7 +1858,7 @@ fn test_escaped_quotes_multiple_string_args() {
   +let result:String = concat(a, b)
   +return result
 
-!test concat_two
++test concat_two
   +with a="he\"llo" b="wo\"rld" -> expect "he\"llowo\"rld"
 "#;
     let program = build_program(source);
@@ -1878,7 +1878,7 @@ fn test_newline_and_tab_escapes_in_test_value() {
 +fn identity (s:String)->String
   +return s
 
-!test identity
++test identity
   +with s="line1\nline2" -> expect "line1\nline2"
 "#;
     let program = build_program(source);
@@ -1901,7 +1901,7 @@ fn test_io_builtin_without_await_gives_helpful_error() {
 ";
     let program = build_program(source);
     let test_source = "\
-!test broken
++test broken
   +with url=\"http://example.com\" -> expect \"\"
 ";
     let cases = extract_test_cases(test_source);
@@ -1937,7 +1937,7 @@ fn test_each_return_propagation() {
   +end
   +return \"none\"
 
-!test find_role
++test find_role
   +with messages=list({role: \"user\", content: \"hi\"}) -> expect \"user\"
 ";
     let program = build_program(source);
@@ -1965,7 +1965,7 @@ fn test_each_field_access_and_let() {
   +end
   +return result
 
-!test build_text
++test build_text
   +with messages=list({role: \"user\", content: \"hi\"}, {role: \"bot\", content: \"hello\"}) -> expect \"user bot \"
 ";
     let program = build_program(source);
@@ -1996,7 +1996,7 @@ fn test_format_expr_struct_with_list_roundtrip() {
 
     // Simulate a stored test with struct input containing list()
     let test_source = "\
-!test process
++test process
   +with s={messages: list(), last_id: 0} -> expect 0
 ";
     let cases = extract_test_cases(test_source);
@@ -2013,7 +2013,7 @@ fn test_format_expr_struct_with_list_roundtrip() {
 
     // Reconstruct test source (same as invalidate_and_retest)
     let reconstructed = format!(
-        "!test process\n  +with {} -> expect {}\n",
+        "+test process\n  +with {} -> expect {}\n",
         input_str, expected_str
     );
 
@@ -2047,7 +2047,7 @@ fn test_contains_matcher() {
 +fn greet (name:String)->String
   +return concat(\"hello \", name, \"!\")
 
-!test greet
++test greet
   +with name=\"world\" -> expect contains(\"hello\")
 ";
     let program = build_program(source);
@@ -2065,7 +2065,7 @@ fn test_contains_matcher_fails_when_not_present() {
 +fn greet (name:String)->String
   +return concat(\"hello \", name, \"!\")
 
-!test greet
++test greet
   +with name=\"world\" -> expect contains(\"goodbye\")
 ";
     let program = build_program(source);
@@ -2084,7 +2084,7 @@ fn test_starts_with_matcher() {
 +fn greet (name:String)->String
   +return concat(\"hello \", name)
 
-!test greet
++test greet
   +with name=\"world\" -> expect starts_with(\"hello\")
 ";
     let program = build_program(source);
@@ -2104,7 +2104,7 @@ fn test_starts_with_matcher_fails() {
 +fn greet (name:String)->String
   +return concat(\"hello \", name)
 
-!test greet
++test greet
   +with name=\"world\" -> expect starts_with(\"goodbye\")
 ";
     let program = build_program(source);
@@ -2124,7 +2124,7 @@ fn test_any_ok_matcher() {
   +check positive x > 0 ~err_negative
   +return x
 
-!test validate
++test validate
   +with x=5 -> expect Ok
 ";
     let program = build_program(source);
@@ -2146,7 +2146,7 @@ fn test_any_ok_matcher_fails_on_err() {
   +check positive x > 0 ~err_negative
   +return x
 
-!test validate
++test validate
   +with x=-1 -> expect Ok
 ";
     let program = build_program(source);
@@ -2163,7 +2163,7 @@ fn test_any_err_matcher() {
   +check positive x > 0 ~err_negative
   +return x
 
-!test validate
++test validate
   +with x=-1 -> expect Err
 ";
     let program = build_program(source);
@@ -2185,7 +2185,7 @@ fn test_any_err_matcher_fails_on_ok() {
   +check positive x > 0 ~err_negative
   +return x
 
-!test validate
++test validate
   +with x=5 -> expect Err
 ";
     let program = build_program(source);
@@ -2202,7 +2202,7 @@ fn test_err_containing_matcher() {
   +check positive x > 0 ~err_negative
   +return x
 
-!test validate
++test validate
   +with x=-1 -> expect Err(\"err_negative\")
 ";
     let program = build_program(source);
@@ -2227,7 +2227,7 @@ fn test_err_containing_matcher_fails_on_wrong_msg() {
   +check positive x > 0 ~err_negative
   +return x
 
-!test validate
++test validate
   +with x=-1 -> expect Err(\"err_something_else\")
 ";
     let program = build_program(source);
@@ -2251,7 +2251,7 @@ fn test_after_routes_contains_pass() {
 
 +route POST \"/chat\" -> handler
 
-!test handler
++test handler
   +with body=\"hello\" -> expect \"ok\"
   +after routes contains \"/chat\"
 ";
@@ -2280,7 +2280,7 @@ fn test_after_routes_contains_fail() {
 +fn handler (body:String)->String
   +return \"ok\"
 
-!test handler
++test handler
   +with body=\"hello\" -> expect \"ok\"
   +after routes contains \"/nonexistent\"
 ";
@@ -2297,12 +2297,12 @@ fn test_after_routes_contains_fail() {
 #[test]
 fn test_after_modules_contains_pass() {
     let source = "\
-!module TestMod
++module TestMod
 
 +fn helper ()->Int
   +return 42
 
-!test helper
++test helper
   +with -> expect 42
   +after modules contains \"TestMod\"
 ";
@@ -2319,7 +2319,7 @@ fn test_after_modules_contains_fail() {
 +fn helper ()->Int
   +return 42
 
-!test helper
++test helper
   +with -> expect 42
   +after modules contains \"NonExistent\"
 ";
@@ -2342,7 +2342,7 @@ fn test_matchers_combined_with_after() {
 
 +route GET \"/api\" -> handler
 
-!test handler
++test handler
   +with body=\"test\" -> expect contains(\"processed\")
   +after routes contains \"/api\"
 ";
@@ -2363,14 +2363,14 @@ fn test_matchers_combined_with_after() {
 #[test]
 fn test_multiple_after_checks() {
     let source = "\
-!module MyMod
++module MyMod
 
 +fn handler (body:String)->String
   +return \"ok\"
 
 +route POST \"/webhook\" -> handler
 
-!test handler
++test handler
   +with body=\"x\" -> expect \"ok\"
   +after routes contains \"/webhook\"
   +after modules contains \"MyMod\"
@@ -2400,7 +2400,7 @@ fn test_exact_err_still_works_without_matcher() {
   +check positive x > 0 ~err_negative
   +return x
 
-!test validate
++test validate
   +with x=-1 -> expect Err(err_negative)
 ";
     let program = build_program(source);
@@ -3550,7 +3550,7 @@ fn match_nested_variant_bindings() {
 #[test]
 fn fork_runtime_creates_isolated_shared_vars() {
     let source = "\
-!module Counter
++module Counter
 +shared count:Int = 0
 +fn get_count ()->Int
   +return count
@@ -3575,7 +3575,7 @@ fn fork_runtime_creates_isolated_shared_vars() {
 #[test]
 fn fork_runtime_mutation_does_not_affect_original() {
     let source = "\
-!module State
++module State
 +shared value:Int = 10
 +fn get ()->Int
   +return value
@@ -3634,7 +3634,7 @@ fn fork_runtime_empty_program_no_shared_vars() {
 #[test]
 fn shared_var_populated_in_env() {
     let source = "\
-!module Config
++module Config
 +shared debug:Bool = false
 +shared max_retries:Int = 3
 +fn get_retries ()->Int
@@ -3658,7 +3658,7 @@ fn shared_var_populated_in_env() {
 fn shared_var_accessible_via_qualified_name() {
     // Shared vars are stored as "Module.name" keys
     let source = "\
-!module App
++module App
 +shared counter:Int = 42
 +fn get ()->Int
   +return 0
@@ -3676,12 +3676,12 @@ fn shared_var_accessible_via_qualified_name() {
 #[test]
 fn shared_var_multiple_modules() {
     let source = "\
-!module A
++module A
 +shared x:Int = 1
 +fn get_x ()->Int
   +return x
 
-!module B
++module B
 +shared y:Int = 2
 +fn get_y ()->Int
   +return y
@@ -3699,7 +3699,7 @@ fn bench_vm_vs_treewalker() {
     use std::time::Instant;
 
     let source = r#"
-!module Bench
++module Bench
 +fn fib (n:Int)->Int
   +if n <= 1
     +return n
@@ -4126,7 +4126,7 @@ fn test_interned_eval_function_with_variables() {
   +let result:Int = a + b
   +return result
 
-!test compute
++test compute
   +with x=3 y=4 -> expect 12
 ";
     let program = build_program(source);
@@ -4150,7 +4150,7 @@ fn test_interned_eval_nested_scopes() {
   +end
   +return result
 
-!test nested
++test nested
   +with x=5 -> expect 15
   +with x=0 -> expect 0
 ";
@@ -4282,7 +4282,7 @@ fn test_env_get_id_not_found() {
 fn test_program_interner_with_modules() {
     // Verify that module names, module function names, and shared vars are interned
     let source = "\
-!module Math
++module Math
 
 +fn square (n:Int)->Int
   +return n * n
@@ -4310,7 +4310,7 @@ fn test_interner_eval_function_with_program_interner() {
   +let result:Int = x * 2
   +return result
 
-!test double
++test double
   +with x=5 -> expect 10
 ";
     let program = build_program(source);
@@ -4547,7 +4547,7 @@ fn test_push_returns_extended_list() {
   +let ys:List<Int> = push(xs, 4)
   +return len(ys)
 
-!test test_push
++test test_push
   +with -> expect 4
 ";
     let program = build_program(source);
@@ -4600,7 +4600,7 @@ fn test_push_preserves_original_list_semantics() {
   +end
   +return len(result)
 
-!test accumulate
++test accumulate
   +with n=4 -> expect 4
 ";
     let program = build_program(source);
@@ -4618,11 +4618,11 @@ fn test_push_preserves_original_list_semantics() {
 fn test_module_function_lookup_with_index() {
     // Module-qualified function lookup should work after rebuild_function_index
     let source = "\
-!module Math
++module Math
 +fn add (a:Int, b:Int)->Int
   +return a + b
 
-!test Math.add
++test Math.add
   +with a=3 b=4 -> expect 7
 ";
     let program = build_program(source);
@@ -4729,7 +4729,7 @@ fn user_function_call_uses_interned_env() {
 +fn double (n:Int) -> Int
   +return n + n
 
-!test double
++test double
   +with n=5 -> expect 10
 ";
     let program = build_program(source);
@@ -4844,7 +4844,7 @@ fn value_struct_field_lookup_with_arc_keys() {
 +fn get_x (p:Point) -> Int
   +return p.x
 
-!test get_x
++test get_x
   +with x=10 y=20 -> expect 10
 ";
     let program = build_program(source);
@@ -4868,7 +4868,7 @@ fn value_list_operations_with_arc_wrapper() {
   +return len(items2)
 +end
 
-!test list_ops
++test list_ops
   +with -> expect 4
 ";
     let program = build_program(source);
@@ -4891,7 +4891,7 @@ fn value_string_builtin_ops_through_arc() {
   +let upper:String = concat(trimmed, \"!\")
   +return upper
 
-!test string_ops
++test string_ops
   +with s=\"  hello  \" -> expect \"hello!\"
 ";
     let program = build_program(source);
@@ -4961,7 +4961,7 @@ fn value_match_pattern_with_arc_union() {
   +end
 +end
 
-!test color_name
++test color_name
   +with c=Red -> expect \"red\"
 ";
     let program = build_program(source);
@@ -4987,7 +4987,7 @@ fn value_each_loop_with_arc_list() {
   +return total
 +end
 
-!test sum_list
++test sum_list
   +with items=list(1, 2, 3) -> expect 6
 ";
     let program = build_program(source);
@@ -5013,7 +5013,7 @@ fn interned_fn_index_dispatch_top_level() {
 +fn triple (n:Int)->Int
   +return n * 3
 
-!test triple
++test triple
   +with n=7 -> expect 21
 ";
     let program = build_program(source);
@@ -5031,12 +5031,12 @@ fn interned_fn_index_dispatch_top_level() {
 fn interned_fn_index_dispatch_module_qualified() {
     // Module-qualified function call dispatches through interned module_index + fn_index.
     let source = "\
-!module Calc
++module Calc
 
 +fn square (n:Int)->Int
   +return n * n
 
-!test Calc.square
++test Calc.square
   +with n=6 -> expect 36
 ";
     let program = build_program(source);
@@ -5061,7 +5061,7 @@ fn interned_fn_index_cross_function_call() {
   +call y:Int = helper(x)
   +return y * 2
 
-!test main_fn
++test main_fn
   +with x=4 -> expect 10
 ";
     let program = build_program(source);
@@ -5089,7 +5089,7 @@ fn interned_union_variant_lookup_in_match() {
     +return side * side
   +end
 
-!test area
++test area
   +with s=Circle(5) -> expect 75
   +with s=Square(4) -> expect 16
 ";
@@ -5228,7 +5228,7 @@ fn interned_struct_field_access_in_eval() {
 +fn get_port (c:Config) -> Int
   +return c.port
 
-!test get_port
++test get_port
   +with host=\"localhost\" port=8080 -> expect 8080
 ";
     let program = build_program(source);
@@ -5257,7 +5257,7 @@ fn interned_union_match_dispatch() {
     +return -1
   +end
 
-!test unwrap_result
++test unwrap_result
   +with r=Success(42) -> expect 42
   +with r=Failure(\"oops\") -> expect -1
 ";
@@ -5370,7 +5370,7 @@ fn test_async_multi_param_function_binds_params_via_runtime() {
     let program = build_program(source);
 
     let test_source = "\
-!test fetch_issues
++test fetch_issues
   +with owner=\"torvalds\" repo=\"linux\" -> expect \"issues_json\"
 ";
     let cases = extract_test_cases(test_source);
@@ -5402,7 +5402,7 @@ async fn test_async_multi_param_function_binds_params_via_spawn_blocking() {
     let program = build_program(source);
 
     let test_source = "\
-!test fetch_issues
++test fetch_issues
   +with owner=\"torvalds\" repo=\"linux\" -> expect \"issues_json\"
 ";
     let cases = extract_test_cases(test_source);
@@ -5435,7 +5435,7 @@ fn test_async_multi_param_wrong_expected_fails() {
     let program = build_program(source);
 
     let test_source = "\
-!test fetch_issues
++test fetch_issues
   +with owner=\"torvalds\" repo=\"linux\" -> expect \"wrong_value\"
 ";
     let cases = extract_test_cases(test_source);
@@ -5478,7 +5478,7 @@ async fn test_async_session_multi_param_function() {
     assert!(results.is_ok(), "mock should succeed: {:?}", results);
 
     let test_source = "\
-!test fetch_issues
++test fetch_issues
   +with owner=\"torvalds\" repo=\"linux\" -> expect \"session_issues\"
 ";
     let results = session.apply_async(test_source, None).await.unwrap();
@@ -5569,7 +5569,7 @@ fn shared_var_accessible_in_nested_call_during_test() {
     // B accesses a shared variable. When testing A, B's shared
     // variable access must still work.
     let source = "\
-!module Counter
++module Counter
 +shared count:Int = 10
 +fn get_count ()->Int
   +return count
@@ -5601,7 +5601,7 @@ fn shared_var_accessible_in_nested_call_during_test() {
 #[test]
 fn shared_var_set_persists_across_eval_calls() {
     let source = r#"
-!module Bot
++module Bot
 +shared bot_token:String = ""
 +fn set_token (raw:String)->String [mut]
   +let trimmed:String = trim(raw)
@@ -5645,7 +5645,7 @@ fn shared_var_set_persists_across_eval_calls() {
 #[test]
 fn shared_var_set_and_read_work_in_test_context() {
     let source = r#"
-!module Bot
++module Bot
 +shared bot_token:String = ""
 +fn configure_and_read (raw:String)->String [mut]
   +let trimmed:String = trim(raw)
@@ -5653,7 +5653,7 @@ fn shared_var_set_and_read_work_in_test_context() {
   +return concat("Bearer ", bot_token)
 +end
 
-!test Bot.configure_and_read
++test Bot.configure_and_read
   +with "  xyz  " -> expect "Bearer xyz"
 "#;
     let program = build_program(source);
@@ -5668,7 +5668,7 @@ fn shared_var_set_and_read_work_in_test_context() {
 #[test]
 fn undeclared_shared_var_still_errors() {
     let source = r#"
-!module Bot
++module Bot
 +fn auth_header ()->String
   +return concat("Bearer ", bot_token)
 +end
@@ -5694,14 +5694,14 @@ fn shared_var_nested_call_different_module_no_cross_leak() {
     // Module B's function should see module B's shared vars,
     // NOT module A's shared vars with the same name.
     let source = "\
-!module Alpha
++module Alpha
 +shared val:Int = 100
 
 +fn get_both ()->Int
   +return val + Beta.get_val()
 +end
 
-!module Beta
++module Beta
 +shared val:Int = 5
 
 +fn get_val ()->Int
@@ -5729,13 +5729,13 @@ fn shared_var_inaccessible_from_wrong_module() {
     // A function in module A should NOT be able to access module B's
     // shared variables via bare name.
     let source = "\
-!module OnlyHere
++module OnlyHere
 +shared secret:Int = 42
 +fn get_secret ()->Int
   +return secret
 +end
 
-!module Other
++module Other
 +fn try_access ()->Int
   +return secret
 +end
@@ -5761,7 +5761,7 @@ fn shared_var_inaccessible_from_wrong_module() {
 #[test]
 fn qualify_function_name_returns_qualified_for_module_fn() {
     let source = "\
-!module MyMod
++module MyMod
 +fn helper ()->Int
   +return 1
 +end
@@ -5784,7 +5784,7 @@ fn qualify_function_name_returns_bare_for_top_level_fn() {
 #[test]
 fn qualify_function_name_preserves_already_qualified() {
     let source = "\
-!module Foo
++module Foo
 +fn bar ()->Int
   +return 1
 +end
@@ -5804,7 +5804,7 @@ fn shared_var_nested_call_via_eval_call_with_input() {
     // Test the !eval path: eval_call_with_input should also
     // support shared variables in nested function calls.
     let source = "\
-!module Store
++module Store
 +shared price:Int = 50
 +fn get_price ()->Int
   +return price
@@ -5836,7 +5836,7 @@ fn shared_var_nested_call_via_eval_call_with_input() {
 fn shared_var_deeply_nested_calls() {
     // A calls B calls C, all accessing shared state
     let source = "\
-!module Deep
++module Deep
 +shared base:Int = 7
 +fn c ()->Int
   +return base
@@ -5874,7 +5874,7 @@ fn shared_var_deeply_nested_calls() {
 fn source_add_timer_in_sync_context_no_error() {
     // Without a coroutine handle, +source add should silently succeed
     let source = r#"
-!module Svc
++module Svc
 +fn setup ()->String [io,async]
   +source add timer(5000) as poll -> on_tick
   +return "ok"
@@ -5898,7 +5898,7 @@ fn source_add_timer_in_sync_context_no_error() {
 #[test]
 fn source_add_channel_in_sync_context() {
     let source = r#"
-!module Svc
++module Svc
 +fn setup ()->String [io,async]
   +source add channel as inbox -> on_msg
   +return "ok"
@@ -5920,7 +5920,7 @@ fn source_add_channel_in_sync_context() {
 #[test]
 fn source_add_event_in_sync_context() {
     let source = r#"
-!module Listener
++module Listener
 +fn setup ()->String [io,async]
   +source add Chat.new_message as msgs -> handle
   +return "ok"
@@ -5947,7 +5947,7 @@ fn source_add_timer_with_async_handle() {
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(16);
         let source = r#"
-!module Svc
++module Svc
 +fn setup ()->String [io,async]
   +source add timer(3000) as poll -> on_tick
   +return "ok"
@@ -6000,7 +6000,7 @@ fn source_add_timer_with_async_handle() {
 #[test]
 fn source_add_timer_non_int_expr_errors() {
     let source = r#"
-!module Svc
++module Svc
 +fn setup ()->String [io,async]
   +source add timer("not_a_number") as poll -> on_tick
   +return "ok"
@@ -6023,7 +6023,7 @@ fn source_add_timer_non_int_expr_errors() {
 fn source_add_module_name_from_handler() {
     // When __module_name isn't set, module_name is extracted from handler
     let source = r#"
-!module MyMod
++module MyMod
 +fn setup ()->String [io,async]
   +source add channel as inbox -> on_msg
   +return "ok"
@@ -6077,7 +6077,7 @@ fn source_add_with_module_name_env() {
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(16);
         let source = r#"
-!module MyMod
++module MyMod
 +fn setup ()->String [io,async]
   +source add channel as inbox -> on_msg
   +return "ok"

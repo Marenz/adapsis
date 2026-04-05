@@ -947,7 +947,7 @@ fn mutate_add_function() {
 #[test]
 fn mutate_add_module_with_functions() {
     let (handle, prog) = setup_mutation_runtime("");
-    let code = "!module Greeter\n+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end";
+    let code = "+module Greeter\n+fn greet (name:String)->String\n  +return concat(\"hello \", name)\n+end";
     let result = unwrap_string(
         handle
             .execute_await("mutate", &[Value::string(code)])
@@ -1029,7 +1029,7 @@ fn fn_remove_top_level() {
 #[test]
 fn fn_remove_from_module() {
     let (handle, prog) = setup_mutation_runtime(
-        "!module MyMod\n+fn greet (name:String)->String\n  +return name\n+end",
+        "+module MyMod\n+fn greet (name:String)->String\n  +return name\n+end",
     );
     assert!(prog.read().unwrap().get_function("MyMod.greet").is_some());
 
@@ -1109,7 +1109,7 @@ fn type_remove_wrong_type_fails() {
 #[test]
 fn module_remove_existing() {
     let (handle, prog) =
-        setup_mutation_runtime("!module MyMod\n+fn hello ()->String\n  +return \"hi\"\n+end");
+        setup_mutation_runtime("+module MyMod\n+fn hello ()->String\n  +return \"hi\"\n+end");
     assert!(!prog.read().unwrap().modules.is_empty());
 
     let result = unwrap_string(
@@ -2314,7 +2314,7 @@ fn module_create_new_module() {
 
 #[test]
 fn module_create_already_exists() {
-    let (handle, _prog) = setup_mutation_runtime("!module Existing");
+    let (handle, _prog) = setup_mutation_runtime("+module Existing");
     let result = unwrap_string(
         handle
             .execute_await("module_create", &[Value::string("Existing")])
@@ -2352,7 +2352,7 @@ fn module_create_empty_name_fails() {
 fn test_run_with_stored_tests() {
     // Build a program with a function that has stored tests
     let source = "+fn double (x:Int)->Int\n  +return x * 2\n+end\n\
-                      !test double\n  +with 3 -> expect 6\n  +with 5 -> expect 10\n";
+                      +test double\n  +with 3 -> expect 6\n  +with 5 -> expect 10\n";
     let ops = crate::parser::parse(source).unwrap();
     let mut program = crate::ast::Program::default();
     for op in &ops {
@@ -2534,7 +2534,7 @@ fn library_errors_with_load_errors() {
             ("BadModule".to_string(), "parse error on line 5".to_string()),
             (
                 "BrokenMod".to_string(),
-                "no !module declaration found".to_string(),
+                "no +module declaration found".to_string(),
             ),
         ];
     }
@@ -2548,7 +2548,7 @@ fn library_errors_with_load_errors() {
         "should show first error: {result}"
     );
     assert!(
-        result.contains("BrokenMod: no !module declaration found"),
+        result.contains("BrokenMod: no +module declaration found"),
         "should show second error: {result}"
     );
 }
@@ -2615,7 +2615,7 @@ fn run_module_startups_no_modules() {
 #[test]
 fn run_module_startups_with_startup_block() {
     let source = r#"
-!module Svc
++module Svc
 +startup [io,async]
   +return "started"
 +fn greet ()->String
@@ -2638,10 +2638,10 @@ fn run_module_startups_with_startup_block() {
 #[test]
 fn run_module_startups_sorted_alphabetically() {
     let source = r#"
-!module Zebra
++module Zebra
 +startup [io,async]
   +return "z"
-!module Alpha
++module Alpha
 +startup [io,async]
   +return "a"
 "#;
@@ -2665,7 +2665,7 @@ fn run_module_startups_sorted_alphabetically() {
 #[test]
 fn run_module_startups_with_source_decl() {
     let source = r#"
-!module Poller
++module Poller
 +source heartbeat timer interval=5000 -> on_tick
 +fn on_tick ()->String
   +return "tick"
@@ -2700,7 +2700,7 @@ fn query_startups_no_modules() {
 #[test]
 fn query_startups_with_startup() {
     let source = r#"
-!module Svc
++module Svc
 +startup [io,async]
   +return "started"
 +fn greet ()->String
@@ -2723,7 +2723,7 @@ fn query_startups_with_startup() {
 #[test]
 fn query_startups_with_both() {
     let source = r#"
-!module Svc
++module Svc
 +startup [io,async]
   +return "started"
 +shutdown [io,async]
@@ -2745,10 +2745,10 @@ fn query_startups_with_both() {
 #[test]
 fn query_startups_multiple_modules() {
     let source = r#"
-!module Alpha
++module Alpha
 +startup [io,async]
   +return "a"
-!module Beta
++module Beta
 +startup [io,async]
   +return "b1"
   +return "b2"

@@ -7,7 +7,7 @@
   +return input
 +end
 
-!test validate
++test validate
   +with {age: 25, email: "foo@bar.com", name: "alice"} -> expect Ok
   +with {age: -1, email: "foo@bar.com", name: "alice"} -> expect Err(err_negative_age)
   +with {age: 200, email: "foo@bar.com", name: "alice"} -> expect Err(err_age_too_high)

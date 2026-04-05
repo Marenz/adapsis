@@ -49,25 +49,25 @@
   +end
 +end
 
-!test count_chars
++test count_chars
   +with s="hello" target="l" -> expect 2
   +with s="aaa" target="a" -> expect 3
   +with s="abc" target="z" -> expect 0
 
-!test reverse_string
++test reverse_string
   +with "hello" -> expect "olleh"
   +with "abc" -> expect "cba"
   +with "a" -> expect "a"
 
-!test repeat_string
++test repeat_string
   +with s="ab" n=3 -> expect "ababab"
   +with s="x" n=1 -> expect "x"
 
-!test word_count
++test word_count
   +with "hello world foo" -> expect 3
   +with "single" -> expect 1
 
-!test to_upper_first
++test to_upper_first
   +with "hello" -> expect "hello"
   +with "" -> expect ""
 

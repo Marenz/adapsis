@@ -1,4 +1,4 @@
-!module Poller
++module Poller
 +source heartbeat timer interval=60000 -> on_heartbeat
 +startup [io,async]
   +source add timer(300000) as poll -> on_tick
@@ -22,14 +22,14 @@
 +fn get_interval ()->Int
   +return 300000
 
-!test on_message
++test on_message
   +with msg="hello" -> expect "received: hello"
   +with msg="" -> expect "received: "
 
-!test get_interval
++test get_interval
   +with -> expect 300000
 
-!module Events
++module Events
 +fn setup ()->String [io,async]
   +event register new_message(String)
   +return "events configured"
@@ -45,5 +45,5 @@
 +fn on_event (payload:String)->String
   +return concat("event: ", payload)
 
-!test on_event
++test on_event
   +with payload="test" -> expect "event: test"

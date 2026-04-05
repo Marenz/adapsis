@@ -3,7 +3,7 @@
   +return remainder == 0
 +end
 
-!test is_even
++test is_even
   +with 4 -> expect true
   +with 5 -> expect false
   +with 0 -> expect true

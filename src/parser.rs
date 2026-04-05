@@ -92,6 +92,8 @@ pub enum Operation {
     Unstub,
     /// Signal task completion
     Done,
+    /// Documentation string: +doc "description"
+    Doc(String),
     /// Check inbox: ?inbox [agent_name]
     Query(String),
     /// Shared variable declaration: +shared name:Type = default_expr
@@ -247,6 +249,8 @@ pub struct TraceMutation {
 pub struct ModuleDecl {
     pub name: String,
     pub body: Vec<Operation>,
+    /// Optional module doc string from `+doc "..."` immediately after `+module Name`.
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +285,8 @@ pub struct FunctionDecl {
     pub return_type: TypeExpr,
     pub effects: Vec<String>,
     pub body: Vec<Operation>,
+    /// Optional documentation string from `+doc "..."` after `+end`.
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -579,38 +585,51 @@ impl<'a> Parser<'a> {
         false
     }
 
+    /// Consume an optional `+doc "..."` line immediately following the current position.
+    /// Returns the doc string if present, or None.
+    fn consume_doc(&mut self) -> Option<String> {
+        let line = self.current()?;
+        let rest = line.text.strip_prefix("+doc")?.trim();
+        if let Ok(doc) = parse_string_literal(line.number, rest) {
+            self.index += 1;
+            Some(doc)
+        } else {
+            None
+        }
+    }
+
     fn parse_operation(&mut self, indent: usize) -> Result<Operation> {
         let line = self.current().context("internal parser state error")?;
         let text = line.text;
 
-        // !module Name — state change, everything after goes into this module
-        if let Some(rest) = text
-            .strip_prefix("!module")
-            .or_else(|| text.strip_prefix("+module"))
-        {
+        // +module Name — state change, everything after goes into this module
+        if let Some(rest) = text.strip_prefix("+module") {
             let name = rest.trim();
             if name.is_empty() {
                 bail!("line {}: expected module name", line.number);
             }
             self.index += 1;
-            // Collect +fn and +type operations until next !module, ! command, or EOF
+            // Optional +doc "..." immediately after +module Name sets the module doc
+            let module_doc = self.consume_doc();
+            // Collect +fn, +type, +doc operations until next +module, ! command, or EOF
             let mut body = Vec::new();
             while let Some(next) = self.current() {
-                if next.text.starts_with("!module") || next.text.starts_with("+module") {
+                if next.text.starts_with("+module") {
                     break;
                 }
                 if next.text == "+end" || next.text == "end" {
                     self.index += 1; // Skip optional +end (backward compat)
                     break;
                 }
-                // +fn, +type, +shared, +startup, +shutdown, and !test belong inside a module — everything else is top-level.
-                // !test blocks between function definitions must NOT break the module context,
-                // otherwise subsequent +fn definitions after a !test would be rejected as
+                // +fn, +type, +shared, +startup, +shutdown, +doc, and +test belong inside a module — everything else is top-level.
+                // +test blocks between function definitions must NOT break the module context,
+                // otherwise subsequent +fn definitions after a +test would be rejected as
                 // "must be inside a module" when reloading library .ax files.
                 if !next.text.starts_with("+fn")
                     && !next.text.starts_with("+type")
                     && !next.text.starts_with("+shared")
-                    && !next.text.starts_with("!test")
+                    && !next.text.starts_with("+test")
+                    && !next.text.starts_with("+doc")
                     && !next.text.starts_with("+startup")
                     && !next.text.starts_with("+shutdown")
                     && !next.text.starts_with("+source")
@@ -623,6 +642,7 @@ impl<'a> Parser<'a> {
             return Ok(Operation::Module(ModuleDecl {
                 name: name.to_string(),
                 body,
+                doc: module_doc,
             }));
         }
 
@@ -653,13 +673,25 @@ impl<'a> Parser<'a> {
             self.index += 1;
             let body = self.parse_nested_block(indent)?;
             self.consume_end();
+            // Optional +doc "description" immediately after +end sets the function doc
+            let doc = self.consume_doc();
             return Ok(Operation::Function(FunctionDecl {
                 name: header.name,
                 params: header.params,
                 return_type: header.return_type,
                 effects: header.effects,
                 body,
+                doc,
             }));
+        }
+
+        // +doc "description" — standalone doc at module level sets the preceding module's doc
+        // (also handled inline in +module and +fn parsing)
+        if let Some(rest) = text.strip_prefix("+doc") {
+            let rest = rest.trim();
+            let doc_text = parse_string_literal(line.number, rest)?;
+            self.index += 1;
+            return Ok(Operation::Doc(doc_text));
         }
 
         // +startup [io,async] — module startup block (no name, no params)
@@ -684,6 +716,7 @@ impl<'a> Parser<'a> {
                 return_type: TypeExpr::Named("String".to_string()),
                 effects,
                 body,
+                doc: None,
             }));
         }
 
@@ -711,6 +744,7 @@ impl<'a> Parser<'a> {
                 return_type: TypeExpr::Named("String".to_string()),
                 effects,
                 body,
+                doc: None,
             }));
         }
 
@@ -1224,10 +1258,10 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        if let Some(rest) = text.strip_prefix("!test") {
+        if let Some(rest) = text.strip_prefix("+test") {
             let function_name = rest.trim();
             if function_name.is_empty() {
-                bail!("line {}: expected function name after !test", line.number);
+                bail!("line {}: expected function name after +test", line.number);
             }
             self.index += 1;
             let cases = self.parse_test_cases(indent)?;
@@ -1453,7 +1487,7 @@ impl<'a> Parser<'a> {
                 let t = next.text.trim();
                 if t.starts_with("+fn ")
                     || t.starts_with("+type ")
-                    || t.starts_with("!test ")
+                    || t.starts_with("+test ")
                     || t.starts_with("!eval ")
                     || t.starts_with("?")
                     || t.starts_with("+module ")
@@ -1763,7 +1797,7 @@ impl<'a> Parser<'a> {
                 .get(self.index.saturating_sub(1))
                 .map(|line| line.number)
                 .unwrap_or(1);
-            bail!("line {}: !test requires at least one `+with` case", line);
+            bail!("line {}: +test requires at least one `+with` case", line);
         }
 
         Ok(cases)
@@ -1974,6 +2008,43 @@ fn parse_effects(line: usize, input: Option<&str>) -> Result<Vec<String>> {
             Ok(effect.to_string())
         })
         .collect()
+}
+
+/// Parse a quoted string literal: `"content"` → `content` (with escape processing).
+/// Used for `+doc "..."` parsing.
+fn parse_string_literal(line: usize, input: &str) -> Result<String> {
+    let input = input.trim();
+    if !input.starts_with('"') {
+        bail!(
+            "line {}: expected quoted string, got `{}`",
+            line,
+            &input[..input.len().min(20)]
+        );
+    }
+    // Find the closing quote, handling backslash escapes
+    let inner = &input[1..];
+    let mut result = String::new();
+    let mut chars = inner.chars().peekable();
+    loop {
+        match chars.next() {
+            None => bail!("line {}: unterminated string literal", line),
+            Some('"') => break,
+            Some('\\') => match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('"') => result.push('"'),
+                Some('\\') => result.push('\\'),
+                Some(c) => {
+                    result.push('\\');
+                    result.push(c);
+                }
+                None => bail!("line {}: unterminated escape in string literal", line),
+            },
+            Some(c) => result.push(c),
+        }
+    }
+    Ok(result)
 }
 
 fn parse_binding_decl(line: usize, input: &str, _allow_call_expr: bool) -> Result<LetDecl> {
@@ -4330,7 +4401,7 @@ mod tests {
     #[test]
     fn module_with_function() {
         let source = "\
-!module MyModule
++module MyModule
 +fn greet ()->String
   +return \"hello\"
 ";
@@ -4348,7 +4419,7 @@ mod tests {
     #[test]
     fn module_with_type_and_function() {
         let source = "\
-!module Users
++module Users
 +type User = id:Int, name:String
 +fn create (name:String)->User
   +let u:User = {id: 1, name: name}
@@ -4369,11 +4440,11 @@ mod tests {
     #[test]
     fn module_stops_at_next_module() {
         let source = "\
-!module A
++module A
 +fn a_fn ()->Int
   +return 1
 
-!module B
++module B
 +fn b_fn ()->Int
   +return 2
 ";
@@ -4440,7 +4511,7 @@ mod tests {
     #[test]
     fn test_block_simple() {
         let source = "\
-!test double
++test double
   +with 5 -> expect 10
 ";
         let op = parse_one(source);
@@ -4458,7 +4529,7 @@ mod tests {
     #[test]
     fn test_block_key_value() {
         let source = "\
-!test add
++test add
   +with a=3 b=4 -> expect 7
 ";
         let op = parse_one(source);
@@ -4482,7 +4553,7 @@ mod tests {
     #[test]
     fn test_block_multiple_cases() {
         let source = "\
-!test validate
++test validate
   +with name=\"alice\" age=25 -> expect Ok
   +with name=\"\" age=25 -> expect Err
 ";
@@ -4499,7 +4570,7 @@ mod tests {
     #[test]
     fn test_with_matcher() {
         let source = "\
-!test fetch
++test fetch
   +with url=\"http://example.com\" -> expect contains(\"hello\")
 ";
         let op = parse_one(source);
@@ -4868,7 +4939,7 @@ mod tests {
   +let u:User = {id: 1, name: name}
   +return u
 
-!test create_user
++test create_user
   +with name=\"alice\" -> expect {id: 1, name: \"alice\"}
 ";
         let ops = parse_ops(source);
@@ -4939,7 +5010,7 @@ mod tests {
     fn module_empty() {
         // Module with no body (next line is a non-module operation)
         let source = "\
-!module Empty
++module Empty
 !eval greet
 ";
         let ops = parse_ops(source);
@@ -4957,7 +5028,7 @@ mod tests {
     #[test]
     fn module_with_shared_var() {
         let source = "\
-!module Counter
++module Counter
 +shared count:Int = 0
 +fn increment ()->Int
   +set count = count + 1
@@ -4982,7 +5053,7 @@ mod tests {
     #[test]
     fn module_with_multiple_types_and_functions() {
         let source = "\
-!module Data
++module Data
 +type Point = x:Int, y:Int
 +type Color = Red | Green | Blue
 +fn origin ()->Point
@@ -5762,7 +5833,7 @@ Add tests
 
     #[test]
     fn error_module_missing_name() {
-        let err = parse("!module").unwrap_err();
+        let err = parse("+module").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("expected module name"), "got: {msg}");
     }
@@ -5841,7 +5912,7 @@ Add tests
 
     #[test]
     fn error_test_missing_function_name() {
-        let err = parse("!test\n  +with 1 -> expect 2\n").unwrap_err();
+        let err = parse("+test\n  +with 1 -> expect 2\n").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("function name"), "got: {msg}");
     }
@@ -5943,7 +6014,7 @@ Add tests
     #[test]
     fn test_with_after_assertion() {
         let source = "\
-!test setup
++test setup
   +with -> expect contains(\"ready\")
   +after routes contains \"/chat\"
 ";
@@ -5963,7 +6034,7 @@ Add tests
     #[test]
     fn test_starts_with_matcher_parse() {
         let source = "\
-!test greet
++test greet
   +with name=\"alice\" -> expect starts_with(\"Hello\")
 ";
         let op = parse_one(source);
@@ -5982,7 +6053,7 @@ Add tests
     #[test]
     fn test_err_matcher_parse() {
         let source = "\
-!test validate
++test validate
   +with x=-1 -> expect Err(\"negative\")
 ";
         let op = parse_one(source);
@@ -6002,21 +6073,21 @@ Add tests
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // Module context preservation across !test blocks
+    // Module context preservation across +test blocks
     // ═════════════════════════════════════════════════════════════════════
 
     #[test]
     fn test_module_context_preserved_across_test_block() {
-        // !test between two +fn definitions inside !module should NOT
+        // +test between two +fn definitions inside +module should NOT
         // break the module context. Both functions and the test should
         // be inside the single ModuleDecl.
         let source = "\
-!module MyMod
++module MyMod
 
 +fn foo ()->Int
   +return 1
 
-!test foo
++test foo
   +with -> expect 1
 
 +fn bar ()->Int
@@ -6049,21 +6120,21 @@ Add tests
 
     #[test]
     fn test_module_context_multiple_tests_interleaved() {
-        // Multiple !test blocks interleaved with +fn definitions
+        // Multiple +test blocks interleaved with +fn definitions
         // should all stay inside the module.
         let source = "\
-!module Calc
++module Calc
 
 +fn add (a:Int, b:Int)->Int
   +return a + b
 
-!test add
++test add
   +with a=1 b=2 -> expect 3
 
 +fn mul (a:Int, b:Int)->Int
   +return a * b
 
-!test mul
++test mul
   +with a=3 b=4 -> expect 12
 
 +fn sub (a:Int, b:Int)->Int
@@ -6090,7 +6161,7 @@ Add tests
     fn test_module_still_breaks_on_non_test_commands() {
         // Other ! commands (not !test) should still break the module context.
         let source = "\
-!module Foo
++module Foo
 
 +fn func1 ()->Int
   +return 1
@@ -6113,14 +6184,14 @@ Add tests
 
     #[test]
     fn test_module_test_without_fn_after() {
-        // !test at end of module should be collected in module body
+        // +test at end of module should be collected in module body
         let source = "\
-!module EndTest
++module EndTest
 
 +fn greet (name:String)->String
   +return concat(\"hello \", name)
 
-!test greet
++test greet
   +with name=\"world\" -> expect \"hello world\"
 ";
         let ops = parse_ops(source);
@@ -6140,20 +6211,20 @@ Add tests
     fn test_two_modules_with_tests() {
         // Two separate modules, each with tests, should be parsed correctly.
         let source = "\
-!module A
++module A
 
 +fn a_func ()->Int
   +return 1
 
-!test a_func
++test a_func
   +with -> expect 1
 
-!module B
++module B
 
 +fn b_func ()->Int
   +return 2
 
-!test b_func
++test b_func
   +with -> expect 2
 ";
         let ops = parse_ops(source);
@@ -6213,7 +6284,7 @@ Add tests
 
     #[test]
     fn parse_startup_with_effects() {
-        let ops = parse_ops("!module Svc\n+startup [io,async]\n  +return \"ok\"\n+end");
+        let ops = parse_ops("+module Svc\n+startup [io,async]\n  +return \"ok\"\n+end");
         assert_eq!(ops.len(), 1);
         match &ops[0] {
             Operation::Module(m) => {
@@ -6235,7 +6306,7 @@ Add tests
 
     #[test]
     fn parse_shutdown_with_effects() {
-        let ops = parse_ops("!module Svc\n+shutdown [io,async]\n  +return \"done\"\n+end");
+        let ops = parse_ops("+module Svc\n+shutdown [io,async]\n  +return \"done\"\n+end");
         assert_eq!(ops.len(), 1);
         match &ops[0] {
             Operation::Module(m) => {
@@ -6256,7 +6327,7 @@ Add tests
 
     #[test]
     fn parse_startup_no_effects() {
-        let ops = parse_ops("!module Svc\n+startup\n  +return \"ok\"\n+end");
+        let ops = parse_ops("+module Svc\n+startup\n  +return \"ok\"\n+end");
         match &ops[0] {
             Operation::Module(m) => match &m.body[0] {
                 Operation::Startup(fd) => {
@@ -6418,7 +6489,7 @@ Add tests
 
     #[test]
     fn parse_module_source_timer() {
-        let ops = parse_ops("!module Svc\n+source sync_timer timer interval=300000 -> on_tick");
+        let ops = parse_ops("+module Svc\n+source sync_timer timer interval=300000 -> on_tick");
         assert_eq!(ops.len(), 1);
         match &ops[0] {
             Operation::Module(m) => {
@@ -6442,7 +6513,7 @@ Add tests
 
     #[test]
     fn parse_module_source_channel_no_config() {
-        let ops = parse_ops("!module Chat\n+source inbox channel -> on_message");
+        let ops = parse_ops("+module Chat\n+source inbox channel -> on_message");
         match &ops[0] {
             Operation::Module(m) => match &m.body[0] {
                 Operation::ModuleSource(s) => {
@@ -6459,7 +6530,7 @@ Add tests
 
     #[test]
     fn parse_module_source_multiple_config() {
-        let ops = parse_ops("!module Svc\n+source poller timer interval=5000 retries=3 -> on_tick");
+        let ops = parse_ops("+module Svc\n+source poller timer interval=5000 retries=3 -> on_tick");
         match &ops[0] {
             Operation::Module(m) => match &m.body[0] {
                 Operation::ModuleSource(s) => {
@@ -6493,7 +6564,7 @@ Add tests
 
     #[test]
     fn parse_source_timer_shorthand_in_startup() {
-        let ops = parse_ops("!module Svc\n+startup [io,async]\n  +source timer heartbeat 60000\n  +return \"ok\"\n+end");
+        let ops = parse_ops("+module Svc\n+startup [io,async]\n  +source timer heartbeat 60000\n  +return \"ok\"\n+end");
         match &ops[0] {
             Operation::Module(m) => {
                 match &m.body[0] {
@@ -6525,5 +6596,48 @@ Add tests
     fn parse_source_timer_shorthand_invalid_interval() {
         let result = parse("+source timer my_timer abc");
         assert!(result.is_err(), "non-numeric interval should error");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // +doc parsing tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_doc_on_function() {
+        let ops = parse_ops(
+            "+module M\n+fn greet ()->String\n  +return \"hi\"\n+end\n+doc \"greets the user\"\n",
+        );
+        assert_eq!(ops.len(), 1);
+        if let Operation::Module(m) = &ops[0] {
+            assert_eq!(m.body.len(), 1);
+            if let Operation::Function(fd) = &m.body[0] {
+                assert_eq!(fd.doc.as_deref(), Some("greets the user"));
+            } else {
+                panic!("expected Function in module body");
+            }
+        } else {
+            panic!("expected Module, got {:?}", ops[0]);
+        }
+    }
+
+    #[test]
+    fn parse_doc_on_module() {
+        let ops = parse_ops(
+            "+module M\n+doc \"a test module\"\n+fn greet ()->String\n  +return \"hi\"\n+end\n",
+        );
+        assert_eq!(ops.len(), 1);
+        if let Operation::Module(m) = &ops[0] {
+            assert_eq!(m.doc.as_deref(), Some("a test module"));
+            assert_eq!(m.body.len(), 1);
+        } else {
+            panic!("expected Module, got {:?}", ops[0]);
+        }
+    }
+
+    #[test]
+    fn parse_standalone_doc_as_operation() {
+        let ops = parse_ops("+doc \"standalone doc\"\n");
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], Operation::Doc(s) if s == "standalone doc"));
     }
 }

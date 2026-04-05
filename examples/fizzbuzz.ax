@@ -12,7 +12,7 @@
   +end
 +end
 
-!test fizzbuzz
++test fizzbuzz
   +with 15 -> expect "fizzbuzz"
   +with 3 -> expect "fizz"
   +with 5 -> expect "buzz"

@@ -95,7 +95,11 @@ pub fn ensure_library_dir() -> Result<PathBuf> {
 /// Produces output that can be round-tripped through the parser.
 pub fn reconstruct_module_source(module: &ast::Module) -> String {
     let mut out = String::new();
-    out.push_str(&format!("!module {}\n", module.name));
+    out.push_str(&format!("+module {}\n", module.name));
+    // Emit module doc if present
+    if let Some(ref doc) = module.doc {
+        out.push_str(&format!("+doc \"{}\"\n", ast::escape_string_literal(doc)));
+    }
 
     // Types first
     for td in &module.types {
@@ -278,10 +282,15 @@ fn reconstruct_function_source(func: &ast::FunctionDecl) -> String {
         typeck::reconstruct_stmt_pub(&mut out, stmt, 1);
     }
 
+    // Emit function doc if present (after +end, before +test)
+    if let Some(ref doc) = func.doc {
+        out.push_str(&format!("+doc \"{}\"\n", ast::escape_string_literal(doc)));
+    }
+
     // Include persisted tests in source reconstruction
     if !func.tests.is_empty() {
         out.push('\n');
-        out.push_str(&format!("!test {}\n", func.name));
+        out.push_str(&format!("+test {}\n", func.name));
         for tc in &func.tests {
             let expect_part = if let Some(ref m) = tc.matcher {
                 if m == "AnyOk" {
@@ -451,17 +460,17 @@ fn load_module_source(program: &mut ast::Program, source: &str) -> Result<String
         validator::apply_and_validate(program, op)?;
     }
 
-    // Restore persisted tests from !test blocks.
+    // Restore persisted tests from +test blocks.
     // reconstruct_module_source() only emits tests that previously passed,
     // so we trust them and mark them passed: true without re-executing.
     if let Some(ref mod_name) = module_name {
         restore_tests_from_operations(program, mod_name, &operations);
     }
 
-    module_name.ok_or_else(|| anyhow::anyhow!("no !module declaration found in source"))
+    module_name.ok_or_else(|| anyhow::anyhow!("no +module declaration found in source"))
 }
 
-/// Restore `!test` blocks from parsed operations into the corresponding
+/// Restore `+test` blocks from parsed operations into the corresponding
 /// function's `tests` field. Called during library load to preserve test
 /// state across restarts.
 fn restore_tests_from_operations(
@@ -469,20 +478,20 @@ fn restore_tests_from_operations(
     module_name: &str,
     operations: &[parser::Operation],
 ) {
-    // Collect tests from top-level !test ops and from inside !module body
+    // Collect tests from top-level +test ops and from inside +module body
     let mut tests_to_restore: Vec<(&str, &[parser::TestCase])> = Vec::new();
 
     for op in operations {
         match op {
             parser::Operation::Test(t) => {
-                eprintln!("[library] found top-level !test for `{}`", t.function_name);
+                eprintln!("[library] found top-level +test for `{}`", t.function_name);
                 tests_to_restore.push((&t.function_name, &t.cases));
             }
             parser::Operation::Module(m) => {
                 for body_op in &m.body {
                     if let parser::Operation::Test(t) = body_op {
                         eprintln!(
-                            "[library] found module-body !test for `{}`",
+                            "[library] found module-body +test for `{}`",
                             t.function_name
                         );
                         tests_to_restore.push((&t.function_name, &t.cases));
@@ -772,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_reconstruct_module_source_roundtrips() {
-        let source = "!module TestMod\n+fn greet (name:String)->String\n  +return name\n";
+        let source = "+module TestMod\n+fn greet (name:String)->String\n  +return name\n";
         let mut program = ast::Program::default();
         let ops = parser::parse(source).unwrap();
         for op in &ops {
@@ -784,7 +793,7 @@ mod tests {
             .find(|m| m.name == "TestMod")
             .unwrap();
         let reconstructed = reconstruct_module_source(module);
-        assert!(reconstructed.contains("!module TestMod"));
+        assert!(reconstructed.contains("+module TestMod"));
         assert!(reconstructed.contains("+fn greet"));
         assert!(reconstructed.contains("+return name"));
 
@@ -807,7 +816,7 @@ mod tests {
         std::fs::create_dir_all(&lib_dir).unwrap();
 
         // Create a program with a module
-        let source = "!module Probe\n+fn hi ()->String\n  +return \"ok\"\n";
+        let source = "+module Probe\n+fn hi ()->String\n  +return \"ok\"\n";
         let mut program = ast::Program::default();
         let ops = parser::parse(source).unwrap();
         for op in &ops {
@@ -835,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_affected_module_names() {
-        let source = "!module Foo\n+fn bar ()->Int\n  +return 1\n";
+        let source = "+module Foo\n+fn bar ()->Int\n  +return 1\n";
         let ops = parser::parse(source).unwrap();
         let names = affected_module_names(&ops);
         assert!(names.contains("Foo"));
@@ -854,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_symbols_no_bare_duplicates() {
-        let source = "!module Probe\n+fn hi ()->String\n  +return \"ok\"\n+fn answer ()->Int\n  +return 42\n";
+        let source = "+module Probe\n+fn hi ()->String\n  +return \"ok\"\n+fn answer ()->Int\n  +return 42\n";
         let mut program = ast::Program::default();
         let ops = parser::parse(source).unwrap();
         for op in &ops {
@@ -882,7 +891,7 @@ mod tests {
 
     #[test]
     fn test_source_qualified_lookup() {
-        let source = "!module Probe\n+fn hi ()->String\n  +return \"ok\"\n";
+        let source = "+module Probe\n+fn hi ()->String\n  +return \"ok\"\n";
         let mut program = ast::Program::default();
         let ops = parser::parse(source).unwrap();
         for op in &ops {
@@ -920,7 +929,7 @@ mod tests {
         // Give it a library state
         session.meta.library_state = Some(LibraryState::new());
 
-        let source = "!module TestPersist\n+fn check ()->Int\n  +return 1\n";
+        let source = "+module TestPersist\n+fn check ()->Int\n  +return 1\n";
         let result = session.apply(source);
         assert!(result.is_ok(), "apply failed: {result:?}");
         let results = result.unwrap();
@@ -978,7 +987,7 @@ mod tests {
         let state = LibraryState::new();
         state.record_load_error(
             "ModuleA".to_string(),
-            "no !module declaration found".to_string(),
+            "no +module declaration found".to_string(),
         );
         state.record_load_error(
             "ModuleB".to_string(),
@@ -988,7 +997,7 @@ mod tests {
         let output = state.format_load_errors().unwrap();
         assert!(output.contains("Load errors (2):"), "header: {output}");
         assert!(
-            output.contains("ModuleA: no !module declaration found"),
+            output.contains("ModuleA: no +module declaration found"),
             "A: {output}"
         );
         assert!(
@@ -1037,7 +1046,7 @@ mod tests {
         std::fs::create_dir_all(&lib_dir).unwrap();
 
         // Write a module file
-        let source = "!module ReloadTest\n+fn greet ()->String\n  +return \"hello\"\n";
+        let source = "+module ReloadTest\n+fn greet ()->String\n  +return \"hello\"\n";
         std::fs::write(lib_dir.join("ReloadTest.ax"), source).unwrap();
 
         // Load the module initially
@@ -1050,7 +1059,7 @@ mod tests {
         assert_eq!(program.modules[0].functions[0].name, "greet");
 
         // Update the file on disk with a different function
-        let updated_source = "!module ReloadTest\n+fn farewell ()->String\n  +return \"bye\"\n";
+        let updated_source = "+module ReloadTest\n+fn farewell ()->String\n  +return \"bye\"\n";
         std::fs::write(lib_dir.join("ReloadTest.ax"), updated_source).unwrap();
 
         // Override HOME so reload_module uses our temp dir
@@ -1086,10 +1095,10 @@ mod tests {
         std::fs::create_dir_all(&lib_dir).unwrap();
 
         // Write a valid module
-        let valid_source = "!module GoodMod\n+fn ok ()->Int\n  +return 1\n";
+        let valid_source = "+module GoodMod\n+fn ok ()->Int\n  +return 1\n";
         std::fs::write(lib_dir.join("GoodMod.ax"), valid_source).unwrap();
 
-        // Write an invalid module (no !module declaration)
+        // Write an invalid module (no +module declaration)
         let bad_source = "+fn orphan ()->Int\n  +return 42\n";
         std::fs::write(lib_dir.join("BadMod.ax"), bad_source).unwrap();
 
@@ -1100,7 +1109,7 @@ mod tests {
         assert!(bad_result.is_err(), "bad module should fail to load");
         let err = bad_result.unwrap_err().to_string();
         assert!(
-            err.contains("no !module declaration"),
+            err.contains("no +module declaration"),
             "error should mention missing module declaration: {err}"
         );
     }
@@ -1108,7 +1117,7 @@ mod tests {
     #[test]
     fn test_persist_and_load_preserves_tests() {
         // Build a module with a function and attach a test to it
-        let source = "!module TestMod\n+fn double (n:Int)->Int\n  +return n * 2\n";
+        let source = "+module TestMod\n+fn double (n:Int)->Int\n  +return n * 2\n";
         let mut program = ast::Program::default();
         let ops = parser::parse(source).unwrap();
         for op in &ops {
@@ -1116,7 +1125,7 @@ mod tests {
         }
 
         // Store a passing test on the function
-        let test_source = "!test double\n  +with n=3 -> expect 6\n  +with n=0 -> expect 0\n";
+        let test_source = "+test double\n  +with n=3 -> expect 6\n  +with n=0 -> expect 0\n";
         let test_ops = parser::parse(test_source).unwrap();
         for op in &test_ops {
             if let parser::Operation::Test(t) = op {
@@ -1148,10 +1157,10 @@ mod tests {
             .unwrap();
         let reconstructed = reconstruct_module_source(module);
 
-        // Verify the reconstructed source contains !test blocks
+        // Verify the reconstructed source contains +test blocks
         assert!(
-            reconstructed.contains("!test double"),
-            "reconstructed source should contain !test block"
+            reconstructed.contains("+test double"),
+            "reconstructed source should contain +test block"
         );
         assert!(
             reconstructed.contains("+with"),
@@ -1190,7 +1199,7 @@ mod tests {
         // Without the fix, this would fail with "duplicate +startup" error.
 
         let source_with_startup = concat!(
-            "!module MyMod\n",
+            "+module MyMod\n",
             "+startup [io,async]\n",
             "  +await _:String = shell(\"echo hello\")\n",
             "+fn greet ()->String\n",
@@ -1233,7 +1242,7 @@ mod tests {
         // loading the same module with a +startup block fails.
 
         let source_with_startup = concat!(
-            "!module DupMod\n",
+            "+module DupMod\n",
             "+startup [io,async]\n",
             "  +await _:String = shell(\"echo hello\")\n",
             "+fn greet ()->String\n",
@@ -1266,8 +1275,8 @@ mod tests {
         // Verify that when a module is removed and reloaded, the new version's
         // functions replace the old ones properly.
 
-        let source_v1 = "!module VersionMod\n+fn compute ()->Int\n  +return 1\n";
-        let source_v2 = "!module VersionMod\n+fn compute ()->Int\n  +return 2\n+fn extra ()->String\n  +return \"new\"\n";
+        let source_v1 = "+module VersionMod\n+fn compute ()->Int\n  +return 1\n";
+        let source_v2 = "+module VersionMod\n+fn compute ()->Int\n  +return 2\n+fn extra ()->String\n  +return \"new\"\n";
 
         // Load v1
         let mut program = ast::Program::default();

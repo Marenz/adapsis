@@ -87,7 +87,7 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
             }
             "/help" | "/h" => {
                 println!("  Just type naturally — the AI handles everything.");
-                println!("  Adapsis code: +fn, +type, !eval, !test, ?symbols, ?source");
+                println!("  Adapsis code: +fn, +type, !eval, +test, ?symbols, ?source");
                 println!("  /status — show program state");
                 println!("  /quit — exit");
                 continue;

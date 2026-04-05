@@ -25,14 +25,14 @@
   +end
 +end
 
-!test validate
++test validate
   +with {name: "alice", age: 25} -> expect Ok
   +with {name: "", age: 25} -> expect Err(err_empty_name)
 
-!test greet_risky
++test greet_risky
   +with {name: "alice", age: 25} -> expect Ok
   +with {name: "", age: 25} -> expect Err(err_empty_name)
 
-!test greet_safe
++test greet_safe
   +with {name: "alice", age: 25} -> expect {greeting: "Hello, alice"}
   +with {name: "", age: 25} -> expect {greeting: "anonymous"}

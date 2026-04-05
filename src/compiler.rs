@@ -1262,6 +1262,7 @@ mod tests {
             effects,
             body,
             tests: vec![],
+            doc: None,
         }
     }
 

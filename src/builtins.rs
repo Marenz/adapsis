@@ -649,7 +649,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "mutate",
         aliases: &[],
         short: "apply Adapsis code mutations to the program: mutate(code) -> String",
-        long: "Parses a String of Adapsis code (mutations like +fn, +type, !module, etc.) and applies them to the live program. \
+        long: "Parses a String of Adapsis code (mutations like +fn, +type, +module, etc.) and applies them to the live program. \
                Returns a summary like \"Applied 3 mutations\" on success, or fails with the parse/validation error. \
                This is the general-purpose mutation builtin — it does the same thing as sending code to the main loop. \
                Takes `(code:String)`. Requires `+await`.",
@@ -848,7 +848,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "module_create",
         aliases: &[],
         short: "create a module: module_create(name) -> String",
-        long: "Creates a new module or confirms it already exists. Same as `!module Name`. \
+        long: "Creates a new module or confirms it already exists. Same as `+module Name`. \
                Takes `(name:String)`. Name must start with an uppercase letter. \
                Returns 'created module Name' on success, or 'module Name already exists'. \
                Requires `+await`.",
@@ -858,7 +858,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "test_run",
         aliases: &[],
         short: "run stored tests: test_run(fn_name) -> String",
-        long: "Runs all stored tests for a function. Same as `!test`. \
+        long: "Runs all stored tests for a function. Same as `+test`. \
                Takes `(fn_name:String)` — fully-qualified name like 'Module.func'. \
                Returns test results as a string with PASS/FAIL for each test case. \
                Returns 'no stored tests for fn_name' if none exist. \
@@ -1047,7 +1047,7 @@ pub struct ActionCommand {
 
 pub static ACTIONS: &[ActionCommand] = &[
     ActionCommand {
-        name: "!test",
+        name: "+test",
         args: "<fn>\\n  +with ...",
         short: "run test cases for a function",
         long: "Runs stored test cases for a function and records the results. Use `+with` lines to define inputs and expected outputs; for async IO code, pair it with `!mock`.\n\
@@ -1064,7 +1064,7 @@ Side-effect assertions with +after (checked after the function runs, state resto
                function calls (`concat(\"a\", \"b\")`), builtins (`len(\"hello\")`), \
                comparisons (`3 > 2`), struct literals (`{name: \"alice\"}`), \
                list creation (`list(1, 2, 3)`), and nested calls (`len(concat(\"a\", \"b\"))`). \
-               In AdapsisOS mode, functions with more than two statements must pass `!test` before `!eval` is allowed.",
+               In AdapsisOS mode, functions with more than two statements must pass `+test` before `!eval` is allowed.",
     },
     ActionCommand {
         name: "!trace",
@@ -1146,8 +1146,8 @@ Side-effect assertions with +after (checked after the function runs, state resto
     ActionCommand {
         name: "!mock",
         args: "<operation> \"<pattern>\" -> \"<response>\"",
-        short: "register mock IO response for testing. During !test, IO calls matching the pattern return the mock instead of real IO.",
-        long: "Registers a fake IO response for testing. During `!test`, if a `+await` call matches the operation and pattern strings, the mock response is returned instead of real IO.",
+        short: "register mock IO response for testing. During +test, IO calls matching the pattern return the mock instead of real IO.",
+        long: "Registers a fake IO response for testing. During `+test`, if a `+await` call matches the operation and pattern strings, the mock response is returned instead of real IO.",
     },
     ActionCommand {
         name: "!unmock",
@@ -1159,7 +1159,7 @@ Side-effect assertions with +after (checked after the function runs, state resto
         name: "!stub",
         args: "<function> \"<pattern>\" -> <expression>",
         short: "stub a user function — intercept calls and return a typed expression",
-        long: "Registers a function stub for testing. During `!test`, if a call to the named function matches the pattern, the expression is evaluated and returned instead of the function body. The expression is raw Adapsis code: Ok(\"done\"), Err(\"fail\"), \"text\", 42, etc. Use `!unstub` to clear.",
+        long: "Registers a function stub for testing. During `+test`, if a call to the named function matches the pattern, the expression is evaluated and returned instead of the function body. The expression is raw Adapsis code: Ok(\"done\"), Err(\"fail\"), \"text\", 42, etc. Use `!unstub` to clear.",
     },
     ActionCommand {
         name: "!unstub",
@@ -1180,10 +1180,16 @@ Side-effect assertions with +after (checked after the function runs, state resto
         long: "Requests a Rust-level runtime change through OpenCode, then rebuilds and restarts the runtime if the change succeeds. Use it for missing builtins, runtime bugs, or core language behavior changes.",
     },
     ActionCommand {
-        name: "!module",
+        name: "+module",
         args: "<Name>",
         short: "switch module context — subsequent +fn/+type definitions go into this module",
         long: "Switches the active module context for subsequent `+fn` and `+type` definitions. It changes where new definitions are created until you switch again.",
+    },
+    ActionCommand {
+        name: "+doc",
+        args: "\"<description>\"",
+        short: "attach documentation to the preceding module or function",
+        long: "Sets the documentation string for the preceding `+module` (immediately after the module name line) or `+fn` (immediately after the `+end` that closes the function). Docs appear in `?symbols` and `?source` output.",
     },
     ActionCommand {
         name: "!done",
@@ -1364,8 +1370,8 @@ mod tests {
         for a in ACTIONS {
             assert!(!a.name.is_empty(), "action name should not be empty");
             assert!(
-                a.name.starts_with('!'),
-                "action '{}' should start with !",
+                a.name.starts_with('!') || a.name.starts_with('+'),
+                "action '{}' should start with ! or +",
                 a.name
             );
         }
@@ -1713,8 +1719,8 @@ mod tests {
     fn key_actions_registered() {
         let action_names: Vec<&str> = ACTIONS.iter().map(|a| a.name).collect();
         assert!(action_names.contains(&"!eval"));
-        assert!(action_names.contains(&"!test"));
-        assert!(action_names.contains(&"!module"));
+        assert!(action_names.contains(&"+test"));
+        assert!(action_names.contains(&"+module"));
         assert!(action_names.contains(&"!remove"));
         assert!(action_names.contains(&"!replace"));
         assert!(action_names.contains(&"!plan"));

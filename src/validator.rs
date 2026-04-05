@@ -17,7 +17,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             let name = converted.name();
             if program.require_modules {
                 bail!(
-                    "type `{name}` must be inside a module. Use: !module MyModule\\n+type {name} = ..."
+                    "type `{name}` must be inside a module. Use: +module MyModule\\n+type {name} = ..."
                 );
             }
             if program.types.iter().any(|t| t.name() == name) {
@@ -42,7 +42,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             // In AdapsisOS mode, reject top-level functions — must be inside a module
             if program.require_modules {
                 bail!(
-                    "function `{}` must be inside a module. Use: !module MyModule\\n+fn {}(...)\\n+end",
+                    "function `{}` must be inside a module. Use: +module MyModule\\n+fn {}(...)\\n+end",
                     converted.name, converted.name
                 );
             }
@@ -68,7 +68,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         }
         parser::Operation::SharedVar(sv) => {
             bail!(
-                "+shared `{}` must be inside a module. Use: !module MyModule\\n+shared {}:{} = ...",
+                "+shared `{}` must be inside a module. Use: +module MyModule\\n+shared {}:{} = ...",
                 sv.name,
                 sv.name,
                 format!("{:?}", sv.ty)
@@ -139,6 +139,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::Stub { .. } => Ok("stub (handled by session)".to_string()),
         parser::Operation::Unstub => Ok("unstub (handled by session)".to_string()),
         parser::Operation::Route { .. } => Ok("route (handled by session)".to_string()),
+        parser::Operation::Doc(_) => Ok("doc (handled by module/function context)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements at top level — execute immediately (not stored in AST)
         parser::Operation::Let(_)
@@ -162,13 +163,13 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             Ok("top-level statement (execute immediately)".to_string())
         }
         parser::Operation::Startup(_) => {
-            bail!("+startup must be inside a module. Use: !module MyModule\\n+startup [io,async]\\n  ...\\n+end")
+            bail!("+startup must be inside a module. Use: +module MyModule\\n+startup [io,async]\\n  ...\\n+end")
         }
         parser::Operation::Shutdown(_) => {
-            bail!("+shutdown must be inside a module. Use: !module MyModule\\n+shutdown [io,async]\\n  ...\\n+end")
+            bail!("+shutdown must be inside a module. Use: +module MyModule\\n+shutdown [io,async]\\n  ...\\n+end")
         }
         parser::Operation::ModuleSource(_) => {
-            bail!("+source declaration must be inside a module. Use: !module MyModule\\n+source name type key=value -> handler")
+            bail!("+source declaration must be inside a module. Use: +module MyModule\\n+source name type key=value -> handler")
         }
     }
 }
@@ -182,6 +183,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
         program.modules.push(ast::Module {
             id: decl.name.clone(),
             name: decl.name.clone(),
+            doc: decl.doc.clone(),
             types: vec![],
             functions: vec![],
             modules: vec![],
@@ -195,6 +197,11 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
         });
     }
     let mod_idx = existing_idx.unwrap_or(program.modules.len() - 1);
+
+    // Set/update the module doc if provided
+    if let Some(ref doc) = decl.doc {
+        program.modules[mod_idx].doc = Some(doc.clone());
+    }
 
     let mut added_fns = 0;
     let mut added_types = 0;
@@ -265,8 +272,16 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             parser::Operation::Test(_) => {
                 // Tests inside a module body are skipped during validation —
                 // they're handled separately by the session/eval layer.
-                // The parser allows !test inside !module so that it doesn't
+                // The parser allows +test inside +module so that it doesn't
                 // break the module context for subsequent +fn definitions.
+            }
+            parser::Operation::Doc(doc_text) => {
+                // +doc inside module body — sets the doc on the most recently added function
+                let m = &mut program.modules[mod_idx];
+                if let Some(last_fn) = m.functions.last_mut() {
+                    let f = std::sync::Arc::make_mut(last_fn);
+                    f.doc = Some(doc_text.clone());
+                }
             }
             parser::Operation::Module(nested) => bail!(
                 "nested module `{}` found inside module `{}` — check indentation",
@@ -339,7 +354,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 program.pending_routes.push(route);
             }
             other => bail!(
-                "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, +source, and !test are allowed",
+                "unexpected operation in module `{}`: {:?} — only +fn, +type, +shared, +startup, +shutdown, +source, +doc, and +test are allowed",
                 decl.name,
                 std::mem::discriminant(other)
             ),
@@ -781,6 +796,7 @@ fn convert_function(decl: &parser::FunctionDecl) -> Result<ast::FunctionDecl> {
         effects,
         body,
         tests: vec![],
+        doc: decl.doc.clone(),
     })
 }
 
@@ -1453,6 +1469,7 @@ pub fn apply_move(
         program.modules.push(ast::Module {
             id: target_module.to_string(),
             name: target_module.to_string(),
+            doc: None,
             types: vec![],
             functions: vec![],
             modules: vec![],
@@ -1652,13 +1669,36 @@ pub fn program_summary_compact(program: &ast::Program) -> String {
     }
 
     for module in &program.modules {
-        let fns: Vec<&str> = module.functions.iter().map(|f| f.name.as_str()).collect();
         let types: Vec<String> = module.types.iter().map(|t| t.name().to_string()).collect();
-        out.push_str(&format!("Module {}:", module.name));
-        if !types.is_empty() {
-            out.push_str(&format!(" types=[{}]", types.join(", ")));
+        out.push_str(&format!("Module {}", module.name));
+        if let Some(ref doc) = module.doc {
+            out.push_str(&format!(": {}", doc));
         }
-        out.push_str(&format!(" fns=[{}]\n", fns.join(", ")));
+        out.push('\n');
+        if !types.is_empty() {
+            out.push_str(&format!("  types=[{}]\n", types.join(", ")));
+        }
+        for func in &module.functions {
+            let params = func
+                .params
+                .iter()
+                .map(|p| format!("{}:{:?}", p.name, p.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let effects = if func.effects.is_empty() {
+                String::new()
+            } else {
+                format!(" [{:?}]", func.effects)
+            };
+            out.push_str(&format!(
+                "  {} ({})->{:?}{}",
+                func.name, params, func.return_type, effects
+            ));
+            if let Some(ref doc) = func.doc {
+                out.push_str(&format!(" — {}", doc));
+            }
+            out.push('\n');
+        }
     }
 
     // Routes are now in RuntimeState, not Program — use ?routes to see them.
@@ -2039,7 +2079,7 @@ mod tests {
     fn apply_module_with_function() {
         let mut program = ast::Program::default();
         let source = "\
-!module Math
++module Math
 +fn add (a:Int, b:Int)->Int
   +return a + b
 ";
@@ -2065,21 +2105,21 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // Module with embedded !test — validator should skip Test ops in body
+    // Module with embedded +test — validator should skip Test ops in body
     // ═════════════════════════════════════════════════════════════════════
 
     #[test]
     fn apply_module_with_embedded_test_succeeds() {
-        // A module containing +fn and !test blocks should be applied
+        // A module containing +fn and +test blocks should be applied
         // successfully — the validator should skip Test operations in
         // the module body without error.
         let source = "\
-!module TestMod
++module TestMod
 
 +fn helper ()->Int
   +return 42
 
-!test helper
++test helper
   +with -> expect 42
 
 +fn other ()->Int
@@ -2092,7 +2132,7 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(
             result.is_ok(),
-            "module with embedded !test should validate: {:?}",
+            "module with embedded +test should validate: {:?}",
             result
         );
 
@@ -2105,13 +2145,13 @@ mod tests {
 
     #[test]
     fn apply_module_rejects_unexpected_operations() {
-        // Operations other than +fn, +type, +shared, and !test should
+        // Operations other than +fn, +type, +shared, and +test should
         // still be rejected inside a module body.
         // (Note: !eval breaks the module body loop in the parser, so
-        // this tests that the parser correctly keeps !test but breaks
+        // this tests that the parser correctly keeps +test but breaks
         // on other ! commands.)
         let source = "\
-!module BadMod
++module BadMod
 
 +fn f1 ()->Int
   +return 1
@@ -2127,15 +2167,15 @@ mod tests {
 
     #[test]
     fn apply_module_with_require_modules_and_embedded_test() {
-        // With require_modules=true, functions after !test inside a module
+        // With require_modules=true, functions after +test inside a module
         // should NOT be rejected. This was the original bug.
         let source = "\
-!module StrictMod
++module StrictMod
 
 +fn first ()->Int
   +return 1
 
-!test first
++test first
   +with -> expect 1
 
 +fn second ()->Int
@@ -2148,7 +2188,7 @@ mod tests {
         let result = apply_and_validate(&mut program, &ops[0]);
         assert!(
             result.is_ok(),
-            "module with !test should work in require_modules mode: {:?}",
+            "module with +test should work in require_modules mode: {:?}",
             result
         );
         assert_eq!(program.modules[0].functions.len(), 2);
@@ -2171,7 +2211,7 @@ mod tests {
     fn reject_module_function_modifying_shared_state_without_mut_effect() {
         let mut program = ast::Program::default();
         let source = "\
-!module Counter
++module Counter
 +shared total:Int = 0
 +fn bump ()->Int
   +set total = total + 1
@@ -2195,7 +2235,7 @@ mod tests {
     fn allow_effectful_function_when_effects_match_body() {
         let mut program = ast::Program::default();
         let source = "\
-!module Counter
++module Counter
 +shared total:Int = 0
 +fn next ()->Int [io,async,mut]
   +await raw:String = http_get(\"https://example.com\")
@@ -2218,7 +2258,7 @@ mod tests {
     fn startup_with_valid_effects() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +startup [io,async]
   +return \"started\"
 +end
@@ -2235,7 +2275,7 @@ mod tests {
     fn shutdown_with_valid_effects() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +shutdown [io,async]
   +return \"stopped\"
 +end
@@ -2252,7 +2292,7 @@ mod tests {
     fn startup_missing_effects_rejected() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +startup
   +return \"started\"
 +end
@@ -2268,7 +2308,7 @@ mod tests {
     fn shutdown_missing_async_rejected() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +shutdown [io]
   +return \"stopped\"
 +end
@@ -2295,7 +2335,7 @@ mod tests {
     fn source_add_in_function_body() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +fn setup ()->String [io,async]
   +source add timer(5000) as poll -> on_tick
   +return \"ok\"
@@ -2311,7 +2351,7 @@ mod tests {
     fn source_remove_in_function_body() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +fn teardown ()->String [io,async]
   +source remove poll
   +return \"ok\"
@@ -2330,7 +2370,7 @@ mod tests {
     fn source_replace_in_function_body() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +fn reconfigure ()->String [io,async]
   +source replace poll timer(10000) -> on_tick_v2
   +return \"ok\"
@@ -2344,7 +2384,7 @@ mod tests {
     fn event_register_and_emit_in_function_body() {
         let mut program = ast::Program::default();
         let source = "\
-!module Chat
++module Chat
 +fn init ()->String [io,async]
   +event register new_message(String)
   +event emit new_message \"hello\"
@@ -2392,7 +2432,7 @@ mod tests {
     fn duplicate_startup_rejected() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +startup [io,async]
   +return \"first\"
 +end
@@ -2410,7 +2450,7 @@ mod tests {
     fn duplicate_shutdown_rejected() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +shutdown [io,async]
   +return \"first\"
 +end
@@ -2431,7 +2471,7 @@ mod tests {
     fn source_list_in_function_body() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +fn status ()->String [io,async]
   +source list
   +return \"ok\"
@@ -2447,7 +2487,7 @@ mod tests {
     fn full_service_module_round_trip() {
         let mut program = ast::Program::default();
         let source = "\
-!module Poller
++module Poller
 +startup [io,async]
   +source add timer(5000) as poll -> on_tick
   +return \"started\"
@@ -2489,7 +2529,7 @@ mod tests {
     fn source_event_statements_round_trip() {
         let mut program = ast::Program::default();
         let source = "\
-!module Chat
++module Chat
 +fn init ()->String [io,async]
   +event register new_message(String)
   +source add channel as inbox -> on_msg
@@ -2530,7 +2570,7 @@ mod tests {
     fn timer_with_expression_validates() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +fn setup (interval:Int)->String [io,async]
   +source add timer(interval) as poll -> on_tick
   +return \"ok\"
@@ -2553,7 +2593,7 @@ mod tests {
     fn event_source_subscription_validates() {
         let mut program = ast::Program::default();
         let source = "\
-!module Listener
++module Listener
 +fn subscribe ()->String [io,async]
   +source add Chat.new_message as msgs -> handle_msg
   +return \"ok\"
@@ -2582,7 +2622,7 @@ mod tests {
     fn startup_with_source_and_event_stmts() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +startup [io,async]
   +event register health_check(String)
   +source add timer(60000) as heartbeat -> on_heartbeat
@@ -2609,7 +2649,7 @@ mod tests {
     fn module_source_decl_timer() {
         let mut program = ast::Program::default();
         let source = "\
-!module Poller
++module Poller
 +source sync_timer timer interval=300000 -> on_tick
 +fn on_tick ()->String
   +return \"tick\"
@@ -2629,7 +2669,7 @@ mod tests {
     fn module_source_decl_channel() {
         let mut program = ast::Program::default();
         let source = "\
-!module Chat
++module Chat
 +source inbox channel -> on_message
 +fn on_message (m:String)->String
   +return m
@@ -2649,7 +2689,7 @@ mod tests {
     fn module_source_decl_multiple_config() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +source poller timer interval=5000 retries=3 -> on_tick
 +fn on_tick ()->String
   +return \"tick\"
@@ -2667,7 +2707,7 @@ mod tests {
     fn module_source_decl_round_trip() {
         let mut program = ast::Program::default();
         let source = "\
-!module Poller
++module Poller
 +source sync_timer timer interval=300000 -> on_tick
 +fn on_tick ()->String
   +return \"tick\"
@@ -2709,7 +2749,7 @@ mod tests {
     fn module_source_with_startup_and_functions() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +source heartbeat timer interval=60000 -> on_heartbeat
 +startup [io,async]
   +return \"started\"
@@ -2728,7 +2768,7 @@ mod tests {
     fn source_timer_shorthand_in_startup() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +startup [io,async]
   +source timer heartbeat 60000
   +return \"ok\"
@@ -2747,7 +2787,7 @@ mod tests {
     fn module_sources_and_startup_coexist() {
         let mut program = ast::Program::default();
         let source = "\
-!module Svc
++module Svc
 +source poller timer interval=5000 -> on_tick
 +startup [io,async]
   +source add channel as inbox -> on_msg
@@ -2776,7 +2816,7 @@ mod tests {
 
         // First: add a module with a function
         let source1 = "\
-!module Calc
++module Calc
 +fn add(a:Int, b:Int) -> Int
   +return a + b
 +end
@@ -2797,7 +2837,7 @@ mod tests {
 
         // Now replace the function with a new body (no tests in the parsed source)
         let source2 = "\
-!module Calc
++module Calc
 +fn add(a:Int, b:Int) -> Int
   +let sum:Int = a + b
   +return sum
