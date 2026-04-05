@@ -625,6 +625,9 @@ pub struct SourceDecl {
 pub struct Module {
     pub id: NodeId,
     pub name: Identifier,
+    /// Optional module-level documentation string, set via `+doc "..."`.
+    #[serde(default)]
+    pub doc: Option<String>,
     pub types: Vec<TypeDecl>,
     pub functions: Vec<Arc<FunctionDecl>>,
     pub modules: Vec<Module>,
@@ -812,6 +815,9 @@ pub struct FunctionDecl {
     pub body: Vec<Statement>,
     #[serde(default)]
     pub tests: Vec<TestCase>,
+    /// Optional function-level documentation string, set via `+doc "..."`.
+    #[serde(default)]
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1048,6 +1054,7 @@ mod tests {
             effects: vec![],
             body: vec![],
             tests: vec![],
+            doc: None,
         })
     }
 
@@ -1068,6 +1075,7 @@ mod tests {
             effects: vec![],
             body: vec![],
             tests: vec![],
+            doc: None,
         })
     }
 
@@ -1076,6 +1084,7 @@ mod tests {
         Module {
             id: String::new(),
             name: name.to_string(),
+            doc: None,
             types: vec![],
             functions,
             modules: vec![],
@@ -2046,6 +2055,7 @@ mod tests {
             effects: vec![Effect::Io, Effect::Async, Effect::Fail],
             body: vec![],
             tests: vec![],
+            doc: None,
         };
         assert_eq!(func.name, "fetch");
         assert_eq!(func.params.len(), 2);
@@ -2084,6 +2094,7 @@ mod tests {
                 }),
             ],
             tests: vec![],
+            doc: None,
         };
         assert_eq!(func.body.len(), 2);
         assert!(matches!(func.body[0].kind, StatementKind::Let { .. }));
@@ -2364,6 +2375,7 @@ mod tests {
         let module = Module {
             id: "mod_math".to_string(),
             name: "Math".to_string(),
+            doc: None,
             types: vec![],
             functions: vec![make_fn_with_params(
                 "square",

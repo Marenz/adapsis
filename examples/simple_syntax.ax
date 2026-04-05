@@ -14,16 +14,16 @@
   +return concat(greeting, name)
 +end
 
-!test add
++test add
   +with a=3 b=4 -> expect 7
   +with a=0 b=0 -> expect 0
   +with a=-1 b=1 -> expect 0
 
-!test validate_user
++test validate_user
   +with name="alice" age=25 -> expect Ok
   +with name="" age=25 -> expect Err(err_empty_name)
   +with name="bob" age=-1 -> expect Err(err_negative_age)
 
-!test greet
++test greet
   +with name="Alice" greeting="Hello, " -> expect "Hello, Alice"
   +with name="World" greeting="Hi " -> expect "Hi World"

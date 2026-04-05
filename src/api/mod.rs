@@ -439,7 +439,7 @@ pub async fn eval_fn(
                 let is_tested = !func.tests.is_empty() && func.tests.iter().all(|t| t.passed);
                 if func.body.len() > 2 && !is_tested {
                     let response = EvalResponse {
-                        result: format!("function `{}` has {} statements but no passing tests. Write !test blocks first.", ev.function_name, func.body.len()),
+                        result: format!("function `{}` has {} statements but no passing tests. Write +test blocks first.", ev.function_name, func.body.len()),
                         success: false,
                         compiled: None,
                     };

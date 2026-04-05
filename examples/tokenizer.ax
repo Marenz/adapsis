@@ -115,31 +115,31 @@
   +return tokens.len
 +end
 
-!test is_digit
++test is_digit
   +with "5" -> expect true
   +with "a" -> expect false
   +with "0" -> expect true
 
-!test is_letter
++test is_letter
   +with "a" -> expect true
   +with "Z" -> expect true
   +with "_" -> expect true
   +with "5" -> expect false
 
-!test is_operator
++test is_operator
   +with "+" -> expect true
   +with "(" -> expect true
   +with "a" -> expect false
 
-!test read_number
++test read_number
   +with input="123abc" start=0 -> expect "123"
   +with input="42" start=0 -> expect "42"
 
-!test read_identifier
++test read_identifier
   +with input="hello world" start=0 -> expect "hello"
   +with input="foo_bar()" start=0 -> expect "foo_bar"
 
-!test token_count
++test token_count
   +with "x + 42" -> expect 3
   +with "foo(bar, 123)" -> expect 6
 

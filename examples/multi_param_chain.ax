@@ -12,12 +12,12 @@
   +return {id: id, name: validated.name, email: validated.email}
 +end
 
-!test validate_request
++test validate_request
   +with name="alice" email="a@b.com" -> expect Ok
   +with name="" email="a@b.com" -> expect Err(err_empty_name)
   +with name="alice" email="" -> expect Err(err_empty_email)
 
-!test create_user
++test create_user
   +with name="alice" email="a@b.com" id=1 -> expect Ok
   +with name="" email="a@b.com" id=1 -> expect Err(err_empty_name)
   +with name="alice" email="" id=1 -> expect Err(err_empty_email)

@@ -674,7 +674,7 @@ fn reconstruct_source(program: &Program, target: &str) -> String {
     // Include persisted tests in source reconstruction
     if !func.tests.is_empty() {
         out.push('\n');
-        out.push_str(&format!("!test {}\n", func.name));
+        out.push_str(&format!("+test {}\n", func.name));
         for tc in &func.tests {
             let expect_part = reconstruct_test_expect(&tc.expected, tc.matcher.as_deref());
             out.push_str(&format!("  +with {} -> expect {}\n", tc.input, expect_part));
@@ -1489,7 +1489,7 @@ mod tests {
     #[test]
     fn symbol_table_module_functions_qualified() {
         let source = "\
-!module Math
++module Math
 +fn add (a:Int, b:Int)->Int
   +return a + b
 ";
@@ -1787,7 +1787,7 @@ mod tests {
     #[test]
     fn call_graph_module_functions() {
         let source = "\
-!module Math
++module Math
 +fn add (a:Int, b:Int)->Int
   +return a + b
 +fn sum3 (a:Int, b:Int, c:Int)->Int
@@ -2251,7 +2251,7 @@ mod tests {
     #[test]
     fn check_module_function_resolution() {
         let source = "\
-!module Utils
++module Utils
 +fn double (x:Int)->Int
   +return x * 2
 ";

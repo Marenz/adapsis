@@ -963,7 +963,7 @@ impl Session {
 
             // Reconstruct test source and re-run
             let bare = name.rsplit('.').next().unwrap_or(name);
-            let mut test_src = format!("!test {bare}\n");
+            let mut test_src = format!("+test {bare}\n");
             for case in &ast_cases {
                 // Reconstruct the expect portion, including matcher syntax
                 let expect_str = reconstruct_expect(&case.expected, case.matcher.as_deref());
@@ -2037,6 +2037,7 @@ mod tests {
                 },
             ],
             tests: vec![],
+            doc: None,
         }
     }
 
@@ -2065,7 +2066,7 @@ mod tests {
     fn invalidate_and_retest_restores_ast_test_pass_flags() {
         let mut session = Session::new();
         session.apply(
-            "+fn foo ()->Int\n  +let x:Int = 1\n  +set x = 2\n  +return 1\n\n!test foo\n  +with -> expect 1\n",
+            "+fn foo ()->Int\n  +let x:Int = 1\n  +set x = 2\n  +return 1\n\n+test foo\n  +with -> expect 1\n",
         )
         .unwrap();
 

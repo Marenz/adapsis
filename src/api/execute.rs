@@ -490,7 +490,7 @@ pub async fn execute_code(
                             if let Some(func) = session.program.get_function(&ev.function_name) {
                                 if func.body.len() > 2 && !crate::session::is_function_tested(&session.program, &ev.function_name) {
                                     result.push_err(format!(
-                                        "function `{}` has {} statements but no passing tests. Write !test blocks first.",
+                                        "function `{}` has {} statements but no passing tests. Write +test blocks first.",
                                         ev.function_name, func.body.len()
                                     ));
                                     continue;
@@ -646,9 +646,9 @@ pub async fn execute_code(
 
                             let scope_desc = match &branch.scope {
                                 crate::session::AgentScope::ReadOnly =>
-                                    "SCOPE: read-only. You CAN: write !test blocks, use !eval, use ?queries. You CANNOT: define new functions or types, modify existing code.".to_string(),
+                                    "SCOPE: read-only. You CAN: write +test blocks, use !eval, use ?queries. You CANNOT: define new functions or types, modify existing code.".to_string(),
                                 crate::session::AgentScope::NewOnly =>
-                                    "SCOPE: new-only. You CAN: define NEW functions and types, write !test blocks, use !eval. You CANNOT: modify or replace existing functions.".to_string(),
+                                    "SCOPE: new-only. You CAN: define NEW functions and types, write +test blocks, use !eval. You CANNOT: modify or replace existing functions.".to_string(),
                                 crate::session::AgentScope::Module(m) =>
                                     format!("SCOPE: module {m}. You CAN: modify anything in module {m}, add new functions to it. You CANNOT: modify code outside module {m}."),
                                 crate::session::AgentScope::Full =>
@@ -875,7 +875,7 @@ pub async fn execute_code(
                                 .collect();
                             if !untested.is_empty() {
                                 result.push_err(format!(
-                                    "Cannot accept !done: {} untested functions: {}. Write !test blocks for them.",
+                                    "Cannot accept !done: {} untested functions: {}. Write +test blocks for them.",
                                     untested.len(),
                                     untested.join(", ")
                                 ));

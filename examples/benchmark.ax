@@ -1,4 +1,4 @@
-!module Bench
++module Bench
 
 +fn fib (n:Int)->Int
   +if n <= 1
@@ -46,21 +46,21 @@
   +return total
 +end
 
-!test fib
++test fib
   +with 0 -> expect 0
   +with 1 -> expect 1
   +with 10 -> expect 55
   +with 20 -> expect 6765
 
-!test sum_to
++test sum_to
   +with 100 -> expect 5050
   +with 1000 -> expect 500500
 
-!test collatz_steps
++test collatz_steps
   +with 27 -> expect 111
   +with 1 -> expect 0
 
-!test nested_loops
++test nested_loops
   +with 10 -> expect 2025
 
 !eval fib 30

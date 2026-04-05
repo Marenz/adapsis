@@ -1833,7 +1833,7 @@ impl CoroutineHandle {
                     return Ok(Some(Value::string(format!("module '{name}' already exists"))));
                 }
                 // Create empty module
-                let code = format!("!module {name}");
+                let code = format!("+module {name}");
                 let operations = crate::parser::parse(&code)
                     .map_err(|e| anyhow::anyhow!("module_create: parse error: {e}"))?;
                 for op in &operations {
@@ -1860,7 +1860,7 @@ impl CoroutineHandle {
                 }
                 // Reconstruct test source from stored AST test cases
                 let bare = fn_name.rsplit('.').next().unwrap_or(&fn_name);
-                let mut test_src = format!("!test {bare}\n");
+                let mut test_src = format!("+test {bare}\n");
                 for case in &ast_cases {
                     let expect_str = crate::session::reconstruct_expect_pub(&case.expected, case.matcher.as_deref());
                     test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, expect_str));

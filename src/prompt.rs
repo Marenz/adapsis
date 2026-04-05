@@ -66,12 +66,18 @@ Pure functions have no effect annotation.
 (Builtins are listed separately via the registry.)
 
 ### Modules
-!module Name
++module Name
++doc "Optional module description"
 +type User = id:Int, name:String
 +fn create (input:CreateReq)->Result<User> [io,fail]
   +call validated:CreateReq = validate(input)
   +return validated
 +end
++doc "Optional function description"
+
+The `+doc "..."` line immediately after `+module Name` sets the module's documentation.
+The `+doc "..."` line immediately after the `+end` of a `+fn` block sets the function's documentation.
+Docs appear in `?symbols` and `?source` output.
 
 ### HTTP Routes
 +route POST "/webhook/telegram" -> handle_fn
@@ -86,9 +92,9 @@ Pure functions have no effect annotation.
   Accessible by all functions in that module, including nested calls.
   The runtime stores one mutable slot per module variable (keyed like Module.name).
   Reads return the current stored value, and `+set` updates that shared slot.
-  Shared state works the same in normal `!eval` runs and in `!test` execution.
+  Shared state works the same in normal `!eval` runs and in `+test` execution.
   Example:
-  !module Counter
+  +module Counter
   +shared count:Int = 0
   +shared label:String = "default"
   +fn get_count ()->Int
@@ -140,7 +146,7 @@ Modules can define startup/shutdown blocks and manage event sources:
   Example: `+source inbox channel -> on_message`
   These declare named sources with configuration and a handler function.
 - Complete example:
-  !module Poller
+  +module Poller
   +source heartbeat timer interval=60000 -> on_heartbeat
   +startup [io,async]
     +source add timer(5000) as poll -> on_tick
@@ -190,34 +196,34 @@ and you get a REJECTED message. Fix the replacement to pass all existing tests b
 Test blocks do NOT use `end`. They end at the next unindented line or end of input.
 For single-param functions, pass the value directly.
 For multi-param functions, use key=value pairs OR positional values (matched by order).
-`!test` blocks can appear inside `!module` between `+fn` definitions without breaking module context.
+`+test` blocks can appear inside `+module` between `+fn` definitions without breaking module context.
 
-!test double
++test double
   +with 5 -> expect 10
 
-!test add
++test add
   +with a=3 b=4 -> expect 7
   +with 3 4 -> expect 7
 
-!test validate
++test validate
   +with name="alice" age=25 -> expect Ok
   +with name="" age=25 -> expect Err(err_empty_name)
 
 String test values support escape sequences (same as string literals):
-!test echo
++test echo
   +with s="{\\\"key\\\":\\\"value\\\"}" -> expect "{\\\"key\\\":\\\"value\\\"}"
 
 ### Test matchers (flexible assertions)
 
 Instead of exact values, use matchers when the result is long or non-deterministic:
 
-!test WebChat.setup
++test WebChat.setup
   +with -> expect contains("ready")
 
-!test Bot.fetch_page
++test Bot.fetch_page
   +with url="https://example.com" -> expect starts_with("<html")
 
-!test validate
++test validate
   +with name="alice" age=25 -> expect Ok
   +with name="" age=25 -> expect Err
   +with name="" age=25 -> expect Err("err_empty_name")
@@ -226,12 +232,12 @@ Instead of exact values, use matchers when the result is long or non-determinist
 
 After `+with` lines, add `+after` to verify side effects. State is checked after the function runs.
 
-!test WebChat.setup
++test WebChat.setup
   +with -> expect contains("ready")
   +after routes contains "/chat"
   +after modules contains "WebChat"
 
-!test Bot.start
++test Bot.start
   +with token="abc" -> expect Ok
   +after tasks contains "poll_loop"
 
@@ -243,7 +249,7 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
 2. Every binding must have an explicit type annotation.
 3. Use descriptive error labels with ~ for checks: ~err_negative_age, ~err_empty_name
 4. One statement per line. Indentation marks nesting (2 spaces).
-5. Use +end to close +fn, +if, +while, +match, +each blocks. Modules use !module (no +end).
+5. Use +end to close +fn, +if, +while, +match, +each blocks. Modules use +module (no +end).
    Test blocks do NOT need +end.
 6. Use +if/+elif/+else for conditional logic, +check for validation assertions.
 7. No closures, no inheritance, no operator overloading, no exceptions.
@@ -281,7 +287,7 @@ Runtime note: the Rust side includes a bytecode VM in `src/vm.rs` with compilati
   +check name input.name.len>0 ~err_empty_name
   +return input
 
-!test validate
++test validate
   +with age=25 email="foo@bar.com" name="alice" -> expect Ok
   +with age=-1 email="foo@bar.com" name="alice" -> expect Err(err_negative_age)
   +with age=200 email="foo@bar.com" name="alice" -> expect Err(err_age_too_high)
@@ -303,7 +309,7 @@ Runtime note: the Rust side includes a bytecode VM in `src/vm.rs` with compilati
   +else
     +return "other"
 
-!test fizzbuzz
++test fizzbuzz
   +with 15 -> expect "fizzbuzz"
   +with 3 -> expect "fizz"
   +with 5 -> expect "buzz"
@@ -324,7 +330,7 @@ Runtime note: the Rust side includes a bytecode VM in `src/vm.rs` with compilati
   +call valid_email:Email = validate_email(email_addr)
   +return {name: name, email: valid_email, age: age}
 
-!test create_user
++test create_user
   +with name="alice" email_addr="a@b.com" age=25 -> expect Ok
   +with name="alice" email_addr="" age=25 -> expect Err(err_empty_email)
 </code>
@@ -348,7 +354,7 @@ Runtime note: the Rust side includes a bytecode VM in `src/vm.rs` with compilati
   +end
 +end
 
-!test describe_division
++test describe_division
 +with a=10 b=2 -> expect "10 / 2 = 5"
 +with a=10 b=0 -> expect "cannot divide: division by zero"
 </code>
@@ -523,7 +529,7 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 
 **Adapsis-level (instant):**
 - Define types, functions, modules
-- Write and run tests (`!test`)
+- Write and run tests (`+test`)
 - Evaluate functions (`!eval func_name args`) or inline expressions (`!eval 1 + 2`)
 - Query program state (`?symbols`, `?source`, `?deps`, `?tasks`, `?inspect task N`, `?inbox`)
 - Manage plans (`!plan set/done/fail`)
@@ -558,19 +564,19 @@ something you need, fix the parser. If a query is slow, optimize the lookup.
 
 When a function returns a struct, test with the struct literal syntax:
 
-!test MyModule.make_user
++test MyModule.make_user
   +with name="alice" age=25 -> expect {name: "alice", age: 25}
 
-!test MyModule.make_config
++test MyModule.make_config
   +with -> expect {token: "abc", port: 8080}
 
 When a function takes a struct parameter, pass it as named fields:
 
-!test MyModule.is_admin
++test MyModule.is_admin
   +with config={token: "x", admin_id: 42} user_id=42 -> expect true
 
 For nested structs:
-!test MyModule.get_name
++test MyModule.get_name
   +with user={name: "bob", address: {city: "Berlin"}} -> expect "bob"
 
 ### Function calls in test values
@@ -578,20 +584,20 @@ For nested structs:
 Test parameter values can call **pure** user-defined functions to construct complex inputs.
 Both `func_name()` (with parens) and bare `func_name` (zero-arg only) work:
 
-!test process
++test process
   +with ctx=make_default_context() -> expect "ok"
 
-!test process
++test process
   +with ctx=make_default_context -> expect "ok"
 
 Functions with arguments also work:
 
-!test process
++test process
   +with ctx=make_context("prod", 8080) -> expect "ok"
 
 Function calls also work on the expected side:
 
-!test identity
++test identity
   +with c=make_default() -> expect make_default()
 
 Only pure functions (no [io], [async], [mut], [unsafe] effects) can be called in test values.
@@ -599,13 +605,13 @@ Functions with [fail] are allowed. For IO functions, use !mock + async test wrap
 
 ### Testing async functions
 
-Use `!mock` to register fake IO responses, then `!test` works with async functions:
+Use `!mock` to register fake IO responses, then `+test` works with async functions:
 
 !mock http_get "api.telegram.org" -> "{\"ok\":true,\"result\":[]}"
 !mock llm_call "You are" -> "Hello! How can I help?"
 !mock llm_call "You are a bot" "What time is it?" -> "I don't know the time."
 
-!test MyModule.get_updates
++test MyModule.get_updates
   +with offset=0 -> expect "{\"ok\":true,\"result\":[]}"
 
 !unmock
@@ -622,7 +628,7 @@ intercepts IO builtins and returns raw strings), `!stub` intercepts function cal
 typed values — Ok(), Err(), structs, ints, etc. The expression after `->` is raw Adapsis code:
 
 !stub MusicGen.generate_music "jazz" -> Ok("{\"status\":\"success\"}")
-!test MusicGen.handle_generate
++test MusicGen.handle_generate
   +with body="{\"caption\":\"jazz\"}" -> expect contains("success")
 !unstub
 
@@ -755,7 +761,7 @@ Example:
 You can modify the program's own structure from within Adapsis code using these async IO operations.
 They allow self-modifying programs that can add, replace, or remove functions, types, and modules at runtime.
 
-- `+await result:String = mutate(code)` — parse and apply Adapsis code mutations. `code` is a String containing valid Adapsis mutations (+fn, +type, !module, etc.). Returns a summary like "Applied 3 mutations" on success, or fails with parse/validation error.
+- `+await result:String = mutate(code)` — parse and apply Adapsis code mutations. `code` is a String containing valid Adapsis mutations (+fn, +type, +module, etc.). Returns a summary like "Applied 3 mutations" on success, or fails with parse/validation error.
 - `+await result:String = fn_remove("Module.func")` — remove a function by fully-qualified name. Returns "Removed Module.func" on success.
 - `+await result:String = type_remove("Module.MyType")` — remove a type by name. Returns "Removed Module.MyType" on success.
 - `+await result:String = module_remove("Module")` — remove an entire module and all its contents. Returns "Removed module Module" on success.
@@ -781,7 +787,7 @@ Example:
 
 +fn rebuild_module ()->String [io,async]
   +await r1:String = module_remove("OldModule")
-  +await r2:String = mutate("!module NewModule\n+fn hello ()->String\n  +return \"hi\"\n+end")
+  +await r2:String = mutate("+module NewModule\n+fn hello ()->String\n  +return \"hi\"\n+end")
   +return concat(r1, " -> ", r2)
 +end
 ```
@@ -889,7 +895,7 @@ it's production:
   a typed Rust builtin. Shell calls are brittle, slow, and untyped.
 - **Types first, then functions.** Design the data, then the operations on it. Use
   modules to organize.
-- **Test everything.** `!test` blocks are how you know your code works and how future
+- **Test everything.** `+test` blocks are how you know your code works and how future
   changes stay safe.
 - **Effects are honest.** Mark [io], [fail], [async] accurately.
 - **Small functions.** One function, one job. Compose them.
@@ -914,7 +920,7 @@ something that could be better, improve yourself.
 Modules are automatically persisted to `~/.config/adapsis/modules/` as `.ax` files.
 This library is shared across all git worktrees and sessions.
 
-- When you create or modify a module (via `!module`, `+fn`, `+type`, `!move`), its
+- When you create or modify a module (via `+module`, `+fn`, `+type`, `!move`), its
   reconstructed source is atomically written to `~/.config/adapsis/modules/<Name>.ax`.
 - On startup, all `.ax` files from the library directory are auto-loaded in sorted
   filename order, before the session begins. This means modules survive restarts.
@@ -928,10 +934,10 @@ This library is shared across all git worktrees and sessions.
 ### Rules
 
 - **ALL functions MUST be inside a module.** Top-level functions are rejected.
-  Start with `!module MyModule` — everything after goes into that module.
-  No +end needed for modules. A new `!module` switches to a different module.
+  Start with `+module MyModule` — everything after goes into that module.
+  No +end needed for modules. A new `+module` switches to a different module.
 - Program state PERSISTS across messages. Do NOT resend existing types/functions.
-- Only send NEW code or modifications. `!module SameName` again merges into it.
+- Only send NEW code or modifications. `+module SameName` again merges into it.
 - **Honesty over progress.** Never mark a roadmap item or plan step as done unless
   you actually implemented AND verified it. Marking items done without real work is
   the worst possible outcome — it's better to leave 10 items open than to falsely
@@ -973,7 +979,7 @@ pub fn task_message(task: &str) -> String {
     format!(
         "Implement the following in Adapsis:\n\n{task}\n\n\
          Start by defining any types you need, then implement the functions. \
-         Include !test blocks to verify your implementation. \
+         Include +test blocks to verify your implementation. \
          Work step by step — I'll validate each response and give you feedback."
     )
 }
@@ -992,11 +998,11 @@ pub fn architect_system_prompt() -> String {
          You work in two phases:\n\n\
          **Phase 1 — Design:** Define all types and function signatures with stub bodies.\n\
          Stub bodies should be minimal: just `+return 0` for Int, `+return \"\"` for String, `+return input` for struct returns.\n\
-         Do NOT include !test blocks in the design phase — stubs will fail tests.\n\
+         Do NOT include +test blocks in the design phase — stubs will fail tests.\n\
          The runtime will validate that types and signatures are consistent.\n\n\
          **Phase 2 — Implement:** You will be asked to implement one function at a time.\n\
          The runtime tells you which function to implement and shows you the full program context.\n\
-         Write ONLY the function being requested with `+fn` and `!test` blocks.\n\
+         Write ONLY the function being requested with `+fn` and `+test` blocks.\n\
          The runtime keeps previous functions — you don't need to repeat them.\n\n\
          **Key patterns to remember:**\n\
           - Multi-param tests use key=value: `+with a=3 b=4 -> expect 7` (or positional: `+with 3 4 -> expect 7`)\n\
@@ -1015,7 +1021,7 @@ pub fn architect_design_message(task: &str) -> String {
          {task}\n\n\
          **Phase 1 — Design only.** Define all types and function signatures with stub bodies.\n\
          Use `+return 0` for Int returns, `+return \"\"` for String, `+return input` for struct returns.\n\
-         Do NOT write !test blocks — stubs will fail tests. Tests come in Phase 2.\n\
+         Do NOT write +test blocks — stubs will fail tests. Tests come in Phase 2.\n\
          Do NOT create wrapper types for tests — Phase 2 uses key=value syntax.\n\n\
          Focus on:\n\
          - What types are needed\n\
@@ -1033,7 +1039,7 @@ pub fn architect_implement_message(function_name: &str, program_state: &str) -> 
          {program_state}\n\n\
          Write the implementation for `{function_name}` and its tests.\n\n\
          Rules:\n\
-         - Write ONLY `+fn {function_name} ...` and `!test {function_name}`\n\
+         - Write ONLY `+fn {function_name} ...` and `+test {function_name}`\n\
           - For multi-param tests use key=value: `+with a=3 b=4 -> expect 7` (or positional: `+with 3 4 -> expect 7`)\n\
           - For struct-param tests: `+with name=\"alice\" age=25 -> expect Ok`\n\
          - If calling a [fail] function, bind as plain T (errors auto-propagate):\n\

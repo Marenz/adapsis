@@ -24,12 +24,12 @@
 +end
 
 // Basic match with single param
-!test is_some
++test is_some
   +with Some(42) -> expect true
   +with Nope -> expect false
 
 // Bug #2: match with multi-param key=value input
-!test unwrap_or
++test unwrap_or
   +with m=Some(42) default=0 -> expect 42
   +with m=Nope default=99 -> expect 99
 
@@ -43,7 +43,7 @@
   +end
 +end
 
-!test describe
++test describe
   +with Some(1) -> expect "has value"
   +with Some(999) -> expect "has value"
   +with Nope -> expect "empty"
@@ -61,7 +61,7 @@
   +end
 +end
 
-!test list_length
++test list_length
   +with Nil -> expect 0
   +with Cons(1, Nil) -> expect 1
   +with Cons(1, Cons(2, Nil)) -> expect 2
@@ -82,7 +82,7 @@
   +end
 +end
 
-!test maybe_add
++test maybe_add
   +with a=Some(3) b=Some(4) -> expect Some(7)
   +with a=Some(3) b=Nope -> expect Some(3)
   +with a=Nope b=Some(4) -> expect Some(4)
@@ -93,7 +93,7 @@
   +return Cons(1, Cons(2, Cons(3, Nil)))
 +end
 
-!test list_length
++test list_length
   +with make_list() -> expect 3
 
 // Bug #3 fix: None and Some as user-defined union variants
@@ -117,10 +117,10 @@
   +end
 +end
 
-!test option_unwrap
++test option_unwrap
   +with opt=Some(42) default=0 -> expect 42
   +with opt=None default=99 -> expect 99
 
-!test option_map_double
++test option_map_double
   +with Some(5) -> expect Some(10)
   +with None -> expect None

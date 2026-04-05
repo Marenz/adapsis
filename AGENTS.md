@@ -6,10 +6,13 @@ Adapsis is an AI-native programming language and live agentic environment. Progr
 ## Language Design Goals
 - **Optimized for LLM-driven construction**, not human typing
 - Every operation starts with `+`, `!`, or `?` — clear code vs prose distinction
+  - `+` prefix = scoped declarations (belong to a module): `+module`, `+fn`, `+test`, `+doc`, `+shared`, `+route`, `+startup`, `+shutdown`, `+source`
+  - `!` prefix = global runtime commands: `!eval`, `!agent`, `!plan`, `!roadmap`, `!done`, `!opencode`, `!reload`, `!msg`, `!stub`, `!unmock`
+  - `?` prefix = queries: `?source`, `?library`, `?symbols`
 - Explicit types everywhere — no inference
 - Effect system: `[io]`, `[async]`, `[fail]`, `[mut]`
 - `+end` closes all blocks (`+fn`, `+if`, `+while`, `+match`, `+each`)
-- `!module Name` as state change (no `+end` needed for modules)
+- `+module Name` as state change (no `+end` needed for modules)
 - Pattern matching over method chains — `+match`/`+case` is primary
 - Auto-propagation for errors — `[fail]` + `+call val:T = func(x)` propagates errors
 - No `is_ok`/`unwrap` builtins — use `+match` on Result directly:
@@ -21,9 +24,10 @@ Adapsis is an AI-native programming language and live agentic environment. Progr
     +return concat("error: ", e)
   +end
   ```
-- Test enforcement — functions >2 statements must have passing `!test` before `!eval`
+- Test enforcement — functions >2 statements must have passing `+test` before `!eval`
 - Tests persist across sessions and auto-rerun when functions change
 - `!mock` for IO testing — intercepts `+await` calls with fake responses
+- `+doc "description"` — documents a module (after `+module Name`) or function (after `+end`)
 
 ## IMPORTANT: Keep the prompt updated
 When modifying the runtime (adding builtins, IO operations, commands, syntax changes):
@@ -107,7 +111,9 @@ web/
 
 ## Key Adapsis Commands
 ```
-!module Name          — switch module context (all +fn/+type after go here)
++module Name          — switch module context (all +fn/+type after go here)
++doc "description"    — document module (after +module Name) or function (after +end)
++test Module.fn       — run tests (blocks !eval if untested)
 !plan set / done N    — task planning
 !roadmap add/done/show — persistent long-term roadmap
 +await roadmap_list/roadmap_add/roadmap_done — programmatic roadmap IO builtins
@@ -115,7 +121,6 @@ web/
 !stub Module.func "pattern" -> expr — function stub (returns typed value, for user functions)
 !unmock               — clear IO mocks
 !unstub               — clear function stubs
-!test Module.fn       — run tests (blocks !eval if untested)
 !eval Module.fn       — evaluate function
 !remove Module.fn     — remove function/type/module
 !done                 — signal task completion

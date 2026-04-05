@@ -625,7 +625,7 @@ async fn test_endpoint_broadcasts_sse_event() {
     let Json(response) = test_fn(
         State(config),
         Json(TestRequest {
-            source: "!test one\n  +with -> expect 1".to_string(),
+            source: "+test one\n  +with -> expect 1".to_string(),
         }),
     )
     .await;
@@ -689,7 +689,7 @@ fn test_config_with_io() -> (
 async fn execute_code_eval_io_function_does_not_reject() {
     // Define an [io,async] function and verify !eval doesn't reject it
     let (config, _io_rx) = test_config_with_io();
-    let module_code = "!module TestIO\n+fn greet(name:String) -> String [io,async]\n  +return concat(\"hello \", name)\n+end";
+    let module_code = "+module TestIO\n+fn greet(name:String) -> String [io,async]\n  +return concat(\"hello \", name)\n+end";
     let mut session = config.snapshot_working_set().await;
     // First apply the module
     let res = execute_code(module_code, &config, &mut session, None).await;
@@ -701,7 +701,7 @@ async fn execute_code_eval_io_function_does_not_reject() {
     config.write_back_working_set(&session).await;
 
     // Add a test so it's not blocked by "untested" check
-    let test_code = "!test TestIO.greet\n  +with name=\"world\" -> expect \"hello world\"";
+    let test_code = "+test TestIO.greet\n  +with name=\"world\" -> expect \"hello world\"";
     let mut session = config.snapshot_working_set().await;
     let res = execute_code(test_code, &config, &mut session, None).await;
     config.write_back_working_set(&session).await;
@@ -726,7 +726,7 @@ async fn execute_code_eval_io_function_does_not_reject() {
 async fn execute_code_eval_io_function_positional_args() {
     // Test that !eval Module.func("arg1", 42, "arg3") also works for [io,async] functions
     let (config, _io_rx) = test_config_with_io();
-    let module_code = "!module TestIO2\n+fn process(a:String, b:Int, c:String) -> String [io,async]\n  +return concat(a, to_string(b), c)\n+end";
+    let module_code = "+module TestIO2\n+fn process(a:String, b:Int, c:String) -> String [io,async]\n  +return concat(a, to_string(b), c)\n+end";
     let mut session = config.snapshot_working_set().await;
     let res = execute_code(module_code, &config, &mut session, None).await;
     assert!(
@@ -737,7 +737,7 @@ async fn execute_code_eval_io_function_positional_args() {
     config.write_back_working_set(&session).await;
 
     // Add a test
-    let test_code = "!test TestIO2.process\n  +with a=\"x\" b=1 c=\"y\" -> expect \"x1y\"";
+    let test_code = "+test TestIO2.process\n  +with a=\"x\" b=1 c=\"y\" -> expect \"x1y\"";
     let mut session = config.snapshot_working_set().await;
     let res = execute_code(test_code, &config, &mut session, None).await;
     config.write_back_working_set(&session).await;
@@ -815,7 +815,7 @@ async fn pipeline_define_test_eval() {
     assert!(!res.has_errors, "define: {:?}", res.mutation_results);
 
     // Test it
-    let test_code = "!test classify\n  +with 5 -> expect \"positive\"\n  +with -3 -> expect \"negative\"\n  +with 0 -> expect \"zero\"";
+    let test_code = "+test classify\n  +with 5 -> expect \"positive\"\n  +with -3 -> expect \"negative\"\n  +with 0 -> expect \"zero\"";
     let res = exec(test_code, &config).await;
     assert!(!res.has_errors, "test: {:?}", res.mutation_results);
     assert_eq!(res.test_results.iter().filter(|t| t.pass).count(), 3, "all 3 tests should pass");
@@ -835,7 +835,7 @@ async fn pipeline_test_failure_reported() {
     let res = exec("+fn always_one() -> Int\n  +return 1\n+end", &config).await;
     assert!(!res.has_errors);
 
-    let res = exec("!test always_one\n  +with -> expect 999", &config).await;
+    let res = exec("+test always_one\n  +with -> expect 999", &config).await;
     // Test should fail
     assert!(
         res.test_results.iter().any(|t| !t.pass),
@@ -858,7 +858,7 @@ async fn pipeline_mutation_error_reported() {
 #[tokio::test]
 async fn pipeline_module_with_function() {
     let config = test_config();
-    let code = "!module Math\n+fn square(x:Int) -> Int\n  +return x * x\n+end";
+    let code = "+module Math\n+fn square(x:Int) -> Int\n  +return x * x\n+end";
     let res = exec(code, &config).await;
     assert!(!res.has_errors, "module define: {:?}", res.mutation_results);
 
@@ -958,7 +958,7 @@ async fn pipeline_inline_expression_eval() {
 #[tokio::test]
 async fn pipeline_multiple_operations_in_one_block() {
     let config = test_config();
-    let code = "+fn inc(x:Int) -> Int\n  +return x + 1\n+end\n!test inc\n  +with 0 -> expect 1\n  +with 9 -> expect 10\n!eval inc(41)";
+    let code = "+fn inc(x:Int) -> Int\n  +return x + 1\n+end\n+test inc\n  +with 0 -> expect 1\n  +with 9 -> expect 10\n!eval inc(41)";
     let res = exec(code, &config).await;
     assert!(!res.has_errors, "combined block: {:?}", res.mutation_results);
     assert_eq!(
@@ -1101,7 +1101,7 @@ async fn http_test_endpoint() {
         .unwrap();
 
     // Then test it
-    let test_body = serde_json::json!({"source": "!test id\n  +with 5 -> expect 5\n  +with 0 -> expect 0"});
+    let test_body = serde_json::json!({"source": "+test id\n  +with 5 -> expect 5\n  +with 0 -> expect 0"});
     let resp = router
         .oneshot(
             axum::http::Request::builder()

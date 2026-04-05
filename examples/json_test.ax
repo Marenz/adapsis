@@ -20,15 +20,15 @@
   +return val
 +end
 
-!test test_json_array_len
++test test_json_array_len
   +with json="[1,2,3]" -> expect 3
   +with json="[]" -> expect 0
 
-!test test_json_get_from_array
++test test_json_get_from_array
   +with json="[42,99]" -> expect 42
 
-!test build_and_parse
++test build_and_parse
   +with 0 -> expect "alice"
 
-!test nested_array_access
++test nested_array_access
   +with 0 -> expect 20
