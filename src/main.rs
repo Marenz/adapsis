@@ -915,8 +915,11 @@ async fn main() -> Result<()> {
             let opencode_lock_for_spawn = opencode_lock.clone();
             let opencode_git_dir_shared: std::sync::Arc<std::sync::RwLock<String>> = std::sync::Arc::new(std::sync::RwLock::new(".".to_string()));
             let opencode_git_dir_for_spawn = opencode_git_dir_shared.clone();
+            let training_log_shared: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>>> = std::sync::Arc::new(std::sync::RwLock::new(None));
+            let training_log_for_spawn = training_log_shared.clone();
             // Clone resources for startup execution (before IO loop moves them)
             let io_sender_for_startup = runtime.io_sender();
+            let io_sender_for_autonomous = runtime.io_sender();
             let startup_registry = runtime.task_registry.clone();
             let startup_snap_reg = runtime.snapshot_registry.clone();
             let startup_runtime = shared_runtime.clone();
@@ -1069,6 +1072,7 @@ async fn main() -> Result<()> {
                             let snap_registry = snap_registry_for_spawn2.clone();
                             let oc_lock = opencode_lock_for_spawn.clone();
                             let oc_git_dir = opencode_git_dir_for_spawn.read().unwrap().clone();
+                            let t_log = training_log_for_spawn.read().unwrap().clone();
 
                             tokio::spawn(async move {
                                 let result = crate::api::handle_llm_takeover(
@@ -1076,7 +1080,7 @@ async fn main() -> Result<()> {
                                     meta, program, runtime,
                                     &llm_url, &llm_model, llm_key,
                                     io_sender, task_registry, snap_registry,
-                                    oc_lock, oc_git_dir,
+                                    oc_lock, oc_git_dir, t_log,
                                 ).await;
                                 let _ = reply.send(result);
                             });
@@ -1299,6 +1303,7 @@ async fn main() -> Result<()> {
                     .open(&training_log).await?;
                 Some(std::sync::Arc::new(tokio::sync::Mutex::new(f)))
             };
+            *training_log_shared.write().unwrap() = train_log.clone();
 
             // Build the three independent tiers from the loaded session.
             let tier1_program = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
@@ -1492,208 +1497,28 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Autonomous mode: build the initial message from restart context + goal.
-            {
-                let goal = autonomous;
-                let goal_message = if let Some(context) = restart_context {
-                    // Restarted with prior session — include full context
-                    eprintln!("[autonomous] restarting with context");
-                    match goal {
-                        Some(ref g) => format!("{context}\n\n## Goal\n{g}"),
-                        None => format!("{context}\n\nContinue where you left off."),
-                    }
-                } else if goal.as_deref() == Some("roadmap") {
-                    let roadmap_path = format!("{}/ROADMAP.md", project_dir);
-                    match std::fs::read_to_string(&roadmap_path) {
-                        Ok(content) => format!(
-                            "You are running in autonomous mode. Here is the project roadmap:\n\n{content}\n\n\
-                             First, use !roadmap add to populate your roadmap with the undone items above. \
-                             Then check !roadmap, pick the first undone item, create a !plan, and start working. \
-                             Use !roadmap done N when you finish an item. Use !opencode for Rust-level changes. \
-                             Keep going — when one item is done, move to the next."
-                        ),
-                        Err(_) => "You are running in autonomous mode. Check !roadmap for tasks. If empty, identify improvements and !roadmap add them. Then start working.".to_string(),
-                    }
-                } else if let Some(ref g) = goal {
-                    format!(
-                        "You are running in autonomous mode. Your goal:\n\n{g}\n\n\
-                         Create a plan, then start building. Use !opencode when you need Rust-level changes. \
-                         Keep going until the goal is complete or you get stuck and need user input."
-                    )
-                } else {
-                    "Check !roadmap for undone items. If there are any, pick the first one, create a !plan, and start working. If empty, idle.".to_string()
-                };
-
-                eprintln!("[autonomous] injecting goal: {}...", goal_message.chars().take(100).collect::<String>());
-                let auto_port = port;
+            // If a startup goal was provided (--autonomous), inject it into the "main" context.
+            // This is a one-shot trigger, not a polling loop. The LLM processes it once
+            // and stops. Further work requires explicit triggers (inject, webhook, timer).
+            if let Some(goal) = autonomous {
+                let inject_sender = io_sender_for_autonomous.clone();
                 tokio::spawn(async move {
+                    // Wait briefly for the server to be ready
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    let client = reqwest::Client::new();
-                    let mut is_first = true;
-                    loop {
-                        let mut msg = if is_first {
-                            is_first = false;
-                            goal_message.clone()
-                        } else {
-                            // Check for injected messages first
-                            let injected = match client.post(format!("http://127.0.0.1:{auto_port}/api/drain-queue"))
-                                .send().await {
-                                    Ok(r) => r.json::<serde_json::Value>().await.ok()
-                                        .and_then(|q| q.get("messages").cloned())
-                                        .and_then(|m| m.as_array().cloned())
-                                        .and_then(|arr| {
-                                            let non_empty: Vec<String> = arr.iter()
-                                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                                .filter(|s| !s.is_empty())
-                                                .collect();
-                                            if non_empty.is_empty() { None } else { Some(non_empty.join("\n\n")) }
-                                        }),
-                                    Err(_) => None,
-                                };
-
-                            if let Some(injected_msg) = injected {
-                                eprintln!("[autonomous] processing injected: {}...", injected_msg.chars().take(80).collect::<String>());
-                                injected_msg
-                            } else {
-                                // Check session state to give the right nudge
-                                let status = match client.get(format!("http://127.0.0.1:{auto_port}/api/status"))
-                                    .send().await {
-                                        Ok(r) => r.json::<serde_json::Value>().await.ok(),
-                                        Err(_) => None,
-                                    };
-
-                                if let Some(ref status) = status {
-                                    let plan = status.get("plan").and_then(|p| p.as_array());
-                                    let has_pending_plan = plan.map(|p| p.iter().any(|s| {
-                                        let st = s.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                                        st == "pending" || st == "in_progress"
-                                    })).unwrap_or(false);
-
-                                    let roadmap = status.get("roadmap").and_then(|r| r.as_array());
-                                    let has_undone_roadmap = roadmap.map(|r| r.iter().any(|item| {
-                                        item.get("done").and_then(|d| d.as_bool()) == Some(false)
-                                    })).unwrap_or(false);
-
-                                    if has_pending_plan {
-                                        "You hit the iteration limit but your plan has unfinished steps. Continue working on the current plan.".to_string()
-                                    } else if has_undone_roadmap {
-                                        "Plan completed. Use !roadmap done N to mark the current roadmap item done, then check !roadmap for the next undone item. Create a new !plan and start working on it.".to_string()
-                                    } else {
-                                        // Nothing left — idle, but drain queue on each wake-up
-                                        eprintln!("[autonomous] all roadmap items done, idling...");
-                                        
-                                        // Drain queue before sleeping
-                                        let injected = match client.post(format!("http://127.0.0.1:{auto_port}/api/drain-queue"))
-                                            .send().await {
-                                                Ok(r) => r.json::<serde_json::Value>().await.ok()
-                                                    .and_then(|q| q.get("messages").cloned())
-                                                    .and_then(|m| m.as_array().cloned())
-                                                    .and_then(|arr| {
-                                                        let non_empty: Vec<String> = arr.iter()
-                                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                                            .filter(|s| !s.is_empty())
-                                                            .collect();
-                                                        if non_empty.is_empty() { None } else { Some(non_empty.join("\n\n")) }
-                                                    }),
-                                                Err(_) => None,
-                                            };
-
-                                        if let Some(injected_msg) = injected {
-                                            eprintln!("[autonomous] processing injected while idle: {}...", injected_msg.chars().take(80).collect::<String>());
-                                            injected_msg
-                                        } else {
-                                            // No injected messages — sleep and retry
-                                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                                            continue;
-                                        }
-                                    }
-                                } else {
-                                    "Continue working. Check !roadmap and !plan for current state.".to_string()
-                                }
-                            }
-                        };
-                        eprintln!("[autonomous] sending: {}...", msg.chars().take(80).collect::<String>());
-                        match client.post(format!("http://127.0.0.1:{auto_port}/api/ask-stream"))
-                            .json(&serde_json::json!({"message": msg}))
-                            .send().await
-                        {
-                            Ok(resp) => {
-                                use futures::StreamExt;
-                                let mut stream = resp.bytes_stream();
-                                let mut raw_buf: Vec<u8> = Vec::new();
-                                while let Some(chunk) = stream.next().await {
-                                    if let Ok(bytes) = chunk {
-                                        raw_buf.extend_from_slice(&bytes);
-                                        let valid_up_to = match std::str::from_utf8(&raw_buf) {
-                                            Ok(_) => raw_buf.len(),
-                                            Err(e) => e.valid_up_to(),
-                                        };
-                                        if valid_up_to == 0 { continue; }
-                                        let text = std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap();
-                                        let mut got_end = false;
-                                        for line in text.lines() {
-                                            if let Some(data) = line.strip_prefix("data: ") {
-                                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                                    let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                                    match etype {
-                                                        // High-frequency streaming chunks — don't spam logs
-                                                        "content" | "thinking" => {}
-                                                        "end" | "done" => {
-                                                            eprintln!("[autonomous] {etype}");
-                                                            got_end = true;
-                                                        }
-                                                        "text" => {
-                                                            let preview = event.get("text")
-                                                                .and_then(|t| t.as_str())
-                                                                .map(|s| s.chars().take(120).collect::<String>())
-                                                                .unwrap_or_default();
-                                                            eprintln!("[ai-text] {preview}");
-                                                        }
-                                                        "code" => {
-                                                            let preview = event.get("code")
-                                                                .and_then(|t| t.as_str())
-                                                                .map(|s| s.chars().take(120).collect::<String>())
-                                                                .unwrap_or_default();
-                                                            eprintln!("[code] {preview}");
-                                                        }
-                                                        "error" => {
-                                                            let msg = event.get("message")
-                                                                .and_then(|t| t.as_str())
-                                                                .unwrap_or("unknown");
-                                                            eprintln!("[error] {msg}");
-                                                        }
-                                                        "feedback" => {
-                                                            let msg = event.get("message")
-                                                                .and_then(|t| t.as_str())
-                                                                .map(|s| s.chars().take(200).collect::<String>())
-                                                                .unwrap_or_default();
-                                                            eprintln!("[feedback] {msg}");
-                                                        }
-                                                        _ => {
-                                                            let detail = event.get("message")
-                                                                .and_then(|t| t.as_str())
-                                                                .map(|s| format!(": {}", s.chars().take(100).collect::<String>()))
-                                                                .unwrap_or_default();
-                                                            eprintln!("[autonomous] {etype}{detail}");
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        raw_buf.drain(..valid_up_to);
-                                        if got_end { break; }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("[autonomous] request failed: {e}, retrying in 10s");
-                                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                            }
-                        }
-                        // Brief pause between autonomous rounds
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    }
-                    eprintln!("[autonomous] UNEXPECTED: loop exited");
+                    let (tx, _rx) = tokio::sync::oneshot::channel();
+                    let msg = if let Some(context) = restart_context {
+                        format!("{context}\n\n## Goal\n{goal}")
+                    } else {
+                        goal
+                    };
+                    eprintln!("[startup] injecting goal into 'main' context: {}...", msg.chars().take(80).collect::<String>());
+                    let _ = inject_sender.send(crate::coroutine::IoRequest::LlmTakeover {
+                        context: "main".to_string(),
+                        message: msg,
+                        reply_fn: None,
+                        reply_arg: None,
+                        reply: tx,
+                    }).await;
                 });
             }
 

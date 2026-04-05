@@ -1769,10 +1769,16 @@ async fn inject_message(
         conv.push_user(&req.message);
     }
 
-    // For "main" context, also push to the global queue so an active
-    // ask_stream session picks it up mid-flight.
-    if context == "main" {
-        config.message_queue.lock().await.push(req.message.clone());
+    // Trigger llm_takeover on this context via the IO channel
+    if let Some(ref sender) = config.io_sender {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let _ = sender.send(crate::coroutine::IoRequest::LlmTakeover {
+            context: context.clone(),
+            message: req.message.clone(),
+            reply_fn: None,
+            reply_arg: None,
+            reply: tx,
+        }).await;
     }
 
     Json(serde_json::json!({"status": "injected", "context": context, "message": req.message}))

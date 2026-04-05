@@ -723,6 +723,7 @@ pub async fn handle_llm_takeover(
     snap_registry: crate::coroutine::TaskSnapshotRegistry,
     opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     opencode_git_dir: String,
+    training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> anyhow::Result<String> {
     let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
 
@@ -801,7 +802,7 @@ pub async fn handle_llm_takeover(
         task_registry: Some(task_registry.clone()),
         snapshot_registry: Some(snap_registry.clone()),
         log_file: None,
-        training_log: None,
+        training_log: training_log.clone(),
         jit_cache: crate::eval::new_jit_cache(),
         event_broadcast: tokio::sync::broadcast::channel(16).0,
         opencode_git_dir: opencode_git_dir.clone(),
