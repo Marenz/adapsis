@@ -44,6 +44,7 @@ pub enum WaitReason {
     StdinRead,
     HttpGet(String),
     HttpPost(String),
+    HttpRequest(String, String),
     LlmTakeover(String),
     Completed(String),
     Failed(String),
@@ -68,6 +69,7 @@ impl std::fmt::Display for WaitReason {
             WaitReason::StdinRead => write!(f, "stdin_read"),
             WaitReason::HttpGet(url) => write!(f, "http_get({})", url.chars().take(50).collect::<String>()),
             WaitReason::HttpPost(url) => write!(f, "http_post({})", url.chars().take(50).collect::<String>()),
+            WaitReason::HttpRequest(method, url) => write!(f, "http_request({} {})", method, url.chars().take(50).collect::<String>()),
             WaitReason::Completed(v) => write!(f, "done: {}", v.chars().take(50).collect::<String>()),
             WaitReason::Failed(e) => write!(f, "failed: {}", e.chars().take(50).collect::<String>()),
         }
@@ -136,6 +138,8 @@ pub enum IoRequest {
     Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
     HttpGet { url: String, reply: oneshot::Sender<Result<String>> },
     HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
+    /// Generic HTTP request with arbitrary method/headers.
+    HttpRequest { method: String, url: String, headers: Vec<(String, String)>, body: String, reply: oneshot::Sender<Result<String>> },
     /// Multipart file upload: POST a file with optional extra form fields.
     HttpUpload { url: String, file_path: String, file_field: String, extra_fields: Vec<(String, String)>, reply: oneshot::Sender<Result<String>> },
     /// Register a source (timer, channel, event) on a module.
@@ -499,6 +503,38 @@ impl Runtime {
             }
             IoRequest::LlmTakeover { .. } => {
                 // LlmTakeover is handled at a higher level (main.rs IO loop)
+            }
+            IoRequest::HttpRequest { url, method, headers, body, reply } => {
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_default();
+                    let req_method = match method.to_uppercase().as_str() {
+                        "GET" => reqwest::Method::GET,
+                        "POST" => reqwest::Method::POST,
+                        "PUT" => reqwest::Method::PUT,
+                        "DELETE" => reqwest::Method::DELETE,
+                        "PATCH" => reqwest::Method::PATCH,
+                        _ => reqwest::Method::GET,
+                    };
+                    let mut req = client.request(req_method, &url);
+                    for (key, value) in &headers {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    if !body.is_empty() {
+                        req = req.body(body);
+                    }
+                    match req.send().await {
+                        Ok(resp) => {
+                            match resp.text().await {
+                                Ok(text) => { let _ = reply.send(Ok(text)); }
+                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                            }
+                        }
+                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                    }
+                });
             }
             IoRequest::LlmCall { model, system, prompt, reply } => {
                 let url = self.llm_url.clone();
@@ -2128,6 +2164,28 @@ impl CoroutineHandle {
                 let result = self.send_and_wait(
                     WaitReason::HttpPost(url.clone()),
                     IoRequest::HttpUpload { url, file_path, file_field, extra_fields, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::string(result));
+            }
+            "http_request" => {
+                let method = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_request expects (method:String, url:String, headers:String, body:String)") };
+                let url = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_request expects (method:String, url:String, headers:String, body:String)") };
+                let headers_str = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => String::new() };
+                let body = match args.get(3) { Some(Value::String(s)) => s.as_ref().clone(), _ => String::new() };
+                let headers: Vec<(String, String)> = headers_str.lines()
+                    .filter_map(|line| {
+                        let mut parts = line.splitn(2, ':');
+                        match (parts.next(), parts.next()) {
+                            (Some(k), Some(v)) => Some((k.trim().to_string(), v.trim().to_string())),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::HttpRequest(method.clone(), url.clone()),
+                    IoRequest::HttpRequest { method, url, headers, body, reply: tx },
                     rx,
                 )?;
                 return Ok(Value::string(result));
