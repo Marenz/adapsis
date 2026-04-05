@@ -955,24 +955,26 @@ pub async fn execute_code(
                 }
             }
 
-            // Handle !opencode tasks
+            // Handle !opencode tasks (sequentially, with lock)
             for task in opencode_tasks {
+                eprintln!("[execute_code:opencode] acquiring lock...");
+                let _lock = config.opencode_lock.lock().await;
                 eprintln!("[execute_code:opencode] {task}");
                 let oc_result = tokio::time::timeout(
                     std::time::Duration::from_secs(3600),
                     tokio::process::Command::new("opencode")
                         .arg("run").arg("--format").arg("json")
                         .arg("--attach").arg("http://localhost:4096")
-                        .arg("--dir").arg(&config.project_dir)
+                        .arg("--dir").arg(&config.opencode_git_dir)
                         .arg(task)
-                        .current_dir(&config.project_dir)
+                        .current_dir(&config.opencode_git_dir)
                         .output()
                 ).await;
                 match oc_result {
                     Ok(Ok(output)) if output.status.success() => {
                         eprintln!("[execute_code:opencode:done] rebuilding...");
                         let build = tokio::process::Command::new("cargo")
-                            .arg("build").arg("--release").current_dir(&config.project_dir).output().await;
+                            .arg("build").arg("--release").current_dir(&config.opencode_git_dir).output().await;
                         match build {
                             Ok(b) if b.status.success() => {
                                 result.push_ok("OpenCode + rebuild successful. Restart to apply.".to_string());
