@@ -25,7 +25,7 @@ use crate::session::{RuntimeState, SandboxState, SessionMeta};
 use crate::typeck;
 
 /// Default timeout for `!eval` execution (seconds).
-pub(crate) const EVAL_TIMEOUT_SECS: u64 = 30;
+pub(crate) const EVAL_TIMEOUT_SECS: u64 = 120;
 use crate::validator;
 
 pub mod execute;
