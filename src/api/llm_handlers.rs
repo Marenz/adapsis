@@ -748,7 +748,10 @@ pub async fn handle_llm_takeover(
                     "{}\n\n{}\n\nCurrent program state:\n{}\n\n\
                      You are in conversation context '{context}'. Respond naturally. \
                      If you need to do work (modify code, create modules, run tasks), include the \
-                     Adapsis commands in your response. For long-running tasks, use `!agent`. \
+                     Adapsis commands in your response. Do NOT use !agent for tasks that require \
+                     IO execution (generating music, sending files, HTTP calls). Agents cannot run \
+                     [io,async] functions. Instead, do IO tasks inline using !eval. Use !agent ONLY \
+                     for pure code writing tasks (adding modules, functions, tests). \
                      IMPORTANT: The user only sees text BEFORE the first <code> block. \
                      Text after <code> blocks is discarded. Put your response to the user first, \
                      then the code. Do not narrate what the code does after the <code> block — \
