@@ -29,6 +29,7 @@ fn test_config() -> AppConfig {
             crate::session::RuntimeState::default(),
         )),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        save_notify: None,
     }
 }
 
@@ -681,6 +682,7 @@ fn test_config_with_io() -> (
             crate::session::RuntimeState::default(),
         )),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        save_notify: None,
     };
     (config, io_rx)
 }

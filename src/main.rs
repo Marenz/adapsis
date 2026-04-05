@@ -1293,6 +1293,11 @@ async fn main() -> Result<()> {
             // Build the three independent tiers from the loaded session.
             let tier1_program = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
 
+            // Save-on-change: bounded channel with capacity 1.
+            // Any code path calls try_send(()) when state changes; the background
+            // task below debounces and saves after 2 seconds of quiet.
+            let (save_tx, save_rx) = tokio::sync::mpsc::channel::<()>(1);
+
             let config = api::AppConfig {
                 program: tier1_program,
                 meta: shared_meta.clone(),
@@ -1314,6 +1319,7 @@ async fn main() -> Result<()> {
                 opencode_git_dir: resolved_git_dir,
                 runtime: shared_runtime.clone(),
                 sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                save_notify: Some(save_tx),
             };
 
             // Clone tier handles before config is moved into the router
@@ -1363,29 +1369,51 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            // Auto-save session periodically.
-            // Sync tier state into the session shim before saving so that
-            // changes made through the tier locks are persisted.
+            // Save-on-change background task.
+            // Waits for a save notification, then debounces for 2 seconds
+            // (coalescing rapid changes), snapshots the tiers, persists library
+            // modules, and saves the session file.
             let save_path = session.clone();
             let autosave_program = save_program.clone();
             let autosave_meta = save_meta.clone();
             let autosave_runtime = save_runtime.clone();
             tokio::spawn(async move {
+                let mut rx = save_rx;
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    let session = snapshot_from_tiers(&autosave_program, &autosave_meta, &autosave_runtime).await;
-                    let conv_count = session.meta.conversations.contexts.len();
-                    if conv_count > 0 {
-                        eprintln!("[autosave] saving {} conversation(s)", conv_count);
+                    // Wait for first notification
+                    if rx.recv().await.is_none() {
+                        break; // channel closed, shut down
                     }
-                    // Persist all library modules (picks up test changes, shared var updates, etc.)
-                    for module in &session.program.modules {
-                        if let Err(e) = crate::library::persist_module(module) {
-                            eprintln!("[autosave] failed to persist module `{}`: {e}", module.name);
+                    // Debounce: drain additional notifications for up to 2 seconds
+                    loop {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            rx.recv(),
+                        ).await {
+                            Ok(Some(())) => {} // more notifications — keep waiting
+                            Ok(None) => break, // channel closed
+                            Err(_) => break,   // 2-second quiet window elapsed
                         }
                     }
-                    if let Err(e) = session.save(std::path::Path::new(&save_path)) {
-                        eprintln!("auto-save failed: {e}");
+                    // Snapshot tiers and save
+                    let sess = snapshot_from_tiers(&autosave_program, &autosave_meta, &autosave_runtime).await;
+                    let conv_count = sess.meta.conversations.contexts.len();
+                    eprintln!("[save] triggered: {} conversation(s), revision {}", conv_count, sess.meta.revision);
+                    // Persist all library modules (picks up test changes, shared var updates, etc.)
+                    let mut lib_errors = 0usize;
+                    for module in &sess.program.modules {
+                        if let Err(e) = crate::library::persist_module(module) {
+                            eprintln!("[save] failed to persist module `{}`: {e}", module.name);
+                            lib_errors += 1;
+                        }
+                    }
+                    if lib_errors == 0 && !sess.program.modules.is_empty() {
+                        eprintln!("[save] persisted {} library module(s)", sess.program.modules.len());
+                    }
+                    if let Err(e) = sess.save(std::path::Path::new(&save_path)) {
+                        eprintln!("[save] failed: {e}");
+                    } else {
+                        eprintln!("[save] session saved to {save_path}");
                     }
                 }
             });

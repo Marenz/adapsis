@@ -72,6 +72,7 @@ impl AppConfig {
                 }
             }
         }
+        self.notify_save();
     }
 
     /// Pull state that async eval/top-level IO can mutate via SHARED_META/
@@ -160,7 +161,7 @@ pub struct AppConfig {
     pub task_registry: Option<crate::coroutine::TaskRegistry>,
     /// Task snapshot registry for live interpreter state inspection
     pub snapshot_registry: Option<crate::coroutine::TaskSnapshotRegistry>,
-    /// Structured log file for AI activity
+    /// Structured log file for AI activity logging
     pub log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// JIT compilation cache — reuses compiled modules across evals when revision unchanged
     pub jit_cache: crate::eval::JitCache,
@@ -181,6 +182,9 @@ pub struct AppConfig {
     /// Multi-session manager: maps session IDs to independent Program instances.
     /// The "main" session uses the existing `session` field above.
     pub sessions: SessionManager,
+    /// Save notification channel — send `()` to trigger a debounced save.
+    /// `None` in tests and in temporary AppConfig instances (e.g. llm_takeover).
+    pub save_notify: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
 impl AppConfig {
@@ -191,6 +195,15 @@ impl AppConfig {
         crate::eval::set_shared_runtime(Some(self.runtime.clone()));
         crate::eval::set_shared_meta(Some(self.meta.clone()));
         crate::eval::set_shared_event_broadcast(Some(self.event_broadcast.clone()));
+    }
+
+    /// Signal that state has changed and a save should be performed.
+    /// Uses `try_send` so it never blocks — if a save is already pending the
+    /// notification is silently dropped (the pending save will cover it).
+    pub fn notify_save(&self) {
+        if let Some(ref tx) = self.save_notify {
+            let _ = tx.try_send(());
+        }
     }
 }
 
@@ -246,6 +259,7 @@ pub async fn mutate(
             *config.program.write().await = program;
             *config.runtime.write().unwrap() = runtime;
             *config.meta.lock().unwrap() = meta.clone();
+            config.notify_save();
             emit_event(&config, &make_sse_event("mutation", serde_json::json!({
                 "revision": meta.revision,
                 "summary": summary,
@@ -685,6 +699,7 @@ pub async fn test_fn(
         if failed == 0 && !test.cases.is_empty() {
             let mut program = config.program.write().await;
             crate::session::store_test(&mut program, &test.function_name, &test.cases);
+            config.notify_save();
         }
         emit_event(&config, &make_sse_event("test", serde_json::json!({
             "function": test.function_name,
