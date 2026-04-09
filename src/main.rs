@@ -1087,8 +1087,48 @@ async fn main() -> Result<()> {
                             });
                         }
                         coroutine::IoRequest::SetLlmModel { name, reply } => {
-                            *llm_model_for_spawn.write().unwrap() = name.clone();
-                            let _ = reply.send(Ok(format!("model set to: {name}")));
+                            // Verify the model loads by making a test request
+                            let old_model = llm_model_for_spawn.read().unwrap().clone();
+                            let test_url = llm_url_for_spawn.clone();
+                            let test_name = name.clone();
+                            let model_ref = llm_model_for_spawn.clone();
+                            tokio::spawn(async move {
+                                let client = reqwest::Client::builder()
+                                    .timeout(std::time::Duration::from_secs(60))
+                                    .build()
+                                    .unwrap_or_default();
+                                let test_req = serde_json::json!({
+                                    "model": &test_name,
+                                    "messages": [{"role": "user", "content": "."}],
+                                    "max_tokens": 1
+                                });
+                                eprintln!("[llm_set_model] testing model '{test_name}'...");
+                                match client.post(format!("{test_url}/v1/chat/completions"))
+                                    .json(&test_req)
+                                    .send()
+                                    .await
+                                {
+                                    Ok(resp) if resp.status().is_success() => {
+                                        *model_ref.write().unwrap() = test_name.clone();
+                                        eprintln!("[llm_set_model] switched to '{test_name}'");
+                                        let _ = reply.send(Ok(format!("model set to: {test_name}")));
+                                    }
+                                    Ok(resp) => {
+                                        let status = resp.status();
+                                        let body = resp.text().await.unwrap_or_default();
+                                        eprintln!("[llm_set_model] model '{test_name}' failed: {status} {body}");
+                                        let _ = reply.send(Err(anyhow::anyhow!(
+                                            "model '{test_name}' failed to load: {status}. Staying on '{old_model}'"
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[llm_set_model] model '{test_name}' unreachable: {e}");
+                                        let _ = reply.send(Err(anyhow::anyhow!(
+                                            "model '{test_name}' unreachable: {e}. Staying on '{old_model}'"
+                                        )));
+                                    }
+                                }
+                            });
                         }
                         coroutine::IoRequest::GetLlmModel { reply } => {
                             let name = llm_model_for_spawn.read().unwrap().clone();
