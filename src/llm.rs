@@ -998,7 +998,12 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
 
     // Extract code: ONLY from explicit <code> blocks. No prefix scanning.
     // The LLM must use <code>...</code> to execute commands.
-    let code_blocks = extract_tag_contents(&clean_content, "code");
+    // Check both content and thinking — some models (e.g. Gemma4) put <code> blocks
+    // inside reasoning_content rather than the main content field.
+    let mut code_blocks = extract_tag_contents(&clean_content, "code");
+    if code_blocks.is_empty() {
+        code_blocks = extract_tag_contents(&combined_thinking, "code");
+    }
     let code = code_blocks.join("\n\n");
 
     let full_text = if thinking.is_empty() {

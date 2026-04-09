@@ -757,16 +757,18 @@ pub async fn handle_llm_takeover(
                      for pure code writing tasks (adding modules, functions, tests). \
                      IMPORTANT: The user only sees text BEFORE the first <code> block. \
                      Text after <code> blocks is discarded. Put your response to the user first, \
-                     then the code. Do not narrate what the code does after the <code> block — \
-                     the user won't see it. For !agent tasks, just say what you'll do, then the \
-                     <code> block. The agent completion result will be delivered separately. \
-                     When you need to understand existing code, use ?source Module.function to read it. \
-                     Don't guess how things work — read the source. Shared vars in modules are accessible \
-                     by name inside that module's functions (e.g. telegram_token in TelegramBot functions). \
-                     REUSE existing functions — do NOT create new modules or wrapper functions for \
-                     one-off tasks. To generate and send music, just !eval the existing functions \
-                     directly (e.g. MusicGen.generate_music then TelegramBot.send_audio_file). \
-                     Music generation takes ~60 seconds for a 60s track — do not retry if it seems slow.",
+                     then the code. Do not narrate what the code does after the <code> block. \
+                     When you need to understand existing code, use ?source Module.function. \
+                     Don't guess how things work — read the source. \
+                     DESIGN PRINCIPLES: \
+                     1. REUSE over CREATE. Before writing new code, check if existing functions \
+                        already do what you need. Use !eval with existing functions directly. \
+                     2. If you must write a new function, make it GENERIC and REUSABLE — parameterize \
+                        everything (chat_id, caption, duration, etc). Add it to the appropriate \
+                        existing module, not a new one. \
+                     3. Never create one-off modules for single requests. \
+                     4. Write +doc for every new function. \
+                     5. Music generation takes ~60 seconds — do not retry if it seems slow.",
                     crate::prompt::system_prompt(),
                     crate::builtins::format_for_prompt(),
                     program_summary,

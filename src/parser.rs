@@ -1707,19 +1707,30 @@ impl<'a> Parser<'a> {
             // We accept it as inline if it parses as a complete expression AND is not
             // a bare identifier (which would be the existing "!eval func_name" syntax).
             if !rest.is_empty() {
-                if let Ok(expr) = parse_expr(line.number, rest) {
-                    // Bare identifiers (func_name) and module-qualified names
-                    // (Module.func_name) are function references, not inline exprs.
-                    let is_function_ref = matches!(&expr, Expr::Ident(_))
-                        || matches!(&expr, Expr::FieldAccess { base, .. }
-                            if matches!(base.as_ref(), Expr::Ident(_)));
-                    if !is_function_ref {
-                        self.index += 1;
-                        return Ok(Operation::Eval(EvalMutation {
-                            function_name: String::new(),
-                            input: Expr::StructLiteral(vec![]),
-                            inline_expr: Some(expr),
-                        }));
+                match parse_expr(line.number, rest) {
+                    Ok(expr) => {
+                        // Bare identifiers (func_name) and module-qualified names
+                        // (Module.func_name) are function references, not inline exprs.
+                        let is_function_ref = matches!(&expr, Expr::Ident(_))
+                            || matches!(&expr, Expr::FieldAccess { base, .. }
+                                if matches!(base.as_ref(), Expr::Ident(_)));
+                        if !is_function_ref {
+                            self.index += 1;
+                            return Ok(Operation::Eval(EvalMutation {
+                                function_name: String::new(),
+                                input: Expr::StructLiteral(vec![]),
+                                inline_expr: Some(expr),
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        // Propagate actionable errors (named arguments, etc.)
+                        // instead of falling through to the legacy path.
+                        let msg = e.to_string();
+                        if msg.contains("named arguments are not supported") {
+                            return Err(e);
+                        }
+                        // Other parse errors: fall through to legacy fn_name + args path.
                     }
                 }
             }
@@ -1756,6 +1767,19 @@ impl<'a> Parser<'a> {
             self.index += 1;
             return Ok(Operation::Query(as_query));
         }
+        // Catch bare DONE/Done/done — the model must use `!done` instead.
+        {
+            let trimmed_lower = text.trim().to_lowercase();
+            if trimmed_lower == "done" || trimmed_lower == "done." || trimmed_lower == "done!" {
+                bail!(
+                    "line {}: `{}` is not a valid command. Use `!done` to signal task completion. \
+                     All commands start with `!` (e.g. `!done`, `!eval`, `!plan`).",
+                    line.number,
+                    text.trim()
+                );
+            }
+        }
+
         // Skip truly unknown operations
         eprintln!(
             "[parser] line {}: skipping unknown `{}`",
@@ -2404,8 +2428,25 @@ impl<'a> ExprParser<'a> {
                 }
                 self.index += 1;
                 let mut args = Vec::new();
+                // Check for named arguments: `func(name=val, ...)` — collect them
+                // all so we can produce a helpful error with the correct positional form.
+                let mut named_args: Vec<(String, String)> = Vec::new();
                 if !matches!(self.peek(), Some(Token::Symbol(')'))) {
                     loop {
+                        if let Some(Token::Ident(name)) = self.tokens.get(self.index) {
+                            if matches!(self.tokens.get(self.index + 1), Some(Token::Symbol('='))) {
+                                // Consume `name=value` — collect the name and raw value text
+                                let arg_name = name.clone();
+                                self.index += 2; // skip ident and '='
+                                let value_expr = self.parse_bp(0)?;
+                                named_args.push((arg_name, format_expr_for_error(&value_expr)));
+                                if matches!(self.peek(), Some(Token::Symbol(','))) {
+                                    self.index += 1;
+                                    continue;
+                                }
+                                break;
+                            }
+                        }
                         args.push(self.parse_bp(0)?);
                         if matches!(self.peek(), Some(Token::Symbol(','))) {
                             self.index += 1;
@@ -2413,6 +2454,25 @@ impl<'a> ExprParser<'a> {
                         }
                         break;
                     }
+                }
+                if !named_args.is_empty() {
+                    // We found named arguments — produce a clear error.
+                    // Reconstruct the callee name for context.
+                    let callee_name = format_expr_for_error(&lhs);
+                    // Consume the closing ')' so the error position is clean.
+                    let _ = self.expect_symbol(')');
+                    let positional_values: Vec<&str> =
+                        named_args.iter().map(|(_, v)| v.as_str()).collect();
+                    let named_display: Vec<String> =
+                        named_args.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    bail!(
+                        "line {}: named arguments are not supported in function calls. \
+                         You wrote: `{callee_name}({named})` — \
+                         use positional arguments instead: `{callee_name}({})`",
+                        self.line,
+                        positional_values.join(", "),
+                        named = named_display.join(", "),
+                    );
                 }
                 self.expect_symbol(')')?;
                 lhs = Expr::Call {
@@ -2633,6 +2693,54 @@ impl<'a> ExprParser<'a> {
             .map(token_text)
             .collect::<Vec<_>>()
             .join("")
+    }
+}
+
+/// Format an `Expr` back to a readable string for error messages.
+/// Not a full reconstructor — just enough for function names, literals, and simple exprs.
+fn format_expr_for_error(expr: &Expr) -> String {
+    match expr {
+        Expr::Ident(name) => name.clone(),
+        Expr::FieldAccess { base, field } => format!("{}.{}", format_expr_for_error(base), field),
+        Expr::Int(n) => n.to_string(),
+        Expr::Float(f) => format!("{f}"),
+        Expr::Bool(b) => b.to_string(),
+        Expr::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+        Expr::Call { callee, args } => {
+            let callee_str = format_expr_for_error(callee);
+            let args_str: Vec<String> = args.iter().map(format_expr_for_error).collect();
+            format!("{}({})", callee_str, args_str.join(", "))
+        }
+        Expr::Binary { op, left, right } => {
+            format!(
+                "{} {} {}",
+                format_expr_for_error(left),
+                match op {
+                    BinaryOp::Add => "+",
+                    BinaryOp::Sub => "-",
+                    BinaryOp::Mul => "*",
+                    BinaryOp::Div => "/",
+                    BinaryOp::Mod => "%",
+                    BinaryOp::Eq => "==",
+                    BinaryOp::Neq => "!=",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::Lte => "<=",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::Gte => ">=",
+                    BinaryOp::And => "AND",
+                    BinaryOp::Or => "OR",
+                },
+                format_expr_for_error(right)
+            )
+        }
+        Expr::Unary { op, expr } => {
+            let op_str = match op {
+                UnaryOp::Neg => "-",
+                UnaryOp::Not => "NOT ",
+            };
+            format!("{}{}", op_str, format_expr_for_error(expr))
+        }
+        _ => "...".to_string(),
     }
 }
 
