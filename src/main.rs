@@ -1155,22 +1155,37 @@ async fn main() -> Result<()> {
                                     (conv.reply_fn.clone(), conv.reply_arg.clone())
                                 };
 
-                                // Trigger reply callback with text + attachment
+                                // Trigger reply callback with text, and attachment if present
                                 if let (Some(func_name), Some(arg)) = (cb_fn, cb_arg) {
-                                    eprintln!("[conversation_notify:{context}] delivering via {func_name}({arg})");
-                                    let mut args = vec![
-                                        crate::eval::Value::string(arg),
-                                        crate::eval::Value::string(message),
-                                    ];
                                     if let Some(att) = attachment {
-                                        args.push(crate::eval::Value::Attachment(att));
+                                        // Call <reply_fn>_with_attachment(arg, text, attachment)
+                                        let att_fn = format!("{func_name}_with_attachment");
+                                        eprintln!("[conversation_notify:{context}] delivering with attachment via {att_fn}({arg})");
+                                        let args = vec![
+                                            crate::eval::Value::string(arg),
+                                            crate::eval::Value::string(message),
+                                            crate::eval::Value::Attachment(att),
+                                        ];
+                                        let (tx, _rx) = tokio::sync::oneshot::channel();
+                                        let _ = io_sender.send(crate::coroutine::IoRequest::Spawn {
+                                            function_name: att_fn,
+                                            args,
+                                            reply: tx,
+                                        }).await;
+                                    } else {
+                                        // Text only
+                                        eprintln!("[conversation_notify:{context}] delivering text via {func_name}({arg})");
+                                        let args = vec![
+                                            crate::eval::Value::string(arg),
+                                            crate::eval::Value::string(message),
+                                        ];
+                                        let (tx, _rx) = tokio::sync::oneshot::channel();
+                                        let _ = io_sender.send(crate::coroutine::IoRequest::Spawn {
+                                            function_name: func_name,
+                                            args,
+                                            reply: tx,
+                                        }).await;
                                     }
-                                    let (tx, _rx) = tokio::sync::oneshot::channel();
-                                    let _ = io_sender.send(crate::coroutine::IoRequest::Spawn {
-                                        function_name: func_name,
-                                        args,
-                                        reply: tx,
-                                    }).await;
                                 }
 
                                 let _ = reply.send(Ok("notified".to_string()));
