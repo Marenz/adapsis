@@ -750,7 +750,7 @@ pub async fn handle_llm_takeover(
         if conv.messages.is_empty() {
             let system = conv.system_prompt.clone().unwrap_or_else(|| {
                 format!(
-                    "{}\n\n{}\n\nCurrent program state:\n{}\n\n\
+                    "{}\n\n{}\n\n{}\n\nCurrent program state:\n{}\n\n\
                      You are in conversation context '{context}'. Respond naturally. \
                      If you need to do work (modify code, create modules, run tasks), include the \
                      Adapsis commands in your response. Do NOT use !agent for tasks that require \
@@ -773,6 +773,7 @@ pub async fn handle_llm_takeover(
                      5. Music generation takes ~60 seconds — do not retry if it seems slow.",
                     crate::prompt::system_prompt(),
                     crate::builtins::format_for_prompt(),
+                    crate::prompt::adapsis_identity(),
                     program_summary,
                 )
             });
