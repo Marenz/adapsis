@@ -2762,3 +2762,42 @@ fn query_startups_multiple_modules() {
     assert!(msg.contains("1 statement"), "Alpha has 1 statement: {msg}");
     assert!(msg.contains("2 statements"), "Beta has 2 statements: {msg}");
 }
+
+#[tokio::test]
+async fn llm_set_and_get_model() {
+    // Set up a shared model string and an IO channel, simulate the IO loop
+    let model_shared: std::sync::Arc<std::sync::RwLock<String>> =
+        std::sync::Arc::new(std::sync::RwLock::new("default-model".to_string()));
+    let model_for_loop = model_shared.clone();
+
+    let (io_tx, mut io_rx) = tokio::sync::mpsc::channel::<IoRequest>(8);
+
+    // Spawn a minimal IO loop that handles SetLlmModel and GetLlmModel
+    tokio::spawn(async move {
+        while let Some(req) = io_rx.recv().await {
+            match req {
+                IoRequest::SetLlmModel { name, reply } => {
+                    *model_for_loop.write().unwrap() = name.clone();
+                    let _ = reply.send(Ok(format!("model set to: {name}")));
+                }
+                IoRequest::GetLlmModel { reply } => {
+                    let name = model_for_loop.read().unwrap().clone();
+                    let _ = reply.send(Ok(name));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let handle = CoroutineHandle::new_mock_with_sender(vec![], io_tx);
+
+    // Set the model
+    let set_result = tokio::task::spawn_blocking(move || {
+        handle.execute_await("llm_set_model", &[Value::string("local/qwen3.5-9b")])
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(unwrap_string(set_result), "model set to: local/qwen3.5-9b");
+    assert_eq!(*model_shared.read().unwrap(), "local/qwen3.5-9b");
+}

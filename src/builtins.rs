@@ -493,6 +493,20 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "llm_set_model",
+        aliases: &[],
+        short: "set the active LLM model at runtime: llm_set_model(name)",
+        long: "Changes the active LLM model used by subsequent LLM calls. Takes `(name:String)` and returns a confirmation String. The new model is used by all future requests until changed again. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "llm_get_model",
+        aliases: &[],
+        short: "get the current active LLM model name",
+        long: "Returns the name of the currently active LLM model as a String. Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "http_get",
         aliases: &[],
         short: "HTTP GET request, returns response body as String",

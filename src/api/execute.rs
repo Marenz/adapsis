@@ -624,7 +624,7 @@ pub async fn execute_code(
                         let agent_task = task.clone();
                         let agent_name = name.clone();
                         let llm_url = config.llm_url.clone();
-                        let llm_model = config.llm_model.clone();
+                        let llm_model = config.llm_model.read().unwrap().clone();
                         let llm_key = config.llm_api_key.clone();
                         let agent_program = config.program.clone();
                         let agent_meta = config.meta.clone();
