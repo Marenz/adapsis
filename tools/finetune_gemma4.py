@@ -34,7 +34,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--lora-rank", type=int, default=16)
-    parser.add_argument("--max-seq-length", type=int, default=4096)
+    parser.add_argument("--max-seq-length", type=int, default=1024)
     parser.add_argument(
         "--export-gguf", action="store_true", help="Export to GGUF after training"
     )
@@ -158,7 +158,8 @@ def main():
         logging_steps=5,
         save_steps=50,
         save_total_limit=2,
-        fp16=True,
+        fp16=False,
+        bf16=True,
         optim="adamw_8bit" if use_unsloth else "adamw_torch",
         report_to="none",
     )
