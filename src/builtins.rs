@@ -502,8 +502,18 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "llm_get_model",
         aliases: &[],
-        short: "get the current active LLM model name",
-        long: "Returns the name of the currently active LLM model as a String. Takes no arguments. Requires `+await`.",
+        short: "get the active LLM model name: llm_get_model() -> String",
+        long: "Returns the name of the currently active LLM model as a String. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "conversation_notify",
+        aliases: &[],
+        short: "notify a conversation context: conversation_notify(context, message[, attachment]) -> String",
+        long: "Pushes a message (with optional Attachment) to a conversation context and triggers \
+               the reply callback. Use from +spawn background tasks to deliver results asynchronously. \
+               The conversation's reply_fn receives the text and attachment for platform-specific delivery. \
+               Example: +await _ = conversation_notify(\"telegram:1815217\", \"Your song is ready!\", audio_attachment)",
         category: BuiltinCategory::Io,
     },
     Builtin {

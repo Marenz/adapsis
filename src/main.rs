@@ -1135,6 +1135,47 @@ async fn main() -> Result<()> {
                             let name = llm_model_for_spawn.read().unwrap().clone();
                             let _ = reply.send(Ok(name));
                         }
+                        coroutine::IoRequest::ConversationNotify { context, message, attachment, reply } => {
+                            let meta = shared_meta_for_spawn.clone();
+                            let io_sender = io_sender_for_spawn.clone();
+                            tokio::spawn(async move {
+                                // Push message with attachment to conversation
+                                let (cb_fn, cb_arg) = {
+                                    let mut meta_guard = meta.lock().unwrap();
+                                    let conv = meta_guard.conversations.get_or_create(&context);
+                                    let mut msg = crate::session::ChatMessage {
+                                        role: "system".to_string(),
+                                        content: message.clone(),
+                                        attachments: vec![],
+                                    };
+                                    if let Some(att) = attachment.clone() {
+                                        msg.attachments.push(att);
+                                    }
+                                    conv.messages.push(msg);
+                                    (conv.reply_fn.clone(), conv.reply_arg.clone())
+                                };
+
+                                // Trigger reply callback with text + attachment
+                                if let (Some(func_name), Some(arg)) = (cb_fn, cb_arg) {
+                                    eprintln!("[conversation_notify:{context}] delivering via {func_name}({arg})");
+                                    let mut args = vec![
+                                        crate::eval::Value::string(arg),
+                                        crate::eval::Value::string(message),
+                                    ];
+                                    if let Some(att) = attachment {
+                                        args.push(crate::eval::Value::Attachment(att));
+                                    }
+                                    let (tx, _rx) = tokio::sync::oneshot::channel();
+                                    let _ = io_sender.send(crate::coroutine::IoRequest::Spawn {
+                                        function_name: func_name,
+                                        args,
+                                        reply: tx,
+                                    }).await;
+                                }
+
+                                let _ = reply.send(Ok("notified".to_string()));
+                            });
+                        }
                         _ => {
                             let rt = rt.clone();
                             tokio::spawn(async move {
@@ -1500,6 +1541,7 @@ async fn main() -> Result<()> {
                         conv.messages.push(crate::session::ChatMessage {
                             role: "tool".to_string(),
                             content: event_message.clone(),
+                            attachments: vec![],
                         });
                         conv.to_llm_messages()
                     };

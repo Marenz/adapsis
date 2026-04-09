@@ -146,6 +146,14 @@ pub enum IoRequest {
     HttpUpload { url: String, file_path: String, file_field: String, extra_fields: Vec<(String, String)>, reply: oneshot::Sender<Result<String>> },
     /// Multipart upload from in-memory bytes (for Attachment values).
     HttpUploadBytes { url: String, bytes: Vec<u8>, file_name: String, mime_type: String, file_field: String, extra_fields: Vec<(String, String)>, reply: oneshot::Sender<Result<String>> },
+    /// Notify a conversation context with a message and optional attachment.
+    /// Triggers the conversation's reply callback to deliver the message.
+    ConversationNotify {
+        context: String,
+        message: String,
+        attachment: Option<crate::attachment::Attachment>,
+        reply: oneshot::Sender<Result<String>>,
+    },
     /// Register a source (timer, channel, event) on a module.
     SourceAdd {
         module_name: String,
@@ -588,6 +596,10 @@ impl Runtime {
             }
             IoRequest::LlmTakeover { .. } => {
                 // LlmTakeover is handled at a higher level (main.rs IO loop)
+            }
+            IoRequest::ConversationNotify { reply, .. } => {
+                // ConversationNotify is handled at a higher level (main.rs IO loop)
+                let _ = reply.send(Err(anyhow::anyhow!("conversation_notify: not available in this runtime context")));
             }
             IoRequest::HttpRequest { url, method, headers, body, reply } => {
                 tokio::spawn(async move {
@@ -2321,6 +2333,21 @@ impl CoroutineHandle {
                 let model = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::LlmAgent, IoRequest::LlmAgent { model, system, task, reply: tx }, rx)?;
+                return Ok(Value::string(result));
+            }
+            "conversation_notify" => {
+                let context = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("conversation_notify expects (context:String, message:String[, attachment:Attachment])") };
+                let message = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("conversation_notify expects (context:String, message:String[, attachment:Attachment])") };
+                let attachment = match args.get(2) {
+                    Some(Value::Attachment(att)) => Some(att.clone()),
+                    _ => None,
+                };
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::Running,
+                    IoRequest::ConversationNotify { context, message, attachment, reply: tx },
+                    rx,
+                )?;
                 return Ok(Value::string(result));
             }
             "llm_takeover" => {
