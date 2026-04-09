@@ -194,6 +194,7 @@ impl OpenAiBackend {
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "stream": stream,
+            "tool_choice": "none",
         })
     }
 
