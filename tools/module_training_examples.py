@@ -259,6 +259,112 @@ add(
     "I can:\n- **Generate music** — any genre, with or without lyrics\n- **Remember things** — store facts, notes, preferences\n- **Manage code** — create functions, modules, run tests\n- **System admin** — check GPU, disk, restart services\n- **Game mode** — start/stop Steam and VR\n- **GitHub** — fetch issues, sync roadmap",
 )
 
+# ═══ !opencode — Rust-level modifications ═══
+add(
+    "Add a new IO builtin called http_patch that works like http_post but uses PATCH method.",
+    "This requires a Rust-level change. Let me dispatch it via !opencode.\n\n<code>\n!opencode Add a new IO builtin http_patch(url, body, content_type) that works like http_post but uses the PATCH HTTP method. Add the IoRequest variant, handler in coroutine.rs, builtin dispatch, and register in builtins.rs. Update prompt.rs with documentation.\n</code>",
+)
+
+add(
+    "The parser doesn't handle multi-line strings. Can you fix that?",
+    'That needs a parser change in Rust. Dispatching via !opencode.\n\n<code>\n!opencode Fix the parser to handle multi-line strings delimited by triple quotes ("""..."""). Update parser.rs to recognize triple-quote delimiters and collect lines until the closing triple-quote. Add tests in the parser test module.\n</code>',
+)
+
+add(
+    "Add a sleep builtin so functions can pause execution.",
+    'Adding a new IO builtin requires Rust changes.\n\n<code>\n!opencode Add a sleep(milliseconds:Int) IO builtin. Add IoRequest::Sleep variant, handle it with tokio::time::sleep in the coroutine runtime, add builtin dispatch for "sleep", and register in builtins.rs. Update prompt.rs.\n</code>',
+)
+
+add(
+    "Can you make the web UI show conversation history?",
+    "The web UI is in web/adapsis.html and needs Rust API changes. Dispatching via !opencode.\n\n<code>\n!opencode Add a GET /api/conversations endpoint that returns the list of conversation contexts with their message counts. Update web/adapsis.html to display conversation history in a collapsible panel.\n</code>",
+)
+
+add(
+    "Add support for importing modules from URLs.",
+    "<code>\n!opencode Add a !import command that downloads an .ax file from a URL and loads it as a module. Add the parser operation, implement HTTP fetch in the library loader, validate the downloaded code before applying. Add error handling for network failures and invalid modules.\n</code>",
+)
+
+add(
+    "The error messages are terrible. Can you improve them?",
+    "Error message improvement is a Rust-level task.\n\n<code>\n!opencode Improve error messages across the codebase: 1) Parser errors should include the line content and a caret pointing to the error position. 2) Eval errors should include the function name and module. 3) Type errors should show expected vs actual types. Focus on parser.rs and eval/mod.rs.\n</code>",
+)
+
+add(
+    "Make !eval support async functions without needing +await.",
+    "<code>\n!opencode Make !eval automatically detect if a function has [io,async] effects and use the async eval path (with coroutine handle) without requiring the user to write +await. This should only apply to !eval, not to function bodies where +await is still required for clarity.\n</code>",
+)
+
+add(
+    "Add a websocket endpoint for real-time events.",
+    "<code>\n!opencode Add a WebSocket endpoint at /ws that broadcasts the same events as /api/events SSE but over WebSocket. Use axum::extract::ws. Clients can subscribe to specific event types via a JSON message.\n</code>",
+)
+
+# ═══ Memory / Reminders ═══
+add(
+    "Remember that I should practice guitar every day.",
+    'Storing that reminder.\n\n<code>\n!eval Memory.store_memory("daily guitar practice", "User wants to practice guitar every day as a habit", "habits")\n</code>',
+)
+
+add(
+    "Remind me to stop smoking.",
+    'I will remember that.\n\n<code>\n!eval Memory.store_memory("quit smoking", "User wants to quit smoking cannabis - important health goal", "habits")\n</code>',
+)
+
+add(
+    "I want to write fiction more often. Help me remember.",
+    '<code>\n!eval Memory.store_memory("practice fiction writing", "User wants to practice creative/fiction writing regularly", "habits")\n</code>',
+)
+
+add(
+    "What habits should I be working on?",
+    'Let me check your stored habits.\n\n<code>\n!eval Memory.recall_for("habits goals practice remind")\n</code>',
+)
+
+add(
+    "Store a decision: I chose Rust over Go for the new project.",
+    '<code>\n!eval Memory.store_decision("language choice", "Chose Rust over Go for the new project", "Rust has better performance, memory safety, and the team has experience with it", "projects")\n</code>',
+)
+
+add(
+    "What do you remember about my projects?",
+    '<code>\n!eval Memory.about_topic("projects")\n</code>',
+)
+
+add(
+    "Remember that Alex's birthday is on March 15.",
+    '<code>\n!eval Memory.store_fact("Alex birthday", "Alex birthday is March 15", "people", "friends")\n</code>',
+)
+
+add(
+    "What facts do you know about my friends?",
+    '<code>\n!eval Memory.recall_for("friends people birthday")\n</code>',
+)
+
+add(
+    "Create a topic for tracking my music production learning.",
+    '<code>\n!eval Stratum.create_topic("Music Production", "Learning music production - DAW, mixing, mastering, composition")\n</code>',
+)
+
+add(
+    "I just learned about sidechain compression. Save that.",
+    '<code>\n!eval Memory.store_memory("sidechain compression", "Learned about sidechain compression technique for mixing - uses a compressor triggered by another track (usually kick) to create pumping effect", "music production")\n</code>',
+)
+
+add(
+    "What have I learned about music production?",
+    '<code>\n!eval Memory.about_topic("music production")\n</code>',
+)
+
+add(
+    "Remember to create my own song using the guitar.",
+    '<code>\n!eval Memory.store_memory("create original guitar song", "User wants to create their own original song using guitar - a personal creative goal", "creative goals")\n</code>',
+)
+
+add("List all my topics.", "<code>\n!eval Memory.list_topics()\n</code>")
+
+add("What are all my stored facts?", "<code>\n!eval Memory.list_facts()\n</code>")
+
 # Write output
 with open(OUTPUT, "w") as f:
     for ex in examples:
