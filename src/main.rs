@@ -1,6 +1,7 @@
 mod api;
 mod ast;
-pub mod builtins;
+mod attachment;
+mod builtins;
 mod compiler;
 mod coroutine;
 mod eval;

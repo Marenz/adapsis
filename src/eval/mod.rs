@@ -46,6 +46,7 @@ pub enum Value {
     String(Arc<String>),
     Struct(InternedId, Arc<HashMap<InternedId, Value>>),
     List(Arc<Vec<Value>>),
+    Attachment(crate::attachment::Attachment),
     Ok(Box<Value>),
     Err(String),
     None,
@@ -100,6 +101,7 @@ impl fmt::Display for Value {
             }
             Value::CoroutineHandle(_) => write!(f, "<coroutine>"),
             Value::TaskHandle(id) => write!(f, "<task:{id}>"),
+            Value::Attachment(att) => write!(f, "{att}"),
         }
     }
 }

@@ -615,7 +615,7 @@ pub async fn execute_code(
                         });
                         result.push_ok(format!("Watching {function_name}({args}) every {interval_ms}ms"));
                     }
-                    crate::parser::Operation::Agent { name, scope, task } => {
+                    crate::parser::Operation::Agent { name, scope, task, model } => {
                         eprintln!("[execute_code:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
 
                         let agent_scope = crate::session::AgentScope::parse(scope);
@@ -624,7 +624,7 @@ pub async fn execute_code(
                         let agent_task = task.clone();
                         let agent_name = name.clone();
                         let llm_url = config.llm_url.clone();
-                        let llm_model = config.llm_model.read().unwrap().clone();
+                        let llm_model = model.clone().unwrap_or_else(|| config.llm_model.read().unwrap().clone());
                         let llm_key = config.llm_api_key.clone();
                         let agent_program = config.program.clone();
                         let agent_meta = config.meta.clone();
