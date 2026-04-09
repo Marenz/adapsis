@@ -144,6 +144,8 @@ pub enum IoRequest {
     HttpRequest { method: String, url: String, headers: Vec<(String, String)>, body: String, reply: oneshot::Sender<Result<String>> },
     /// Multipart file upload: POST a file with optional extra form fields.
     HttpUpload { url: String, file_path: String, file_field: String, extra_fields: Vec<(String, String)>, reply: oneshot::Sender<Result<String>> },
+    /// Multipart upload from in-memory bytes (for Attachment values).
+    HttpUploadBytes { url: String, bytes: Vec<u8>, file_name: String, mime_type: String, file_field: String, extra_fields: Vec<(String, String)>, reply: oneshot::Sender<Result<String>> },
     /// Register a source (timer, channel, event) on a module.
     SourceAdd {
         module_name: String,
@@ -535,6 +537,32 @@ impl Runtime {
                     let file_part = reqwest::multipart::Part::bytes(file_bytes)
                         .file_name(file_name)
                         .mime_str(mime)
+                        .unwrap_or_else(|_| reqwest::multipart::Part::bytes(vec![]));
+                    let mut form = reqwest::multipart::Form::new()
+                        .part(file_field, file_part);
+                    for (key, value) in extra_fields {
+                        form = form.text(key, value);
+                    }
+                    match client.post(&url).multipart(form).send().await {
+                        Ok(resp) => {
+                            match resp.text().await {
+                                Ok(body) => { let _ = reply.send(Ok(body)); }
+                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                            }
+                        }
+                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                    }
+                });
+            }
+            IoRequest::HttpUploadBytes { url, bytes, file_name, mime_type, file_field, extra_fields, reply } => {
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(120))
+                        .build()
+                        .unwrap_or_default();
+                    let file_part = reqwest::multipart::Part::bytes(bytes)
+                        .file_name(file_name)
+                        .mime_str(&mime_type)
                         .unwrap_or_else(|_| reqwest::multipart::Part::bytes(vec![]));
                     let mut form = reqwest::multipart::Form::new()
                         .part(file_field, file_part);
@@ -2216,10 +2244,8 @@ impl CoroutineHandle {
                 return Ok(Value::Attachment(attachment));
             }
             "http_upload" => {
-                let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_upload expects (url:String, file_path:String, file_field:String[, extra_fields:String])") };
-                let file_path = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_upload expects (url:String, file_path:String, file_field:String[, extra_fields:String])") };
+                let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_upload expects (url:String, file_or_attachment, file_field:String[, extra_fields:String])") };
                 let file_field = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => "file".to_string() };
-                // Parse extra_fields from "key1=val1&key2=val2" format
                 let extra_fields: Vec<(String, String)> = match args.get(3) {
                     Some(Value::String(s)) if !s.is_empty() => {
                         s.split('&').filter_map(|pair| {
@@ -2232,13 +2258,32 @@ impl CoroutineHandle {
                     }
                     _ => vec![],
                 };
-                let (tx, rx) = oneshot::channel();
-                let result = self.send_and_wait(
-                    WaitReason::HttpPost(url.clone()),
-                    IoRequest::HttpUpload { url, file_path, file_field, extra_fields, reply: tx },
-                    rx,
-                )?;
-                return Ok(Value::string(result));
+                // Accept either a file path (String) or an Attachment
+                match args.get(1) {
+                    Some(Value::String(s)) => {
+                        let file_path = s.as_ref().clone();
+                        let (tx, rx) = oneshot::channel();
+                        let result = self.send_and_wait(
+                            WaitReason::HttpPost(url.clone()),
+                            IoRequest::HttpUpload { url, file_path, file_field, extra_fields, reply: tx },
+                            rx,
+                        )?;
+                        return Ok(Value::string(result));
+                    }
+                    Some(Value::Attachment(att)) => {
+                        let bytes = att.bytes().map_err(|e| anyhow::anyhow!("attachment read error: {e}"))?;
+                        let name = att.name.clone();
+                        let mime = att.mime_type.clone();
+                        let (tx, rx) = oneshot::channel();
+                        let result = self.send_and_wait(
+                            WaitReason::HttpPost(url.clone()),
+                            IoRequest::HttpUploadBytes { url, bytes, file_name: name, mime_type: mime, file_field, extra_fields, reply: tx },
+                            rx,
+                        )?;
+                        return Ok(Value::string(result));
+                    }
+                    _ => bail!("http_upload: second arg must be a file path (String) or Attachment"),
+                }
             }
             "http_request" => {
                 let method = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_request expects (method:String, url:String, headers:String, body:String)") };
