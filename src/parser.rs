@@ -98,6 +98,8 @@ pub enum Operation {
         target: Option<String>,
         text: String,
     },
+    /// Mark a module as frozen (reject further mutations).
+    Frozen,
     /// Check inbox: ?inbox [agent_name]
     Query(String),
     /// Shared variable declaration: +shared name:Type = default_expr
@@ -638,6 +640,7 @@ impl<'a> Parser<'a> {
                     && !next.text.starts_with("+shutdown")
                     && !next.text.starts_with("+source")
                     && !next.text.starts_with("+route")
+                    && !next.text.starts_with("+frozen")
                 {
                     break;
                 }
@@ -716,6 +719,12 @@ impl<'a> Parser<'a> {
                     text: doc_text,
                 });
             }
+        }
+
+        // +frozen — mark module as frozen
+        if text.strip_prefix("+frozen").is_some() {
+            self.index += 1;
+            return Ok(Operation::Frozen);
         }
 
         // +startup [io,async] — module startup block (no name, no params)
@@ -5938,7 +5947,12 @@ Add tests
     fn agent_basic() {
         let op = parse_one("!agent test write tests for all functions");
         match op {
-            Operation::Agent { name, scope, task, model } => {
+            Operation::Agent {
+                name,
+                scope,
+                task,
+                model,
+            } => {
                 assert_eq!(name, "test");
                 assert_eq!(scope, "full"); // default scope
                 assert_eq!(task, "write tests for all functions");
@@ -5951,7 +5965,12 @@ Add tests
     fn agent_with_bare_scope() {
         let op = parse_one("!agent refactor --scope read-only reorganize code");
         match op {
-            Operation::Agent { name, scope, task, model } => {
+            Operation::Agent {
+                name,
+                scope,
+                task,
+                model,
+            } => {
                 assert_eq!(name, "refactor");
                 assert_eq!(scope, "read-only");
                 assert_eq!(task, "reorganize code");
@@ -5964,7 +5983,12 @@ Add tests
     fn agent_with_quoted_scope() {
         let op = parse_one(r#"!agent crypto --scope "module Crypto" rewrite encryption"#);
         match op {
-            Operation::Agent { name, scope, task, model } => {
+            Operation::Agent {
+                name,
+                scope,
+                task,
+                model,
+            } => {
                 assert_eq!(name, "crypto");
                 assert_eq!(scope, "module Crypto");
                 assert_eq!(task, "rewrite encryption");

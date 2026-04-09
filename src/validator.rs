@@ -163,6 +163,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
                 Ok("doc (handled by module/function context)".to_string())
             }
         },
+        parser::Operation::Frozen => Ok("+frozen (handled by module context)".to_string()),
         parser::Operation::Query(_) => Ok("query (handled by orchestrator)".to_string()),
         // Standalone statements at top level — execute immediately (not stored in AST)
         parser::Operation::Let(_)
@@ -200,8 +201,21 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
 
 
 fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result<String> {
-    // Find existing module to merge into, or create new
+    // Check if module is frozen — reject mutations unless the body only contains +frozen toggle
     let existing_idx = program.modules.iter().position(|m| m.name == decl.name);
+    if let Some(idx) = existing_idx {
+        if program.modules[idx].frozen {
+            // Allow only if the body contains just a Doc or is empty (read-only operations)
+            let has_mutations = decl.body.iter().any(|op| !matches!(op,
+                parser::Operation::Doc { .. } | parser::Operation::Frozen
+            ));
+            if has_mutations {
+                bail!("module `{}` is frozen — mutations are rejected. Use +unfreeze to allow changes.", decl.name);
+            }
+        }
+    }
+
+    // Find existing module to merge into, or create new
     if existing_idx.is_none() {
         program.modules.push(ast::Module {
             id: decl.name.clone(),
@@ -216,6 +230,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             sources: vec![],
             event_decls: vec![],
             routes: vec![],
+            frozen: false,
             fn_index: HashMap::new(),
         });
     }
@@ -305,6 +320,10 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     let f = std::sync::Arc::make_mut(last_fn);
                     f.doc = Some(doc_text.clone());
                 }
+            }
+            parser::Operation::Frozen => {
+                let m = &mut program.modules[mod_idx];
+                m.frozen = true;
             }
             parser::Operation::Module(nested) => bail!(
                 "nested module `{}` found inside module `{}` — check indentation",
@@ -1502,6 +1521,7 @@ pub fn apply_move(
             sources: vec![],
             event_decls: vec![],
             routes: vec![],
+            frozen: false,
             fn_index: HashMap::new(),
         });
     }
@@ -2186,6 +2206,37 @@ mod tests {
         assert_eq!(ops.len(), 2);
         assert!(matches!(&ops[0], parser::Operation::Module(_)));
         assert!(matches!(&ops[1], parser::Operation::Eval(_)));
+    }
+
+    #[test]
+    fn frozen_module_rejects_mutations() {
+        let mut program = ast::Program::default();
+        // Create a module and freeze it
+        let source1 = "+module Locked\n+fn hello() -> String\n  +return \"hi\"\n+end\n+frozen\n";
+        let ops1 = parser::parse(source1).unwrap();
+        apply_and_validate(&mut program, &ops1[0]).unwrap();
+        assert!(program.modules[0].frozen);
+
+        // Try to mutate it - should fail
+        let source2 = "+module Locked\n+fn goodbye() -> String\n  +return \"bye\"\n+end\n";
+        let ops2 = parser::parse(source2).unwrap();
+        let result = apply_and_validate(&mut program, &ops2[0]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("frozen"));
+    }
+
+    #[test]
+    fn frozen_module_allows_doc_update() {
+        let mut program = ast::Program::default();
+        let source1 = "+module Locked\n+fn hello() -> String\n  +return \"hi\"\n+end\n+frozen\n";
+        let ops1 = parser::parse(source1).unwrap();
+        apply_and_validate(&mut program, &ops1[0]).unwrap();
+
+        // Doc-only update should succeed on frozen module
+        let source2 = "+module Locked\n+doc \"updated docs\"\n";
+        let ops2 = parser::parse(source2).unwrap();
+        let result = apply_and_validate(&mut program, &ops2[0]);
+        assert!(result.is_ok());
     }
 
     #[test]
