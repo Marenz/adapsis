@@ -909,7 +909,8 @@ async fn main() -> Result<()> {
             let shared_meta_for_spawn = shared_meta.clone();
             let shared_program_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
             let llm_url_for_spawn = url.clone();
-            let llm_model_for_spawn = model.clone();
+            let llm_model_shared: std::sync::Arc<std::sync::RwLock<String>> = std::sync::Arc::new(std::sync::RwLock::new(model.clone()));
+            let llm_model_for_spawn = llm_model_shared.clone();
             let llm_key_for_spawn = api_key.clone();
             let opencode_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
             let opencode_lock_for_spawn = opencode_lock.clone();
@@ -1065,7 +1066,7 @@ async fn main() -> Result<()> {
                             let program = shared_program_for_spawn.clone();
                             let runtime = shared_runtime_for_spawn.clone();
                             let llm_url = llm_url_for_spawn.clone();
-                            let llm_model = llm_model_for_spawn.clone();
+                            let llm_model = llm_model_for_spawn.read().unwrap().clone();
                             let llm_key = llm_key_for_spawn.clone();
                             let io_sender = io_sender_for_spawn.clone();
                             let task_registry = task_registry_for_spawn.clone();
@@ -1084,6 +1085,14 @@ async fn main() -> Result<()> {
                                 ).await;
                                 let _ = reply.send(result);
                             });
+                        }
+                        coroutine::IoRequest::SetLlmModel { name, reply } => {
+                            *llm_model_for_spawn.write().unwrap() = name.clone();
+                            let _ = reply.send(Ok(format!("model set to: {name}")));
+                        }
+                        coroutine::IoRequest::GetLlmModel { reply } => {
+                            let name = llm_model_for_spawn.read().unwrap().clone();
+                            let _ = reply.send(Ok(name));
                         }
                         _ => {
                             let rt = rt.clone();
@@ -1317,7 +1326,7 @@ async fn main() -> Result<()> {
                 program: tier1_program,
                 meta: shared_meta.clone(),
                 llm_url: url.clone(),
-                llm_model: model.clone(),
+                llm_model: llm_model_shared.clone(),
                 llm_api_key: api_key.clone(),
                 project_dir: project_dir.clone(),
                 io_sender: Some(io_sender),

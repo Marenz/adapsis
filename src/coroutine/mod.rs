@@ -160,6 +160,15 @@ pub enum IoRequest {
         reply_arg: Option<String>,
         reply: oneshot::Sender<Result<String>>,
     },
+    /// Set the active LLM model at runtime.
+    SetLlmModel {
+        name: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// Get the current active LLM model name.
+    GetLlmModel {
+        reply: oneshot::Sender<Result<String>>,
+    },
 }
 
 /// The coroutine runtime — manages IO resources and dispatches operations.
@@ -596,6 +605,13 @@ impl Runtime {
                     }
                     let _ = reply.send(Ok(final_result));
                 });
+            }
+            // These are handled upstream in the main IO loop before reaching handle_io.
+            IoRequest::SetLlmModel { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!("llm_set_model: not available in this runtime context")));
+            }
+            IoRequest::GetLlmModel { reply } => {
+                let _ = reply.send(Err(anyhow::anyhow!("llm_get_model: not available in this runtime context")));
             }
         }
     }
@@ -2215,6 +2231,28 @@ impl CoroutineHandle {
                 let result = self.send_and_wait(
                     WaitReason::LlmTakeover(context.clone()),
                     IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::string(result));
+            }
+            "llm_set_model" => {
+                let name = match args.get(0) {
+                    Some(Value::String(s)) => s.as_ref().clone(),
+                    _ => bail!("llm_set_model expects (name:String)"),
+                };
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::Running,
+                    IoRequest::SetLlmModel { name, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::string(result));
+            }
+            "llm_get_model" => {
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::Running,
+                    IoRequest::GetLlmModel { reply: tx },
                     rx,
                 )?;
                 return Ok(Value::string(result));

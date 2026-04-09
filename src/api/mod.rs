@@ -151,7 +151,7 @@ pub struct AppConfig {
     /// This is also the SharedMeta passed to spawn_blocking tasks via set_shared_meta().
     pub meta: crate::session::SharedMeta,
     pub llm_url: String,
-    pub llm_model: String,
+    pub llm_model: std::sync::Arc<std::sync::RwLock<String>>,
     pub llm_api_key: Option<String>,
     pub project_dir: String,
     pub io_sender: Option<tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,

@@ -867,6 +867,28 @@ Example:
 +end
 ```
 
+### LLM Model Control IO Builtins
+
+You can switch the active LLM model at runtime from Adapsis code using these async IO operations:
+
+- `+await result:String = llm_set_model("local/qwen3.5-9b")` — changes the active model for all subsequent LLM calls. Returns a confirmation String like `model set to: local/qwen3.5-9b`. Requires `+await`.
+- `+await name:String = llm_get_model()` — returns the currently active model name as a String. Requires `+await`.
+
+These require `[io,async]` effects. The model name is shared across the running process.
+
+Example:
+```
++fn switch_to_local ()->String [io,async]
+  +await r:String = llm_set_model("local/qwen3.5-9b")
+  +return r
++end
+
++fn get_current_model ()->String [io,async]
+  +await name:String = llm_get_model()
+  +return name
++end
+```
+
 ### Multi-Session API
 
 AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session

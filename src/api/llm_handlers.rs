@@ -199,7 +199,7 @@ pub async fn ask(
     let tx = EventSender::broadcast_only(config.event_broadcast.clone());
     tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
     let llm = crate::llm::LlmClient::new_with_model_and_key(
-        &config.llm_url, &config.llm_model, config.llm_api_key.clone(),
+        &config.llm_url, &config.llm_model.read().unwrap(), config.llm_api_key.clone(),
     );
 
     let max_iterations = config.max_iterations;
@@ -396,7 +396,7 @@ pub async fn ask_stream(
         config_clone.install_handler_locals();
         let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone(), config_clone.log_file.clone());
         let llm = crate::llm::LlmClient::new_with_model_and_key(
-            &config_clone.llm_url, &config_clone.llm_model, config_clone.llm_api_key.clone(),
+            &config_clone.llm_url, &config_clone.llm_model.read().unwrap(), config_clone.llm_api_key.clone(),
         );
 
         let _ = tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
@@ -648,7 +648,8 @@ pub async fn ask_stream(
                     plan_summary
                 );
                 tx.log("feedback", &format!("Errors found ({} issues), retrying...\n{feedback}", errors.len())).await;
-                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, feedback_details, true, op_result.tests_passed, op_result.tests_failed).await;
+                let current_model = config_clone.llm_model.read().unwrap().clone();
+                log_training_data(&config_clone.training_log, &current_model, &last_context, &output.thinking, &code, feedback_details, true, op_result.tests_passed, op_result.tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
             } else {
@@ -659,7 +660,8 @@ pub async fn ask_stream(
                 };
                 let feedback = format!("{}{}", results_section, plan_summary);
                 tx.log("feedback", &feedback).await;
-                log_training_data(&config_clone.training_log, &config_clone.llm_model, &last_context, &output.thinking, &code, feedback_details, true, op_result.tests_passed, op_result.tests_failed).await;
+                let current_model = config_clone.llm_model.read().unwrap().clone();
+                log_training_data(&config_clone.training_log, &current_model, &last_context, &output.thinking, &code, feedback_details, true, op_result.tests_passed, op_result.tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
                 if accepted_done { break; }
@@ -796,7 +798,7 @@ pub async fn handle_llm_takeover(
         program: program.clone(),
         meta: meta.clone(),
         llm_url: llm_url.to_string(),
-        llm_model: llm_model.to_string(),
+        llm_model: std::sync::Arc::new(std::sync::RwLock::new(llm_model.to_string())),
         llm_api_key: llm_key.clone(),
         project_dir: ".".to_string(),
         io_sender: Some(io_sender.clone()),
