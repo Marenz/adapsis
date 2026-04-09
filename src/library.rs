@@ -100,6 +100,10 @@ pub fn reconstruct_module_source(module: &ast::Module) -> String {
     if let Some(ref doc) = module.doc {
         out.push_str(&format!("+doc \"{}\"\n", ast::escape_string_literal(doc)));
     }
+    // Emit frozen flag if set
+    if module.frozen {
+        out.push_str("+frozen\n");
+    }
 
     // Types first
     for td in &module.types {
