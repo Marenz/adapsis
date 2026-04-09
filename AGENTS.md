@@ -167,3 +167,48 @@ web/
 - JSONL training log at `--training-log` path (default: `training.jsonl`)
 - Each iteration: model, context, thinking, code, outcome, tests passed/failed
 - Accumulates in `~/.config/adapsis/training/`
+- `tools/generate_training_data.py` — generates examples using Opus, validates through parser
+- `tools/module_training_examples.py` — hand-crafted per-module examples
+- `tools/merge_training_data.py` — deduplicates and merges all JSONL files
+- `tools/finetune_gemma4.py` — QLoRA fine-tuning with unsloth
+
+## Attachment System
+- `Value::Attachment` — binary data type (audio, images, files)
+- `AttachmentData::Memory` (≤10MB in RAM) / `AttachmentData::File` (>10MB on disk)
+- `http_post_binary(url, body)` → returns `Attachment` from HTTP response
+- `http_upload(url, attachment, field, extra)` — multipart upload from Attachment
+- `conversation_notify(context, message, attachment)` — delivers to conversation with file
+
+## Conversation System (llm_takeover)
+- Per-context conversation history: `ConversationManager` in `SessionMeta`
+- `llm_takeover(context, message, reply_fn, reply_arg)` — conversational LLM with history
+- Iterative loop: call LLM → execute code inline → feed results back (max 10 rounds)
+- `!agent` breaks the loop for background work with completion callback
+- Reply callbacks: `reply_fn(reply_arg, text)` for text, `reply_fn_with_attachment(...)` for files
+- Conversations persist across restarts via session serialization
+
+## Module Freezing
+- `+frozen` inside `+module` body marks the module as protected
+- Frozen modules reject all mutations except `+doc` updates
+- Prevents dumb/small models from rewriting infrastructure
+- Currently frozen: TelegramBot, MusicGen, Stratum, Memory
+
+## Model Management
+- `llm_set_model(name)` — switch LLM at runtime (validates before switching)
+- `llm_get_model()` — returns current model name
+- `!agent --model gemma4-31b task` — per-agent model override
+- MusicGen auto-switches to `gemma4s` during generation to free VRAM
+
+## Music Generation (ace-step-rs)
+- HTTP endpoint: `POST http://127.0.0.1:8091/generate` → raw OGG bytes
+- CPU offload: text encoder on CPU, DiT+VAE on GPU (13GB → 10GB VRAM)
+- Non-blocking: `MusicGen.generate()` spawns background task, returns immediately
+- Delivery: `conversation_notify` with Attachment → `send_reply_with_attachment`
+- Auto model switch: saves current model, switches to gemma4s, generates, switches back
+
+## Infrastructure
+- Caddy HTTPS on port 443 (Let's Encrypt), only `/webhook/telegram` exposed
+- Systemd services: `adapsis.service`, `llama-server.service`, `ace-step-gen.service`, `whisper-server.service`, `caddy.service`
+- llama-server: TurboQuant build with turbo3 KV cache, Gemma 4 fixes
+- Save-on-change (debounced), not periodic autosave
+- Panic hook + exit logging for crash debugging
