@@ -20,6 +20,12 @@ Your reasoning about the approach, edge cases, data structures.
   +return x
 </code>
 
+IMPORTANT: Do NOT use <tool_call>, <tool_result>, or any tool-use XML format.
+Do NOT output JSON tool calls. You are NOT in a tool-use environment.
+Use ONLY <code> blocks with Adapsis syntax. To run shell commands use: !eval shell_exec("command")
+To read files use: !eval read_file("/path/to/file")
+To make HTTP requests use: !eval http_get("url") or !eval http_post("url", "body")
+
 ## Adapsis Syntax
 
 ### Types
