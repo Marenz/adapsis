@@ -2222,6 +2222,17 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             } else if lower.contains("missing effect") || lower.contains("requires effect") {
                 "Add the missing effect to your function signature, e.g. [io,async] or [fail]."
                     .to_string()
+            } else if lower.contains("named arguments are not supported") {
+                "Adapsis function calls use positional arguments only. Instead of `func(name=value)`, \
+                 use `func(value)`. Check the function signature with `?source Module.func` to see the \
+                 correct parameter order.".to_string()
+            } else if lower.contains("expected `key=value` pair") {
+                "This error often occurs when `!eval` input is misinterpreted as key=value pairs. \
+                 For function calls, use: `!eval Module.func value1 value2` or \
+                 `!eval Module.func(value1, value2)`. Named arguments like `func(key=value)` are not supported.".to_string()
+            } else if lower.contains("is not a valid command") && lower.contains("!done") {
+                "Use `!done` (with the `!` prefix) to signal task completion. All Adapsis commands \
+                 start with `!` — bare words like `DONE` are not recognized.".to_string()
             } else {
                 String::new()
             };
