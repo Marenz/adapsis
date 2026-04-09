@@ -1192,9 +1192,9 @@ fn session_migrates_chat_messages_to_conversations() {
     // Build a session with legacy chat_messages but no conversations["main"]
     let mut session = crate::session::Session::new();
     session.meta.chat_messages = vec![
-        crate::session::ChatMessage { role: "system".to_string(), content: "you are helpful".to_string() },
-        crate::session::ChatMessage { role: "user".to_string(), content: "hello".to_string() },
-        crate::session::ChatMessage { role: "assistant".to_string(), content: "hi there".to_string() },
+        crate::session::ChatMessage { role: "system".to_string(), content: "you are helpful".to_string(), attachments: vec![] },
+        crate::session::ChatMessage { role: "user".to_string(), content: "hello".to_string(), attachments: vec![] },
+        crate::session::ChatMessage { role: "assistant".to_string(), content: "hi there".to_string(), attachments: vec![] },
     ];
     // Ensure no "main" conversation exists yet
     assert!(session.meta.conversations.get("main").is_none());

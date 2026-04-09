@@ -497,6 +497,9 @@ impl AgentBranch {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Binary attachments (audio, images, etc.). Not serialized to session file.
+    #[serde(skip)]
+    pub attachments: Vec<crate::attachment::Attachment>,
 }
 
 /// A conversation context with its own message history and callback info.
@@ -543,15 +546,15 @@ impl Conversation {
     }
 
     pub fn push_user(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage { role: "user".to_string(), content: content.into() });
+        self.messages.push(ChatMessage { role: "user".to_string(), content: content.into(), attachments: vec![] });
     }
 
     pub fn push_assistant(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage { role: "assistant".to_string(), content: content.into() });
+        self.messages.push(ChatMessage { role: "assistant".to_string(), content: content.into(), attachments: vec![] });
     }
 
     pub fn push_system(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage { role: "system".to_string(), content: content.into() });
+        self.messages.push(ChatMessage { role: "system".to_string(), content: content.into(), attachments: vec![] });
     }
 
     /// Convert conversation history to LLM-compatible message format.
@@ -2112,7 +2115,7 @@ mod tests {
         meta.revision = 5;
         meta.roadmap.push(RoadmapItem { description: "build feature X".to_string(), done: false });
         meta.plan.push(PlanStep { description: "step 1".to_string(), status: PlanStatus::Pending });
-        meta.chat_messages.push(ChatMessage { role: "user".to_string(), content: "hello".to_string() });
+        meta.chat_messages.push(ChatMessage { role: "user".to_string(), content: "hello".to_string(), attachments: vec![] });
 
         let json = serde_json::to_string(&meta).expect("serialize");
         let restored: SessionMeta = serde_json::from_str(&json).expect("deserialize");
