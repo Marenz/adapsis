@@ -138,6 +138,8 @@ pub enum IoRequest {
     Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
     HttpGet { url: String, reply: oneshot::Sender<Result<String>> },
     HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
+    /// HTTP POST that returns the response as a binary Attachment (for audio/image downloads).
+    HttpPostBinary { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<crate::attachment::Attachment>> },
     /// Generic HTTP request with arbitrary method/headers.
     HttpRequest { method: String, url: String, headers: Vec<(String, String)>, body: String, reply: oneshot::Sender<Result<String>> },
     /// Multipart file upload: POST a file with optional extra form fields.
@@ -449,6 +451,52 @@ impl Runtime {
                         Ok(resp) => {
                             match resp.text().await {
                                 Ok(body) => { let _ = reply.send(Ok(body)); }
+                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                            }
+                        }
+                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                    }
+                });
+            }
+            IoRequest::HttpPostBinary { url, body, content_type, reply } => {
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(300))
+                        .build()
+                        .unwrap_or_default();
+                    match client.post(&url)
+                        .header("Content-Type", &content_type)
+                        .body(body)
+                        .send().await
+                    {
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                let status = resp.status();
+                                let body = resp.text().await.unwrap_or_default();
+                                let _ = reply.send(Err(anyhow::anyhow!("HTTP {status}: {body}")));
+                                return;
+                            }
+                            // Extract filename from Content-Disposition or URL
+                            let name = resp.headers()
+                                .get("content-disposition")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.split("filename=").nth(1))
+                                .map(|s| s.trim_matches('"').to_string())
+                                .unwrap_or_else(|| {
+                                    url.rsplit('/').next().unwrap_or("download").to_string()
+                                });
+                            let mime = resp.headers()
+                                .get("content-type")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("application/octet-stream")
+                                .to_string();
+                            match resp.bytes().await {
+                                Ok(bytes) => {
+                                    match crate::attachment::Attachment::from_bytes(bytes.to_vec(), mime, name) {
+                                        Ok(att) => { let _ = reply.send(Ok(att)); }
+                                        Err(e) => { let _ = reply.send(Err(anyhow::anyhow!("attachment error: {e}"))); }
+                                    }
+                                }
                                 Err(e) => { let _ = reply.send(Err(e.into())); }
                             }
                         }
@@ -2158,6 +2206,14 @@ impl CoroutineHandle {
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPost { url, body, content_type, reply: tx }, rx)?;
                 return Ok(Value::string(result));
+            }
+            "http_post_binary" => {
+                let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_post_binary expects (url:String, body:String[, content_type:String])") };
+                let body = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_post_binary expects (url:String, body:String[, content_type:String])") };
+                let content_type = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => "application/json".to_string() };
+                let (tx, rx) = oneshot::channel();
+                let attachment = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPostBinary { url, body, content_type, reply: tx }, rx)?;
+                return Ok(Value::Attachment(attachment));
             }
             "http_upload" => {
                 let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_upload expects (url:String, file_path:String, file_field:String[, extra_fields:String])") };

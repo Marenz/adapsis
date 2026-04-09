@@ -521,6 +521,15 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "http_post_binary",
+        aliases: &[],
+        short: "HTTP POST returning binary: http_post_binary(url, body[, content_type]) -> Attachment",
+        long: "Makes an HTTP POST request and returns the response body as an Attachment (binary data with mime type and filename). \
+               Use for downloading binary files like audio, images, etc. The Content-Type and Content-Disposition headers \
+               from the response are used for the attachment metadata. 5-minute timeout.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "http_request",
         aliases: &[],
         short: "Generic HTTP request: http_request(method, url, headers, body) -> String",
