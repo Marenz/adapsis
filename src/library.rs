@@ -535,6 +535,16 @@ pub fn persist_module(module: &ast::Module) -> Result<()> {
 
     let source = reconstruct_module_source(module);
 
+    // Safety: don't overwrite a file with less content (prevents data loss
+    // when session state has a stub but the file has the full module)
+    if target.exists() {
+        let existing = std::fs::read_to_string(&target).unwrap_or_default();
+        if source.len() < existing.len() && module.functions.is_empty() {
+            // The module in memory has no functions but the file does - skip
+            return Ok(());
+        }
+    }
+
     std::fs::write(&tmp, &source)
         .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
     std::fs::rename(&tmp, &target)
