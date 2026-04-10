@@ -962,6 +962,7 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
+                                let runtime_for_env = runtime_for_blocking.clone();
                                 let ctx = eval::EvalContext::new_minimal(
                                     runtime_for_blocking, meta_for_blocking,
                                     &program, eval::make_shared_program_mut(&program),
@@ -971,6 +972,8 @@ async fn main() -> Result<()> {
                                 let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
                                 env.populate_shared_from_program(&program);
+                                // Set shared runtime so +shared vars resolve from runtime state
+                                env.set_shared_runtime(runtime_for_env);
                                 // Initialize shared runtime vars so +shared defaults are available
                                 if let Some(rt) = eval::get_shared_runtime() {
                                     eval::init_missing_shared_runtime_vars(&program, &rt);

@@ -352,6 +352,10 @@ impl Env {
     /// Populate the shared_cache directly from the program's module shared var
     /// declarations. This is a fallback for when SharedRuntime is not available
     /// (e.g. in tests or CLI mode). Evaluates each default expression.
+    pub fn set_shared_runtime(&mut self, runtime: crate::session::SharedRuntime) {
+        self.shared_runtime = Some(runtime);
+    }
+
     pub fn populate_shared_from_program(&mut self, program: &ast::Program) {
         for module in &program.modules {
             for sv in &module.shared_vars {
