@@ -2428,14 +2428,14 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                         if key.is_empty() {
                             continue;
                         }
-                        if let Ok(idx) = key.parse::<usize>() {
-                            current = current
-                                .get(idx)
-                                .ok_or_else(|| anyhow!("json_get: index {idx} not found"))?;
+                        let next = if let Ok(idx) = key.parse::<usize>() {
+                            current.get(idx)
                         } else {
-                            current = current
-                                .get(key)
-                                .ok_or_else(|| anyhow!("json_get: key '{key}' not found"))?;
+                            current.get(key)
+                        };
+                        match next {
+                            Some(v) => current = v,
+                            None => return Ok(Value::string("")),
                         }
                     }
                     // Return the value as a string, stripping quotes from string values
