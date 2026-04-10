@@ -970,6 +970,11 @@ async fn main() -> Result<()> {
 
                                 let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
                                 let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
+                                env.populate_shared_from_program(&program);
+                                // Initialize shared runtime vars so +shared defaults are available
+                                if let Some(rt) = eval::get_shared_runtime() {
+                                    eval::init_missing_shared_runtime_vars(&program, &rt);
+                                }
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 for (i, param) in func_decl.params.iter().enumerate() {
                                     if let Some(val) = args.get(i) {
