@@ -2000,18 +2000,25 @@ pub(crate) fn eval_function_body(
                     .iter()
                     .map(|a| eval_ast_expr(program, a, env))
                     .collect::<Result<Vec<_>>>()?;
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
                 let io_tx = handle.io_sender();
-                let _ = io_tx.blocking_send(crate::coroutine::IoRequest::Spawn {
+                io_tx.try_send(crate::coroutine::IoRequest::Spawn {
                     function_name: call.callee.clone(),
                     args,
                     reply: reply_tx,
-                });
+                }).map_err(|e| anyhow::anyhow!("+spawn failed to send: {e}"))?;
                 // If there's a binding, wait for the task ID
                 if let Some(b) = binding {
-                    let task_id = reply_rx
-                        .blocking_recv()
-                        .map_err(|e| anyhow::anyhow!("spawn reply failed: {e}"))??;
+                    // Use try_recv in a loop since blocking_recv panics inside tokio runtime
+                    let task_id = loop {
+                        match reply_rx.try_recv() {
+                            Ok(result) => break result?,
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                            Err(e) => bail!("spawn reply failed: {e}"),
+                        }
+                    };
                     env.set(&b.name, Value::TaskHandle(task_id));
                 }
             }
@@ -2086,7 +2093,7 @@ pub(crate) fn eval_function_body(
                         if let Some(Value::CoroutineHandle(handle)) =
                             env.get_raw("__coroutine_handle")
                         {
-                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
                             let io_tx = handle.io_sender();
                             let _ = io_tx.blocking_send(crate::coroutine::IoRequest::SourceAdd {
                                 module_name,
