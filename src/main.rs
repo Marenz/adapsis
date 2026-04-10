@@ -1172,11 +1172,14 @@ async fn main() -> Result<()> {
                                             crate::eval::Value::Attachment(att),
                                         ];
                                         let (tx, _rx) = tokio::sync::oneshot::channel();
-                                        let _ = io_sender.send(crate::coroutine::IoRequest::Spawn {
-                                            function_name: att_fn,
+                                        match io_sender.try_send(crate::coroutine::IoRequest::Spawn {
+                                            function_name: att_fn.clone(),
                                             args,
                                             reply: tx,
-                                        }).await;
+                                        }) {
+                                            Ok(()) => eprintln!("[conversation_notify:{context}] spawn dispatched {att_fn}"),
+                                            Err(e) => eprintln!("[conversation_notify:{context}] spawn send failed: {e}"),
+                                        }
                                     } else {
                                         // Text only
                                         eprintln!("[conversation_notify:{context}] delivering text via {func_name}({arg})");
@@ -1185,11 +1188,14 @@ async fn main() -> Result<()> {
                                             crate::eval::Value::string(message),
                                         ];
                                         let (tx, _rx) = tokio::sync::oneshot::channel();
-                                        let _ = io_sender.send(crate::coroutine::IoRequest::Spawn {
+                                        match io_sender.try_send(crate::coroutine::IoRequest::Spawn {
                                             function_name: func_name,
                                             args,
                                             reply: tx,
-                                        }).await;
+                                        }) {
+                                            Ok(()) => eprintln!("[conversation_notify:{context}] spawn dispatched"),
+                                            Err(e) => eprintln!("[conversation_notify:{context}] spawn send failed: {e}"),
+                                        }
                                     }
                                 }
 
