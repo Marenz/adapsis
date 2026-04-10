@@ -540,6 +540,14 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "http_get_binary",
+        aliases: &[],
+        short: "HTTP GET returning binary: http_get_binary(url) -> Attachment",
+        long: "Makes an HTTP GET request and returns the response body as an Attachment. \
+               Use for downloading binary files like audio, images, etc.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "http_request",
         aliases: &[],
         short: "Generic HTTP request: http_request(method, url, headers, body) -> String",

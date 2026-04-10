@@ -474,10 +474,14 @@ impl Runtime {
                         .timeout(std::time::Duration::from_secs(300))
                         .build()
                         .unwrap_or_default();
-                    match client.post(&url)
-                        .header("Content-Type", &content_type)
-                        .body(body)
-                        .send().await
+                    let req = if body.is_empty() {
+                        client.get(&url)
+                    } else {
+                        client.post(&url)
+                            .header("Content-Type", &content_type)
+                            .body(body)
+                    };
+                    match req.send().await
                     {
                         Ok(resp) => {
                             if !resp.status().is_success() {
@@ -2274,6 +2278,12 @@ impl CoroutineHandle {
                 let content_type = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => "application/json".to_string() };
                 let (tx, rx) = oneshot::channel();
                 let attachment = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPostBinary { url, body, content_type, reply: tx }, rx)?;
+                return Ok(Value::Attachment(attachment));
+            }
+            "http_get_binary" => {
+                let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_get_binary expects (url:String)") };
+                let (tx, rx) = oneshot::channel();
+                let attachment = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPostBinary { url, body: String::new(), content_type: "application/octet-stream".to_string(), reply: tx }, rx)?;
                 return Ok(Value::Attachment(attachment));
             }
             "http_upload" => {
