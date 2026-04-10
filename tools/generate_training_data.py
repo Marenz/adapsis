@@ -170,6 +170,162 @@ SCENARIOS = [
         None,
     ),
     ("Generate a song, then tell me what model you're running on.", None),
+    # === Batch 2: More music variations ===
+    ("Chiptune 8-bit game music, 30 seconds.", None),
+    ("Gregorian chant style, 2 minutes.", None),
+    ("Flamenco guitar, passionate, 1 minute.", None),
+    ("Dubstep with heavy bass drops, 45 seconds.", None),
+    ("Swing jazz, 1920s style, 90 seconds.", None),
+    ("Afrobeat groove, 2 minutes.", None),
+    ("Celtic folk with fiddle, 1 minute.", None),
+    ("Psychedelic rock, spacey, 3 minutes.", None),
+    ("Opera aria style, dramatic, 2 minutes.", None),
+    ("Garage rock, raw and dirty, 30 seconds.", None),
+    ("Tropical house, summer vibes, 1 minute.", None),
+    ("Grunge, 90s style, distorted guitar, 45 seconds.", None),
+    ("Bollywood dance music, 1 minute.", None),
+    ("Acid techno, 303 bass, 2 minutes.", None),
+    ("New age meditation, crystal bowls, 5 minutes.", None),
+    # === Batch 2: More function creation ===
+    ("Write a function that checks if a number is prime.", None),
+    ("Create a function to find the longest word in a sentence.", None),
+    ("Add a fibonacci function.", None),
+    ("Write a function that counts vowels in a string.", None),
+    ("Create a function that removes duplicates from a list.", None),
+    ("Add a binary search function.", None),
+    ("Write a function to check if a string is a valid email format.", None),
+    ("Create a ROT13 cipher function.", None),
+    ("Add a function that formats a number with commas (1000 -> 1,000).", None),
+    ("Write a function that calculates the area of a circle given radius.", None),
+    # === Batch 2: More system queries ===
+    ("What time is it?", None),
+    ("Show running services.", None),
+    ("Check if the music daemon is running.", None),
+    ("How much RAM is available?", None),
+    ("What's my IP address?", None),
+    ("Show recent log entries.", None),
+    ("List files in my home directory.", None),
+    ("Check if port 8080 is in use.", None),
+    # === Batch 2: More Stratum/Memory ===
+    ("Remember that I like dark roast coffee.", None),
+    ("Store the fact that Earth is 4.5 billion years old.", None),
+    ("What do you remember about my preferences?", None),
+    ("Create a topic called 'Travel Plans'.", None),
+    ("Find all memories related to music.", None),
+    ("Delete the note about the meeting.", None),
+    ("How many nodes are in the graph?", None),
+    ("Show me all edge types.", None),
+    ("Link my guitar practice memory to the music production topic.", None),
+    ("Search for anything about Python.", None),
+    # === Batch 2: More error recovery ===
+    (
+        "Write a greet function.",
+        "Errors:\nERROR: function must be inside a module. Use: +module Name\nFix and continue.",
+    ),
+    (
+        "Add a web scraper.",
+        "Errors:\nERROR: module `WebScraper` is frozen — mutations are rejected.\nFix and continue.",
+    ),
+    (
+        "Evaluate my_func().",
+        "Errors:\nERROR: function 'my_func' not found\nFix and continue.",
+    ),
+    (
+        "Run the tests.",
+        "Results:\nOK: PASS Utils.double (3/3 cases)\nOK: PASS Utils.greet (1/1 cases)\nContinue or !done.",
+    ),
+    # === Batch 2: Telegram-specific ===
+    ("Send a photo to my chat.", None),
+    ("Who sent the last message?", None),
+    ("How many messages are in my Telegram chat?", None),
+    # === Batch 2: More !opencode ===
+    ("Add a timer builtin that fires a callback after N seconds.", None),
+    ("The type checker is too strict with generics. Can you relax it?", None),
+    ("Add support for string interpolation like f-strings.", None),
+    ("Make the web UI mobile-friendly.", None),
+    # === Batch 2: GitHub ===
+    ("What GitHub issues are open?", None),
+    ("Show me issue #10.", None),
+    ("Sync issues to the roadmap.", None),
+    ("What are the comments on issue #25?", None),
+    # === Batch 2: Multi-turn conversations ===
+    (
+        "Make a song about rain.",
+        'Results:\nOK: = "Generation started"\nContinue or !done.',
+    ),
+    (
+        "What functions does Utils have?",
+        "Results:\nOK: Utils has 3 functions: double, greet, join_strings\nContinue or !done.",
+    ),
+    (
+        "Switch to gemma4-31b.",
+        'Results:\nOK: = "model set to: gemma4-31b"\nContinue or !done.',
+    ),
+    (
+        "Add a capitalize function and test it.",
+        "Results:\nOK: updated module Utils (1 fn added)\nOK: PASS Utils.capitalize (2/2 cases)\nContinue or !done.",
+    ),
+    # === Batch 2: Edge cases ===
+    ("", None),  # Empty message
+    ("Just say hello, no code needed.", None),
+    ("What's 0 divided by 0?", None),
+    ("Can you write Rust code?", None),
+    ("Tell me a joke.", None),
+    ("What programming languages do you know?", None),
+    # === Batch 2: Complex tasks ===
+    (
+        "Read the MusicGen source, summarize what it does, then add a function to list all generated songs.",
+        None,
+    ),
+    (
+        "Check what model I'm on, switch to gemma4s, generate a test song, then switch back.",
+        None,
+    ),
+    (
+        "Create a Utils module with at least 5 math functions and test all of them.",
+        None,
+    ),
+    (
+        "Show me the Stratum module, explain the recall function, then use it to search for 'coding'.",
+        None,
+    ),
+    # === Batch 2: Game mode ===
+    ("Start game mode.", None),
+    ("Stop game mode.", None),
+    ("Is the VR client running?", None),
+    ("Show Steam on the main display.", None),
+    # === Batch 2: Module management ===
+    ("List all modules.", None),
+    ("How many functions does Stratum have?", None),
+    ("Is MusicGen frozen?", None),
+    ("Show me the TelegramBot webhook handler.", None),
+    ("What routes are registered?", None),
+    # === Batch 2: Model switching ===
+    ("Use the big model for this.", None),
+    ("Switch to a smaller model to save VRAM.", None),
+    ("What models are available?", None),
+    ("Which model is best for coding?", None),
+    # === Batch 2: Reminders/habits ===
+    ("I need to drink more water. Help me remember.", None),
+    ("Remind me to exercise every morning.", None),
+    ("What habits am I tracking?", None),
+    ("I meditated today. Log it.", None),
+    ("Show my progress on quitting smoking.", None),
+    ("Add a creative writing goal: write 500 words per day.", None),
+    ("What goals have I set?", None),
+    ("I practiced guitar for 30 minutes today.", None),
+    # === Batch 2: File operations ===
+    ("Read the Adapsis config file.", None),
+    ("What modules are in ~/.config/adapsis/modules/?", None),
+    ("Show me the systemd service file for adapsis.", None),
+    ("How big is the training data file?", None),
+    # === Batch 2: Debugging/status ===
+    ("Something is wrong with the music generation. Debug it.", None),
+    ("Why is the bot not responding on Telegram?", None),
+    ("Show me recent error logs.", None),
+    ("Is the webhook endpoint working?", None),
+    ("Check if Caddy is running.", None),
+    ("What version of llama.cpp are we using?", None),
 ]
 
 
