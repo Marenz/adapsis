@@ -827,10 +827,31 @@ impl CoroutineHandle {
     /// Helper: send an IO request and wait for the result, tracking wait reason.
     fn send_and_wait<T>(&self, reason: WaitReason, req: IoRequest, rx: oneshot::Receiver<Result<T>>) -> Result<T> {
         self.set_wait(reason);
-        self.io_tx.blocking_send(req)
-            .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
-        let result = rx.blocking_recv()
-            .map_err(|e| anyhow::anyhow!("IO result channel closed: {e}"))??;
+        // Use try_send to avoid panicking inside tokio runtime.
+        // Falls back to blocking_send only if try_send fails with Full.
+        match self.io_tx.try_send(req) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(req)) => {
+                self.io_tx.blocking_send(req)
+                    .map_err(|e| anyhow::anyhow!("IO runtime closed: {e}"))?;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                bail!("IO runtime closed");
+            }
+        }
+        // Spin-wait for the result to avoid blocking_recv panic
+        let mut rx = rx;
+        let result = loop {
+            match rx.try_recv() {
+                Ok(result) => break result?,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    bail!("IO result channel closed");
+                }
+            }
+        };
         self.clear_wait();
         Ok(result)
     }
