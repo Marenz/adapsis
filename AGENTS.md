@@ -231,9 +231,6 @@ Permission levels per group: `none` < `execute` < `read` < `write`
 Each conversation can set `permission_model` to use a different model's permissions.
 Only restricts — never expands beyond the active model.
 
-### Legacy: `+frozen`
-`+frozen` inside `+module` still works as a secondary safeguard but is superseded by the permission system.
-
 ### Program summary filtering
 The system prompt only shows modules the model can at least Read. Execute-level modules show function signatures without docs.
 

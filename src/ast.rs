@@ -648,10 +648,6 @@ pub struct Module {
     /// HTTP routes declared in this module via +route.
     #[serde(default)]
     pub routes: Vec<HttpRoute>,
-    /// When true, the module rejects mutations from apply_module.
-    /// Use +frozen inside +module to set, +unfreeze Module to clear.
-    #[serde(default)]
-    pub frozen: bool,
     /// Maps interned function name → index in this module's `functions` Vec.
     /// Uses `InternedId` (u32) keys for faster hash + comparison on lookup.
     /// Derived index, not serialized. Public so validators can construct Module literals.
@@ -1098,7 +1094,6 @@ mod tests {
             sources: vec![],
             event_decls: vec![],
             routes: vec![],
-            frozen: false,
             fn_index: HashMap::new(),
         }
     }
@@ -2398,7 +2393,6 @@ mod tests {
             sources: vec![],
             event_decls: vec![],
             routes: vec![],
-            frozen: false,
             fn_index: HashMap::new(),
         };
         program.modules.push(module);
