@@ -98,8 +98,6 @@ pub enum Operation {
         target: Option<String>,
         text: String,
     },
-    /// Mark a module as frozen (reject further mutations).
-    Frozen,
     /// Check inbox: ?inbox [agent_name]
     Query(String),
     /// Shared variable declaration: +shared name:Type = default_expr
@@ -640,7 +638,6 @@ impl<'a> Parser<'a> {
                     && !next.text.starts_with("+shutdown")
                     && !next.text.starts_with("+source")
                     && !next.text.starts_with("+route")
-                    && !next.text.starts_with("+frozen")
                 {
                     break;
                 }
@@ -719,12 +716,6 @@ impl<'a> Parser<'a> {
                     text: doc_text,
                 });
             }
-        }
-
-        // +frozen — mark module as frozen
-        if text.strip_prefix("+frozen").is_some() {
-            self.index += 1;
-            return Ok(Operation::Frozen);
         }
 
         // +startup [io,async] — module startup block (no name, no params)
