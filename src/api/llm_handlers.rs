@@ -881,7 +881,9 @@ pub async fn handle_llm_takeover(
                     clean.replace_range(s..s + e + 8, "");
                 } else { break; }
             }
-            // Truncate at first <code> block - everything after is narration about code execution
+            // Strip orphan </think> tags (DeepSeek puts these without opening tag)
+            clean = clean.replace("</think>", "");
+            // Truncate at first <code> block
             if let Some(s) = clean.find("<code>") {
                 clean.truncate(s);
             }
