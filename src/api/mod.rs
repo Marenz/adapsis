@@ -1690,6 +1690,10 @@ async fn adapsis_route_dispatch(
         }
         let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.populate_shared_from_program(&program);
+        // Set shared runtime so +shared vars resolve from runtime state
+        if let Some(rt) = crate::eval::get_shared_runtime() {
+            env.set_shared_runtime(rt);
+        }
         // Set up coroutine handle so async functions (+await) work in route handlers
         if let Some(sender) = io_sender_for_blocking {
             let handle = crate::coroutine::CoroutineHandle::new(sender);

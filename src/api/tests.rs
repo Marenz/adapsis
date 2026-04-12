@@ -1297,6 +1297,21 @@ fn llm_takeover_uses_shared_opencode_lock() {
     );
 }
 
+/// Regression test: route handler Env creation must call set_shared_runtime.
+#[test]
+fn env_creations_set_shared_runtime() {
+    let mod_source = include_str!("mod.rs");
+    // Find the route handler section (near "webhook" and "handler_fn")
+    let webhook_section = mod_source.find("[webhook]").expect("webhook section");
+    let after_webhook = &mod_source[webhook_section..];
+    let env_creation = after_webhook.find("Env::new_with_shared_interner").expect("Env creation in route handler");
+    let after_creation = &after_webhook[env_creation..env_creation + 500.min(after_webhook.len() - env_creation)];
+    assert!(
+        after_creation.contains("set_shared_runtime"),
+        "Route handler creates Env without set_shared_runtime. Shared vars won't resolve."
+    );
+}
+
 /// Regression test: handle_llm_takeover's tmp_config must use the caller's
 /// permission_config and access_level, not create its own with Full/default.
 /// Otherwise permission checks in execute_code are bypassed.
