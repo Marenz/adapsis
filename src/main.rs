@@ -1088,7 +1088,15 @@ async fn main() -> Result<()> {
                                 // Event dispatch will be implemented in a later phase
                             }
                         }
-                        coroutine::IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, reply } => {
+                        coroutine::IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, permission_model, reply } => {
+                            // If a permission_model override was requested, set it on
+                            // the conversation before handing off to handle_llm_takeover.
+                            if let Some(ref pm) = permission_model {
+                                let mut meta_guard = shared_meta_for_spawn.lock().unwrap();
+                                let conv = meta_guard.conversations.get_or_create(&context);
+                                conv.permission_model = Some(pm.clone());
+                            }
+
                             let meta = shared_meta_for_spawn.clone();
                             let program = shared_program_for_spawn.clone();
                             let runtime = shared_runtime_for_spawn.clone();
@@ -1664,6 +1672,7 @@ async fn main() -> Result<()> {
                         message: msg,
                         reply_fn: None,
                         reply_arg: None,
+                        permission_model: None,
                         reply: tx,
                     }).await;
                 });

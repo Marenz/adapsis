@@ -170,6 +170,10 @@ pub enum IoRequest {
         message: String,
         reply_fn: Option<String>,
         reply_arg: Option<String>,
+        /// Optional permission model override — when set, the conversation uses
+        /// this model's permissions instead of the active LLM model's.  Used for
+        /// non-admin Telegram users who get a restricted view.
+        permission_model: Option<String>,
         reply: oneshot::Sender<Result<String>>,
     },
     /// Set the active LLM model at runtime.
@@ -2382,14 +2386,15 @@ impl CoroutineHandle {
                 return Ok(Value::string(result));
             }
             "llm_takeover" => {
-                let context = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String])") };
-                let message = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String])") };
+                let context = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String[, permission_model:String]])") };
+                let message = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String[, permission_model:String]])") };
                 let reply_fn = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
                 let reply_arg = args.get(3).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
+                let permission_model = args.get(4).and_then(|v| match v { Value::String(s) => { let s = s.as_ref().clone(); if s.is_empty() { None } else { Some(s) } }, _ => None });
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(
                     WaitReason::LlmTakeover(context.clone()),
-                    IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, reply: tx },
+                    IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, permission_model, reply: tx },
                     rx,
                 )?;
                 return Ok(Value::string(result));
