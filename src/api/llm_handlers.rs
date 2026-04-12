@@ -771,33 +771,46 @@ pub async fn handle_llm_takeover(
         // Add system prompt if this is a new conversation
         if conv.messages.is_empty() {
             let system = conv.system_prompt.clone().unwrap_or_else(|| {
-                format!(
-                    "{}\n\n{}\n\n{}\n\nCurrent program state:\n{}\n\n\
-                     You are in conversation context '{context}'. Respond naturally. \
-                     If you need to do work (modify code, create modules, run tasks), include the \
-                     Adapsis commands in your response. Do NOT use !agent for tasks that require \
-                     IO execution (generating music, sending files, HTTP calls). Agents cannot run \
-                     [io,async] functions. Instead, do IO tasks inline using !eval. Use !agent ONLY \
-                     for pure code writing tasks (adding modules, functions, tests). \
-                     IMPORTANT: The user only sees text BEFORE the first <code> block. \
-                     Text after <code> blocks is discarded. Put your response to the user first, \
-                     then the code. Do not narrate what the code does after the <code> block. \
-                     When you need to understand existing code, use ?source Module.function. \
-                     Don't guess how things work — read the source. \
-                     DESIGN PRINCIPLES: \
-                     1. REUSE over CREATE. Before writing new code, check if existing functions \
-                        already do what you need. Use !eval with existing functions directly. \
-                     2. If you must write a new function, make it GENERIC and REUSABLE — parameterize \
-                        everything (chat_id, caption, duration, etc). Add it to the appropriate \
-                        existing module, not a new one. \
-                     3. Never create one-off modules for single requests. \
-                     4. Write +doc for every new function. \
-                     5. Music generation takes ~60 seconds — do not retry if it seems slow.",
-                    crate::prompt::system_prompt(),
-                    crate::builtins::format_for_prompt(),
-                    crate::prompt::adapsis_identity(),
-                    program_summary,
-                )
+                {
+                    let available_models = permission_config.model_names();
+                    let models_line = if available_models.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "Available models (switchable via llm_set_model): {}\n",
+                            available_models.join(", "),
+                        )
+                    };
+                    format!(
+                        "{}\n\n{}\n\n{}\n\nCurrent model: {llm_model}\n\
+                         {models_line}\
+                         Current program state:\n{}\n\n\
+                         You are in conversation context '{context}'. Respond naturally. \
+                         If you need to do work (modify code, create modules, run tasks), include the \
+                         Adapsis commands in your response. Do NOT use !agent for tasks that require \
+                         IO execution (generating music, sending files, HTTP calls). Agents cannot run \
+                         [io,async] functions. Instead, do IO tasks inline using !eval. Use !agent ONLY \
+                         for pure code writing tasks (adding modules, functions, tests). \
+                         IMPORTANT: The user only sees text BEFORE the first <code> block. \
+                         Text after <code> blocks is discarded. Put your response to the user first, \
+                         then the code. Do not narrate what the code does after the <code> block. \
+                         When you need to understand existing code, use ?source Module.function. \
+                         Don't guess how things work — read the source. \
+                         DESIGN PRINCIPLES: \
+                         1. REUSE over CREATE. Before writing new code, check if existing functions \
+                            already do what you need. Use !eval with existing functions directly. \
+                         2. If you must write a new function, make it GENERIC and REUSABLE — parameterize \
+                            everything (chat_id, caption, duration, etc). Add it to the appropriate \
+                            existing module, not a new one. \
+                         3. Never create one-off modules for single requests. \
+                         4. Write +doc for every new function. \
+                         5. Music generation takes ~60 seconds — do not retry if it seems slow.",
+                        crate::prompt::system_prompt(),
+                        crate::builtins::format_for_prompt(),
+                        crate::prompt::adapsis_identity(),
+                        program_summary,
+                    )
+                }
             });
             conv.push_system(system);
         }

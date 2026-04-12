@@ -183,6 +183,18 @@ impl PermissionConfig {
     pub fn can_agent(&self, process_level: AccessLevel, _model_name: &str) -> bool {
         process_level.allows_agents()
     }
+
+    /// List all configured model names (excluding "default").
+    pub fn model_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .model
+            .keys()
+            .filter(|k| k.as_str() != "default")
+            .map(|k| k.as_str())
+            .collect();
+        names.sort();
+        names
+    }
 }
 
 #[cfg(test)]
