@@ -6118,4 +6118,331 @@ fn source_add_with_module_name_env() {
     });
 }
 
+// ── Collection builtins: List extended, Map, Set ─────────────────────────────
+
+fn call(name: &str, args: Vec<Value>) -> anyhow::Result<Value> {
+    let p = ast::Program::default();
+    let mut env = Env::new();
+    eval_builtin_or_user(&p, name, args, &mut env)
+}
+
+#[test]
+fn test_list_extended() {
+    // pop
+    let r = call("pop", vec![Value::list(vec![Value::Int(1), Value::Int(2)])]);
+    assert!(r.is_ok());
+    let result = r.unwrap();
+    if let Value::List(pair) = result {
+        assert_eq!(pair.len(), 2);
+        assert!(matches!(&pair[1], Value::Int(2)));
+    } else {
+        panic!("pop should return a list");
+    }
+
+    // pop empty list errors
+    let r = call("pop", vec![Value::list(vec![])]);
+    assert!(r.is_err());
+
+    // remove
+    let r = call(
+        "remove",
+        vec![
+            Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+            Value::Int(1),
+        ],
+    );
+    assert!(r.is_ok());
+    if let Value::List(v) = r.unwrap() {
+        assert_eq!(v.len(), 2);
+        assert!(matches!(&v[0], Value::Int(1)));
+        assert!(matches!(&v[1], Value::Int(3)));
+    } else {
+        panic!("remove should return a list");
+    }
+
+    // insert
+    let r = call(
+        "insert",
+        vec![
+            Value::list(vec![Value::Int(1), Value::Int(3)]),
+            Value::Int(1),
+            Value::Int(2),
+        ],
+    );
+    assert!(r.is_ok());
+    if let Value::List(v) = r.unwrap() {
+        assert_eq!(v.len(), 3);
+        assert!(matches!(&v[1], Value::Int(2)));
+    }
+
+    // reverse
+    let r = call(
+        "reverse",
+        vec![Value::list(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ])],
+    );
+    assert!(r.is_ok());
+    if let Value::List(v) = r.unwrap() {
+        assert!(matches!(&v[0], Value::Int(3)));
+        assert!(matches!(&v[2], Value::Int(1)));
+    }
+
+    // sort ints
+    let r = call(
+        "sort",
+        vec![Value::list(vec![
+            Value::Int(3),
+            Value::Int(1),
+            Value::Int(2),
+        ])],
+    );
+    assert!(r.is_ok());
+    if let Value::List(v) = r.unwrap() {
+        assert!(matches!(&v[0], Value::Int(1)));
+        assert!(matches!(&v[2], Value::Int(3)));
+    }
+
+    // sort strings
+    let r = call(
+        "sort",
+        vec![Value::list(vec![
+            Value::string("banana"),
+            Value::string("apple"),
+            Value::string("cherry"),
+        ])],
+    );
+    assert!(r.is_ok());
+    if let Value::List(v) = r.unwrap() {
+        assert!(matches!(&v[0], Value::String(s) if s.as_str() == "apple"));
+    }
+
+    // slice
+    let r = call(
+        "slice",
+        vec![
+            Value::list(vec![
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+            ]),
+            Value::Int(1),
+            Value::Int(3),
+        ],
+    );
+    assert!(r.is_ok());
+    if let Value::List(v) = r.unwrap() {
+        assert_eq!(v.len(), 2);
+        assert!(matches!(&v[0], Value::Int(1)));
+        assert!(matches!(&v[1], Value::Int(2)));
+    }
+
+    // length of list
+    let r = call("len", vec![Value::list(vec![Value::Int(1), Value::Int(2)])]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Int(2)));
+
+    // contains on list
+    let r = call(
+        "contains",
+        vec![
+            Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+            Value::Int(2),
+        ],
+    );
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(true)));
+
+    let r = call(
+        "contains",
+        vec![
+            Value::list(vec![Value::Int(1), Value::Int(2)]),
+            Value::Int(5),
+        ],
+    );
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(false)));
+}
+
+#[test]
+fn test_map_operations() {
+    // empty map
+    let r = call("map", vec![]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Map(m) if m.is_empty()));
+
+    // map with pairs
+    let r = call(
+        "map",
+        vec![
+            Value::string("a"),
+            Value::Int(1),
+            Value::string("b"),
+            Value::Int(2),
+        ],
+    );
+    assert!(r.is_ok());
+    let m = r.unwrap();
+    assert!(matches!(&m, Value::Map(entries) if entries.len() == 2));
+
+    // map_set new key
+    let base = Value::map(vec![(Value::string("x"), Value::Int(10))]);
+    let r = call("map_set", vec![base, Value::string("y"), Value::Int(20)]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::Map(m) if m.len() == 2));
+
+    // map_set existing key replaces
+    let base = Value::map(vec![(Value::string("x"), Value::Int(10))]);
+    let r = call("map_set", vec![base, Value::string("x"), Value::Int(99)]);
+    assert!(r.is_ok());
+    if let Value::Map(entries) = r.unwrap() {
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].1, Value::Int(99)));
+    }
+
+    // map_get found
+    let m = Value::map(vec![(Value::string("k"), Value::Int(42))]);
+    let r = call("map_get", vec![m.clone(), Value::string("k")]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Int(42)));
+
+    // map_get not found errors
+    let r = call("map_get", vec![m.clone(), Value::string("missing")]);
+    assert!(r.is_err());
+
+    // map_get with default
+    let r = call(
+        "map_get",
+        vec![m.clone(), Value::string("missing"), Value::Int(0)],
+    );
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Int(0)));
+
+    // map_has
+    let r = call("map_has", vec![m.clone(), Value::string("k")]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(true)));
+
+    let r = call("map_has", vec![m.clone(), Value::string("nope")]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(false)));
+
+    // map_remove
+    let m2 = Value::map(vec![
+        (Value::string("a"), Value::Int(1)),
+        (Value::string("b"), Value::Int(2)),
+    ]);
+    let r = call("map_remove", vec![m2, Value::string("a")]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::Map(entries) if entries.len() == 1));
+
+    // map_keys
+    let m3 = Value::map(vec![
+        (Value::string("a"), Value::Int(1)),
+        (Value::string("b"), Value::Int(2)),
+    ]);
+    let r = call("map_keys", vec![m3.clone()]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::List(v) if v.len() == 2));
+
+    // map_values
+    let r = call("map_values", vec![m3.clone()]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::List(v) if v.len() == 2));
+
+    // map_entries
+    let r = call("map_entries", vec![m3]);
+    assert!(r.is_ok());
+    if let Value::List(entries) = r.unwrap() {
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], Value::List(pair) if pair.len() == 2));
+    }
+
+    // length of map
+    let m4 = Value::map(vec![
+        (Value::string("x"), Value::Int(1)),
+        (Value::string("y"), Value::Int(2)),
+    ]);
+    let r = call("len", vec![m4.clone()]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Int(2)));
+
+    // contains on map checks keys
+    let r = call("contains", vec![m4.clone(), Value::string("x")]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(true)));
+
+    let r = call("contains", vec![m4, Value::string("z")]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(false)));
+}
+
+#[test]
+fn test_set_operations() {
+    // empty set
+    let r = call("set", vec![]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Set(s) if s.is_empty()));
+
+    // set with items (deduplicated)
+    let r = call(
+        "set",
+        vec![Value::Int(1), Value::Int(2), Value::Int(1), Value::Int(3)],
+    );
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::Set(s) if s.len() == 3));
+
+    // set_add new item
+    let s = Value::set(vec![Value::Int(1), Value::Int(2)]);
+    let r = call("set_add", vec![s, Value::Int(3)]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::Set(s) if s.len() == 3));
+
+    // set_add duplicate
+    let s = Value::set(vec![Value::Int(1), Value::Int(2)]);
+    let r = call("set_add", vec![s, Value::Int(1)]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::Set(s) if s.len() == 2));
+
+    // set_remove existing
+    let s = Value::set(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let r = call("set_remove", vec![s, Value::Int(2)]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::Set(s) if s.len() == 2));
+
+    // set_has
+    let s = Value::set(vec![Value::Int(1), Value::Int(2)]);
+    let r = call("set_has", vec![s.clone(), Value::Int(1)]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(true)));
+
+    let r = call("set_has", vec![s.clone(), Value::Int(99)]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(false)));
+
+    // set_to_list
+    let s = Value::set(vec![Value::Int(1), Value::Int(2)]);
+    let r = call("set_to_list", vec![s]);
+    assert!(r.is_ok());
+    assert!(matches!(&r.unwrap(), Value::List(v) if v.len() == 2));
+
+    // length of set
+    let s = Value::set(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let r = call("len", vec![s.clone()]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Int(3)));
+
+    // contains on set
+    let r = call("contains", vec![s.clone(), Value::Int(2)]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(true)));
+
+    let r = call("contains", vec![s, Value::Int(99)]);
+    assert!(r.is_ok());
+    assert!(matches!(r.unwrap(), Value::Bool(false)));
+}
+
 // bytecode VM placeholder

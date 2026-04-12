@@ -1,0 +1,119 @@
++module TelegramBot
++doc "Telegram bot: webhook handler, voice transcription, multi-user LLM conversations via llm_takeover"
++shared telegram_token:String = ""
++shared admin_ids:String = "1815217"
+
++startup [io,async]
+  +await token:String = read_file("/home/marenz/.telegram-bot-token")
+  +set telegram_token = trim(token)
+  +return concat("TelegramBot ready, token loaded (", to_string(length(telegram_token)), " chars)")
+
++route POST "/webhook/telegram" -> handle_update
+
++fn handle_update(payload:String) -> String [io,async]
+  +spawn process_update_async(payload)
+  +return "{}"
++doc "Acknowledge Telegram webhook immediately, process in background"
+
++fn is_admin(chat_id:Int) -> Bool
+  +let ids:List(String) = split(admin_ids, ",")
+  +let id_str:String = to_string(chat_id)
+  +return contains(ids, id_str)
++doc "Check if a chat ID is in the admin list"
+
++test is_admin
+  +with chat_id=1815217 -> expect true
+  +with chat_id=999 -> expect false
+
++fn process_update_async(payload:String) -> String [io,async]
+  +let text:String = extract_text(payload)
+  +let chat_id:Int = extract_chat_id(payload)
+  +let voice_file_id:String = json_get(payload, "message.voice.file_id")
+  +if text == ""
+    +if voice_file_id == ""
+      +return "no text or voice"
+    +await text:String = transcribe_voice(voice_file_id)
+  +let ctx:String = concat("telegram:", to_string(chat_id))
+  +if is_admin(chat_id)
+    +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id))
+    +if reply != ""
+      +await _:String = send_message(chat_id, reply)
+    +return "ok"
+  +else
+    +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id))
+    +if reply != ""
+      +await _:String = send_message(chat_id, reply)
+    +return "ok"
++doc "Background processor: transcribe voice if needed, route to llm_takeover with per-user conversation context"
+
++fn transcribe_voice(file_id:String) -> String [io,async]
+  +let file_url:String = concat("https://api.telegram.org/bot", telegram_token, "/getFile?file_id=", file_id)
+  +await file_info:String = http_get(file_url)
+  +let file_path:String = json_get(file_info, "result.file_path")
+  +if file_path == ""
+    +return "[voice message - could not get file]"
+  +let download_url:String = concat("https://api.telegram.org/file/bot", telegram_token, "/", file_path)
+  +await audio:Attachment = http_post_binary(download_url, "")
+  +await result:String = http_upload("http://127.0.0.1:8090/transcribe", audio, "file", "")
+  +let transcript:String = json_get(result, "text")
+  +if transcript == ""
+    +return "[voice message - transcription failed]"
+  +return transcript
++doc "Download voice file from Telegram and transcribe via Whisper server"
+
++fn send_message(chat_id:Int, text:String) -> String [io,async]
+  +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendMessage")
+  +let body:String = concat("{\"chat_id\":", to_string(chat_id), ",\"text\":\"", json_escape(text), "\"}")
+  +await response:String = http_post(url, body)
+  +return response
++doc "Send a text message to a Telegram chat"
+
++fn send_reply(chat_id_str:String, text:String) -> String [io,async]
+  +let chat_id:Int = to_int(chat_id_str)
+  +await resp:String = send_message(chat_id, text)
+  +return resp
++doc "Callback for llm_takeover: send reply given chat_id as string"
+
++fn send_reply_with_attachment(chat_id_str:String, text:String, attachment:Attachment) -> String [io,async]
+  +let chat_id:Int = to_int(chat_id_str)
+  +await _:String = send_message(chat_id, text)
+  +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendAudio")
+  +let extra:String = concat("chat_id=", to_string(chat_id), "&title=", text, "&performer=AdapsisOS")
+  +await resp:String = http_upload(url, attachment, "audio", extra)
+  +return resp
++doc "Send a text reply with an audio attachment"
+
++fn send_audio_file(chat_id:Int, file_path:String, caption:String) -> String [io,async]
+  +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendDocument")
+  +let extra:String = concat("chat_id=", to_string(chat_id), "&caption=", caption)
+  +await resp:String = http_upload(url, file_path, "document", extra)
+  +return resp
++doc "Upload a local file to a Telegram chat"
+
++fn extract_chat_id(payload:String) -> Int
+  +let val:String = json_get(payload, "message.chat.id")
+  +if val == ""
+    +return 0
+  +return to_int(val)
++doc "Extract chat ID from Telegram webhook payload"
+
++test extract_chat_id
+  +with payload="{\"message\":{\"chat\":{\"id\":123}}}" -> expect 123
+
++fn extract_text(payload:String) -> String
+  +let val:String = json_get(payload, "message.text")
+  +return val
++doc "Extract message text from Telegram webhook payload"
+
++test extract_text
+  +with payload="{\"message\":{\"text\":\"hello\"}}" -> expect "hello"
+  +with payload="{\"message\":{}}" -> expect ""
+
++fn extract_reply(json:String) -> String
+  +let val:String = json_get(json, "reply")
+  +return val
++doc "Extract reply field from API response JSON"
+
++fn ping() -> String
+  +return "pong"
++doc "Health check"

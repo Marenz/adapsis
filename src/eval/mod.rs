@@ -46,6 +46,8 @@ pub enum Value {
     String(Arc<String>),
     Struct(InternedId, Arc<HashMap<InternedId, Value>>),
     List(Arc<Vec<Value>>),
+    Map(Arc<Vec<(Value, Value)>>),
+    Set(Arc<Vec<Value>>),
     Attachment(crate::attachment::Attachment),
     Ok(Box<Value>),
     Err(String),
@@ -80,6 +82,26 @@ impl fmt::Display for Value {
                     write!(f, "{item}")?;
                 }
                 write!(f, "]")
+            }
+            Value::Map(entries) => {
+                write!(f, "Map{{")?;
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{k}: {v}")?;
+                }
+                write!(f, "}}")
+            }
+            Value::Set(items) => {
+                write!(f, "Set{{")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "}}")
             }
             Value::Ok(v) => write!(f, "Ok({v})"),
             Value::Err(msg) => write!(f, "Err({msg})"),
@@ -117,6 +139,18 @@ impl Value {
     #[inline]
     pub fn list(items: Vec<Value>) -> Self {
         Value::List(Arc::new(items))
+    }
+
+    /// Convenience constructor: wrap a map vec in `Arc`.
+    #[inline]
+    pub fn map(entries: Vec<(Value, Value)>) -> Self {
+        Value::Map(Arc::new(entries))
+    }
+
+    /// Convenience constructor: wrap a set vec in `Arc`.
+    #[inline]
+    pub fn set(items: Vec<Value>) -> Self {
+        Value::Set(Arc::new(items))
     }
 
     /// Convenience constructor: wrap a struct name + field map in `Arc`.
@@ -212,6 +246,15 @@ impl Value {
                         .all(|(k, v)| f2.get(k).is_some_and(|v2| v.matches(v2)))
             }
             (Value::List(a), Value::List(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.matches(y))
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|((k1, v1), (k2, v2))| k1.matches(k2) && v1.matches(v2))
+            }
+            (Value::Set(a), Value::Set(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.matches(y))
             }
             (
@@ -1767,6 +1810,39 @@ pub(crate) fn eval_function_body(
                             }
                         }
                     }
+                    Value::Set(items) => {
+                        for item in items.iter().cloned() {
+                            env.push_scope();
+                            env.set(&binding.name, item);
+                            let result = eval_function_body(program, each_body, env);
+                            env.pop_scope();
+                            match result {
+                                Ok(val) => {
+                                    if !matches!(val, Value::None) {
+                                        return Ok(val);
+                                    }
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    Value::Map(entries) => {
+                        for (k, v) in entries.iter().cloned() {
+                            env.push_scope();
+                            // Binding is a 2-element list [key, value]
+                            env.set(&binding.name, Value::list(vec![k, v]));
+                            let result = eval_function_body(program, each_body, env);
+                            env.pop_scope();
+                            match result {
+                                Ok(val) => {
+                                    if !matches!(val, Value::None) {
+                                        return Ok(val);
+                                    }
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
                     _ => bail!("each: expected list, got {}", iter_val),
                 }
             }
@@ -2212,7 +2288,9 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             match &args[0] {
                 Value::String(s) => Ok(Value::Int(s.len() as i64)),
                 Value::List(l) => Ok(Value::Int(l.len() as i64)),
-                _ => bail!("len() expects string or list"),
+                Value::Map(m) => Ok(Value::Int(m.len() as i64)),
+                Value::Set(s) => Ok(Value::Int(s.len() as i64)),
+                _ => bail!("len() expects String, List, Map, or Set"),
             }
         }
         "error_suggest" | "failure_suggest" => {
@@ -2344,11 +2422,26 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
         }
         "contains" => {
             if args.len() != 2 {
-                bail!("contains(s, substr) expects 2 arguments");
+                bail!("contains(haystack, needle) expects 2 arguments");
             }
-            match (&args[0], &args[1]) {
-                (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_ref()))),
-                _ => bail!("contains expects (String, String)"),
+            match &args[0] {
+                Value::String(s) => match &args[1] {
+                    Value::String(sub) => Ok(Value::Bool(s.contains(sub.as_ref()))),
+                    _ => bail!("contains(String, ...) expects String needle"),
+                },
+                Value::List(items) => {
+                    let needle = &args[1];
+                    Ok(Value::Bool(items.iter().any(|v| v.matches(needle))))
+                }
+                Value::Map(entries) => {
+                    let needle = &args[1];
+                    Ok(Value::Bool(entries.iter().any(|(k, _)| k.matches(needle))))
+                }
+                Value::Set(items) => {
+                    let needle = &args[1];
+                    Ok(Value::Bool(items.iter().any(|v| v.matches(needle))))
+                }
+                _ => bail!("contains expects (String, String), (List, value), (Map, key), or (Set, item)"),
             }
         }
         "regex_match" => {
@@ -2564,7 +2657,318 @@ fn eval_builtin_list(callee: &str, args: Vec<Value>) -> Result<Value> {
                 _ => bail!("join expects (List, String)"),
             }
         }
+        "pop" => {
+            if args.len() != 1 {
+                bail!("pop(list) expects 1 argument");
+            }
+            match args.into_iter().next().unwrap() {
+                Value::List(mut items) => {
+                    let vec = Arc::make_mut(&mut items);
+                    if vec.is_empty() {
+                        bail!("pop: list is empty");
+                    }
+                    let removed = vec.pop().unwrap();
+                    Ok(Value::list(vec![Value::List(items), removed]))
+                }
+                _ => bail!("pop expects List"),
+            }
+        }
+        "remove" => {
+            if args.len() != 2 {
+                bail!("remove(list, index) expects 2 arguments");
+            }
+            match args.into_iter().collect::<Vec<_>>().as_mut_slice() {
+                [Value::List(items), Value::Int(i)] => {
+                    let idx = *i as usize;
+                    if idx >= items.len() {
+                        bail!("remove: index {idx} out of bounds (len {})", items.len());
+                    }
+                    let mut new_items = items.as_ref().clone();
+                    new_items.remove(idx);
+                    Ok(Value::list(new_items))
+                }
+                _ => bail!("remove expects (List, Int)"),
+            }
+        }
+        "insert" => {
+            if args.len() != 3 {
+                bail!("insert(list, index, item) expects 3 arguments");
+            }
+            let mut it = args.into_iter();
+            let list_val = it.next().unwrap();
+            let idx_val = it.next().unwrap();
+            let item = it.next().unwrap();
+            match (list_val, idx_val) {
+                (Value::List(items), Value::Int(i)) => {
+                    let idx = i as usize;
+                    let mut new_items = items.as_ref().clone();
+                    if idx > new_items.len() {
+                        bail!("insert: index {idx} out of bounds (len {})", new_items.len());
+                    }
+                    new_items.insert(idx, item);
+                    Ok(Value::list(new_items))
+                }
+                _ => bail!("insert expects (List, Int, value)"),
+            }
+        }
+        "reverse" => {
+            if args.len() != 1 {
+                bail!("reverse(list) expects 1 argument");
+            }
+            match args.into_iter().next().unwrap() {
+                Value::List(items) => {
+                    let mut new_items = items.as_ref().clone();
+                    new_items.reverse();
+                    Ok(Value::list(new_items))
+                }
+                _ => bail!("reverse expects List"),
+            }
+        }
+        "sort" => {
+            if args.len() != 1 {
+                bail!("sort(list) expects 1 argument");
+            }
+            match args.into_iter().next().unwrap() {
+                Value::List(items) => {
+                    let mut new_items = items.as_ref().clone();
+                    let mut err: Option<String> = None;
+                    new_items.sort_by(|a, b| {
+                        if err.is_some() {
+                            return std::cmp::Ordering::Equal;
+                        }
+                        match (a, b) {
+                            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                            (Value::Float(x), Value::Float(y)) => {
+                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            (Value::String(x), Value::String(y)) => x.cmp(y),
+                            _ => {
+                                err = Some(
+                                    "sort: only Int, Float, or String lists can be sorted"
+                                        .to_string(),
+                                );
+                                std::cmp::Ordering::Equal
+                            }
+                        }
+                    });
+                    if let Some(e) = err {
+                        bail!("{e}");
+                    }
+                    Ok(Value::list(new_items))
+                }
+                _ => bail!("sort expects List"),
+            }
+        }
+        "slice" => {
+            if args.len() != 3 {
+                bail!("slice(list, start, end) expects 3 arguments");
+            }
+            match (&args[0], &args[1], &args[2]) {
+                (Value::List(items), Value::Int(start), Value::Int(end)) => {
+                    let len = items.len();
+                    let s = (*start as usize).min(len);
+                    let e = (*end as usize).min(len);
+                    let s = s.min(e);
+                    Ok(Value::list(items[s..e].to_vec()))
+                }
+                _ => bail!("slice expects (List, Int, Int)"),
+            }
+        }
         _ => unreachable!("eval_builtin_list called with non-list callee: {callee}"),
+    }
+}
+
+fn eval_builtin_map(callee: &str, args: Vec<Value>) -> Result<Value> {
+    match callee {
+        "map" => {
+            if args.len() % 2 != 0 {
+                bail!("map() expects an even number of arguments (key, value pairs)");
+            }
+            let mut entries = Vec::with_capacity(args.len() / 2);
+            let mut it = args.into_iter();
+            while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                entries.push((k, v));
+            }
+            Ok(Value::map(entries))
+        }
+        "map_set" => {
+            if args.len() != 3 {
+                bail!("map_set(map, key, value) expects 3 arguments");
+            }
+            let mut it = args.into_iter();
+            let map_val = it.next().unwrap();
+            let key = it.next().unwrap();
+            let value = it.next().unwrap();
+            match map_val {
+                Value::Map(mut entries) => {
+                    let vec = Arc::make_mut(&mut entries);
+                    if let Some(pos) = vec.iter().position(|(k, _)| k.matches(&key)) {
+                        vec[pos].1 = value;
+                    } else {
+                        vec.push((key, value));
+                    }
+                    Ok(Value::Map(entries))
+                }
+                _ => bail!("map_set expects (Map, key, value)"),
+            }
+        }
+        "map_get" => {
+            if args.len() != 2 && args.len() != 3 {
+                bail!("map_get(map, key) or map_get(map, key, default) expects 2 or 3 arguments");
+            }
+            match &args[0] {
+                Value::Map(entries) => {
+                    let key = &args[1];
+                    match entries.iter().find(|(k, _)| k.matches(key)) {
+                        Some((_, v)) => Ok(v.clone()),
+                        None => {
+                            if args.len() == 3 {
+                                Ok(args[2].clone())
+                            } else {
+                                bail!("map_get: key not found")
+                            }
+                        }
+                    }
+                }
+                _ => bail!("map_get expects (Map, key)"),
+            }
+        }
+        "map_has" => {
+            if args.len() != 2 {
+                bail!("map_has(map, key) expects 2 arguments");
+            }
+            match &args[0] {
+                Value::Map(entries) => {
+                    let key = &args[1];
+                    Ok(Value::Bool(entries.iter().any(|(k, _)| k.matches(key))))
+                }
+                _ => bail!("map_has expects (Map, key)"),
+            }
+        }
+        "map_remove" => {
+            if args.len() != 2 {
+                bail!("map_remove(map, key) expects 2 arguments");
+            }
+            let mut it = args.into_iter();
+            let map_val = it.next().unwrap();
+            let key = it.next().unwrap();
+            match map_val {
+                Value::Map(mut entries) => {
+                    let vec = Arc::make_mut(&mut entries);
+                    vec.retain(|(k, _)| !k.matches(&key));
+                    Ok(Value::Map(entries))
+                }
+                _ => bail!("map_remove expects (Map, key)"),
+            }
+        }
+        "map_keys" => {
+            if args.len() != 1 {
+                bail!("map_keys(map) expects 1 argument");
+            }
+            match &args[0] {
+                Value::Map(entries) => {
+                    Ok(Value::list(entries.iter().map(|(k, _)| k.clone()).collect()))
+                }
+                _ => bail!("map_keys expects Map"),
+            }
+        }
+        "map_values" => {
+            if args.len() != 1 {
+                bail!("map_values(map) expects 1 argument");
+            }
+            match &args[0] {
+                Value::Map(entries) => {
+                    Ok(Value::list(entries.iter().map(|(_, v)| v.clone()).collect()))
+                }
+                _ => bail!("map_values expects Map"),
+            }
+        }
+        "map_entries" => {
+            if args.len() != 1 {
+                bail!("map_entries(map) expects 1 argument");
+            }
+            match &args[0] {
+                Value::Map(entries) => Ok(Value::list(
+                    entries
+                        .iter()
+                        .map(|(k, v)| Value::list(vec![k.clone(), v.clone()]))
+                        .collect(),
+                )),
+                _ => bail!("map_entries expects Map"),
+            }
+        }
+        _ => unreachable!("eval_builtin_map called with non-map callee: {callee}"),
+    }
+}
+
+fn eval_builtin_set(callee: &str, args: Vec<Value>) -> Result<Value> {
+    match callee {
+        "set" => {
+            // Deduplicate while preserving insertion order
+            let mut items: Vec<Value> = Vec::new();
+            for item in args {
+                if !items.iter().any(|v| v.matches(&item)) {
+                    items.push(item);
+                }
+            }
+            Ok(Value::set(items))
+        }
+        "set_add" => {
+            if args.len() != 2 {
+                bail!("set_add(set, item) expects 2 arguments");
+            }
+            let mut it = args.into_iter();
+            let set_val = it.next().unwrap();
+            let item = it.next().unwrap();
+            match set_val {
+                Value::Set(mut items) => {
+                    let vec = Arc::make_mut(&mut items);
+                    if !vec.iter().any(|v| v.matches(&item)) {
+                        vec.push(item);
+                    }
+                    Ok(Value::Set(items))
+                }
+                _ => bail!("set_add expects (Set, item)"),
+            }
+        }
+        "set_remove" => {
+            if args.len() != 2 {
+                bail!("set_remove(set, item) expects 2 arguments");
+            }
+            let mut it = args.into_iter();
+            let set_val = it.next().unwrap();
+            let item = it.next().unwrap();
+            match set_val {
+                Value::Set(mut items) => {
+                    let vec = Arc::make_mut(&mut items);
+                    vec.retain(|v| !v.matches(&item));
+                    Ok(Value::Set(items))
+                }
+                _ => bail!("set_remove expects (Set, item)"),
+            }
+        }
+        "set_has" => {
+            if args.len() != 2 {
+                bail!("set_has(set, item) expects 2 arguments");
+            }
+            match &args[0] {
+                Value::Set(items) => {
+                    let needle = &args[1];
+                    Ok(Value::Bool(items.iter().any(|v| v.matches(needle))))
+                }
+                _ => bail!("set_has expects (Set, item)"),
+            }
+        }
+        "set_to_list" => {
+            if args.len() != 1 {
+                bail!("set_to_list(set) expects 1 argument");
+            }
+            match args.into_iter().next().unwrap() {
+                Value::Set(items) => Ok(Value::List(items)),
+                _ => bail!("set_to_list expects Set"),
+            }
+        }
+        _ => unreachable!("eval_builtin_set called with non-set callee: {callee}"),
     }
 }
 
@@ -2880,7 +3284,13 @@ pub fn eval_builtin_or_user(
         | "json_escape"
         | "base64_encode" => eval_builtin_string(callee, args),
         // List operations
-        "list" | "push" | "get" | "join" => eval_builtin_list(callee, args),
+        "list" | "push" | "get" | "join"
+        | "pop" | "remove" | "insert" | "reverse" | "sort" | "slice" => eval_builtin_list(callee, args),
+        // Map operations
+        "map" | "map_set" | "map_get" | "map_has" | "map_remove"
+        | "map_keys" | "map_values" | "map_entries" => eval_builtin_map(callee, args),
+        // Set operations
+        "set" | "set_add" | "set_remove" | "set_has" | "set_to_list" => eval_builtin_set(callee, args),
         // Math operations
         "abs" | "sqrt" | "pow" | "floor"
         | "to_int" | "parse_int" | "int"
