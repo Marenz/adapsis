@@ -744,7 +744,7 @@ pub async fn execute_code(
                                     }
                                 }
 
-                                match branch.apply(&code) {
+                                match branch.apply_async(&code, agent_io_sender.as_ref()).await {
                                     Ok(results) => {
                                         let mut has_err = false;
                                         for (msg, ok) in &results {
