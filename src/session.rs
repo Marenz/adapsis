@@ -448,6 +448,137 @@ impl AgentBranch {
         Ok(results)
     }
 
+    /// Apply mutations with async IO support (for agents that need to run IO operations).
+    pub async fn apply_async(
+        &mut self,
+        source: &str,
+        io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
+    ) -> Result<Vec<(String, bool)>> {
+        let operations = crate::parser::parse(source)?;
+
+        // Check scope
+        for op in &operations {
+            if !self.scope.allows_mutation(op) {
+                return Ok(vec![(
+                    format!(
+                        "agent scope violation: {:?} not allowed in {:?}",
+                        std::mem::discriminant(op),
+                        self.scope
+                    ),
+                    false,
+                )]);
+            }
+        }
+
+        let mut results = Vec::new();
+        for op in &operations {
+            match op {
+                crate::parser::Operation::Test(test) => {
+                    let fn_name = if self.program.get_function(&test.function_name).is_some() {
+                        test.function_name.clone()
+                    } else {
+                        format!("{}.{}", self.name, test.function_name)
+                    };
+                    for case in &test.cases {
+                        match crate::eval::eval_test_case(&self.program, &fn_name, case) {
+                            Ok(detail) => {
+                                let passed = detail.contains("PASS");
+                                results.push((detail, passed));
+                                if passed {
+                                    store_test(&mut self.program, &fn_name, &test.cases);
+                                }
+                            }
+                            Err(e) => results.push((format!("test error: {e}"), false)),
+                        }
+                    }
+                }
+                crate::parser::Operation::Eval(ev) => {
+                    // Handle eval with async IO support
+                    if let Some(sender) = io_sender {
+                        if let Some(ref expr) = ev.inline_expr {
+                            let program = self.program.clone();
+                            let expr = expr.clone();
+                            let sender = sender.clone();
+                            let runtime = crate::eval::get_shared_runtime();
+                            let meta = crate::eval::get_shared_meta();
+                            let eval_result = tokio::task::spawn_blocking(move || {
+                                if let Some(rt) = runtime {
+                                    crate::eval::set_shared_runtime(Some(rt));
+                                }
+                                if let Some(m) = meta {
+                                    crate::eval::set_shared_meta(Some(m));
+                                }
+                                crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                            }).await;
+                            match eval_result {
+                                Ok(Ok(val)) => results.push((format!("= {val}"), true)),
+                                Ok(Err(e)) => results.push((format!("eval error: {e}"), false)),
+                                Err(e) => results.push((format!("eval task error: {e}"), false)),
+                            }
+                        } else {
+                            // Named function eval
+                            let program = self.program.clone();
+                            let fn_name = ev.function_name.clone();
+                            let input = ev.input.clone();
+                            let sender = sender.clone();
+                            let runtime = crate::eval::get_shared_runtime();
+                            let meta = crate::eval::get_shared_meta();
+                            let needs_async = program.get_function(&fn_name)
+                                .map(|f| f.effects.iter().any(|e| matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)))
+                                .unwrap_or(false);
+                            if needs_async {
+                                let eval_result = tokio::task::spawn_blocking(move || {
+                                    if let Some(rt) = runtime {
+                                        crate::eval::set_shared_runtime(Some(rt));
+                                    }
+                                    if let Some(m) = meta {
+                                        crate::eval::set_shared_meta(Some(m));
+                                    }
+                                    crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
+                                    crate::eval::eval_call_with_input(&program, &fn_name, &input)
+                                }).await;
+                                match eval_result {
+                                    Ok(Ok(val)) => results.push((format!("= {val}"), true)),
+                                    Ok(Err(e)) => results.push((format!("eval error: {e}"), false)),
+                                    Err(e) => results.push((format!("eval task error: {e}"), false)),
+                                }
+                            } else {
+                                match crate::eval::eval_call_with_input(&self.program, &fn_name, &ev.input) {
+                                    Ok(val) => results.push((format!("= {val}"), true)),
+                                    Err(e) => results.push((format!("eval error: {e}"), false)),
+                                }
+                            }
+                        }
+                    } else {
+                        results.push(("eval skipped: no IO sender".to_string(), false));
+                    }
+                }
+                crate::parser::Operation::Query(q) => {
+                    let table = crate::typeck::build_symbol_table(&self.program);
+                    let response = crate::typeck::handle_query(&self.program, &table, q, &self.runtime_state.http_routes);
+                    results.push((response, true));
+                }
+                crate::parser::Operation::Trace(_)
+                | crate::parser::Operation::Message { .. } => {}
+                _ => match crate::validator::apply_and_validate(&mut self.program, op) {
+                    Ok(msg) => {
+                        let pending: Vec<_> = self.program.pending_routes.drain(..).collect();
+                        for route in pending {
+                            self.runtime_state.http_routes.push(route);
+                        }
+                        results.push((msg, true))
+                    },
+                    Err(e) => results.push((format!("{e}"), false)),
+                },
+            }
+        }
+
+        record_mutation_failures(&mut self.runtime_state, &results);
+        self.mutations.push(source.to_string());
+        Ok(results)
+    }
+
     /// Merge this branch's mutations back into a session.
     /// Returns list of conflicts (empty if clean merge).
     pub fn merge_into(self, session: &mut Session) -> Vec<String> {
