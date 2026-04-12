@@ -482,14 +482,17 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "llm_takeover",
         aliases: &[],
-        short: "conversational LLM with per-context history: llm_takeover(context, message[, reply_fn, reply_arg])",
+        short: "conversational LLM with per-context history: llm_takeover(context, message[, reply_fn, reply_arg[, permission_model]])",
         long: "Calls the LLM with per-context conversation history and returns the text reply. \
                The context name (e.g. \"telegram:123\", \"agent:builder\") identifies the conversation — \
                each context has independent history. If the LLM response contains code, it is executed \
                in the background. If the code spawns agents (!agent), the agent runs asynchronously and \
                the reply callback is invoked when it completes. \
                Optional reply_fn/reply_arg configure a callback function for async notifications: \
-               reply_fn(reply_arg, text) is called to deliver agent completion summaries.",
+               reply_fn(reply_arg, text) is called to deliver agent completion summaries. \
+               Optional permission_model overrides which model's permissions are used for the program \
+               summary shown to the LLM (e.g. \"gemma4s\" to restrict non-admin users to execute-only view). \
+               Pass \"\" to use the default (active model's permissions).",
         category: BuiltinCategory::Io,
     },
     Builtin {

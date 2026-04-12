@@ -181,11 +181,22 @@ web/
 
 ## Conversation System (llm_takeover)
 - Per-context conversation history: `ConversationManager` in `SessionMeta`
-- `llm_takeover(context, message, reply_fn, reply_arg)` — conversational LLM with history
+- `llm_takeover(context, message, reply_fn, reply_arg[, permission_model])` — conversational LLM with history
 - Iterative loop: call LLM → execute code inline → feed results back (max 10 rounds)
 - `!agent` breaks the loop for background work with completion callback
 - Reply callbacks: `reply_fn(reply_arg, text)` for text, `reply_fn_with_attachment(...)` for files
 - Conversations persist across restarts via session serialization
+- Optional `permission_model` parameter overrides which model's permissions are used for the
+  program summary shown to the LLM. Used for non-admin Telegram users (e.g. `"gemma4s"` = execute-only).
+  The override only restricts visibility, not actual execution permissions.
+
+## Telegram Bot (TelegramBot.ax)
+- **Multi-admin**: `admin_user_ids` shared var, comma-separated (e.g. `"1815217,456789"`)
+- **Group chats**: messages in group/supergroup → `telegram:group:<chat_id>` context (shared by all senders)
+- **Admin DMs**: `telegram:<user_id>` context with full LLM access
+- **Non-admin DMs**: `telegram:user:<user_id>` context with sandboxed `permission_model` (default: `gemma4s`)
+- **Non-admin in groups**: same group context but with restricted `permission_model`
+- Context routing extracts `message.from.id` (sender) and `message.chat.type` (private/group/supergroup)
 
 ## Permission System
 Layered access control: Process level → Model level → Context level. Each layer can only restrict.

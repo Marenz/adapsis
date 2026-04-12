@@ -738,11 +738,22 @@ pub async fn handle_llm_takeover(
     let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
 
     // Get or create conversation, update callback info, build messages
+    //
+    // Use the actual permission config + access level so the program summary
+    // shown to the LLM is filtered correctly.  If the conversation has a
+    // `permission_model` override, use that model's permissions instead (this
+    // is how non-admin Telegram users get a restricted view).
     let program_summary = {
         let prog = program.read().await;
+        let perm_model_override = {
+            let meta_guard = meta.lock().unwrap();
+            meta_guard.conversations.get(&context)
+                .and_then(|c| c.permission_model.clone())
+        };
+        let effective_model = perm_model_override.as_deref().unwrap_or(llm_model);
         crate::validator::program_summary_for_model(
-            &prog, &std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
-            crate::permissions::AccessLevel::Full, llm_model,
+            &prog, &permission_config,
+            access_level, effective_model,
         )
     };
     let messages = {

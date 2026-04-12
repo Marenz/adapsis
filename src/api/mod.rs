@@ -1785,6 +1785,7 @@ async fn inject_message(
             message: req.message.clone(),
             reply_fn: None,
             reply_arg: None,
+            permission_model: None,
             reply: tx,
         }).await;
     }
