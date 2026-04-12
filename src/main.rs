@@ -1089,12 +1089,13 @@ async fn main() -> Result<()> {
                             }
                         }
                         coroutine::IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, permission_model, reply } => {
-                            // If a permission_model override was requested, set it on
-                            // the conversation before handing off to handle_llm_takeover.
-                            if let Some(ref pm) = permission_model {
+                            // Set or clear permission_model on the conversation.
+                            // This is per-message: admin messages clear any restriction
+                            // that a non-admin may have set on a shared group context.
+                            {
                                 let mut meta_guard = shared_meta_for_spawn.lock().unwrap();
                                 let conv = meta_guard.conversations.get_or_create(&context);
-                                conv.permission_model = Some(pm.clone());
+                                conv.permission_model = permission_model.clone();
                             }
 
                             let meta = shared_meta_for_spawn.clone();
