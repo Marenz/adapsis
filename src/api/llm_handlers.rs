@@ -732,6 +732,8 @@ pub async fn handle_llm_takeover(
     opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     opencode_git_dir: String,
     training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    access_level: crate::permissions::AccessLevel,
+    permission_config: std::sync::Arc<crate::permissions::PermissionConfig>,
 ) -> anyhow::Result<String> {
     let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
 
@@ -826,8 +828,8 @@ pub async fn handle_llm_takeover(
         runtime: runtime.clone(),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         save_notify: None,
-        access_level: crate::permissions::AccessLevel::Full,
-        permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+        access_level,
+        permission_config: permission_config.clone(),
     };
 
     // Build agent completion callback from conversation's reply info

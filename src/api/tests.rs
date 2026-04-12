@@ -1296,3 +1296,167 @@ fn llm_takeover_uses_shared_opencode_lock() {
         "handle_llm_takeover should use the opencode_git_dir parameter, not hardcode \".\""
     );
 }
+
+/// Regression test: handle_llm_takeover's tmp_config must use the caller's
+/// permission_config and access_level, not create its own with Full/default.
+/// Otherwise permission checks in execute_code are bypassed.
+#[test]
+fn llm_takeover_uses_caller_permissions() {
+    let source = include_str!("llm_handlers.rs");
+
+    // Find the tmp_config block in handle_llm_takeover
+    let takeover_start = source.find("pub async fn handle_llm_takeover").expect("handle_llm_takeover not found");
+    let takeover_body = &source[takeover_start..];
+
+    let config_start = takeover_body.find("let tmp_config = AppConfig").expect("tmp_config not found in handle_llm_takeover");
+    let config_section = &takeover_body[config_start..];
+    let config_end = config_section.find("};").expect("end of tmp_config not found");
+    let config_block = &config_section[..config_end];
+
+    // Must NOT use AccessLevel::Full — should use the passed-in access level
+    assert!(
+        !config_block.contains("AccessLevel::Full"),
+        "handle_llm_takeover creates its own AccessLevel::Full instead of using the caller's. \
+         This bypasses the permission system."
+    );
+
+    // Must NOT use PermissionConfig::default() — should use the passed-in config
+    assert!(
+        !config_block.contains("PermissionConfig::default()"),
+        "handle_llm_takeover creates its own PermissionConfig::default() instead of using the caller's. \
+         This bypasses the permission system."
+    );
+}
+
+/// Test: execute_code rejects +module on core modules for a restricted model.
+#[tokio::test]
+async fn execute_code_permission_blocks_core_module_write() {
+    let mut perm_config = crate::permissions::PermissionConfig::default();
+    perm_config.groups.insert("core".to_string(), vec!["Protected".to_string()]);
+    perm_config.model.insert("restricted-model".to_string(), crate::permissions::ModelPermissions {
+        group_perms: {
+            let mut m = std::collections::HashMap::new();
+            m.insert("core".to_string(), crate::permissions::PermissionLevel::Read);
+            m.insert("user".to_string(), crate::permissions::PermissionLevel::Write);
+            m
+        },
+        opencode: false,
+    });
+
+    let (config, _io_rx) = test_config_with_io();
+    // Override permissions on the config
+    let config = AppConfig {
+        access_level: crate::permissions::AccessLevel::Full,
+        permission_config: std::sync::Arc::new(perm_config),
+        llm_model: std::sync::Arc::new(std::sync::RwLock::new("restricted-model".to_string())),
+        ..config
+    };
+
+    // Try to modify a core module — should be rejected
+    let code = "+module Protected\n+fn hack() -> String\n  +return \"hacked\"\n+end";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(code, &config, &mut session, None).await;
+    assert!(res.has_errors, "modifying core module should be blocked");
+    assert!(
+        res.mutation_results.iter().any(|r| r.message.contains("permission denied")),
+        "error should mention 'permission denied', got: {:?}", res.mutation_results
+    );
+
+    // Try to modify a user module — should succeed
+    let code2 = "+module MyStuff\n+fn hello() -> String\n  +return \"hi\"\n+end";
+    let mut session = config.snapshot_working_set().await;
+    let res2 = execute_code(code2, &config, &mut session, None).await;
+    assert!(!res2.has_errors, "modifying user module should be allowed: {:?}", res2.mutation_results);
+}
+
+/// Test: execute_code blocks !opencode when model doesn't have permission.
+#[tokio::test]
+async fn execute_code_permission_blocks_opencode() {
+    let mut perm_config = crate::permissions::PermissionConfig::default();
+    perm_config.model.insert("no-opencode".to_string(), crate::permissions::ModelPermissions {
+        group_perms: {
+            let mut m = std::collections::HashMap::new();
+            m.insert("user".to_string(), crate::permissions::PermissionLevel::Write);
+            m
+        },
+        opencode: false,
+    });
+
+    let (config, _io_rx) = test_config_with_io();
+    let config = AppConfig {
+        access_level: crate::permissions::AccessLevel::Full,
+        permission_config: std::sync::Arc::new(perm_config),
+        llm_model: std::sync::Arc::new(std::sync::RwLock::new("no-opencode".to_string())),
+        ..config
+    };
+
+    let code = "!opencode Add a new feature";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(code, &config, &mut session, None).await;
+    assert!(
+        res.mutation_results.iter().any(|r| r.message.contains("permission denied")),
+        "!opencode should be blocked, got: {:?}", res.mutation_results
+    );
+}
+
+/// Test: execute_code blocks ?source on modules below Read permission.
+#[tokio::test]
+async fn execute_code_permission_blocks_source_query() {
+    let mut perm_config = crate::permissions::PermissionConfig::default();
+    perm_config.groups.insert("secret".to_string(), vec!["Hidden".to_string()]);
+    perm_config.model.insert("limited".to_string(), crate::permissions::ModelPermissions {
+        group_perms: {
+            let mut m = std::collections::HashMap::new();
+            m.insert("secret".to_string(), crate::permissions::PermissionLevel::Execute);
+            m.insert("user".to_string(), crate::permissions::PermissionLevel::Write);
+            m
+        },
+        opencode: false,
+    });
+
+    let (config, _io_rx) = test_config_with_io();
+    let config = AppConfig {
+        access_level: crate::permissions::AccessLevel::Full,
+        permission_config: std::sync::Arc::new(perm_config),
+        llm_model: std::sync::Arc::new(std::sync::RwLock::new("limited".to_string())),
+        ..config
+    };
+
+    // First create the Hidden module so it exists
+    let setup = "+module Hidden\n+fn secret() -> String\n  +return \"42\"\n+end";
+    let mut session = config.snapshot_working_set().await;
+    // This will fail because "limited" can't write to "secret" group
+    // So create with a permissive config first
+    let full_config = AppConfig {
+        permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+        ..config.clone()
+    };
+    let mut session = full_config.snapshot_working_set().await;
+    execute_code(setup, &full_config, &mut session, None).await;
+    full_config.write_back_working_set(&session).await;
+
+    // Now try ?source with limited model
+    let code = "?source Hidden";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(code, &config, &mut session, None).await;
+    assert!(
+        res.mutation_results.iter().any(|r| r.message.contains("permission denied")),
+        "?source on execute-only module should be blocked, got: {:?}", res.mutation_results
+    );
+}
+
+/// Test: process-level ExecuteOnly blocks all mutations regardless of model config.
+#[tokio::test]
+async fn execute_code_process_level_caps_everything() {
+    let (config, _io_rx) = test_config_with_io();
+    let config = AppConfig {
+        access_level: crate::permissions::AccessLevel::ExecuteOnly,
+        permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+        ..config
+    };
+
+    let code = "+module Anything\n+fn test() -> String\n  +return \"hi\"\n+end";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(code, &config, &mut session, None).await;
+    assert!(res.has_errors, "ExecuteOnly should block all mutations");
+}

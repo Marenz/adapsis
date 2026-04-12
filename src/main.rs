@@ -928,6 +928,15 @@ async fn main() -> Result<()> {
             let opencode_git_dir_for_spawn = opencode_git_dir_shared.clone();
             let training_log_shared: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>>> = std::sync::Arc::new(std::sync::RwLock::new(None));
             let training_log_for_spawn = training_log_shared.clone();
+            let access_level_parsed: permissions::AccessLevel = access_level.parse().expect("invalid --access-level");
+            let perm_config = if let Some(ref path) = permissions_file {
+                permissions::PermissionConfig::load(std::path::Path::new(path)).expect("failed to load permissions file")
+            } else {
+                permissions::PermissionConfig::default()
+            };
+            let access_level_for_spawn = access_level_parsed;
+            let perm_config_for_spawn = std::sync::Arc::new(perm_config.clone());
+            let perm_config_for_config = perm_config_for_spawn.clone();
             // Clone resources for startup execution (before IO loop moves them)
             let io_sender_for_startup = runtime.io_sender();
             let io_sender_for_autonomous = runtime.io_sender();
@@ -1092,6 +1101,8 @@ async fn main() -> Result<()> {
                             let oc_lock = opencode_lock_for_spawn.clone();
                             let oc_git_dir = opencode_git_dir_for_spawn.read().unwrap().clone();
                             let t_log = training_log_for_spawn.read().unwrap().clone();
+                            let al = access_level_for_spawn;
+                            let pc = perm_config_for_spawn.clone();
 
                             tokio::spawn(async move {
                                 let result = crate::api::handle_llm_takeover(
@@ -1100,6 +1111,7 @@ async fn main() -> Result<()> {
                                     &llm_url, &llm_model, llm_key,
                                     io_sender, task_registry, snap_registry,
                                     oc_lock, oc_git_dir, t_log,
+                                    al, pc,
                                 ).await;
                                 let _ = reply.send(result);
                             });
@@ -1442,13 +1454,8 @@ async fn main() -> Result<()> {
             // task below debounces and saves after 2 seconds of quiet.
             let (save_tx, save_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-            let access_level = access_level.parse::<permissions::AccessLevel>().expect("invalid --access-level");
-            let permission_config = if let Some(ref pf) = permissions_file {
-                std::sync::Arc::new(permissions::PermissionConfig::load(std::path::Path::new(pf))
-                    .expect("failed to load permissions file"))
-            } else {
-                std::sync::Arc::new(permissions::PermissionConfig::default())
-            };
+            let permission_config = perm_config_for_config;
+            let access_level_for_config = access_level_parsed;
 
             let config = api::AppConfig {
                 program: tier1_program,
@@ -1472,7 +1479,7 @@ async fn main() -> Result<()> {
                 runtime: shared_runtime.clone(),
                 sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
                 save_notify: Some(save_tx),
-                access_level,
+                access_level: access_level_for_config,
                 permission_config,
             };
 
