@@ -357,6 +357,23 @@ pub async fn execute_code(
                 | crate::parser::Operation::OpenCode(_)));
 
             if has_mutations {
+                // Permission check: verify the model can modify the affected modules
+                let model_name = config.llm_model.read().unwrap().clone();
+                for op in &ops {
+                    if let crate::parser::Operation::Module(decl) = op {
+                        let perm = config.permission_config.resolve(
+                            config.access_level, &model_name, &decl.name,
+                        );
+                        if perm < crate::permissions::PermissionLevel::Write {
+                            result.push_err(format!(
+                                "permission denied: model '{}' cannot modify module '{}' (level: {:?}, need: Write)",
+                                model_name, decl.name, perm
+                            ));
+                            return result;
+                        }
+                    }
+                }
+
                 // Filter out !plan lines — already handled in the pre-pass above.
                 // Without this, apply_to_tiers_async re-parses the raw code and
                 // processes Plan operations a second time.
@@ -553,6 +570,22 @@ pub async fn execute_code(
                         }
                     }
                     crate::parser::Operation::Query(query) => {
+                        // Permission check for ?source queries
+                        if query.trim().starts_with("?source ") {
+                            let target = query.trim().strip_prefix("?source ").unwrap_or("").trim();
+                            let module_name = target.split('.').next().unwrap_or(target);
+                            let model_name = config.llm_model.read().unwrap().clone();
+                            let perm = config.permission_config.resolve(
+                                config.access_level, &model_name, module_name,
+                            );
+                            if perm < crate::permissions::PermissionLevel::Read {
+                                result.push_err(format!(
+                                    "permission denied: model '{}' cannot read source of module '{}'",
+                                    model_name, module_name
+                                ));
+                                continue;
+                            }
+                        }
                         let response = if query.trim() == "?inbox" || query.trim().starts_with("?inbox") {
                             let msgs = crate::session::peek_messages(&session.meta, "main");
                             if msgs.is_empty() {
@@ -616,6 +649,14 @@ pub async fn execute_code(
                         result.push_ok(format!("Watching {function_name}({args}) every {interval_ms}ms"));
                     }
                     crate::parser::Operation::Agent { name, scope, task, model } => {
+                        let model_name = config.llm_model.read().unwrap().clone();
+                        if !config.permission_config.can_agent(config.access_level, &model_name) {
+                            result.push_err(format!(
+                                "permission denied: cannot spawn agents (access_level: {:?})",
+                                config.access_level
+                            ));
+                            continue;
+                        }
                         eprintln!("[execute_code:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
 
                         let agent_scope = crate::session::AgentScope::parse(scope);
@@ -949,6 +990,14 @@ pub async fn execute_code(
 
             // Handle !opencode tasks (sequentially, with lock)
             for task in opencode_tasks {
+                let model_name = config.llm_model.read().unwrap().clone();
+                if !config.permission_config.can_opencode(config.access_level, &model_name) {
+                    result.push_err(format!(
+                        "permission denied: model '{}' cannot use !opencode (access_level: {:?})",
+                        model_name, config.access_level
+                    ));
+                    continue;
+                }
                 eprintln!("[execute_code:opencode] acquiring lock...");
                 let _lock = config.opencode_lock.lock().await;
                 eprintln!("[execute_code:opencode] {task}");

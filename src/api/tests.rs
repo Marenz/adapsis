@@ -30,6 +30,8 @@ fn test_config() -> AppConfig {
         )),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         save_notify: None,
+        access_level: crate::permissions::AccessLevel::Full,
+        permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
     }
 }
 
@@ -683,6 +685,8 @@ fn test_config_with_io() -> (
         )),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         save_notify: None,
+        access_level: crate::permissions::AccessLevel::Full,
+        permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
     };
     (config, io_rx)
 }

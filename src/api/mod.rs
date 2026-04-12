@@ -185,6 +185,10 @@ pub struct AppConfig {
     /// Save notification channel — send `()` to trigger a debounced save.
     /// `None` in tests and in temporary AppConfig instances (e.g. llm_takeover).
     pub save_notify: Option<tokio::sync::mpsc::Sender<()>>,
+    /// Process-level access cap.
+    pub access_level: crate::permissions::AccessLevel,
+    /// Per-model permission configuration.
+    pub permission_config: std::sync::Arc<crate::permissions::PermissionConfig>,
 }
 
 impl AppConfig {

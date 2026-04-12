@@ -7,6 +7,7 @@ mod coroutine;
 mod eval;
 mod events;
 pub mod intern;
+mod permissions;
 pub mod library;
 mod llm;
 mod orchestrator;
@@ -230,6 +231,14 @@ enum Command {
         /// Maximum iterations per AI request (default 20)
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
+
+        /// Process-level access cap: full, adapsis-only, user-only, execute-only
+        #[arg(long, default_value = "full")]
+        access_level: String,
+
+        /// Path to permissions TOML file for per-model permissions
+        #[arg(long)]
+        permissions_file: Option<String>,
     },
 
     /// Send a message to a running AdapsisOS instance
@@ -817,7 +826,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations, access_level, permissions_file } => {
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -1433,6 +1442,14 @@ async fn main() -> Result<()> {
             // task below debounces and saves after 2 seconds of quiet.
             let (save_tx, save_rx) = tokio::sync::mpsc::channel::<()>(1);
 
+            let access_level = access_level.parse::<permissions::AccessLevel>().expect("invalid --access-level");
+            let permission_config = if let Some(ref pf) = permissions_file {
+                std::sync::Arc::new(permissions::PermissionConfig::load(std::path::Path::new(pf))
+                    .expect("failed to load permissions file"))
+            } else {
+                std::sync::Arc::new(permissions::PermissionConfig::default())
+            };
+
             let config = api::AppConfig {
                 program: tier1_program,
                 meta: shared_meta.clone(),
@@ -1455,6 +1472,8 @@ async fn main() -> Result<()> {
                 runtime: shared_runtime.clone(),
                 sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
                 save_notify: Some(save_tx),
+                access_level,
+                permission_config,
             };
 
             // Clone tier handles before config is moved into the router

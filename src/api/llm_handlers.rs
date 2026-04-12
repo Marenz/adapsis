@@ -817,6 +817,8 @@ pub async fn handle_llm_takeover(
         runtime: runtime.clone(),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         save_notify: None,
+        access_level: crate::permissions::AccessLevel::Full,
+        permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
     };
 
     // Build agent completion callback from conversation's reply info
