@@ -899,7 +899,7 @@ pub async fn handle_llm_takeover(
 
         llm_messages.push(crate::llm::ChatMessage::assistant(&output.text));
 
-        // Extract text reply (prose without code)
+        // Extract text reply (prose without code/commands)
         let prose = {
             let mut clean = output.text.clone();
             while let Some(s) = clean.find("<think>") {
@@ -913,7 +913,10 @@ pub async fn handle_llm_takeover(
             if let Some(s) = clean.find("<code>") {
                 clean.truncate(s);
             }
-            clean.trim().to_string()
+            // Strip !done — it's a command, not user-facing text.
+            // Can appear as the entire response or trailing after prose.
+            let trimmed = clean.trim().trim_end_matches("!done").trim().to_string();
+            trimmed
         };
 
         if !prose.is_empty() {
