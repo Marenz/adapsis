@@ -389,7 +389,6 @@ pub async fn execute_code(
                     Ok(res) => {
                         config.write_back_working_set(session).await;
                         for (msg, ok) in res {
-                            eprintln!("[execute_code:{}] {msg}", if ok { "ok" } else { "err" });
                             if !ok { result.has_errors = true; }
                             result.mutation_results.push(MutationResult { message: msg, success: ok });
                         }
@@ -433,12 +432,10 @@ pub async fn execute_code(
                             };
                             match case_result {
                                 Ok(msg) => {
-                                    eprintln!("[execute_code:pass] {msg}");
                                     result.push_test_pass(msg);
                                 }
                                 Err(e) => {
                                     all_passed = false;
-                                    eprintln!("[execute_code:fail] {e}");
                                     result.push_test_fail(format!("{e}"));
                                 }
                             }
@@ -953,14 +950,10 @@ pub async fn execute_code(
                                 }
                                 match crate::eval::eval_function_body_pub(&session.program, &[stmt], &mut env) {
                                     Ok(val) => {
-                                        let msg = format!("executed: {val}");
-                                        eprintln!("[execute_code:exec] {msg}");
-                                        result.push_ok(msg);
+                                        result.push_ok(format!("executed: {val}"));
                                     }
                                     Err(e) => {
-                                        let msg = format!("exec error: {e}");
-                                        eprintln!("[execute_code:exec:err] {msg}");
-                                        result.push_err(msg);
+                                        result.push_err(format!("exec error: {e}"));
                                     }
                                 }
                                 config.sync_async_side_effects_into(session);
