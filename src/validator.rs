@@ -1749,6 +1749,55 @@ pub fn program_summary_compact(program: &ast::Program) -> String {
     out
 }
 
+/// Like `program_summary_compact` but filters modules based on model permissions.
+/// - None: module not shown at all
+/// - Execute: show module name and function signatures (no doc)
+/// - Read/Write: show everything including docs
+pub fn program_summary_for_model(
+    program: &ast::Program,
+    perm_config: &crate::permissions::PermissionConfig,
+    access_level: crate::permissions::AccessLevel,
+    model_name: &str,
+) -> String {
+    use crate::permissions::PermissionLevel;
+    let mut out = String::new();
+
+    let visible_modules: Vec<&ast::Module> = program.modules.iter()
+        .filter(|m| perm_config.resolve(access_level, model_name, &m.name) > PermissionLevel::None)
+        .collect();
+
+    out.push_str(&format!("Program: {} modules\n", visible_modules.len()));
+
+    for module in &visible_modules {
+        let perm = perm_config.resolve(access_level, model_name, &module.name);
+
+        out.push_str(&format!("Module {}", module.name));
+        if perm >= PermissionLevel::Read {
+            if let Some(ref doc) = module.doc {
+                out.push_str(&format!(": {doc}"));
+            }
+        }
+        out.push('\n');
+
+        for func in &module.functions {
+            let params = func.params.iter()
+                .map(|p| format!("{}:{:?}", p.name, p.ty))
+                .collect::<Vec<_>>().join(", ");
+            let effects = if func.effects.is_empty() { String::new() }
+                else { format!(" [{:?}]", func.effects) };
+            out.push_str(&format!("  {} ({})->{:?}{}", func.name, params, func.return_type, effects));
+            if perm >= PermissionLevel::Read {
+                if let Some(ref doc) = func.doc {
+                    out.push_str(&format!(" — {doc}"));
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 /// Full program summary with all signatures.
 pub fn program_summary(program: &ast::Program) -> String {
     let mut out = String::new();

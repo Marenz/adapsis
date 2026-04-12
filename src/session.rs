@@ -519,6 +519,11 @@ pub struct Conversation {
     /// System prompt override for this conversation (if None, uses default)
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Override the model name used for permission checks in this context.
+    /// When set, permissions are resolved using this name instead of the active model.
+    /// Can only restrict, not expand beyond the active model's permissions.
+    #[serde(default)]
+    pub permission_model: Option<String>,
 }
 
 impl Conversation {
@@ -529,6 +534,7 @@ impl Conversation {
             reply_fn: None,
             reply_arg: None,
             system_prompt: None,
+            permission_model: None,
         }
     }
 

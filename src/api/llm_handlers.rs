@@ -234,7 +234,10 @@ pub async fn ask(
         let context = format!(
             "Working directory: {}\n{}{}{}\nUser: {}{}",
             config.project_dir,
-            crate::validator::program_summary_compact(&session.program),
+            crate::validator::program_summary_for_model(
+                &session.program, &config.permission_config, config.access_level,
+                &config.llm_model.read().unwrap(),
+            ),
             load_errors_ctx,
             plan_ctx,
             req.message,
@@ -412,7 +415,10 @@ pub async fn ask_stream(
             // Tier 1: read program briefly for summary
             let program_summary = {
                 let program = config_clone.program.read().await;
-                crate::validator::program_summary_compact(&program)
+                crate::validator::program_summary_for_model(
+                    &program, &config_clone.permission_config, config_clone.access_level,
+                    &config_clone.llm_model.read().unwrap(),
+                )
             };
             // Tier 3: read/write meta briefly for chat history + plan context
             // Note: guard must be dropped before any .await — std::sync::MutexGuard is not Send.
@@ -732,7 +738,10 @@ pub async fn handle_llm_takeover(
     // Get or create conversation, update callback info, build messages
     let program_summary = {
         let prog = program.read().await;
-        crate::validator::program_summary_compact(&prog)
+        crate::validator::program_summary_for_model(
+            &prog, &std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+            crate::permissions::AccessLevel::Full, llm_model,
+        )
     };
     let messages = {
         let mut meta_guard = meta.lock().unwrap();

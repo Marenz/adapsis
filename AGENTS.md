@@ -187,11 +187,55 @@ web/
 - Reply callbacks: `reply_fn(reply_arg, text)` for text, `reply_fn_with_attachment(...)` for files
 - Conversations persist across restarts via session serialization
 
-## Module Freezing
-- `+frozen` inside `+module` body marks the module as protected
-- Frozen modules reject all mutations except `+doc` updates
-- Prevents dumb/small models from rewriting infrastructure
-- Currently frozen: TelegramBot, MusicGen, Stratum, Memory
+## Permission System
+Layered access control: Process level → Model level → Context level. Each layer can only restrict.
+
+### Process level (`--access-level` CLI flag)
+- `full` — everything allowed including `!opencode`
+- `adapsis-only` — can modify any module, no `!opencode`
+- `user-only` — can only modify non-core modules, no `!opencode`
+- `execute-only` — cannot modify anything, can only `!eval`
+
+### Model level (`--permissions-file` → `permissions.toml`)
+```toml
+[groups]
+core = ["TelegramBot", "MusicGen"]
+data = ["Stratum", "Memory"]
+infra = ["GithubSync", "IssueReader"]
+# Modules not in any group belong to "user"
+
+[model.gemma4s]
+core = "execute"    # can call functions only
+data = "execute"
+user = "execute"
+opencode = false
+
+[model."chatgpt/gpt-5.4"]
+core = "read"       # can call + view source
+data = "write"      # can modify
+user = "write"
+opencode = false
+
+[model."anthropic/claude-opus-4-6"]
+core = "write"
+opencode = true
+```
+
+Permission levels per group: `none` < `execute` < `read` < `write`
+- `none` — module invisible
+- `execute` — can `!eval` functions
+- `read` — execute + `?source`, visible in program summary with docs
+- `write` — read + can `+module` to modify
+
+### Context level override
+Each conversation can set `permission_model` to use a different model's permissions.
+Only restricts — never expands beyond the active model.
+
+### Legacy: `+frozen`
+`+frozen` inside `+module` still works as a secondary safeguard but is superseded by the permission system.
+
+### Program summary filtering
+The system prompt only shows modules the model can at least Read. Execute-level modules show function signatures without docs.
 
 ## Model Management
 - `llm_set_model(name)` — switch LLM at runtime (validates before switching)
