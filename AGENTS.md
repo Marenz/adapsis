@@ -89,14 +89,16 @@ POST /api/sessions/:id/mutate — mutate in a specific session
 ```
 src/
   main.rs        — CLI, autonomous loop, session management
-  api.rs         — HTTP API, ask/ask_stream handlers, !opencode orchestration
+  api/           — HTTP API: mod.rs (routes), execute.rs (execute_code pipeline),
+                   llm_handlers.rs (ask/ask_stream, llm_takeover), tests.rs
   ast.rs         — Core AST (Program, Module, Function, Statement, Expr, Type, Effect)
   parser.rs      — Line-oriented parser (+, !, ? prefixes, +end blocks)
   validator.rs   — Parser→AST, mutations, !replace, !remove, !module merging
-  eval.rs        — Tree-walking interpreter, builtins, test runner, +match on Result
+  eval/          — Tree-walking interpreter, builtins, test runner, +match on Result
+  vm.rs          — Stack-based bytecode VM (tier 2, see Execution Tiers)
   intern.rs      — String interner (InternedId=u32) for variable/field/variant names
   compiler.rs    — Cranelift JIT (Int, Float, Bool, String, Struct, While, Match)
-  coroutine.rs   — Async IO runtime (TCP, HTTP, files, shell, LLM, mocks, task registry)
+  coroutine/     — Async IO runtime (TCP, HTTP, files, shell, LLM, mocks, task registry)
   llm.rs         — LLM client (OpenAI-compatible, streaming, thinking mode, retries)
   session.rs     — Session persistence (program AST, tests, roadmap, plan, mocks, chat)
   library.rs     — ~/.config/adapsis/modules/ auto-load/persist
@@ -109,6 +111,27 @@ web/
 ```
 
 - Shared module vars live in `RuntimeState.shared_vars` under `Module.name` keys; eval/test paths must install both shared runtime and shared program snapshots so missing shared slots can be materialized from `+shared` defaults.
+
+## Execution Tiers
+Function evaluation goes through up to three tiers (fastest first):
+
+1. **Cranelift JIT** (`compiler.rs`) — numeric/string functions only
+   (`is_compilable_function` gate; bails on each/await/spawn/yield/List/Map/Union).
+2. **Bytecode VM** (`vm.rs`) — near-full language coverage.
+   - Sync path: `eval_compiled_or_interpreted_cached` → `try_vm_execute` (eval/mod.rs).
+   - Async path: `eval_async_function` (eval/mod.rs) — IO suspensions serviced
+     via `CoroutineHandle::execute_await`, so mocks/in-process ops work.
+   - The VM **bails to the tree-walker** on: `+shared` variable access
+     (unresolved identifiers), `+spawn`, `+yield`, `+source`/`+event`.
+     Bare identifiers only compile to variant constructors if they're declared
+     union variants — anything else is a compile error (fallback signal).
+   - Async fallback rule: only safe BEFORE any IO has been performed.
+     `eval_async_function` tracks this; never re-run a function after IO.
+3. **Tree-walker** (`eval/mod.rs`) — universal fallback; the only tier with
+   `Env`-based shared vars, function stubs, spawned-task snapshot tracking.
+
+Tests (`+test`) always run the tree-walker with mock-only coroutine handles.
+Spawned tasks (task_id set) always use the tree-walker (snapshot tracking).
 
 ## Key Adapsis Commands
 ```
