@@ -971,7 +971,7 @@ pub struct StatementDetail {
     pub summary: String,
 }
 
-fn format_type(ty: &crate::ast::Type) -> String {
+pub(crate) fn format_type(ty: &crate::ast::Type) -> String {
     match ty {
         crate::ast::Type::Int => "Int".into(),
         crate::ast::Type::Float => "Float".into(),
