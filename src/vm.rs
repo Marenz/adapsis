@@ -690,6 +690,11 @@ pub enum VmResult {
 /// to avoid string hashing on every call dispatch (issue #29).
 pub type CompileCache = std::collections::HashMap<InternedId, CompiledFunction>;
 
+/// Execute a compiled function without IO support — returns `VmResult::Await`
+/// on the first IO suspension instead of servicing it. Test-only: production
+/// callers use `execute_with_io`, which keeps the compile cache alive across
+/// resumptions.
+#[cfg(test)]
 pub fn execute(
     compiled: &CompiledFunction,
     args: Vec<Value>,
@@ -729,11 +734,17 @@ fn execute_cached(
 
 /// Resume a suspended VM after an async IO operation completes.
 /// Pushes the IO result onto the stack and continues execution.
-pub fn resume(mut vm_state: VmState, io_result: Value, program: &ast::Program) -> Result<VmResult> {
+/// The `cache` and `interner` must be the same ones used for the initial
+/// execution so lazily-compiled callees stay available.
+fn resume(
+    mut vm_state: VmState,
+    io_result: Value,
+    program: &ast::Program,
+    cache: &mut CompileCache,
+    interner: &mut StringInterner,
+) -> Result<VmResult> {
     vm_state.stack.push(io_result);
-    let mut cache = CompileCache::new();
-    let mut interner = program.interner.clone();
-    run_loop(vm_state, program, &mut cache, &mut interner)
+    run_loop(vm_state, program, cache, interner)
 }
 
 /// Execute a compiled function with async IO support.
@@ -759,9 +770,7 @@ pub fn execute_with_io(
                 vm_state,
             } => {
                 let io_result = io_handler(&op_name, &args)?;
-                let mut vm_state = vm_state;
-                vm_state.stack.push(io_result);
-                result = run_loop(vm_state, program, &mut cache, &mut interner)?;
+                result = resume(vm_state, io_result, program, &mut cache, &mut interner)?;
             }
         }
     }
