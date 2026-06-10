@@ -50,7 +50,8 @@ When modifying the runtime (adding builtins, IO operations, commands, syntax cha
 ```bash
 cargo build --release
 cargo test --release                    # Rust unit tests
-for f in examples/*.ax; do cargo run -q --release -- test "$f" 2>&1 | grep -c PASS; done | paste -sd+ | bc  # Adapsis tests
+# Adapsis tests: `adapsis test` exits non-zero on failure and prints "TEST SUMMARY: N passed, M failed"
+for f in examples/*.ax; do ./target/release/adapsis test "$f" >/dev/null 2>&1 || echo "FAILED: $f"; done
 ```
 
 ## Run AdapsisOS

@@ -521,16 +521,28 @@ async fn main() -> Result<()> {
                 meta.function_stubs = fn_stubs.clone();
                 eval::set_shared_meta(Some(std::sync::Arc::new(std::sync::Mutex::new(meta))));
             }
+            let mut passed = 0usize;
+            let mut failed = 0usize;
             for test_op in &test_ops {
                 if let parser::Operation::Test(test) = test_op {
                     println!("\n--- Testing {} ---", test.function_name);
                     for (i, case) in test.cases.iter().enumerate() {
                         match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
-                            Ok(msg) => println!("  PASS [{i}]: {msg}"),
-                            Err(e) => eprintln!("  FAIL [{i}]: {e}"),
+                            Ok(msg) => {
+                                passed += 1;
+                                println!("  PASS [{i}]: {msg}");
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                eprintln!("  FAIL [{i}]: {e}");
+                            }
                         }
                     }
                 }
+            }
+            println!("\nTEST SUMMARY: {passed} passed, {failed} failed");
+            if failed > 0 {
+                std::process::exit(1);
             }
         }
         Command::Compile { path, func, args } => {
