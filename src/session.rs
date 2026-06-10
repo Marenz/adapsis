@@ -71,6 +71,7 @@ impl FailureHistory {
         self.entries.iter().skip(start).map(String::as_str).collect()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -360,7 +361,11 @@ impl AgentScope {
 pub struct AgentBranch {
     pub name: String,
     pub scope: AgentScope,
+    /// Task description — written at construction, read in tests/diagnostics.
+    #[allow(dead_code)]
     pub task: String,
+    /// Revision of the parent session at fork time — used in tests and for diagnostics.
+    #[allow(dead_code)]
     pub fork_revision: usize,
     pub program: ast::Program,
     pub mutations: Vec<String>,
@@ -371,7 +376,8 @@ pub struct AgentBranch {
 }
 
 impl AgentBranch {
-    /// Create a new branch forked from the current session state.
+    /// Create a new branch forked from the current session state (used in tests).
+    #[cfg(test)]
     pub fn fork(name: &str, scope: AgentScope, task: &str, session: &Session) -> Self {
         Self::fork_from_parts(name, scope, task, &session.program, &session.runtime, &session.meta)
     }
@@ -398,12 +404,14 @@ impl AgentBranch {
         }
     }
 
-    /// Access the forked runtime state.
+    /// Access the forked runtime state (used in tests).
+    #[cfg(test)]
     pub fn runtime(&self) -> &RuntimeState {
         &self.runtime_state
     }
 
-    /// Apply a mutation to this branch (respecting scope).
+    /// Apply a mutation to this branch (respecting scope, used in tests).
+    #[cfg(test)]
     pub fn apply(&mut self, source: &str) -> Result<Vec<(String, bool)>> {
         let operations = crate::parser::parse(source)?;
 
@@ -579,8 +587,8 @@ impl AgentBranch {
         Ok(results)
     }
 
-    /// Merge this branch's mutations back into a session.
-    /// Returns list of conflicts (empty if clean merge).
+    /// Merge this branch's mutations back into a session (used in tests).
+    #[cfg(test)]
     pub fn merge_into(self, session: &mut Session) -> Vec<String> {
         self.merge_into_parts(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox)
     }
@@ -669,6 +677,7 @@ impl Conversation {
         }
     }
 
+    #[cfg(test)]
     pub fn new_temporary() -> Self {
         Self {
             temporary: true,
@@ -676,6 +685,7 @@ impl Conversation {
         }
     }
 
+    #[cfg(test)]
     pub fn with_callback(mut self, reply_fn: String, reply_arg: String) -> Self {
         self.reply_fn = Some(reply_fn);
         self.reply_arg = Some(reply_arg);
@@ -742,16 +752,19 @@ impl ConversationManager {
     }
 
     /// Remove a conversation context (e.g. when a temporary task completes).
+    #[cfg(test)]
     pub fn remove(&mut self, context: &str) -> Option<Conversation> {
         self.contexts.remove(context)
     }
 
     /// Remove all temporary conversations that are done.
+    #[cfg(test)]
     pub fn prune_temporary(&mut self) {
         self.contexts.retain(|_, conv| !conv.temporary);
     }
 
     /// List all active context names.
+    #[cfg(test)]
     pub fn list_contexts(&self) -> Vec<&str> {
         self.contexts.keys().map(|s| s.as_str()).collect()
     }
@@ -768,22 +781,26 @@ impl Session {
     }
 
     /// Send a message to an agent (or "main" for the main session).
+    #[cfg(test)]
     pub fn send_agent_message(&mut self, from: &str, to: &str, content: &str) {
         send_agent_message(&mut self.meta, from, to, content);
     }
 
     /// Drain all pending messages for an agent.
+    #[cfg(test)]
     pub fn drain_messages(&mut self, agent_name: &str) -> Vec<AgentMessage> {
         drain_messages(&mut self.meta, agent_name)
     }
 
     /// Peek at pending messages without removing them.
+    #[cfg(test)]
     pub fn peek_messages(&self, agent_name: &str) -> &[AgentMessage] {
         peek_messages(&self.meta, agent_name)
     }
 
     /// Check whether a function is considered "tested":
     /// the function's AST `tests` field is non-empty and all test cases have `passed == true`.
+    #[cfg(test)]
     pub fn is_function_tested(&self, fn_name: &str) -> bool {
         is_function_tested(&self.program, fn_name)
     }
@@ -837,29 +854,7 @@ impl Session {
         }
     }
 
-    /// Remove all routes whose handler matches a function name.
-    pub fn remove_routes_for_handler(&mut self, handler_name: &str) -> Vec<String> {
-        let mut removed = Vec::new();
-        self.runtime.http_routes.retain(|r| {
-            if r.handler_fn == handler_name {
-                removed.push(format!("{} {}", r.method, r.path));
-                false
-            } else {
-                true
-            }
-        });
-        removed
-    }
 
-    /// Get a snapshot of all HTTP routes.
-    pub fn get_routes(&self) -> &[ast::HttpRoute] {
-        &self.runtime.http_routes
-    }
-
-    /// Find a route by method and path.
-    pub fn find_route(&self, method: &str, path: &str) -> Option<&ast::HttpRoute> {
-        self.runtime.http_routes.iter().find(|r| r.method == method && r.path == path)
-    }
 
     /// Handle a sandbox action (enter, merge, discard, status).
     fn handle_sandbox(&mut self, action: &parser::SandboxAction) -> (String, bool) {
@@ -1414,38 +1409,8 @@ impl Session {
     }
 
 
-    /// Get the parsed operations from a source string (for test/eval/query handling).
-    pub fn parse_operations(&self, source: &str) -> Result<Vec<parser::Operation>> {
-        parser::parse(source)
-    }
-
-    /// Record an eval in the working history.
-    pub fn record_eval(&mut self, function: &str, input: &str, result: &str) {
-        record_eval(&mut self.meta, function, input, result);
-    }
-
-    /// Record test results in the working history.
-    pub fn record_test(
-        &mut self,
-        function: &str,
-        passed: usize,
-        failed: usize,
-        details: Vec<String>,
-    ) {
-        record_test(&mut self.meta, function, passed, failed, details);
-    }
-
-    /// Record a query in the working history.
-    pub fn record_query(&mut self, query: &str, response: &str) {
-        record_query(&mut self.meta, query, response);
-    }
-
-    /// Record a trace in the working history.
-    pub fn record_trace(&mut self, function: &str, steps: usize) {
-        record_trace(&mut self.meta, function, steps);
-    }
-
     /// Replay mutations up to a specific revision, reconstructing program state.
+    #[cfg(test)]
     pub fn rewind_to(&mut self, target_revision: usize) -> Result<()> {
         rewind_to(&mut self.program, &mut self.runtime, &mut self.meta, &mut self.sandbox, target_revision)
     }
@@ -1849,41 +1814,6 @@ pub fn store_test(program: &mut ast::Program, fn_name: &str, cases: &[parser::Te
     }
 }
 
-pub fn record_eval(meta: &mut SessionMeta, function: &str, input: &str, result: &str) {
-    meta.history.push(HistoryEntry::Eval {
-        revision: meta.revision,
-        function: function.to_string(),
-        input: input.to_string(),
-        result: result.to_string(),
-    });
-}
-
-pub fn record_test(meta: &mut SessionMeta, function: &str, passed: usize, failed: usize, details: Vec<String>) {
-    meta.history.push(HistoryEntry::Test {
-        revision: meta.revision,
-        function: function.to_string(),
-        passed,
-        failed,
-        details,
-    });
-}
-
-pub fn record_query(meta: &mut SessionMeta, query: &str, response: &str) {
-    meta.history.push(HistoryEntry::Query {
-        revision: meta.revision,
-        query: query.to_string(),
-        response: response.to_string(),
-    });
-}
-
-pub fn record_trace(meta: &mut SessionMeta, function: &str, steps: usize) {
-    meta.history.push(HistoryEntry::Trace {
-        revision: meta.revision,
-        function: function.to_string(),
-        steps,
-    });
-}
-
 pub fn rewind_to(
     program: &mut ast::Program,
     runtime: &mut RuntimeState,
@@ -1934,15 +1864,6 @@ pub fn roadmap_list(roadmap: &[RoadmapItem]) -> String {
 pub fn roadmap_add(roadmap: &mut Vec<RoadmapItem>, desc: &str) -> String {
     roadmap.push(RoadmapItem { description: desc.to_string(), done: false });
     format!("Roadmap: added \"{}\" (#{}).", desc, roadmap.len())
-}
-
-pub fn roadmap_done(roadmap: &mut Vec<RoadmapItem>, n: usize) -> Result<String> {
-    if let Some(item) = roadmap.get_mut(n.saturating_sub(1)) {
-        item.done = true;
-        Ok(format!("Roadmap: #{n} done."))
-    } else {
-        Err(anyhow!("Roadmap: #{n} not found."))
-    }
 }
 
 /// Checked version of `roadmap_done` — warns if there's no evidence of work,
@@ -2019,6 +1940,7 @@ pub fn plan_show(plan: &[PlanStep]) -> String {
 
 /// Format a parser::Expr back into source-level syntax suitable for `+with` lines.
 /// Public alias for testing.
+#[cfg(test)]
 pub fn format_expr_pub(expr: &parser::Expr) -> String {
     format_expr(expr)
 }

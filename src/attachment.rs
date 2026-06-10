@@ -57,7 +57,12 @@ impl Attachment {
     }
 
     /// Create an attachment from an existing file on disk.
-    pub fn from_file(path: PathBuf, mime_type: impl Into<String>, name: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub fn from_file(
+        path: std::path::PathBuf,
+        mime_type: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self {
             data: AttachmentData::File(path),
             mime_type: mime_type.into(),
@@ -83,12 +88,8 @@ impl Attachment {
         }
     }
 
-    /// Whether the attachment has no data.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Guess MIME type from file extension.
+    #[cfg(test)]
     pub fn mime_from_extension(name: &str) -> &'static str {
         match name.rsplit('.').next() {
             Some("ogg") => "audio/ogg",

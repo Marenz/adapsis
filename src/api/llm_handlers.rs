@@ -138,20 +138,6 @@ pub(super) async fn write_log_file(
     }
 }
 
-/// Legacy standalone logging function — kept during migration so existing code
-/// that doesn't yet have an `EventSender` can still log.
-/// New code should prefer `EventSender::log()`.
-async fn log_activity(
-    log_file: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
-    event: &str,
-    detail: &str,
-) {
-    write_log_file(log_file, event, detail).await;
-    // Stderr: short preview
-    let preview: String = detail.chars().take(200).collect();
-    eprintln!("[{event}] {preview}");
-}
-
 /// Write a training data entry (JSONL) for one iteration.
 async fn log_training_data(
     training_log: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,

@@ -24,8 +24,6 @@ use crate::parser;
 use crate::session::{RuntimeState, SandboxState, SessionMeta};
 use crate::typeck;
 
-/// Default timeout for `!eval` execution (seconds).
-pub(crate) const EVAL_TIMEOUT_SECS: u64 = 120;
 use crate::validator;
 
 pub mod execute;
@@ -35,6 +33,8 @@ pub use execute::{
     format_inspect_task,
     parse_inspect_task_query,
 };
+#[cfg(test)]
+pub use execute::CodeExecutionResult;
 pub mod llm_handlers;
 pub use llm_handlers::{ask, ask_stream, handle_llm_takeover};
 use llm_handlers::EventSender;

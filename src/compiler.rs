@@ -190,6 +190,7 @@ fn is_compilable_expr(expr: &ast::Expr) -> bool {
 }
 
 /// Check if an entire program can be fully compiled.
+#[cfg(test)]
 pub fn is_fully_compilable(program: &ast::Program) -> bool {
     program.functions.iter().all(|f| is_compilable_function(f))
 }

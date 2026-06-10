@@ -162,17 +162,6 @@ impl EvalContext {
         }
     }
 
-    /// Create an empty context (for tests or paths that don't need shared state).
-    pub fn empty() -> Self {
-        Self {
-            runtime: None,
-            meta: None,
-            event_broadcast: None,
-            program_snapshot: None,
-            program_mut: None,
-        }
-    }
-
     /// Install all fields into the current thread's thread-local globals.
     /// Call this at the top of every `spawn_blocking` closure.
     pub fn install(&self) {
@@ -181,12 +170,5 @@ impl EvalContext {
         set_shared_event_broadcast(self.event_broadcast.clone());
         set_shared_program(self.program_snapshot.clone());
         set_shared_program_mut(self.program_mut.clone());
-    }
-
-    /// Install and also set up the display interner from a program.
-    /// Use this when the worker thread needs to format `Value` types.
-    pub fn install_with_interner(&self, program: &crate::ast::Program) {
-        self.install();
-        crate::intern::set_display_interner(&program.shared_interner);
     }
 }

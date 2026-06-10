@@ -92,6 +92,8 @@ pub enum Op {
     /// Unconditional jump to instruction at the given offset.
     Jump(usize),
     /// Pop a boolean; if true, jump to the given offset.
+    /// Reserved for future compiler output.
+    #[allow(dead_code)]
     BranchIf(usize),
     /// Pop a boolean; if false, jump to the given offset.
     BranchIfNot(usize),
@@ -100,6 +102,8 @@ pub enum Op {
     /// Discard the top value on the stack.
     Pop,
     /// Duplicate the top value on the stack.
+    /// Reserved for future compiler output.
+    #[allow(dead_code)]
     Dup,
 
     // ── Struct / composite construction ──────────────────────────────
@@ -109,6 +113,8 @@ pub enum Op {
     /// Pop a struct value, push the value of the named field (interned ID).
     GetField(InternedId),
     /// Pop N values, construct a list.
+    /// Reserved for future compiler output.
+    #[allow(dead_code)]
     MakeList(usize),
 
     // ── Result / Option constructors ─────────────────────────────────
@@ -146,6 +152,7 @@ pub struct Frame {
 #[derive(Debug, Clone)]
 pub struct VmState {
     /// Name of the currently executing function (for diagnostics).
+    #[allow(dead_code)]
     pub function_name: String,
     /// Instruction pointer — index into `bytecode`.
     pub ip: usize,
@@ -168,9 +175,11 @@ pub struct CompiledFunction {
     pub bytecode: Arc<Vec<Op>>,
     /// Number of local variable slots required (includes parameters).
     pub local_count: usize,
-    /// Parameter names in declaration order (for binding call arguments).
+    /// Parameter names in declaration order (for binding call arguments, debug).
+    #[allow(dead_code)]
     pub param_names: Vec<String>,
     /// All local variable names in slot order (for debug/inspect).
+    #[allow(dead_code)]
     pub local_names: Vec<String>,
     /// Name interner mapping function/builtin/IO names used in bytecode
     /// opcodes (`Call`, `CallBuiltin`, `AwaitIo`) to compact `u32` ids.

@@ -7,6 +7,8 @@ pub struct Builtin {
     pub aliases: &'static [&'static str],
     pub short: &'static str,
     pub long: &'static str,
+    /// Declarative metadata for future grouping/filtering; not yet read at runtime.
+    #[allow(dead_code)]
     pub category: BuiltinCategory,
 }
 
@@ -1393,6 +1395,7 @@ Side-effect assertions with +after (checked after the function runs, state resto
 ];
 
 /// Get all builtin names (for the validator's shadow check).
+#[cfg(test)]
 pub fn all_builtin_names() -> Vec<&'static str> {
     let mut names = Vec::new();
     for b in BUILTINS {

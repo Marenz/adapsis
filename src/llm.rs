@@ -116,12 +116,7 @@ impl ChatMessage {
         }
     }
 
-    pub fn tool(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::Tool,
-            content: content.into(),
-        }
-    }
+
 }
 
 /// Incremental chunk from the LLM streaming response.
@@ -140,8 +135,12 @@ pub struct LlmOutput {
     pub text: String,
     pub thinking: String,
     pub code: String,
+    /// Reserved for future telemetry — populated from API response but not yet consumed.
+    #[allow(dead_code)]
     pub prompt_tokens: u64,
+    #[allow(dead_code)]
     pub completion_tokens: u64,
+    #[allow(dead_code)]
     pub total_tokens: u64,
 }
 
@@ -888,10 +887,14 @@ struct ChunkDelta {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ResponseChoice>,
+    /// Parsed from API response for future telemetry — not yet consumed.
+    #[allow(dead_code)]
     #[serde(default)]
     usage: Option<TokenUsage>,
 }
 
+/// Token usage stats from the API response — reserved for future telemetry.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct TokenUsage {
     #[serde(default)]
