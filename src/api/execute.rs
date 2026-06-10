@@ -5,7 +5,7 @@
 
 use crate::eval;
 
-use super::{AppConfig, MutationResult, TestCaseResult, WorkingSet, EVAL_TIMEOUT_SECS};
+use super::{AppConfig, MutationResult, TestCaseResult, WorkingSet};
 
 pub(super) fn collect_opencode_tasks(ops: &[crate::parser::Operation]) -> Vec<String> {
     ops.iter()

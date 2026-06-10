@@ -31,8 +31,6 @@ use crate::validator;
 pub mod execute;
 pub use execute::{
     execute_code,
-    CodeExecutionResult,
-    AgentCompletionCallback,
     format_tasks,
     format_inspect_task,
     parse_inspect_task_query,
