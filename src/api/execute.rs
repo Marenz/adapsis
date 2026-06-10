@@ -434,6 +434,19 @@ pub async fn execute_code(
                         }
                         if all_passed && !test.cases.is_empty() {
                             crate::session::store_test(&mut session.program, &test.function_name, &test.cases);
+                        } else if !all_passed {
+                            // Show the current function source alongside the
+                            // failure so the model can fix the logic without a
+                            // separate ?source round-trip.
+                            let source = crate::typeck::reconstruct_source(
+                                &session.program, &test.function_name,
+                            );
+                            if !source.is_empty() && !source.starts_with("No ") && !source.contains("not found") {
+                                result.push_ok(format!(
+                                    "Current source of {}:\n{}",
+                                    test.function_name, source
+                                ));
+                            }
                         }
                     }
                     crate::parser::Operation::Eval(ev) => {
@@ -491,9 +504,17 @@ pub async fn execute_code(
                         if session.program.require_modules {
                             if let Some(func) = session.program.get_function(&ev.function_name) {
                                 if func.body.len() > 2 && !crate::session::is_function_tested(&session.program, &ev.function_name) {
+                                    let with_example = if func.params.is_empty() {
+                                        "+with -> expect <result>".to_string()
+                                    } else {
+                                        let params: Vec<String> = func.params.iter()
+                                            .map(|p| format!("{}=<{}>", p.name, super::format_type(&p.ty)))
+                                            .collect();
+                                        format!("+with {} -> expect <result>", params.join(" "))
+                                    };
                                     result.push_err(format!(
-                                        "function `{}` has {} statements but no passing tests. Write +test blocks first.",
-                                        ev.function_name, func.body.len()
+                                        "function `{}` has {} statements but no passing tests. Write a test first:\n+test {}\n  {}",
+                                        ev.function_name, func.body.len(), ev.function_name, with_example
                                     ));
                                     continue;
                                 }
@@ -894,9 +915,10 @@ pub async fn execute_code(
                                 .collect();
                             if !untested.is_empty() {
                                 result.push_err(format!(
-                                    "Cannot accept !done: {} untested functions: {}. Write +test blocks for them.",
+                                    "Cannot accept !done: {} untested functions: {}. Write +test blocks for them, e.g.:\n+test {}\n  +with <param>=<value> -> expect <result>",
                                     untested.len(),
-                                    untested.join(", ")
+                                    untested.join(", "),
+                                    untested[0]
                                 ));
                                 continue;
                             }
@@ -1017,9 +1039,35 @@ pub async fn execute_code(
             }
         }
         Err(e) => {
-            result.push_err(format!("Parse error: {e}"));
+            result.push_err(format_parse_error_with_context(&e, code));
         }
     }
 
     result
+}
+
+/// Format a parse error, extracting the line number from the message
+/// (`line N: ...`) and showing surrounding source lines with a `>>>`
+/// marker. This lets the LLM locate the error in the code block it just
+/// submitted without counting lines manually.
+fn format_parse_error_with_context(e: &anyhow::Error, code: &str) -> String {
+    let err_str = format!("{e}");
+    let context = err_str
+        .strip_prefix("line ")
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .map(|n| {
+            let lines: Vec<&str> = code.lines().collect();
+            let start = n.saturating_sub(3); // 0-based index of two lines before
+            let end = (n + 2).min(lines.len());
+            let ctx: Vec<String> = (start..end)
+                .map(|i| {
+                    let marker = if i + 1 == n { ">>>" } else { "   " };
+                    format!("{marker} {}: {}", i + 1, lines.get(i).unwrap_or(&""))
+                })
+                .collect();
+            format!("\nContext:\n{}", ctx.join("\n"))
+        })
+        .unwrap_or_default();
+    format!("Parse error: {e}{context}")
 }

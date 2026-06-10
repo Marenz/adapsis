@@ -590,7 +590,7 @@ fn query_deps_modules(program: &Program, graph: &CallGraph, target: &str) -> Str
 
 /// Reconstruct Adapsis source code from the AST for a function.
 /// Supports both qualified (`Module.func`) and unqualified (`func`) names.
-fn reconstruct_source(program: &Program, target: &str) -> String {
+pub fn reconstruct_source(program: &Program, target: &str) -> String {
     // Module-qualified lookup: "Module.func"
     let func = if let Some((module_name, fn_name)) = target.split_once('.') {
         program

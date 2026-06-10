@@ -324,10 +324,18 @@ pub async fn ask(
 
         // Build feedback for next iteration
         if iter_has_errors {
-            let errors: Vec<String> = exec_result.mutation_results.iter().filter(|r| !r.success).map(|r| r.message.clone())
-                .chain(exec_result.test_results.iter().filter(|r| !r.pass).map(|r| r.message.clone()))
+            // Show ALL results (successes too), not just errors — otherwise
+            // the model can't tell which parts already applied and may
+            // re-submit code that succeeded.
+            let details: Vec<String> = exec_result.mutation_results.iter()
+                .map(|r| format!("{}: {}", if r.success { "OK" } else { "ERROR" }, r.message))
+                .chain(exec_result.test_results.iter()
+                    .map(|r| format!("{}: {}", if r.pass { "PASS" } else { "FAIL" }, r.message)))
                 .collect();
-            let feedback = format!("Errors:\n{}\n\nFix and continue.", errors.join("\n"));
+            let feedback = format!(
+                "Results:\n{}\n\nFix the errors and continue. Successful operations are already applied — do not re-submit them.",
+                details.join("\n")
+            );
             eprintln!("[web:feedback] → retrying");
             messages.push(crate::llm::ChatMessage::user(feedback));
         } else {
@@ -436,6 +444,10 @@ pub async fn ask_stream(
 
         let max_iterations = config_clone.max_iterations;
         let mut last_context = req.message.clone();
+        // Loop-breaker: track consecutive identical error feedback so we can
+        // tell the model it's stuck instead of burning the iteration budget.
+        let mut last_error_signature = String::new();
+        let mut repeat_count = 0usize;
         for iteration in 0..max_iterations {
             // Check for injected messages and append to conversation
             {
@@ -583,8 +595,9 @@ pub async fn ask_stream(
                     };
                     if !all_fns.is_empty() {
                         op_result.info(format!(
-                            "Untested functions (blocked from !eval): {}",
-                            all_fns.join(", ")
+                            "Untested functions (blocked from !eval): {}. Example:\n+test {}\n  +with <param>=<value> -> expect <result>",
+                            all_fns.join(", "),
+                            all_fns[0]
                         ));
                     }
                 }
@@ -634,10 +647,25 @@ pub async fn ask_stream(
                 let errors: Vec<&str> = feedback_details.iter()
                     .filter(|d| d.starts_with("ERROR:") || d.starts_with("FAIL:") || d.contains("[FAILED]"))
                     .map(|s| s.as_str()).collect();
+                // Detect repeated identical failures (same error set as last
+                // iteration) and escalate the hint instead of repeating it.
+                let error_signature = errors.join("\n");
+                if !error_signature.is_empty() && error_signature == last_error_signature {
+                    repeat_count += 1;
+                } else {
+                    repeat_count = 0;
+                    last_error_signature = error_signature;
+                }
+                let stuck_hint = match repeat_count {
+                    0 => "",
+                    1 => "\n\nNote: this is the same error as your previous attempt. Re-read the error message carefully before retrying.",
+                    _ => "\n\nYou have hit the exact same error multiple times in a row. STOP repeating the same approach. Use ?source to inspect the current state, ?symbols to check available functions/types, and try a structurally different solution.",
+                };
                 let feedback = format!(
-                    "Results:\n{}\n\n{}\n\nFix the errors and continue.",
+                    "Results:\n{}\n\n{}\n\nFix the errors and continue.{}",
                     feedback_details.join("\n"),
-                    plan_summary
+                    plan_summary,
+                    stuck_hint
                 );
                 tx.log("feedback", &format!("Errors found ({} issues), retrying...\n{feedback}", errors.len())).await;
                 let current_model = config_clone.llm_model.read().unwrap().clone();
@@ -650,10 +678,13 @@ pub async fn ask_stream(
                 } else {
                     format!("Results:\n{}\n\n", feedback_details.join("\n"))
                 };
+                // Success resets the repeated-failure tracker.
+                last_error_signature.clear();
+                repeat_count = 0;
                 let feedback = format!("{}{}", results_section, plan_summary);
                 tx.log("feedback", &feedback).await;
                 let current_model = config_clone.llm_model.read().unwrap().clone();
-                log_training_data(&config_clone.training_log, &current_model, &last_context, &output.thinking, &code, feedback_details, true, op_result.tests_passed, op_result.tests_failed).await;
+                log_training_data(&config_clone.training_log, &current_model, &last_context, &output.thinking, &code, feedback_details, false, op_result.tests_passed, op_result.tests_failed).await;
                 last_context = feedback.clone();
                 messages.push(crate::llm::ChatMessage::user(feedback));
                 if accepted_done { break; }

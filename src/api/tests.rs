@@ -1477,3 +1477,76 @@ async fn execute_code_process_level_caps_everything() {
     let res = execute_code(code, &config, &mut session, None).await;
     assert!(res.has_errors, "ExecuteOnly should block all mutations");
 }
+
+/// Test: parse errors include surrounding source context with >>> marker.
+#[tokio::test]
+async fn execute_code_parse_error_shows_context() {
+    let config = test_config();
+    // Line 2 has an incomplete expression — a hard parse error
+    let code = "+fn bad (x:Int)->Int\n  +let y:Int = x +\n  +return y";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(code, &config, &mut session, None).await;
+    assert!(res.has_errors, "incomplete expression should produce a parse error: {:?}",
+        res.mutation_results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    let err = res.mutation_results.iter().find(|r| !r.success)
+        .expect("expected a failed mutation result");
+    assert!(
+        err.message.contains("Context:"),
+        "parse error should include source context, got: {}", err.message
+    );
+    assert!(
+        err.message.contains(">>>"),
+        "parse error context should mark the offending line, got: {}", err.message
+    );
+}
+
+/// Test: failing tests include the current function source in feedback.
+#[tokio::test]
+async fn execute_code_test_failure_includes_function_source() {
+    let (config, _io_rx) = test_config_with_io();
+    let module_code = "+module MathX\n+fn double(x:Int) -> Int\n  +return x + 1\n+end";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(module_code, &config, &mut session, None).await;
+    assert!(!res.has_errors, "module should apply: {:?}", res.mutation_results);
+    config.write_back_working_set(&session).await;
+
+    // This test fails (function adds 1 instead of doubling)
+    let test_code = "+test MathX.double\n  +with x=4 -> expect 8";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(test_code, &config, &mut session, None).await;
+    assert!(res.has_errors, "test should fail");
+    let has_source = res.mutation_results.iter()
+        .any(|r| r.message.contains("Current source of MathX.double"));
+    assert!(
+        has_source,
+        "failing test feedback should include function source, got: {:?}",
+        res.mutation_results.iter().map(|r| &r.message).collect::<Vec<_>>()
+    );
+}
+
+/// Test: untested-function block message shows +test example syntax.
+#[tokio::test]
+async fn execute_code_untested_eval_block_shows_test_syntax() {
+    let (config, _io_rx) = test_config_with_io();
+    let module_code = "+module Big\n+fn calc(a:Int, b:Int) -> Int\n  +let x:Int = a + b\n  +let y:Int = x * 2\n  +return y\n+end";
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(module_code, &config, &mut session, None).await;
+    assert!(!res.has_errors, "module should apply: {:?}", res.mutation_results);
+    session.program.require_modules = true;
+    config.write_back_working_set(&session).await;
+
+    let eval_code = "!eval Big.calc {a: 1, b: 2}";
+    let mut session = config.snapshot_working_set().await;
+    session.program.require_modules = true;
+    let res = execute_code(eval_code, &config, &mut session, None).await;
+    let err = res.mutation_results.iter().find(|r| !r.success)
+        .expect("untested eval should be blocked");
+    assert!(
+        err.message.contains("+test Big.calc"),
+        "block message should show +test example, got: {}", err.message
+    );
+    assert!(
+        err.message.contains("+with"),
+        "block message should show +with syntax, got: {}", err.message
+    );
+}
