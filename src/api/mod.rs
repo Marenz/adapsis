@@ -171,6 +171,9 @@ pub struct AppConfig {
     pub opencode_git_dir: String,
     /// Sequential lock for !opencode — only one at a time
     pub opencode_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Optional OpenCode server URL to attach to (e.g. "http://localhost:4096").
+    /// If None, opencode runs in standalone mode.
+    pub opencode_attach: Option<String>,
     /// Message queue for injecting messages into the autonomous loop
     pub message_queue: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     /// Maximum iterations per AI request
@@ -1161,15 +1164,16 @@ pub async fn opencode_task(
 
     // Spawn with piped stdout so we can stream lines and emit SSE events
     // as they happen (instead of buffering until exit).
-    let child = tokio::process::Command::new("opencode")
-        .arg("run")
-        .arg("--format")
-        .arg("json")
+    let mut cmd = tokio::process::Command::new("opencode");
+    cmd.arg("run").arg("--format").arg("json")
         .arg(&req.task)
         .current_dir(project_dir)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+        .stderr(std::process::Stdio::piped());
+    if let Some(attach_url) = &config.opencode_attach {
+        cmd.arg("--attach").arg(attach_url);
+    }
+    let child = cmd.spawn();
 
     let mut child = match child {
         Ok(c) => c,

@@ -994,15 +994,17 @@ pub async fn execute_code(
                 eprintln!("[execute_code:opencode] acquiring lock...");
                 let _lock = config.opencode_lock.lock().await;
                 eprintln!("[execute_code:opencode] {task}");
+                let mut cmd = tokio::process::Command::new("opencode");
+                cmd.arg("run").arg("--format").arg("json")
+                    .arg("--dir").arg(&config.opencode_git_dir)
+                    .arg(task)
+                    .current_dir(&config.opencode_git_dir);
+                if let Some(attach_url) = &config.opencode_attach {
+                    cmd.arg("--attach").arg(attach_url);
+                }
                 let oc_result = tokio::time::timeout(
                     std::time::Duration::from_secs(3600),
-                    tokio::process::Command::new("opencode")
-                        .arg("run").arg("--format").arg("json")
-                        .arg("--attach").arg("http://localhost:4096")
-                        .arg("--dir").arg(&config.opencode_git_dir)
-                        .arg(task)
-                        .current_dir(&config.opencode_git_dir)
-                        .output()
+                    cmd.output()
                 ).await;
                 match oc_result {
                     Ok(Ok(output)) if output.status.success() => {
