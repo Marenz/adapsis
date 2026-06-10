@@ -6445,4 +6445,66 @@ fn test_set_operations() {
     assert!(matches!(r.unwrap(), Value::Bool(false)));
 }
 
-// bytecode VM placeholder
+// ── eval_async_function (VM-first async eval) ─────────────────────
+
+#[test]
+fn async_eval_uses_vm_with_mocked_io() {
+    // A simple [io,async] function should run through the bytecode VM,
+    // with IO suspensions serviced by the coroutine handle (mock here).
+    let source = "\
++fn fetch_data (url:String)->String [io,async]
+  +await resp:String = http_get(url)
+  +return concat(\"got: \", resp)
+";
+    let program = build_program(source);
+    let mocks = vec![IoMock {
+        operation: "http_get".to_string(),
+        patterns: vec!["example.com".to_string()],
+        response: "hello".to_string(),
+    }];
+    // Prove the VM path is taken: the function must be VM-compilable
+    // (otherwise this test would silently pass through the fallback).
+    let func = program.get_function("fetch_data").unwrap();
+    crate::vm::compile_function(func, &program)
+        .expect("fetch_data must compile to bytecode for this test to cover the VM path");
+
+    let handle = crate::coroutine::CoroutineHandle::new_mock(mocks);
+    let input = parser::parse_single_expr("{url: \"https://example.com\"}").unwrap();
+    let result = eval_async_function(&program, "fetch_data", &input, handle).unwrap();
+    assert_eq!(format!("{result}"), "\"got: hello\"");
+}
+
+#[test]
+fn async_eval_falls_back_to_interpreter_for_shared_vars() {
+    // Functions using +shared cannot compile to bytecode — eval_async_function
+    // must fall back to the tree-walker and still produce the right value.
+    let source = "\
++module Cfg
++shared prefix:String = \"pre-\"
+
++fn tag (name:String)->String [io,async]
+  +return concat(prefix, name)
++end
+";
+    let program = build_program(source);
+    let handle = crate::coroutine::CoroutineHandle::new_mock(vec![]);
+    let input = parser::parse_single_expr("{name: \"x\"}").unwrap();
+    let result = eval_async_function(&program, "Cfg.tag", &input, handle).unwrap();
+    assert_eq!(format!("{result}"), "\"pre-x\"");
+}
+
+#[test]
+fn async_eval_unmocked_io_error_is_surfaced() {
+    // With a mock-only handle and no matching mock, the IO call fails.
+    // The error must be surfaced — not silently retried.
+    let source = "\
++fn fetch (url:String)->String [io,async]
+  +await resp:String = http_get(url)
+  +return resp
+";
+    let program = build_program(source);
+    let handle = crate::coroutine::CoroutineHandle::new_mock(vec![]);
+    let input = parser::parse_single_expr("{url: \"https://example.com\"}").unwrap();
+    let result = eval_async_function(&program, "fetch", &input, handle);
+    assert!(result.is_err(), "unmocked IO should error: {result:?}");
+}

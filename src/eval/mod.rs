@@ -4096,6 +4096,13 @@ pub fn try_vm_eval(
 
 /// Try to execute a function via the bytecode VM with async IO support.
 /// The io_handler performs IO operations when the VM suspends.
+///
+/// Returns `None` only when the function cannot be *compiled* to bytecode
+/// (unsupported features like +shared, +spawn, +yield) — the caller should
+/// fall back to the tree-walker. Runtime errors are returned as `Some(Err)`
+/// and must NOT trigger a fallback: IO operations may already have executed,
+/// and re-running the function in the interpreter would repeat their side
+/// effects.
 pub fn try_vm_eval_async(
     func: &ast::FunctionDecl,
     args: &[Value],
@@ -4106,10 +4113,74 @@ pub fn try_vm_eval_async(
         Ok(c) => c,
         Err(_) => return None,
     };
-    match vm::execute_with_io(&compiled, args.to_vec(), program, io_handler) {
-        Ok(val) => Some(Ok(val)),
-        Err(_) => None,
+    Some(vm::execute_with_io(
+        &compiled,
+        args.to_vec(),
+        program,
+        io_handler,
+    ))
+}
+
+/// Evaluate an async ([io]/[async]) function: bytecode VM first, tree-walker
+/// fallback. This is the shared entry point for the API async eval paths.
+///
+/// The VM path is used when:
+/// - the coroutine handle has no task_id (spawned tasks need per-statement
+///   snapshot tracking, which only the tree-walker provides), and
+/// - the function compiles to bytecode (no +shared, +spawn, +yield, +source).
+///
+/// IO suspensions are serviced through `handle.execute_await`, so mocks and
+/// in-process ops (roadmap, shared state) behave identically to the
+/// tree-walker path. Once the VM has performed IO, runtime errors are
+/// returned directly — never re-run in the interpreter (side effects).
+pub fn eval_async_function(
+    program: &ast::Program,
+    function_name: &str,
+    input: &parser::Expr,
+    handle: crate::coroutine::CoroutineHandle,
+) -> Result<Value> {
+    let func = program.get_function(function_name).ok_or_else(|| {
+        anyhow!(
+            "function `{function_name}` not found{}",
+            suggest_similar(program, function_name)
+        )
+    })?;
+
+    if handle.task_id.is_none() {
+        if let Ok(args) = input_to_vm_args(input, func) {
+            // Track whether any IO was performed. Callee functions are
+            // compiled lazily inside the VM, so compilation of a helper
+            // (e.g. one using +shared) can fail mid-execution. Falling back
+            // to the tree-walker is only safe while no IO side effects have
+            // happened yet.
+            let io_performed = std::cell::Cell::new(false);
+            let io_handler = |op: &str, io_args: &[Value]| -> Result<Value> {
+                io_performed.set(true);
+                handle.execute_await(op, io_args)
+            };
+            match try_vm_eval_async(func, &args, program, &io_handler) {
+                Some(Ok(val)) => return Ok(val),
+                Some(Err(e)) => {
+                    if io_performed.get() {
+                        // IO already executed — re-running would duplicate
+                        // side effects. Surface the error as-is.
+                        return Err(e);
+                    }
+                    // No IO yet — safe to retry with the tree-walker
+                    // (covers lazy callee-compile failures like +shared).
+                }
+                None => {} // top-level function not VM-compilable
+            }
+        }
     }
+
+    // Tree-walker fallback
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
+    env.populate_shared_from_program(program);
+    let input_val = eval_parser_expr_with_program(input, program)?;
+    env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    bind_input_to_params(program, func, &input_val, &mut env);
+    eval_function_body_named(program, function_name, &func.body, &mut env)
 }
 
 #[cfg(test)]
