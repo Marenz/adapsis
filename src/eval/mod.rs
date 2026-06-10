@@ -863,7 +863,7 @@ pub fn eval_call_with_input(
             }
         };
         let mut env = Env::new_with_shared_interner(&program.shared_interner);
-        let call = ast::CallExpr {
+        let _call = ast::CallExpr {
             callee: function_name.to_string(),
             args: vec![], // not used — we call eval_call_inner directly
         };
@@ -1346,7 +1346,7 @@ fn eval_test_case_with_runtime(
         rt.block_on(async {
             let (runtime, mut io_rx) = crate::coroutine::Runtime::new();
             let runtime = std::sync::Arc::new(runtime);
-            let io_sender = runtime.io_sender();
+            let _io_sender = runtime.io_sender();
 
             // Spawn the IO handler loop
             let rt_handle = runtime.clone();
@@ -2173,7 +2173,7 @@ pub(crate) fn eval_function_body(
                         if let Some(Value::CoroutineHandle(handle)) =
                             env.get_raw("__coroutine_handle")
                         {
-                let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                             let io_tx = handle.io_sender();
                             let _ = io_tx.blocking_send(crate::coroutine::IoRequest::SourceAdd {
                                 module_name,

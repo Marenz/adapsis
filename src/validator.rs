@@ -142,7 +142,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
         parser::Operation::Doc { target, text } => {
             if let Some(target) = target {
                 // Targeted doc: +doc Module "text" or +doc Module.func "text"
-                if let Some(dot_pos) = target.find('.') {
+                if let Some(_dot_pos) = target.find('.') {
                     let func_name = target;
                     if let Some(func) = program.get_function_mut(func_name) {
                         func.doc = Some(text.clone());

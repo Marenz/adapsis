@@ -521,7 +521,7 @@ impl AgentBranch {
                             let program = self.program.clone();
                             let fn_name = ev.function_name.clone();
                             let input = ev.input.clone();
-                            let sender = sender.clone();
+                            let _sender = sender.clone();
                             let runtime = crate::eval::get_shared_runtime();
                             let meta = crate::eval::get_shared_meta();
                             let needs_async = program.get_function(&fn_name)
