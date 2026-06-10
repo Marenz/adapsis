@@ -759,16 +759,13 @@ impl CoroutineHandle {
 
     /// Create a handle with mocks AND a real IO sender — mocks are checked first,
     /// unmatched operations fall through to real IO via the sender.
+    #[cfg(test)]
     pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
         Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None }
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
         self.io_tx.clone()
-    }
-
-    pub fn registry(&self) -> Option<&TaskRegistry> {
-        self.task_registry.as_ref()
     }
 
     /// Mark this task as waiting on a specific operation.
@@ -819,18 +816,6 @@ impl CoroutineHandle {
         }
     }
 
-    /// Mark the snapshot as completed (keep last known state queryable).
-    pub fn complete_snapshot(&self, function_name: &str) {
-        if let (Some(id), Some(snap_reg)) = (self.task_id, &self.snapshot_registry) {
-            if let Ok(mut snaps) = snap_reg.lock() {
-                if let Some(snap) = snaps.get_mut(&id) {
-                    snap.function_name = function_name.to_string();
-                    snap.current_stmt_id = None;
-                    // wait_reason will be updated from TaskInfo on query
-                }
-            }
-        }
-    }
 
     /// Helper: send an IO request and wait for the result, tracking wait reason.
     fn send_and_wait<T>(&self, reason: WaitReason, req: IoRequest, rx: oneshot::Receiver<Result<T>>) -> Result<T> {

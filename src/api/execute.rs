@@ -148,14 +148,6 @@ impl OperationResult {
         self.feedback.push(entry);
     }
 
-    /// Log to stderr but do NOT include in LLM feedback.
-    /// Use for bookkeeping ops (mock registration, plan progress) where
-    /// the information is already conveyed via plan_summary or is noise.
-    pub(super) fn ok_silent(&self, msg: impl Into<String>) {
-        let entry = format!("OK: {}", msg.into());
-        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
-    }
-
     pub(super) fn pass(&mut self, msg: impl Into<String>) {
         self.tests_passed += 1;
         let entry = format!("PASS: {}", msg.into());

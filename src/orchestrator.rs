@@ -40,17 +40,6 @@ impl<B: LlmBackend> Orchestrator<B> {
         }
     }
 
-    /// Attach runtime registries so ?tasks / ?inspect queries work.
-    pub fn with_registries(
-        mut self,
-        task_registry: crate::coroutine::TaskRegistry,
-        snapshot_registry: crate::coroutine::TaskSnapshotRegistry,
-    ) -> Self {
-        self.task_registry = Some(task_registry);
-        self.snapshot_registry = Some(snapshot_registry);
-        self
-    }
-
     fn emit(&self, event: AdapsisEvent) {
         if let Some(bus) = &self.event_bus {
             bus.send(event);

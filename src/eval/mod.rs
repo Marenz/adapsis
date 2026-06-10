@@ -155,6 +155,7 @@ impl Value {
 
     /// Convenience constructor: wrap a struct name + field map in `Arc`.
     /// Accepts string keys and interns them via the thread-local display interner.
+    #[cfg(test)]
     #[inline]
     pub fn strct(name: impl AsRef<str>, fields: HashMap<String, Value>) -> Self {
         let name_id = intern::intern_display(name.as_ref());
@@ -173,6 +174,7 @@ impl Value {
     }
 
     /// Borrow the inner string slice, if this is a `String` variant.
+    #[cfg(test)]
     #[inline]
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -182,6 +184,7 @@ impl Value {
     }
 
     /// Borrow the inner slice, if this is a `List` variant.
+    #[cfg(test)]
     #[inline]
     pub fn as_list(&self) -> Option<&[Value]> {
         match self {
@@ -191,6 +194,7 @@ impl Value {
     }
 
     /// Get a mutable reference to the inner `Vec`, cloning the `Arc` if needed (CoW).
+    #[cfg(test)]
     #[inline]
     pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
         match self {
@@ -201,6 +205,7 @@ impl Value {
 
     /// Look up a field on a struct value by string name, resolving via the
     /// thread-local display interner.
+    #[cfg(test)]
     pub fn get_field(&self, field: &str) -> Option<&Value> {
         match self {
             Value::Struct(_, fields) => {
@@ -304,6 +309,7 @@ pub struct Env {
 }
 
 impl Env {
+    #[cfg(test)]
     pub fn new() -> Self {
         // Seed from the thread-local interner so existing interned ids stay consistent
         let interner = STRING_INTERNER.with(|si| si.borrow().shared());
@@ -324,6 +330,7 @@ impl Env {
     /// This is the fast path: cloning a `SharedInterner` is O(1) (Arc clone),
     /// and the Program's interner already contains all names in the AST, so
     /// every `intern_name()` call during evaluation is a cache hit.
+    #[cfg(test)]
     pub fn new_with_interner(interner: &StringInterner) -> Self {
         let mut env = Self {
             scopes: smallvec::smallvec![HashMap::new()],
@@ -449,6 +456,7 @@ impl Env {
 
     /// Define a variable in the current scope using a pre-interned id.
     /// This is the fast path — no string→id conversion needed.
+    #[cfg(test)]
     #[inline]
     pub fn set_id(&mut self, id: InternedId, value: Value) {
         self.scopes
@@ -549,6 +557,7 @@ impl Env {
     }
 
     /// Look up a variable using a pre-interned id. Fast path — no string interning.
+    #[cfg(test)]
     #[inline]
     fn get_id(&self, id: InternedId) -> Option<&Value> {
         for scope in self.scopes.iter().rev() {
@@ -4070,28 +4079,6 @@ fn trace_body(
         }
     }
     None
-}
-
-/// Try to execute a function via the bytecode VM.
-/// Returns `Some(Ok(val))` on success, `None` if the VM can't handle it
-/// (compilation error or async suspension), allowing the tree-walker to
-/// take over as fallback. Optionally accepts a CoroutineHandle for async IO.
-pub fn try_vm_eval(
-    func: &ast::FunctionDecl,
-    args: &[Value],
-    program: &ast::Program,
-) -> Option<Result<Value>> {
-    let compiled = match vm::compile_function(func, program) {
-        Ok(c) => c,
-        Err(_) => return None, // VM can't compile → fall back
-    };
-    // Use execute_with_io — for sync callers, IO operations cause fallback
-    match vm::execute_with_io(&compiled, args.to_vec(), program, &|op, _| {
-        bail!("VM: async IO ({op}) not available in sync context")
-    }) {
-        Ok(val) => Some(Ok(val)),
-        Err(_) => None, // any error → fall back
-    }
 }
 
 /// Try to execute a function via the bytecode VM with async IO support.

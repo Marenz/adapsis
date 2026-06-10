@@ -1596,6 +1596,9 @@ async fn main() -> Result<()> {
                             lib_errors += 1;
                         }
                     }
+                    if lib_errors > 0 {
+                        eprintln!("[save] {lib_errors} module(s) failed to persist");
+                    }
                     if let Err(e) = sess.save(std::path::Path::new(&save_path)) {
                         eprintln!("[save] failed: {e}");
                     } else {

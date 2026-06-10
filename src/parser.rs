@@ -2300,11 +2300,6 @@ fn parse_each_header(line: usize, input: &str) -> Result<(Expr, String, TypeExpr
     ))
 }
 
-/// Public wrapper for parsing a type expression from a string.
-pub fn parse_type_expr(input: &str) -> Result<TypeExpr> {
-    parse_type(0, input)
-}
-
 /// Public wrapper for parsing a single expression from a string.
 pub fn parse_single_expr(input: &str) -> Result<Expr> {
     parse_expr(0, input)
