@@ -530,17 +530,25 @@ impl<'a> Compiler<'a> {
                 match self.resolve_local(name) {
                     Some(slot) => self.emit(Op::LoadLocal(slot)),
                     None => {
-                        // Could be a zero-arg union constructor or builtin
                         if name == "true" {
                             self.emit(Op::PushBool(true));
                         } else if name == "false" {
                             self.emit(Op::PushBool(false));
                         } else if name == "None" {
                             self.emit(Op::PushNone);
-                        } else {
-                            // Treat as zero-arg variant constructor
+                        } else if self.program.is_union_variant(name) {
+                            // Zero-arg variant constructor
                             let vid = self.interner.intern(name);
                             self.emit(Op::PushVariant(vid, 0));
+                        } else {
+                            // Unknown identifier — most likely a +shared variable,
+                            // which the VM does not support yet. Bail so the
+                            // tiered eval path falls back to the tree-walker
+                            // (which resolves shared vars via Env).
+                            bail!(
+                                "vm: unresolved identifier `{name}` (shared variables \
+                                 are not supported in the VM — falling back to interpreter)"
+                            );
                         }
                     }
                 }
@@ -1433,6 +1441,48 @@ mod tests {
             .iter()
             .any(|op| matches!(op, Op::MatchVariant(v, _) if crate::intern::resolve_display(*v) == "Red"));
         assert!(has_match, "should emit MatchVariant for variant \"Red\"");
+    }
+
+    #[test]
+    fn compile_zero_arg_variant_constructor() {
+        // A bare identifier that IS a declared union variant compiles to PushVariant.
+        let compiled = compile_from_source(
+            "\
++type Color = Red | Green | Blue
+
++fn default_color ()->Color
+  +return Red
+",
+            "default_color",
+        );
+        let has_variant = compiled
+            .bytecode
+            .iter()
+            .any(|op| matches!(op, Op::PushVariant(_, 0)));
+        assert!(has_variant, "Red should compile to PushVariant");
+    }
+
+    #[test]
+    fn compile_bails_on_shared_variable_read() {
+        // A bare identifier that is NOT a local, builtin constant, or union
+        // variant (i.e. a +shared variable) must fail compilation so the
+        // tiered eval path falls back to the tree-walker — otherwise shared
+        // vars would silently resolve to a bogus variant value.
+        let source = "\
++module Greeter
++shared greeting:String = \"hello\"
+
++fn greet (name:String)->String
+  +return concat(greeting, \" \", name)
++end
+";
+        let program = build_program(source);
+        let func = program.get_function("Greeter.greet").unwrap();
+        let err = compile_function(func, &program).expect_err("expected compile bail");
+        assert!(
+            err.to_string().contains("greeting"),
+            "error should name the unresolved identifier: {err}"
+        );
     }
 
     #[test]
