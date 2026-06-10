@@ -228,6 +228,12 @@ enum Command {
         #[arg(long, env = "FORGE_OPENCODE_GIT_DIR")]
         opencode_git_dir: Option<String>,
 
+        /// OpenCode server URL to attach to (e.g. http://localhost:4096).
+        /// If set, !opencode uses `--attach` to connect to a running server.
+        /// If unset (default), opencode runs in standalone mode.
+        #[arg(long)]
+        opencode_attach: Option<String>,
+
         /// Maximum iterations per AI request (default 20)
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
@@ -826,7 +832,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, max_iterations, access_level, permissions_file } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, access_level, permissions_file } => {
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -1483,6 +1489,7 @@ async fn main() -> Result<()> {
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
                 max_iterations,
                 opencode_lock: opencode_lock,
+                opencode_attach: opencode_attach.clone(),
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 opencode_git_dir: resolved_git_dir,
                 runtime: shared_runtime.clone(),

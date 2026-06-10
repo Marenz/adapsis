@@ -847,6 +847,7 @@ pub async fn handle_llm_takeover(
         event_broadcast: tokio::sync::broadcast::channel(16).0,
         opencode_git_dir: opencode_git_dir.clone(),
         opencode_lock: opencode_lock.clone(),
+        opencode_attach: None,
         message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         max_iterations: 10,
         runtime: runtime.clone(),

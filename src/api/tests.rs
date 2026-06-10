@@ -23,6 +23,7 @@ fn test_config() -> AppConfig {
         event_broadcast: tokio::sync::broadcast::channel(16).0,
         opencode_git_dir: ".".to_string(),
         opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        opencode_attach: None,
         message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         max_iterations: 1,
         runtime: std::sync::Arc::new(std::sync::RwLock::new(
@@ -678,6 +679,7 @@ fn test_config_with_io() -> (
         event_broadcast: tokio::sync::broadcast::channel(16).0,
         opencode_git_dir: ".".to_string(),
         opencode_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        opencode_attach: None,
         message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         max_iterations: 1,
         runtime: std::sync::Arc::new(std::sync::RwLock::new(
