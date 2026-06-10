@@ -493,20 +493,17 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::StoreLocal(slot));
             }
 
-            ast::StatementKind::Spawn { call, binding } => {
-                self.compile_call_expr(call)?;
-                if let Some(binding) = binding {
-                    let slot = self.alloc_local(&binding.name);
-                    self.emit(Op::StoreLocal(slot));
-                } else {
-                    self.emit(Op::Pop);
-                }
+            ast::StatementKind::Spawn { .. } => {
+                // +spawn must run the task in the background (tree-walker
+                // dispatches via the coroutine task registry). Compiling it
+                // as a synchronous call would silently change semantics.
+                anyhow::bail!("vm: +spawn not supported — falling back to interpreter");
             }
 
-            ast::StatementKind::Yield { value } => {
-                self.compile_expr(value)?;
-                // Yield is conceptually a return for generators — use Return for now
-                self.emit(Op::Return);
+            ast::StatementKind::Yield { .. } => {
+                // Yield has generator semantics in the tree-walker; compiling
+                // it as Return would terminate the function instead.
+                anyhow::bail!("vm: +yield not supported — falling back to interpreter");
             }
             ast::StatementKind::Source(_) | ast::StatementKind::Event(_) => {
                 anyhow::bail!("source/event statements not supported in VM")

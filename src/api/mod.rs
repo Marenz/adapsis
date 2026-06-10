@@ -492,15 +492,8 @@ pub async fn eval_fn(
 
             let eval_result = tokio::task::spawn_blocking(move || {
                 ctx.install();
-                let func = program.get_function(&fn_name)
-                    .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                 let handle = crate::coroutine::CoroutineHandle::new(sender);
-                let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
-                env.populate_shared_from_program(&program);
-                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
-                let input_val = eval::eval_parser_expr_with_program(&input, &program)?;
-                eval::bind_input_to_params(&program, func, &input_val, &mut env);
-                eval::eval_function_body_pub(&program, &func.body, &mut env)
+                eval::eval_async_function(&program, &fn_name, &input, handle)
             }).await;
 
             // Sync mutations back to session if any occurred

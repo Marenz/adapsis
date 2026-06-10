@@ -523,15 +523,8 @@ pub async fn execute_code(
                                 let eval_fn_name = ev.function_name.clone();
                                 let eval_result = tokio::task::spawn_blocking(move || {
                                     ctx.install();
-                                    let func = program.get_function(&fn_name)
-                                        .ok_or_else(|| anyhow::anyhow!("function not found"))?;
                                     let handle = crate::coroutine::CoroutineHandle::new(sender);
-                                    let mut env = crate::eval::Env::new_with_shared_interner(&program.shared_interner);
-                                    env.populate_shared_from_program(&program);
-                                    env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(handle));
-                                    let input_val = crate::eval::eval_parser_expr_with_program(&input, &program)?;
-                                    crate::eval::bind_input_to_params(&program, func, &input_val, &mut env);
-                                    crate::eval::eval_function_body_pub(&program, &func.body, &mut env)
+                                    crate::eval::eval_async_function(&program, &fn_name, &input, handle)
                                 }).await;
                                 let (msg, success) = match &eval_result {
                                     Ok(Ok(val)) => (format!("eval {}() = {val}", eval_fn_name), true),
