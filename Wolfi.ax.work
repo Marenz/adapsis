@@ -1,0 +1,182 @@
++module Wolfi
++doc "Wolfi's capabilities on Renate's laptop: software management (via the bounded adapsis-pkg sudo wrapper), read-only system info, screenshots, and self-maintained memory notes. All shell access goes through the ADAPSIS_SHELL_POLICY allowlist. Long operations run in the background and report completion via conversation_notify."
+
++shared apt_get:String = "sudo -n apt-get -y -o APT::Get::Assume-Yes=true"
++shared notes_path:String = "/home/adapsis/.config/adapsis/persona-notes.md"
++shared shot_helper:String = "sudo -n /usr/local/sbin/adapsis-shot"
+
++fn install_app(context:String, name:String) -> String [io,async]
+  +spawn _install_and_report(context, name)
+  +return concat("Ich installiere ", name, " jetzt im Hintergrund - das kann einen Moment dauern. Ich melde mich, wenn es fertig ist.")
++doc "Install a software package by apt name (e.g. libreoffice, neovim, thunderbird, telegram-desktop). Runs in the background and sends a follow-up message to context when done. Pass the Telegram chat_id as context."
+
++fn _install_and_report(context:String, name:String) -> String [io,async]
+  +await out:String = shell_exec(concat(apt_get, " install ", name))
+  +if starts_with(out, "EXIT")
+    +let flat:String = flatpak_id_for(name)
+    +if flat != ""
+      +await fout:String = do_flatpak_install(flat)
+      +if starts_with(fout, "EXIT")
+        +await _:String = conversation_notify(context, concat("Das Installieren von ", name, " hat nicht geklappt: ", fout), "")
+        +return "failed"
+      +await _:String = conversation_notify(context, concat(name, " ist fertig installiert (aus Flathub)!"), "")
+      +return "ok"
+    +await _:String = conversation_notify(context, concat("Das Installieren von ", name, " hat leider nicht geklappt: ", out), "")
+    +return "failed"
+  +await _:String = conversation_notify(context, concat(name, " ist fertig installiert!"), "")
+  +return "ok"
++doc "Internal: try apt install; if the package is not in apt, fall back to a known Flathub app for common apps (Telegram, Signal). Reports to the conversation."
+
++fn flatpak_id_for(name:String) -> String
+  +if name == "telegram"
+    +return "org.telegram.desktop"
+  +if name == "telegram-desktop"
+    +return "org.telegram.desktop"
+  +if name == "signal"
+    +return "org.signal.Signal"
+  +if name == "signal-desktop"
+    +return "org.signal.Signal"
+  +if name == "spotify"
+    +return "com.spotify.Client"
+  +if name == "discord"
+    +return "com.discordapp.Discord"
+  +if name == "zoom"
+    +return "us.zoom.Zoom"
+  +return ""
++doc "Map a common app name to its Flathub app-id, or empty string if none known."
+
++test flatpak_id_for
+  +with name="telegram" -> expect "org.telegram.desktop"
+  +with name="signal" -> expect "org.signal.Signal"
+  +with name="nonsense" -> expect ""
+
++fn do_flatpak_install(app_id:String) -> String [io,async]
+  +await _r:String = shell_exec("sudo -n flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo")
+  +await out:String = shell_exec(concat("sudo -n flatpak install -y --noninteractive flathub ", app_id))
+  +return out
++doc "Internal: ensure Flathub remote exists, install the given app-id system-wide."
+
++fn remove_app(context:String, name:String) -> String [io,async]
+  +spawn _remove_and_report(context, name)
+  +return concat("Ich entferne ", name, " jetzt im Hintergrund.")
++doc "Remove an installed package by name. Reports completion to context."
+
++fn _remove_and_report(context:String, name:String) -> String [io,async]
+  +await out:String = shell_exec(concat(apt_get, " remove ", name))
+  +if starts_with(out, "EXIT")
+    +await _:String = conversation_notify(context, concat("Das Entfernen von ", name, " hat nicht geklappt: ", out), "")
+    +return "failed"
+  +await _:String = conversation_notify(context, concat(name, " wurde entfernt."), "")
+  +return "ok"
++doc "Internal: apt-get remove in the background; report to the conversation."
+
++fn update_all(context:String) -> String [io,async]
+  +spawn _update_and_report(context)
+  +return "Ich aktualisiere jetzt alle Programme im Hintergrund. Das kann ein paar Minuten dauern - ich melde mich, wenn es durch ist."
++doc "Update all installed software to the latest versions (apt upgrade). Background; reports completion to context."
+
++fn _update_and_report(context:String) -> String [io,async]
+  +await _u:String = shell_exec(concat(apt_get, " update"))
+  +await out:String = shell_exec(concat(apt_get, " --with-new-pkgs upgrade"))
+  +if starts_with(out, "EXIT")
+    +await _:String = conversation_notify(context, concat("Die Aktualisierung hatte ein Problem: ", out), "")
+    +return "failed"
+  +await _:String = conversation_notify(context, "Alle Programme sind jetzt aktuell.", "")
+  +return "ok"
++doc "Internal: apt-get update + upgrade in the background; report to the conversation."
+
++fn install_flatpak(context:String, app_id:String) -> String [io,async]
+  +spawn _install_flatpak_and_report(context, app_id)
+  +return concat("Ich installiere ", app_id, " aus Flathub im Hintergrund. Ich melde mich, wenn es fertig ist.")
++doc "Install an app from Flathub via flatpak (user scope, no root). Use the Flathub app-id, e.g. org.telegram.desktop, org.signal.Signal. Use this for apps NOT available via apt (install_app)."
+
++fn _install_flatpak_and_report(context:String, app_id:String) -> String [io,async]
+  +await out:String = do_flatpak_install(app_id)
+  +if starts_with(out, "EXIT")
+    +await _:String = conversation_notify(context, concat("Das Installieren von ", app_id, " aus Flathub hat nicht geklappt: ", out), "")
+    +return "failed"
+  +await _:String = conversation_notify(context, concat(app_id, " ist fertig installiert (Flathub)!"), "")
+  +return "ok"
++doc "Internal: flatpak --user install from Flathub in the background; report to the conversation."
+
++fn search_app(term:String) -> String [io,async]
+  +await out:String = shell_exec(concat("apt-cache search ", term))
+  +return out
++doc "Search available packages by keyword (fast, synchronous)."
+
++fn app_details(name:String) -> String [io,async]
+  +await out:String = shell_exec(concat("apt-cache show ", name))
+  +return out
++doc "Show details about a package (description, version)."
+
++fn updates_available() -> String [io,async]
+  +await _u:String = shell_exec(concat(apt_get, " update"))
+  +await out:String = shell_exec("apt list --upgradable")
+  +return out
++doc "List packages that have updates available (read-only)."
+
++fn clean_disk() -> String [io,async]
+  +await out:String = shell_exec(concat(apt_get, " clean"))
+  +return "Speicher aufgeraeumt (Paket-Zwischenspeicher geleert)."
++doc "Free disk space by clearing the downloaded package cache."
+
++fn list_installed() -> String [io,async]
+  +await out:String = shell_exec("apt list --installed")
+  +return out
++doc "List installed packages (read-only)."
+
++fn system_info() -> String [io,async]
+  +await disk:String = shell_exec("df -h /")
+  +await mem:String = shell_exec("free -h")
+  +await up:String = shell_exec("uptime")
+  +return concat("Speicherplatz:\n", disk, "\n\nArbeitsspeicher:\n", mem, "\n\nLaufzeit:\n", up)
++doc "Read-only overview of the laptop: disk space, memory, uptime. Answers 'how is my computer doing / how much space is left'."
+
++fn disk_space() -> String [io,async]
+  +await out:String = shell_exec("df -h /")
+  +return out
++doc "How much disk space is free."
+
++fn memory_usage() -> String [io,async]
+  +await out:String = shell_exec("free -h")
+  +return out
++doc "How much memory (RAM) is in use."
+
++fn screenshot(context:String) -> String [io,async]
+  +spawn _screenshot_and_send(context)
+  +return "Ich mache jetzt ein Foto vom Bildschirm und schicke es dir gleich."
++doc "Take a screenshot of Renate's desktop and send it to the chat. A small notice appears on her screen each time. Pass the Telegram chat_id as context."
+
++fn _screenshot_and_send(context:String) -> String [io,async]
+  +await path:String = shell_exec(shot_helper)
+  +let clean:String = trim(path)
+  +if starts_with(clean, "EXIT")
+    +await _:String = conversation_notify(context, concat("Ich konnte kein Foto vom Bildschirm machen: ", clean), "")
+    +return "failed"
+  +if starts_with(clean, "shell_exec refused")
+    +await _:String = conversation_notify(context, "Screenshots sind hier nicht erlaubt.", "")
+    +return "refused"
+  +await img:Attachment = read_attachment(clean)
+  +await _:String = conversation_notify(context, "Hier ist der Bildschirm:", img)
+  +return "ok"
++doc "Internal: capture the desktop via the adapsis-shot helper and deliver the image to the conversation."
+
++fn remember(note:String) -> String [io,async]
+  +await existing:String = read_or_empty(notes_path)
+  +let updated:String = concat(existing, "- ", note, "\n")
+  +await _:String = write_file(notes_path, updated)
+  +return concat("gemerkt: ", note)
++doc "Append a short note about Renate to Wolfi's persistent memory (recalled in every future conversation). Do not store sensitive data like passwords."
+
++fn read_or_empty(path:String) -> String [io,async]
+  +await exists:Bool = file_exists(path)
+  +if exists
+    +await content:String = read_file(path)
+    +return content
+  +return ""
++doc "Read a file, or return empty string if it does not exist."
+
++fn forget_all() -> String [io,async]
+  +await _:String = write_file(notes_path, "")
+  +return "Notizen geleert"
++doc "Clear all of Wolfi's learned notes about Renate."

@@ -5,7 +5,7 @@
 +shared allowed_path:String = "/home/marenz/.telegram-bot-users"
 +shared admin_user_ids:String = "1815217"
 +shared allowed_user_ids:String = ""
-+shared sandbox_perm_model:String = "gemma4s"
++shared sandbox_perm_model:String = "family"
 +shared intake_mode:String = "poll"
 +shared poll_offset:Int = 0
 +shared poll_running:Bool = false
@@ -262,12 +262,12 @@
 +fn send_reply_with_attachment(chat_id_str:String, text:String, attachment:Attachment) -> String [io,async]
   +let chat_id:Int = to_int(chat_id_str)
   +await _:String = send_message(chat_id, text)
-  +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendAudio")
-  +let extra:String = concat("chat_id=", to_string(chat_id), "&title=", text, "&performer=AdapsisOS")
-  +await resp:String = http_upload(url, attachment, "audio", extra)
+  +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendDocument")
+  +let extra:String = concat("chat_id=", to_string(chat_id))
+  +await resp:String = http_upload(url, attachment, "document", extra)
   +return resp
 +end
-+doc "Send a text reply with an audio attachment (callback for llm_takeover)"
++doc "Send a text reply with a file attachment via sendDocument (works for images, audio, pdfs — callback for llm_takeover/conversation_notify)"
 
 +fn send_audio_file(chat_id:Int, file_path:String, caption:String) -> String [io,async]
   +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendDocument")
