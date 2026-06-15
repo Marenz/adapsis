@@ -1353,11 +1353,19 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| ".".to_string());
 
             // Resolve opencode git directory:
+            // 0. If !opencode is disabled by the access level (anything below
+            //    Full), skip all git/worktree setup entirely. Such deployments
+            //    can never rebuild their own runtime, so cloning the source repo
+            //    is both unnecessary and an avoidable dependency/attack surface
+            //    (and would hard-fail on boxes without git installed).
             // 1. If explicitly set, validate it's a git repo with Cargo.toml
             // 2. Otherwise, auto-setup a bare repo + per-session worktree
             //    Each session gets its own isolated worktree so multiple
             //    sessions don't interfere with each other.
-            let resolved_git_dir = if let Some(ref dir) = opencode_git_dir {
+            let resolved_git_dir = if access_level_parsed != permissions::AccessLevel::Full {
+                eprintln!("[opencode] access level {:?} disables !opencode; skipping git/worktree setup", access_level_parsed);
+                ".".to_string()
+            } else if let Some(ref dir) = opencode_git_dir {
                 // Validate the explicit directory
                 let p = std::path::Path::new(dir);
                 if !p.join(".git").exists() {
