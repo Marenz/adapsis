@@ -542,6 +542,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "file_read_binary",
+        aliases: &["read_file_binary", "read_attachment"],
+        short: "read a local file as an Attachment: read_file_binary(path) -> Attachment",
+        long: "Reads a local file (e.g. an image or audio file) into an Attachment value, suitable for sending via conversation_notify. The mime type is guessed from the file extension. Fails if the file cannot be read.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "file_write",
         aliases: &["write_file"],
         short: "write String to file",

@@ -2229,6 +2229,31 @@ impl CoroutineHandle {
                 let contents = self.send_and_wait(WaitReason::FileRead(path.clone()), IoRequest::FileRead { path, reply: tx }, rx)?;
                 return Ok(Value::string(contents));
             }
+            "file_read_binary" | "read_file_binary" | "read_attachment" => {
+                // Read a local file into an Attachment (for images/audio to send
+                // via conversation_notify). Local disk read — done directly.
+                let path = match &args[0] { Value::String(s) => s.as_ref().clone(), _ => bail!("read_file_binary expects String path") };
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| anyhow::anyhow!("read_file_binary: cannot read '{path}': {e}"))?;
+                let name = std::path::Path::new(&path)
+                    .file_name().map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "file".to_string());
+                let mime = match name.rsplit('.').next() {
+                    Some("png") => "image/png",
+                    Some("jpg") | Some("jpeg") => "image/jpeg",
+                    Some("gif") => "image/gif",
+                    Some("webp") => "image/webp",
+                    Some("pdf") => "application/pdf",
+                    Some("ogg") => "audio/ogg",
+                    Some("mp3") => "audio/mpeg",
+                    Some("wav") => "audio/wav",
+                    Some("txt") => "text/plain",
+                    _ => "application/octet-stream",
+                };
+                let att = crate::attachment::Attachment::from_bytes(bytes, mime, name)
+                    .map_err(|e| anyhow::anyhow!("read_file_binary: {e}"))?;
+                return Ok(Value::Attachment(att));
+            }
             "file_write" | "write_file" => {
                 let path = match &args[0] { Value::String(s) => s.as_ref().clone(), _ => bail!("file_write expects String path") };
                 let data = match &args[1] { Value::String(s) => s.as_ref().clone(), other => format!("{other}") };
