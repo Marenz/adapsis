@@ -1,22 +1,79 @@
 +module TelegramBot
-+doc "Telegram bot: webhook handler, voice transcription, multi-user LLM conversations via llm_takeover"
++doc "Telegram bot: webhook OR long-poll intake, voice transcription, multi-user LLM conversations via llm_takeover"
 +shared telegram_token:String = ""
 +shared admin_ids:String = "1815217"
++shared intake_mode:String = "poll"
++shared poll_offset:Int = 0
++shared poll_running:Bool = false
 
 +startup [io,async]
   +await token:String = read_file("/home/marenz/.telegram-bot-token")
   +set telegram_token = trim(token)
-  +return concat("TelegramBot ready, token loaded (", to_string(length(telegram_token)), " chars)")
+  +if intake_mode == "poll"
+    +spawn poll_loop()
+    +return concat("TelegramBot ready (poll mode), token loaded (", to_string(length(telegram_token)), " chars)")
+  +return concat("TelegramBot ready (webhook mode), token loaded (", to_string(length(telegram_token)), " chars)")
++doc "Load token, then arm the configured intake: 'poll' spawns getUpdates loop, 'webhook' relies on the +route below"
 
 +route POST "/webhook/telegram" -> handle_update
 
 +fn handle_update(payload:String) -> String [io,async]
+  +if intake_mode != "webhook"
+    +return "{}"
   +spawn process_update_async(payload)
   +return "{}"
-+doc "Acknowledge Telegram webhook immediately, process in background"
++doc "Webhook intake: acknowledge immediately, process in background. Ignored unless intake_mode is 'webhook' so a stale route can't double-deliver while polling."
+
++fn poll_loop() -> String [io,async,mut]
+  +if poll_running
+    +return "already running"
+  +set poll_running = true
+  +while poll_running
+    +await _:String = poll_once()
+  +return "poll loop stopped"
++doc "Long-poll intake: repeatedly calls getUpdates. No inbound port required. Guarded by poll_running so it is started at most once."
+
++fn poll_once() -> String [io,async,mut]
+  +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/getUpdates?timeout=30&offset=", to_string(poll_offset))
+  +match http_get(url)
+  +case Ok(body)
+    +await _:String = dispatch_updates(body)
+    +return "ok"
+  +case Err(e)
+    +await _:Int = sleep(3000)
+    +return concat("poll error: ", e)
+  +end
++doc "One getUpdates cycle (30s long-poll). On network error, back off 3s and continue — the loop must not crash on a blip."
+
++fn dispatch_updates(body:String) -> String [io,async,mut]
+  +let arr:String = json_get(body, "result")
+  +if arr == ""
+    +return "no result"
+  +let n:Int = json_array_len(arr)
+  +let i:Int = 0
+  +while i < n
+    +let update:String = json_get(arr, to_string(i))
+    +let uid:Int = extract_update_id(update)
+    +if uid >= poll_offset
+      +set poll_offset = uid + 1
+    +spawn process_update_async(update)
+    +set i = i + 1
+  +return concat("dispatched ", to_string(n))
++doc "Split a getUpdates array into individual updates, advance the dedup offset, and feed each to the shared process_update_async (same path as webhook)."
+
++fn extract_update_id(update:String) -> Int
+  +let val:String = json_get(update, "update_id")
+  +if val == ""
+    +return 0
+  +return to_int(val)
++doc "Extract update_id for offset tracking (acknowledges the update so Telegram stops re-sending it)"
+
++test extract_update_id
+  +with update="{\"update_id\":42,\"message\":{}}" -> expect 42
+  +with update="{\"message\":{}}" -> expect 0
 
 +fn is_admin(chat_id:Int) -> Bool
-  +let ids:List(String) = split(admin_ids, ",")
+  +let ids:List<String> = split(admin_ids, ",")
   +let id_str:String = to_string(chat_id)
   +return contains(ids, id_str)
 +doc "Check if a chat ID is in the admin list"
