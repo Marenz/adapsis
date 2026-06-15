@@ -20,6 +20,9 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::eval::Value;
 
+pub mod shell_policy;
+pub use shell_policy::ShellPolicy;
+
 /// A handle that Adapsis code uses to represent sockets/connections.
 pub type Handle = i64;
 
@@ -202,6 +205,9 @@ pub struct Runtime {
     pub llm_url: String,
     pub llm_default_model: String,
     pub llm_api_key: Option<String>,
+    /// Gate for `shell_exec`/`exec`. Enforced at the IO loop so it applies
+    /// regardless of caller module or permission level.
+    pub shell_policy: ShellPolicy,
 }
 
 impl Runtime {
@@ -219,6 +225,7 @@ impl Runtime {
                 llm_url: String::new(),
                 llm_default_model: String::new(),
                 llm_api_key: None,
+                shell_policy: ShellPolicy::from_env(),
             },
             io_rx,
         )
@@ -349,6 +356,15 @@ impl Runtime {
                 }
             }
             IoRequest::ShellExec { command, reply } => {
+                // Enforce the shell policy at the single choke point that
+                // actually spawns a process. Refusals never run `sh`.
+                if let Err(reason) = self.shell_policy.check(&command) {
+                    eprintln!("[shell_policy] refused: {reason} (command: {command:?})");
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "shell_exec refused: {reason}"
+                    )));
+                    return;
+                }
                 tokio::task::spawn_blocking(move || {
                     let output = std::process::Command::new("sh")
                         .arg("-c")

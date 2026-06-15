@@ -1020,6 +1020,10 @@ This library is shared across all git worktrees and sessions.
 - shell_exec is acceptable for commands that have no builtin equivalent (e.g. calling
   external APIs, verifying results). This is acceptable for testing, not for
   production logic.
+- shell_exec may be gated by policy (ADAPSIS_SHELL_POLICY). On a locked-down
+  deployment it can be denied entirely or restricted to an allowlist of programs;
+  refused commands return an error "shell_exec refused: ...". Do not rely on
+  shell_exec being available — prefer builtins, and handle the refusal gracefully.
 - Write Adapsis operations directly in your response. Any line starting with
   +, !, or ? is automatically detected and executed. Mix prose and code freely.
 "#
