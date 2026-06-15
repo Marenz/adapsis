@@ -1,9 +1,10 @@
 +module TelegramBot
-+doc "Telegram bot: webhook OR long-poll intake, voice transcription, LLM replies. Supports group chats, multiple admins, and per-user sandboxing."
++doc "Telegram bot: webhook OR long-poll intake, voice transcription, LLM replies. Three-tier access: admins (admin_user_ids) full, allow-listed users (allowed_user_ids from allowed_path) sandboxed, everyone else ignored. Supports group chats and per-user sandboxing."
 +shared telegram_token:String = ""
 +shared token_path:String = "/home/marenz/.telegram-bot-token"
-+shared admin_path:String = "/home/marenz/.telegram-bot-users"
++shared allowed_path:String = "/home/marenz/.telegram-bot-users"
 +shared admin_user_ids:String = "1815217"
++shared allowed_user_ids:String = ""
 +shared sandbox_perm_model:String = "gemma4s"
 +shared intake_mode:String = "poll"
 +shared poll_offset:Int = 0
@@ -12,21 +13,20 @@
 +startup [io,async,mut]
   +await token:String = read_file(token_path)
   +set telegram_token = trim(token)
-  +match read_file(admin_path)
-  +case Ok(raw)
-    +set admin_user_ids = parse_admin_ids(raw)
-  +case Err(e)
-    +set admin_user_ids = admin_user_ids
+  +await has_allowed:Bool = file_exists(allowed_path)
+  +if has_allowed
+    +await raw:String = read_file(allowed_path)
+    +set allowed_user_ids = parse_id_list(raw)
   +end
   +if intake_mode == "poll"
     +spawn poll_loop()
-    +return concat("TelegramBot ready (poll mode), token loaded (", to_string(length(telegram_token)), " chars), admins=", admin_user_ids)
+    +return concat("TelegramBot ready (poll mode), token=", to_string(length(telegram_token)), "ch, admins=", admin_user_ids, ", allowed=", allowed_user_ids)
   +end
-  +return concat("TelegramBot ready (webhook mode), token loaded (", to_string(length(telegram_token)), " chars), admins=", admin_user_ids)
+  +return concat("TelegramBot ready (webhook mode), token=", to_string(length(telegram_token)), "ch, admins=", admin_user_ids, ", allowed=", allowed_user_ids)
 +end
-+doc "Load token from token_path; load admin IDs from admin_path if present (one ID per line and/or comma-separated, blank lines and # comments ignored), else keep the default. Then arm the configured intake."
++doc "Load token from token_path; load the allow-list of permitted (non-admin) user IDs from allowed_path if present (one ID per line and/or comma-separated, blank lines and # comments ignored). admin_user_ids stays from its default/shared value. Then arm the configured intake."
 
-+fn parse_admin_ids(raw:String) -> String
++fn parse_id_list(raw:String) -> String
   +let lines:List<String> = split(raw, "\n")
   +let out:String = ""
   +let i:Int = 0
@@ -51,20 +51,17 @@
     +end
     +set i = i + 1
   +end
-  +if out == ""
-    +return "1815217"
-  +end
   +return out
 +end
-+doc "Normalize an admin-id file into a comma-separated ID string: accepts newline- and/or comma-separated IDs, trims whitespace, skips blank lines and # comments. Falls back to the default admin if the file yields nothing."
++doc "Normalize an ID file into a comma-separated ID string: accepts newline- and/or comma-separated IDs, trims whitespace, skips blank lines and # comments. Returns empty string if the file yields nothing (caller decides the fallback)."
 
-+test parse_admin_ids
++test parse_id_list
   +with raw="1815217" -> expect "1815217"
   +with raw="1815217\n999\n" -> expect "1815217,999"
   +with raw="1815217, 999" -> expect "1815217,999"
   +with raw="# admins\n1815217\n\n999\n" -> expect "1815217,999"
-  +with raw="" -> expect "1815217"
-  +with raw="\n\n" -> expect "1815217"
+  +with raw="" -> expect ""
+  +with raw="\n\n" -> expect ""
 
 +route POST "/webhook/telegram" -> handle_update
 
@@ -163,6 +160,12 @@
     +await text:String = transcribe_voice(voice_file_id)
   +end
   +let admin:Bool = is_admin(user_id)
+  +let allowed:Bool = is_allowed(user_id)
+  +if admin == false
+    +if allowed == false
+      +return concat("ignored: unauthorized user ", to_string(user_id))
+    +end
+  +end
   +if chat_type == "group"
     +await _:String = handle_group(chat_id, user_id, text, admin)
     +return "ok"
@@ -178,7 +181,15 @@
   +await _:String = handle_user_dm(chat_id, user_id, text)
   +return "ok"
 +end
-+doc "Background update processor: transcribes voice, routes to appropriate handler by chat type and admin status."
++doc "Background update processor: transcribes voice, then enforces the allow-list. Admins (admin_user_ids) get full access; users in allowed_user_ids get the sandboxed model; everyone else is silently ignored (no reply). Routes by chat type."
+
++fn is_allowed(user_id:Int) -> Bool
+  +return is_admin_in(user_id, allowed_user_ids)
++end
++doc "Check if a user ID is in the allow-list (allowed_user_ids); reuses the comma-boundary matcher."
+
++test is_allowed
+  +with user_id=999 -> expect false
 
 +fn handle_group(chat_id:Int, user_id:Int, text:String, admin:Bool) -> String [io,async]
   +let ctx:String = concat("telegram:group:", to_string(chat_id))
