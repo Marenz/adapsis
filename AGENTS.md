@@ -227,9 +227,25 @@ Layered access control: Process level → Model level → Context level. Each la
 
 ### Process level (`--access-level` CLI flag)
 - `full` — everything allowed including `!opencode`
-- `adapsis-only` — can modify any module, no `!opencode`
+- `adapsis-only` — can modify any module, no `!opencode` **(default)**
 - `user-only` — can only modify non-core modules, no `!opencode`
 - `execute-only` — cannot modify anything, can only `!eval`
+
+**Default is `adapsis-only`** so `!opencode` (which rebuilds and re-execs the
+runtime) is opt-in. The self-improving dev loop must pass `--access-level full`
+explicitly (see `start.sh`). Deployments that should never rewrite their own
+runtime (e.g. a family member's machine) should keep the default or go lower.
+
+### Shell policy (`ADAPSIS_SHELL_POLICY` env var)
+`shell_exec`/`exec` is gated independently of the permission system, enforced at
+the IO loop (`coroutine/shell_policy.rs`):
+- unset / `unrestricted` — any command (legacy default)
+- `deny` — all shell execution refused
+- `allow:git,ls,systemctl` — only listed programs (first token) may run
+
+Unknown/empty specs fail safe to `deny`. For a locked-down box, set
+`ADAPSIS_SHELL_POLICY=deny` or an explicit allowlist. This is the OS-capability
+gate the per-module permissions do **not** provide.
 
 ### Model level (`--permissions-file` → `permissions.toml`)
 ```toml

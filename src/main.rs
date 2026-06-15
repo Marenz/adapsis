@@ -238,8 +238,10 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
 
-        /// Process-level access cap: full, adapsis-only, user-only, execute-only
-        #[arg(long, default_value = "full")]
+        /// Process-level access cap: full, adapsis-only, user-only, execute-only.
+        /// Defaults to adapsis-only so !opencode (which rebuilds and re-execs the
+        /// runtime) is OFF by default — pass --access-level full to opt in.
+        #[arg(long, default_value = "adapsis-only")]
         access_level: String,
 
         /// Path to permissions TOML file for per-model permissions
