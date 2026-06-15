@@ -1225,6 +1225,13 @@ pub fn eval_test_case_with_mocks(
     if let Some(rt) = get_shared_runtime() {
         init_missing_shared_runtime_vars(program, &rt);
     }
+    // Qualify the name up front so FN_NAME_STACK carries the "Module.fn" prefix.
+    // Without this, a bare name like "is_admin" leaves current_module_name() = None
+    // and shared-variable resolution (Env::get -> materialize_shared_value) silently
+    // fails with "undefined variable", even though the value is in the cache.
+    // qualify_function_name is a no-op for already-qualified or top-level names.
+    let qualified_name = program.qualify_function_name(function_name);
+    let function_name: &str = &qualified_name;
     let func = program.get_function(function_name).ok_or_else(|| {
         anyhow!(
             "function `{function_name}` not found{}",

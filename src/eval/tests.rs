@@ -3544,6 +3544,45 @@ fn match_nested_variant_bindings() {
 }
 
 // ═════════════════════════════════════════════════════════════════════
+// Regression: shared-variable resolution under +test with a bare fn name
+// ═════════════════════════════════════════════════════════════════════
+
+/// A module function that reads a `+shared` variable must resolve it when
+/// invoked through `eval_test_case` by its *bare* name (as `+test is_admin`
+/// produces). Previously the bare name left `current_module_name()` = None,
+/// so `materialize_shared_value` bailed and `Env::get` returned
+/// "undefined variable", even though the value sat in the shared cache.
+/// This silently broke security-relevant checks like an admin gate.
+#[test]
+fn shared_var_resolves_in_test_with_bare_fn_name() {
+    let source = "\
++module Gate
++shared admin_ids:String = \"1815217\"
++fn is_admin (chat_id:Int)->Bool
+  +let ids:List<String> = split(admin_ids, \",\")
+  +let id_str:String = to_string(chat_id)
+  +return contains(ids, id_str)
+
++test is_admin
+  +with chat_id=1815217 -> expect true
+  +with chat_id=999 -> expect false
+";
+    let program = build_program(source);
+    let cases = extract_test_cases(source);
+    assert_eq!(cases.len(), 2, "expected two test cases");
+
+    for (fn_name, case) in &cases {
+        // fn_name is the bare "is_admin" — exactly what triggered the bug.
+        assert_eq!(fn_name, "is_admin");
+        let result = eval_test_case(&program, fn_name, case);
+        assert!(
+            result.is_ok(),
+            "is_admin must resolve shared `admin_ids` under test (bare name): {result:?}"
+        );
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════
 // Architecture: fork_runtime_for_test isolation
 // ═════════════════════════════════════════════════════════════════════
 
