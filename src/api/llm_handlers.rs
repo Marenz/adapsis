@@ -794,7 +794,26 @@ pub async fn handle_llm_takeover(
         // Add system prompt if this is a new conversation
         if conv.messages.is_empty() {
             let system = conv.system_prompt.clone().unwrap_or_else(|| {
-                {
+                if perm_model_override.is_some() {
+                    // Sandboxed (non-admin) context, e.g. a family member: use the
+                    // persona instead of the Adapsis-programmer framing. The
+                    // persona owns the identity/tone/safety; we still tell it how
+                    // to actually invoke functions and the <code> reply mechanics,
+                    // and show only the functions it may call.
+                    format!(
+                        "{}\n\n\
+                         ## So führst du Aktionen aus (technisch)\n\
+                         Wenn du etwas am Computer tun musst, rufe eine vorhandene Funktion in einem \
+                         <code>…</code>-Block auf, z. B. <code>!eval Wolfi.install_app(\"firefox\")</code>. \
+                         Der Nutzer sieht NUR den Text VOR dem ersten <code>-Block — schreibe also zuerst \
+                         deine Antwort an Renate, dann den Code. Erfinde keine Funktionen; nutze nur die unten gelisteten. \
+                         Lies bei Unklarheit den Quelltext mit ?source Modul.funktion.\n\n\
+                         ## Verfügbare Funktionen\n{}\n\n\
+                         Konversationskontext: '{context}'.",
+                        crate::prompt::persona(),
+                        program_summary,
+                    )
+                } else {
                     let available_models = permission_config.model_names();
                     let models_line = if available_models.is_empty() {
                         String::new()
