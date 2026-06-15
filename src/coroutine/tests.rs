@@ -2801,3 +2801,70 @@ async fn llm_set_and_get_model() {
     assert_eq!(unwrap_string(set_result), "model set to: local/qwen3.5-9b");
     assert_eq!(*model_shared.read().unwrap(), "local/qwen3.5-9b");
 }
+
+// ── Shell policy enforcement at the IO loop ───────────────────────────
+
+#[tokio::test]
+async fn shell_exec_denied_policy_refuses_at_io_loop() {
+    // Build the real Runtime and force a Denied policy, then send a ShellExec
+    // request straight through handle_io. The reply must be an error and the
+    // command must never reach `sh`.
+    let (mut runtime, _io_rx) = Runtime::new();
+    runtime.shell_policy = ShellPolicy::Denied;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    runtime
+        .handle_io(IoRequest::ShellExec {
+            // A command that, if it ran, would create an observable artifact.
+            command: "echo SHOULD_NOT_RUN > /tmp/adapsis_shell_policy_probe".to_string(),
+            reply: tx,
+        })
+        .await;
+
+    let result = rx.await.expect("reply channel closed");
+    assert!(
+        result.is_err(),
+        "Denied policy must refuse shell_exec, got: {result:?}"
+    );
+    assert!(
+        !std::path::Path::new("/tmp/adapsis_shell_policy_probe").exists(),
+        "refused command must not have executed"
+    );
+}
+
+#[tokio::test]
+async fn shell_exec_allowlist_blocks_unlisted_program() {
+    let (mut runtime, _io_rx) = Runtime::new();
+    runtime.shell_policy = ShellPolicy::Allowlist(vec!["echo".to_string()]);
+
+    // `rm` is not in the allowlist -> refused.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    runtime
+        .handle_io(IoRequest::ShellExec {
+            command: "rm -rf /tmp/adapsis_nonexistent_probe_dir".to_string(),
+            reply: tx,
+        })
+        .await;
+    let result = rx.await.expect("reply channel closed");
+    assert!(
+        result.is_err(),
+        "Allowlist must block unlisted program `rm`, got: {result:?}"
+    );
+
+    // `echo` is allowed -> runs and returns Ok.
+    let (tx2, rx2) = tokio::sync::oneshot::channel();
+    runtime
+        .handle_io(IoRequest::ShellExec {
+            command: "echo hello".to_string(),
+            reply: tx2,
+        })
+        .await;
+    let result2 = rx2.await.expect("reply channel closed");
+    assert!(
+        result2.is_ok(),
+        "Allowlist must permit listed program `echo`, got: {result2:?}"
+    );
+    let (stdout, _stderr, code) = result2.unwrap();
+    assert_eq!(code, 0);
+    assert!(stdout.contains("hello"));
+}
