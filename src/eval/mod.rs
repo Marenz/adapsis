@@ -2098,8 +2098,13 @@ pub(crate) fn eval_function_body(
                     .collect::<Result<Vec<_>>>()?;
                 let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
                 let io_tx = handle.io_sender();
+                // Qualify the callee (e.g. "poll_loop" -> "TelegramBot.poll_loop")
+                // so the spawned task can resolve the function's module and thus
+                // its +shared variables. A bare name leaves current_module_name()
+                // as None and shared-var lookups fail with "undefined variable".
+                let spawn_fn_name = program.qualify_function_name(&call.callee);
                 io_tx.try_send(crate::coroutine::IoRequest::Spawn {
-                    function_name: call.callee.clone(),
+                    function_name: spawn_fn_name,
                     args,
                     reply: reply_tx,
                 }).map_err(|e| anyhow::anyhow!("+spawn failed to send: {e}"))?;
