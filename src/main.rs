@@ -247,6 +247,12 @@ enum Command {
         /// Path to permissions TOML file for per-model permissions
         #[arg(long)]
         permissions_file: Option<String>,
+
+        /// Address to bind the HTTP API to. Defaults to 127.0.0.1 (loopback only)
+        /// so the code-executing API is not exposed on the network. Pass 0.0.0.0
+        /// only if you deliberately want LAN/remote access.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
     },
 
     /// Send a message to a running AdapsisOS instance
@@ -846,7 +852,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, access_level, permissions_file } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, access_level, permissions_file, host } => {
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -1528,12 +1534,12 @@ async fn main() -> Result<()> {
                 .merge(api::router_with_llm(config))
                 .layer(tower_http::cors::CorsLayer::permissive());
 
-            let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+            let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
                 .await
-                .map_err(|e| anyhow::anyhow!("Cannot bind port {port}: {e}. Try -p {}", port + 1))?;
-            println!("AdapsisOS running at http://127.0.0.1:{port}");
-            println!("  API:     http://127.0.0.1:{port}/api/");
-            println!("  Browser: http://127.0.0.1:{port}/");
+                .map_err(|e| anyhow::anyhow!("Cannot bind {host}:{port}: {e}. Try -p {}", port + 1))?;
+            println!("AdapsisOS running at http://{host}:{port}");
+            println!("  API:     http://{host}:{port}/api/");
+            println!("  Browser: http://{host}:{port}/");
             println!();
 
             if daemonize {
