@@ -1,36 +1,57 @@
 +module TelegramBot
-+doc "Telegram bot: webhook OR long-poll intake, voice transcription, multi-user LLM conversations via llm_takeover"
++doc "Telegram bot: webhook OR long-poll intake, voice transcription, LLM replies. Supports group chats, multiple admins, and per-user sandboxing."
 +shared telegram_token:String = ""
-+shared admin_ids:String = "1815217"
++shared token_path:String = "/home/marenz/.telegram-bot-token"
++shared admin_user_ids:String = "1815217"
++shared sandbox_perm_model:String = "gemma4s"
 +shared intake_mode:String = "poll"
 +shared poll_offset:Int = 0
 +shared poll_running:Bool = false
 
 +startup [io,async]
-  +await token:String = read_file("/home/marenz/.telegram-bot-token")
+  +await token:String = read_file(token_path)
   +set telegram_token = trim(token)
   +if intake_mode == "poll"
     +spawn poll_loop()
     +return concat("TelegramBot ready (poll mode), token loaded (", to_string(length(telegram_token)), " chars)")
+  +end
   +return concat("TelegramBot ready (webhook mode), token loaded (", to_string(length(telegram_token)), " chars)")
-+doc "Load token, then arm the configured intake: 'poll' spawns getUpdates loop, 'webhook' relies on the +route below"
++end
++doc "Load token from token_path, then arm the configured intake: 'poll' spawns the getUpdates loop (no inbound port), 'webhook' relies on the +route below."
 
 +route POST "/webhook/telegram" -> handle_update
+
++fn init(token:String, admins:String) -> String [mut]
+  +set telegram_token = token
+  +set admin_user_ids = admins
+  +return "ok"
++end
++doc "Initialize bot with token and comma-separated admin user IDs"
+
++fn is_admin(user_id:Int) -> Bool
+  +return is_admin_in(user_id, admin_user_ids)
++end
++doc "Check if a user ID is in the admin list (uses shared admin_user_ids)"
 
 +fn handle_update(payload:String) -> String [io,async]
   +if intake_mode != "webhook"
     +return "{}"
-  +spawn process_update_async(payload)
+  +end
+  +spawn process_update(payload)
   +return "{}"
++end
 +doc "Webhook intake: acknowledge immediately, process in background. Ignored unless intake_mode is 'webhook' so a stale route can't double-deliver while polling."
 
 +fn poll_loop() -> String [io,async,mut]
   +if poll_running
     +return "already running"
+  +end
   +set poll_running = true
   +while poll_running
     +await _:String = poll_once()
+  +end
   +return "poll loop stopped"
++end
 +doc "Long-poll intake: repeatedly calls getUpdates. No inbound port required. Guarded by poll_running so it is started at most once."
 
 +fn poll_once() -> String [io,async,mut]
@@ -43,12 +64,14 @@
     +await _:Int = sleep(3000)
     +return concat("poll error: ", e)
   +end
-+doc "One getUpdates cycle (30s long-poll). On network error, back off 3s and continue — the loop must not crash on a blip."
++end
++doc "One getUpdates cycle (30s long-poll). On network error, back off 3s and continue so the loop never crashes on a blip."
 
 +fn dispatch_updates(body:String) -> String [io,async,mut]
   +let arr:String = json_get(body, "result")
   +if arr == ""
     +return "no result"
+  +end
   +let n:Int = json_array_len(arr)
   +let i:Int = 0
   +while i < n
@@ -56,52 +79,94 @@
     +let uid:Int = extract_update_id(update)
     +if uid >= poll_offset
       +set poll_offset = uid + 1
-    +spawn process_update_async(update)
+    +end
+    +spawn process_update(update)
     +set i = i + 1
+  +end
   +return concat("dispatched ", to_string(n))
-+doc "Split a getUpdates array into individual updates, advance the dedup offset, and feed each to the shared process_update_async (same path as webhook)."
++end
++doc "Split a getUpdates array into individual updates, advance the dedup offset, and feed each to process_update (same path as webhook)."
 
 +fn extract_update_id(update:String) -> Int
   +let val:String = json_get(update, "update_id")
   +if val == ""
     +return 0
+  +end
   +return to_int(val)
++end
 +doc "Extract update_id for offset tracking (acknowledges the update so Telegram stops re-sending it)"
 
 +test extract_update_id
   +with update="{\"update_id\":42,\"message\":{}}" -> expect 42
   +with update="{\"message\":{}}" -> expect 0
 
-+fn is_admin(chat_id:Int) -> Bool
-  +let ids:List<String> = split(admin_ids, ",")
-  +let id_str:String = to_string(chat_id)
-  +return contains(ids, id_str)
-+doc "Check if a chat ID is in the admin list"
-
-+test is_admin
-  +with chat_id=1815217 -> expect true
-  +with chat_id=999 -> expect false
-
-+fn process_update_async(payload:String) -> String [io,async]
++fn process_update(payload:String) -> String [io,async]
   +let text:String = extract_text(payload)
   +let chat_id:Int = extract_chat_id(payload)
+  +let user_id:Int = extract_user_id(payload)
+  +let chat_type:String = extract_chat_type(payload)
   +let voice_file_id:String = json_get(payload, "message.voice.file_id")
+  +if chat_id == 0
+    +return "no chat_id"
+  +end
   +if text == ""
     +if voice_file_id == ""
       +return "no text or voice"
+    +end
     +await text:String = transcribe_voice(voice_file_id)
-  +let ctx:String = concat("telegram:", to_string(chat_id))
-  +if is_admin(chat_id)
-    +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id))
-    +if reply != ""
-      +await _:String = send_message(chat_id, reply)
+  +end
+  +let admin:Bool = is_admin(user_id)
+  +if chat_type == "group"
+    +await _:String = handle_group(chat_id, user_id, text, admin)
     +return "ok"
-  +else
-    +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id))
-    +if reply != ""
-      +await _:String = send_message(chat_id, reply)
+  +end
+  +if chat_type == "supergroup"
+    +await _:String = handle_group(chat_id, user_id, text, admin)
     +return "ok"
-+doc "Background processor: transcribe voice if needed, route to llm_takeover with per-user conversation context"
+  +end
+  +if admin
+    +await _:String = handle_admin_dm(chat_id, user_id, text)
+    +return "ok"
+  +end
+  +await _:String = handle_user_dm(chat_id, user_id, text)
+  +return "ok"
++end
++doc "Background update processor: transcribes voice, routes to appropriate handler by chat type and admin status."
+
++fn handle_group(chat_id:Int, user_id:Int, text:String, admin:Bool) -> String [io,async]
+  +let ctx:String = concat("telegram:group:", to_string(chat_id))
+  +let sender:String = concat("[user:", to_string(user_id), "] ", text)
+  +let perm:String = ""
+  +if admin == false
+    +set perm = sandbox_perm_model
+  +end
+  +await reply:String = llm_takeover(ctx, sender, "TelegramBot.send_reply", to_string(chat_id), perm)
+  +if reply != ""
+    +await _:String = send_message(chat_id, reply)
+  +end
+  +return "ok"
++end
++doc "Handle group/supergroup message. All messages share telegram:group:<chat_id> context. Non-admin senders get restricted permissions."
+
++fn handle_admin_dm(chat_id:Int, user_id:Int, text:String) -> String [io,async]
+  +let ctx:String = concat("telegram:", to_string(user_id))
+  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id))
+  +if reply != ""
+    +await _:String = send_message(chat_id, reply)
+  +end
+  +return "ok"
++end
++doc "Handle DM from admin user. Full LLM access with own conversation context."
+
++fn handle_user_dm(chat_id:Int, user_id:Int, text:String) -> String [io,async]
+  +let ctx:String = concat("telegram:user:", to_string(user_id))
+  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), sandbox_perm_model)
+  +if reply != ""
+    +await _:String = send_message(chat_id, reply)
+  +end
+  +return "ok"
++end
++doc "Handle DM from non-admin user. Sandboxed with restricted permission model."
 
 +fn transcribe_voice(file_id:String) -> String [io,async]
   +let file_url:String = concat("https://api.telegram.org/bot", telegram_token, "/getFile?file_id=", file_id)
@@ -109,27 +174,32 @@
   +let file_path:String = json_get(file_info, "result.file_path")
   +if file_path == ""
     +return "[voice message - could not get file]"
+  +end
   +let download_url:String = concat("https://api.telegram.org/file/bot", telegram_token, "/", file_path)
-  +await audio:Attachment = http_post_binary(download_url, "")
+  +await audio:Attachment = http_get_binary(download_url)
   +await result:String = http_upload("http://127.0.0.1:8090/transcribe", audio, "file", "")
   +let transcript:String = json_get(result, "text")
   +if transcript == ""
     +return "[voice message - transcription failed]"
+  +end
   +return transcript
-+doc "Download voice file from Telegram and transcribe via Whisper server"
++end
++doc "Download voice file from Telegram and transcribe via Whisper"
 
 +fn send_message(chat_id:Int, text:String) -> String [io,async]
   +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendMessage")
   +let body:String = concat("{\"chat_id\":", to_string(chat_id), ",\"text\":\"", json_escape(text), "\"}")
   +await response:String = http_post(url, body)
   +return response
++end
 +doc "Send a text message to a Telegram chat"
 
 +fn send_reply(chat_id_str:String, text:String) -> String [io,async]
   +let chat_id:Int = to_int(chat_id_str)
   +await resp:String = send_message(chat_id, text)
   +return resp
-+doc "Callback for llm_takeover: send reply given chat_id as string"
++end
++doc "Send a text reply given chat_id as string (callback for llm_takeover)"
 
 +fn send_reply_with_attachment(chat_id_str:String, text:String, attachment:Attachment) -> String [io,async]
   +let chat_id:Int = to_int(chat_id_str)
@@ -138,39 +208,81 @@
   +let extra:String = concat("chat_id=", to_string(chat_id), "&title=", text, "&performer=AdapsisOS")
   +await resp:String = http_upload(url, attachment, "audio", extra)
   +return resp
-+doc "Send a text reply with an audio attachment"
++end
++doc "Send a text reply with an audio attachment (callback for llm_takeover)"
 
 +fn send_audio_file(chat_id:Int, file_path:String, caption:String) -> String [io,async]
   +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendDocument")
   +let extra:String = concat("chat_id=", to_string(chat_id), "&caption=", caption)
   +await resp:String = http_upload(url, file_path, "document", extra)
   +return resp
-+doc "Upload a local file to a Telegram chat"
++end
++doc "Upload a local audio file to a Telegram chat"
 
 +fn extract_chat_id(payload:String) -> Int
   +let val:String = json_get(payload, "message.chat.id")
   +if val == ""
     +return 0
+  +end
   +return to_int(val)
++end
 +doc "Extract chat ID from Telegram webhook payload"
 
-+test extract_chat_id
-  +with payload="{\"message\":{\"chat\":{\"id\":123}}}" -> expect 123
++fn extract_user_id(payload:String) -> Int
+  +let val:String = json_get(payload, "message.from.id")
+  +if val == ""
+    +return 0
+  +end
+  +return to_int(val)
++end
++doc "Extract sender user ID from Telegram webhook payload"
+
++fn extract_chat_type(payload:String) -> String
+  +let val:String = json_get(payload, "message.chat.type")
+  +return val
++end
++doc "Extract chat type (private/group/supergroup/channel) from Telegram webhook payload"
 
 +fn extract_text(payload:String) -> String
   +let val:String = json_get(payload, "message.text")
   +return val
++end
 +doc "Extract message text from Telegram webhook payload"
+
++fn extract_reply(json:String) -> String
+  +let val:String = json_get(json, "reply")
+  +return val
++end
++doc "Extract reply field from API response JSON"
 
 +test extract_text
   +with payload="{\"message\":{\"text\":\"hello\"}}" -> expect "hello"
   +with payload="{\"message\":{}}" -> expect ""
 
-+fn extract_reply(json:String) -> String
-  +let val:String = json_get(json, "reply")
-  +return val
-+doc "Extract reply field from API response JSON"
++test extract_chat_id
+  +with payload="{\"message\":{\"chat\":{\"id\":123}}}" -> expect 123
 
-+fn ping() -> String
-  +return "pong"
-+doc "Health check"
++test extract_user_id
+  +with payload="{\"message\":{\"from\":{\"id\":456}}}" -> expect 456
+  +with payload="{\"message\":{}}" -> expect 0
+
++test extract_chat_type
+  +with payload="{\"message\":{\"chat\":{\"type\":\"group\"}}}" -> expect "group"
+  +with payload="{\"message\":{\"chat\":{\"type\":\"private\"}}}" -> expect "private"
+  +with payload="{\"message\":{\"chat\":{}}}" -> expect ""
+
++fn is_admin_in(user_id:Int, ids:String) -> Bool
+  +let uid_str:String = to_string(user_id)
+  +let needle:String = concat(",", concat(uid_str, ","))
+  +let haystack:String = concat(",", concat(ids, ","))
+  +return contains(haystack, needle)
++end
++doc "Check if user_id is in comma-separated ID list (testable pure version)"
+
++test is_admin_in
+  +with user_id=1815217 ids="1815217" -> expect true
+  +with user_id=9999999 ids="1815217" -> expect false
+  +with user_id=1815217 ids="1815217,999" -> expect true
+  +with user_id=999 ids="1815217,999" -> expect true
+  +with user_id=99 ids="1815217,999" -> expect false
+  +with user_id=181521 ids="1815217" -> expect false
