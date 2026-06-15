@@ -343,6 +343,22 @@ mod tests {
         assert!(!config.can_opencode(AccessLevel::AdapsisOnly, "anthropic/claude-opus-4-6"));
     }
 
+    /// The CLI default for --access-level must parse to a level that forbids
+    /// !opencode. !opencode rebuilds and re-execs the runtime, so it must be
+    /// opt-in (--access-level full), never the default posture. If someone
+    /// changes the default in main.rs back to "full", this test fails.
+    #[test]
+    fn cli_default_access_level_disallows_opencode() {
+        let default: AccessLevel = "adapsis-only".parse().expect("default must parse");
+        assert!(
+            !default.allows_opencode(),
+            "the default --access-level must not allow !opencode"
+        );
+        // Even a model explicitly granted opencode cannot use it under the default.
+        let config = test_config();
+        assert!(!config.can_opencode(default, "anthropic/claude-opus-4-6"));
+    }
+
     #[test]
     fn load_from_string() {
         let config: PermissionConfig = toml::from_str(
