@@ -1,15 +1,13 @@
 +module TelegramBot
 +doc "Telegram bot: webhook OR long-poll intake, voice transcription, multi-user LLM conversations via llm_takeover"
 +shared telegram_token:String = ""
-+shared token_path:String = "/home/marenz/.telegram-bot-token"
 +shared admin_ids:String = "1815217"
-+shared nonadmin_model:String = "gemma4s"
 +shared intake_mode:String = "poll"
 +shared poll_offset:Int = 0
 +shared poll_running:Bool = false
 
 +startup [io,async]
-  +await token:String = read_file(token_path)
+  +await token:String = read_file("/home/marenz/.telegram-bot-token")
   +set telegram_token = trim(token)
   +if intake_mode == "poll"
     +spawn poll_loop()
@@ -99,11 +97,11 @@
       +await _:String = send_message(chat_id, reply)
     +return "ok"
   +else
-    +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), nonadmin_model)
+    +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id))
     +if reply != ""
       +await _:String = send_message(chat_id, reply)
     +return "ok"
-+doc "Background processor: transcribe voice if needed, route to llm_takeover. Admins get full access; non-admins are sandboxed to nonadmin_model's permissions."
++doc "Background processor: transcribe voice if needed, route to llm_takeover with per-user conversation context"
 
 +fn transcribe_voice(file_id:String) -> String [io,async]
   +let file_url:String = concat("https://api.telegram.org/bot", telegram_token, "/getFile?file_id=", file_id)
