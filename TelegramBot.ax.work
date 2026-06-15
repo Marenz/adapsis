@@ -2,22 +2,69 @@
 +doc "Telegram bot: webhook OR long-poll intake, voice transcription, LLM replies. Supports group chats, multiple admins, and per-user sandboxing."
 +shared telegram_token:String = ""
 +shared token_path:String = "/home/marenz/.telegram-bot-token"
++shared admin_path:String = "/home/marenz/.telegram-bot-users"
 +shared admin_user_ids:String = "1815217"
 +shared sandbox_perm_model:String = "gemma4s"
 +shared intake_mode:String = "poll"
 +shared poll_offset:Int = 0
 +shared poll_running:Bool = false
 
-+startup [io,async]
++startup [io,async,mut]
   +await token:String = read_file(token_path)
   +set telegram_token = trim(token)
+  +match read_file(admin_path)
+  +case Ok(raw)
+    +set admin_user_ids = parse_admin_ids(raw)
+  +case Err(e)
+    +set admin_user_ids = admin_user_ids
+  +end
   +if intake_mode == "poll"
     +spawn poll_loop()
-    +return concat("TelegramBot ready (poll mode), token loaded (", to_string(length(telegram_token)), " chars)")
+    +return concat("TelegramBot ready (poll mode), token loaded (", to_string(length(telegram_token)), " chars), admins=", admin_user_ids)
   +end
-  +return concat("TelegramBot ready (webhook mode), token loaded (", to_string(length(telegram_token)), " chars)")
+  +return concat("TelegramBot ready (webhook mode), token loaded (", to_string(length(telegram_token)), " chars), admins=", admin_user_ids)
 +end
-+doc "Load token from token_path, then arm the configured intake: 'poll' spawns the getUpdates loop (no inbound port), 'webhook' relies on the +route below."
++doc "Load token from token_path; load admin IDs from admin_path if present (one ID per line and/or comma-separated, blank lines and # comments ignored), else keep the default. Then arm the configured intake."
+
++fn parse_admin_ids(raw:String) -> String
+  +let lines:List<String> = split(raw, "\n")
+  +let out:String = ""
+  +let i:Int = 0
+  +let n:Int = len(lines)
+  +while i < n
+    +let line:String = get(lines, i)
+    +let cells:List<String> = split(line, ",")
+    +let j:Int = 0
+    +let m:Int = len(cells)
+    +while j < m
+      +let tok:String = trim(get(cells, j))
+      +if tok != ""
+        +if starts_with(tok, "#") == false
+          +if out == ""
+            +set out = tok
+          +else
+            +set out = concat(out, concat(",", tok))
+          +end
+        +end
+      +end
+      +set j = j + 1
+    +end
+    +set i = i + 1
+  +end
+  +if out == ""
+    +return "1815217"
+  +end
+  +return out
++end
++doc "Normalize an admin-id file into a comma-separated ID string: accepts newline- and/or comma-separated IDs, trims whitespace, skips blank lines and # comments. Falls back to the default admin if the file yields nothing."
+
++test parse_admin_ids
+  +with raw="1815217" -> expect "1815217"
+  +with raw="1815217\n999\n" -> expect "1815217,999"
+  +with raw="1815217, 999" -> expect "1815217,999"
+  +with raw="# admins\n1815217\n\n999\n" -> expect "1815217,999"
+  +with raw="" -> expect "1815217"
+  +with raw="\n\n" -> expect "1815217"
 
 +route POST "/webhook/telegram" -> handle_update
 
