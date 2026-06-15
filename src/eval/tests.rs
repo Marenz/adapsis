@@ -2553,10 +2553,19 @@ fn builtin_split() {
 #[test]
 fn builtin_join() {
     let p = ast::Program::default();
-    // join uses Display format for list items — strings include quotes
     assert_eq!(
         eval_expr_str(&p, "join(list(1, 2, 3), \"-\")"),
         r#""1-2-3""#
+    );
+    // String elements must join by raw content, NOT quoted Display form.
+    // Regression: join previously rendered ["a","b"] as `"a","b"`.
+    assert_eq!(
+        eval_expr_str(&p, r#"join(list("a", "b", "c"), ",")"#),
+        r#""a,b,c""#
+    );
+    assert_eq!(
+        eval_expr_str(&p, r#"join(split("1815217\n999\n", "\n"), ",")"#),
+        r#""1815217,999,""#
     );
 }
 

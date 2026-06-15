@@ -2667,7 +2667,16 @@ fn eval_builtin_list(callee: &str, args: Vec<Value>) -> Result<Value> {
             }
             match (&args[0], &args[1]) {
                 (Value::List(items), Value::String(delim)) => {
-                    let parts: Vec<String> = items.iter().map(|v| format!("{v}")).collect();
+                    // Use raw string content for String elements; the Display impl
+                    // quotes strings ("..."), which is wrong for a text join. Fall
+                    // back to Display only for non-String values.
+                    let parts: Vec<String> = items
+                        .iter()
+                        .map(|v| match v {
+                            Value::String(s) => s.as_ref().clone(),
+                            other => format!("{other}"),
+                        })
+                        .collect();
                     Ok(Value::string(parts.join(delim.as_ref())))
                 }
                 _ => bail!("join expects (List, String)"),
