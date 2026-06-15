@@ -760,17 +760,23 @@ pub async fn handle_llm_takeover(
     // shown to the LLM is filtered correctly.  If the conversation has a
     // `permission_model` override, use that model's permissions instead (this
     // is how non-admin Telegram users get a restricted view).
+    // A conversation's permission_model override (e.g. "gemma4s" for non-admin
+    // Telegram users) determines BOTH the filtered program view shown to the LLM
+    // AND the model identity that code execution is gated against. Without using
+    // it for execution, the sandbox would be advisory only: a non-admin context
+    // could emit mutations or !opencode that execute at the admin model's
+    // permission level. We hoist it here so tmp_config below can enforce it.
+    let perm_model_override = {
+        let meta_guard = meta.lock().unwrap();
+        meta_guard.conversations.get(&context)
+            .and_then(|c| c.permission_model.clone())
+    };
+    let effective_model = perm_model_override.clone().unwrap_or_else(|| llm_model.to_string());
     let program_summary = {
         let prog = program.read().await;
-        let perm_model_override = {
-            let meta_guard = meta.lock().unwrap();
-            meta_guard.conversations.get(&context)
-                .and_then(|c| c.permission_model.clone())
-        };
-        let effective_model = perm_model_override.as_deref().unwrap_or(llm_model);
         crate::validator::program_summary_for_model(
             &prog, &permission_config,
-            access_level, effective_model,
+            access_level, &effective_model,
         )
     };
     let messages = {
@@ -851,7 +857,12 @@ pub async fn handle_llm_takeover(
         program: program.clone(),
         meta: meta.clone(),
         llm_url: llm_url.to_string(),
-        llm_model: std::sync::Arc::new(std::sync::RwLock::new(llm_model.to_string())),
+        // Gate execution (mutations, !opencode, spawned agents) against the
+        // effective model: the conversation's permission_model override when set,
+        // otherwise the active model. This makes the non-admin sandbox enforced,
+        // not just a filtered view. The conversational reply itself was already
+        // generated above with the real model.
+        llm_model: std::sync::Arc::new(std::sync::RwLock::new(effective_model.clone())),
         llm_api_key: llm_key.clone(),
         project_dir: ".".to_string(),
         io_sender: Some(io_sender.clone()),

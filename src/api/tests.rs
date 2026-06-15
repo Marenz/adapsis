@@ -1345,6 +1345,45 @@ fn llm_takeover_uses_caller_permissions() {
     );
 }
 
+/// The conversation's permission_model override must gate EXECUTION, not just
+/// the program summary shown to the LLM. tmp_config.llm_model must be set from
+/// effective_model (the override when present), otherwise a non-admin context
+/// could emit mutations/!opencode that run at the active (admin) model's level.
+#[test]
+fn llm_takeover_enforces_permission_model_on_execution() {
+    let source = include_str!("llm_handlers.rs");
+    let takeover_start = source
+        .find("pub async fn handle_llm_takeover")
+        .expect("handle_llm_takeover not found");
+    let takeover_body = &source[takeover_start..];
+
+    let config_start = takeover_body
+        .find("let tmp_config = AppConfig")
+        .expect("tmp_config not found");
+    let config_section = &takeover_body[config_start..];
+    let config_end = config_section.find("};").expect("end of tmp_config not found");
+    let config_block = &config_section[..config_end];
+
+    // The llm_model field of tmp_config must derive from effective_model, which
+    // resolves the conversation's permission_model override.
+    let llm_model_line = config_block
+        .lines()
+        .find(|l| l.trim_start().starts_with("llm_model:"))
+        .expect("tmp_config must set llm_model");
+    assert!(
+        llm_model_line.contains("effective_model"),
+        "tmp_config.llm_model must be built from effective_model (permission_model \
+         override) so the non-admin sandbox is enforced at execution. Found: {llm_model_line}"
+    );
+
+    // And effective_model must actually be derived from the permission_model override.
+    assert!(
+        takeover_body.contains("perm_model_override")
+            && takeover_body.contains("permission_model.clone()"),
+        "effective_model must resolve the conversation's permission_model override"
+    );
+}
+
 /// Test: execute_code rejects +module on core modules for a restricted model.
 #[tokio::test]
 async fn execute_code_permission_blocks_core_module_write() {
