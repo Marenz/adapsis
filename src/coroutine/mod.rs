@@ -2266,16 +2266,24 @@ impl CoroutineHandle {
             "http_get" => {
                 let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_get expects (url:String)") };
                 let (tx, rx) = oneshot::channel();
-                let result = self.send_and_wait(WaitReason::HttpGet(url.clone()), IoRequest::HttpGet { url, reply: tx }, rx)?;
-                return Ok(Value::string(result));
+                // Transport/timeout failures must surface as a catchable Err value
+                // (so `+match http_get(url)` / `+case Err(e)` works as documented),
+                // NOT propagate and kill the calling task (e.g. a long-poll loop).
+                match self.send_and_wait(WaitReason::HttpGet(url.clone()), IoRequest::HttpGet { url, reply: tx }, rx) {
+                    Ok(result) => return Ok(Value::Ok(Box::new(Value::string(result)))),
+                    Err(e) => return Ok(Value::Err(format!("{e}"))),
+                }
             }
             "http_post" => {
                 let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
                 let body = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_post expects (url:String, body:String, content_type:String)") };
                 let content_type = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => "application/json".to_string() };
                 let (tx, rx) = oneshot::channel();
-                let result = self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPost { url, body, content_type, reply: tx }, rx)?;
-                return Ok(Value::string(result));
+                // Surface transport/timeout failures as catchable Err (see http_get).
+                match self.send_and_wait(WaitReason::HttpPost(url.clone()), IoRequest::HttpPost { url, body, content_type, reply: tx }, rx) {
+                    Ok(result) => return Ok(Value::Ok(Box::new(Value::string(result)))),
+                    Err(e) => return Ok(Value::Err(format!("{e}"))),
+                }
             }
             "http_post_binary" => {
                 let url = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_post_binary expects (url:String, body:String[, content_type:String])") };
