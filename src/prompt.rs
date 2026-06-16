@@ -1070,6 +1070,29 @@ pub fn persona_notes_path() -> Option<std::path::PathBuf> {
     })
 }
 
+/// Path to the VPN/mesh topology file (peers, endpoints). Per-machine, editable
+/// without a rebuild. Falls back to `~/.config/adapsis/mesh.md`.
+pub fn mesh_topology_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("ADAPSIS_MESH_FILE") {
+        return Some(std::path::PathBuf::from(p));
+    }
+    std::env::var_os("HOME").map(|h| {
+        std::path::Path::new(&h).join(".config").join("adapsis").join("mesh.md")
+    })
+}
+
+/// VPN/mesh topology fragment (who's who on the VPN, that peers can talk to each
+/// other, exposed endpoints). Returned as `Some(content)` when a `mesh.md` exists,
+/// else `None`. Injected into BOTH admin and sandboxed conversation prompts so
+/// every instance knows its peers regardless of who it's talking to. This is
+/// network *facts*, kept separate from `persona.md` (character/tone).
+pub fn mesh_topology() -> Option<String> {
+    mesh_topology_path()
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Built-in fallback persona (German, warm, plain-language) used when no
 /// persona file is present.
 pub fn default_persona() -> String {
