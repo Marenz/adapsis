@@ -248,11 +248,13 @@ enum Command {
         #[arg(long)]
         permissions_file: Option<String>,
 
-        /// Address to bind the HTTP API to. Defaults to 127.0.0.1 (loopback only)
-        /// so the code-executing API is not exposed on the network. Pass 0.0.0.0
-        /// only if you deliberately want LAN/remote access.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
+        /// Address(es) to bind the HTTP API to. Defaults to 127.0.0.1 (loopback
+        /// only) so the code-executing API is not exposed on the network. Pass
+        /// 0.0.0.0 to expose on all interfaces, or repeat the flag / use a
+        /// comma-separated list to bind several specific interfaces, e.g.
+        /// `--host 127.0.0.1 --host 10.0.0.4` or `--host 127.0.0.1,10.0.0.4`.
+        #[arg(long, default_value = "127.0.0.1", value_delimiter = ',')]
+        host: Vec<String>,
     },
 
     /// Send a message to a running AdapsisOS instance
@@ -1542,19 +1544,42 @@ async fn main() -> Result<()> {
                 .merge(api::router_with_llm(config))
                 .layer(tower_http::cors::CorsLayer::permissive());
 
-            let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
-                .await
-                .map_err(|e| anyhow::anyhow!("Cannot bind {host}:{port}: {e}. Try -p {}", port + 1))?;
-            println!("AdapsisOS running at http://{host}:{port}");
-            println!("  API:     http://{host}:{port}/api/");
-            println!("  Browser: http://{host}:{port}/");
+            // Normalize the requested bind addresses: trim, drop empties, and
+            // de-duplicate while preserving order so `--host 0.0.0.0` and
+            // `--host 127.0.0.1 --host 10.0.0.4` both behave sensibly.
+            let mut hosts: Vec<String> = Vec::new();
+            for h in &host {
+                let h = h.trim();
+                if !h.is_empty() && !hosts.iter().any(|existing| existing == h) {
+                    hosts.push(h.to_string());
+                }
+            }
+            if hosts.is_empty() {
+                hosts.push("127.0.0.1".to_string());
+            }
+
+            // Bind one listener per requested host. Binding fails fast so a typo
+            // or an already-used interface is reported before the server starts.
+            let mut listeners = Vec::with_capacity(hosts.len());
+            for h in &hosts {
+                let listener = tokio::net::TcpListener::bind(format!("{h}:{port}"))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Cannot bind {h}:{port}: {e}. Try -p {}", port + 1))?;
+                listeners.push(listener);
+            }
+
+            println!("AdapsisOS running, bound to {} interface(s):", hosts.len());
+            for h in &hosts {
+                println!("  API:     http://{h}:{port}/api/");
+                println!("  Browser: http://{h}:{port}/");
+            }
             println!();
 
             if daemonize {
                 // We verified the port works. Now respawn without -d.
-                // Use SO_REUSEADDR equivalent by dropping listener first and
+                // Use SO_REUSEADDR equivalent by dropping listeners first and
                 // giving the OS a moment.
-                drop(listener);
+                drop(listeners);
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 
                 let exe = std::env::current_exe()?;
@@ -1717,9 +1742,25 @@ async fn main() -> Result<()> {
                 });
             }
 
-            eprintln!("[adapsis] starting HTTP server on port {port}");
-            match axum::serve(listener, app).await {
-                Ok(()) => eprintln!("[adapsis] server exited cleanly — THIS SHOULD NOT HAPPEN"),
+            eprintln!("[adapsis] starting HTTP server on port {port} across {} interface(s)", listeners.len());
+            // Serve the same router on every bound interface concurrently. The
+            // router is cloned per listener (axum Routers are cheap to clone);
+            // if any listener errors, the whole server tears down.
+            let serve_futures = listeners
+                .into_iter()
+                .zip(hosts.iter().cloned())
+                .map(|(listener, h)| {
+                    let app = app.clone();
+                    async move {
+                        let result = axum::serve(listener, app).await;
+                        if let Err(e) = &result {
+                            eprintln!("[adapsis] server error on {h}:{port}: {e}");
+                        }
+                        result
+                    }
+                });
+            match futures::future::try_join_all(serve_futures).await {
+                Ok(_) => eprintln!("[adapsis] server exited cleanly — THIS SHOULD NOT HAPPEN"),
                 Err(e) => eprintln!("[adapsis] server error: {e}"),
             }
             eprintln!("[adapsis] process exiting");
