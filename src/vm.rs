@@ -1921,6 +1921,49 @@ mod tests {
     }
 
     #[test]
+    fn exec_await_post_with_nested_user_call_args() {
+        // Repro: async fn calling a 3-arg IO builtin (http_post) whose args are
+        // NESTED USER-FUNCTION calls referencing the function's parameters.
+        // This is the Peer.ask shape: http_post(concat(base_url(ip), "/p"),
+        // payload(message, caller), "application/json"). The nested user calls
+        // must see ip/message/caller through their own frames.
+        let program = build_program(
+            "\
++fn base_url (ip:String)->String
+  +return concat(\"http://\", ip, \":3002\")
++fn payload (message:String, caller:String)->String
+  +return concat(\"{\", message, \"|\", caller, \"}\")
++fn ask (ip:String, message:String, caller:String)->String [io,async]
+  +await resp:String = http_post(concat(base_url(ip), \"/api/ask\"), payload(message, caller), \"application/json\")
+  +return resp
+",
+        );
+        let func = program.get_function("ask").unwrap();
+        let compiled = compile_function(func, &program).unwrap();
+        let captured: std::cell::RefCell<Vec<Value>> = std::cell::RefCell::new(vec![]);
+        let io = |_op: &str, args: &[Value]| -> Result<Value> {
+            *captured.borrow_mut() = args.to_vec();
+            Ok(Value::string("{\"reply\":\"ok\"}"))
+        };
+        let result = execute_with_io(
+            &compiled,
+            vec![
+                Value::string("10.0.0.4"),
+                Value::string("hi"),
+                Value::string("Kronk"),
+            ],
+            &program,
+            &io,
+        )
+        .expect("execute_with_io failed");
+        let args = captured.into_inner();
+        assert_eq!(args.len(), 3, "http_post should receive 3 args");
+        assert_eq!(args[0].as_str().unwrap(), "http://10.0.0.4:3002/api/ask");
+        assert_eq!(args[1].as_str().unwrap(), "{hi|Kronk}");
+        assert_eq!(result.as_str().unwrap(), "{\"reply\":\"ok\"}");
+    }
+
+    #[test]
     fn exec_string_return() {
         // Test that PushString works correctly with borrow-based dispatch
         let program = build_program(
