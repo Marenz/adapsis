@@ -5163,6 +5163,12 @@ mod tests {
             }
             _ => panic!("expected positional StructLiteral, got {e:?}"),
         }
+        // Also the simple x/y/z case that failed live.
+        let e2 = parse_test_input(0, r#""x", "y", "z""#).unwrap();
+        match e2 {
+            Expr::StructLiteral(fields) => assert_eq!(fields.len(), 3, "x,y,z -> 3 fields, got {fields:?}"),
+            other => panic!("expected 3-field StructLiteral, got {other:?}"),
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════
