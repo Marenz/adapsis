@@ -1118,6 +1118,12 @@ pub async fn program(State(config): State<AppConfig>) -> Json<ProgramResponse> {
 #[derive(Deserialize)]
 pub struct AskRequest {
     pub message: String,
+    /// Optional identity of the caller. When another AdapsisOS node calls this
+    /// node's `/api/ask` over the VPN, it sets `caller` to its own persona/node
+    /// name (e.g. "Moonwolf (edox, 10.0.0.4)") so the receiver knows a *peer*
+    /// is asking, not the local admin user. Absent for normal local/admin use.
+    #[serde(default)]
+    pub caller: Option<String>,
 }
 
 #[derive(Deserialize)]

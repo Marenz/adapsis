@@ -198,7 +198,10 @@ pub async fn ask(
         let base = crate::prompt::system_prompt();
         let builtins = crate::builtins::format_for_prompt();
         let identity = crate::prompt::adapsis_identity();
-        format!("{base}\n\n{builtins}\n\n{identity}")
+        let mesh = crate::prompt::mesh_topology()
+            .map(|m| format!("\n\n{m}"))
+            .unwrap_or_default();
+        format!("{base}\n\n{builtins}\n\n{identity}{mesh}")
     };
 
     // Build messages from conversation history
@@ -217,8 +220,20 @@ pub async fn ask(
             "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
         } else { "" };
         let load_errors_ctx = format_library_load_errors(&session.meta);
+        // If a peer node is calling (caller set), frame the message as coming
+        // from that peer over the VPN — not from the local admin user — so the
+        // model addresses its reply to the peer and knows it's a node-to-node
+        // exchange.
+        let speaker_line = match req.caller.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(caller) => format!(
+                "Peer AdapsisOS node `{caller}` is contacting you over the VPN via /api/ask. \
+                 Reply addressed to that peer (not to a local user): {}",
+                req.message
+            ),
+            None => format!("User: {}", req.message),
+        };
         let context = format!(
-            "Working directory: {}\n{}{}{}\nUser: {}{}",
+            "Working directory: {}\n{}{}{}\n{}{}",
             config.project_dir,
             crate::validator::program_summary_for_model(
                 &session.program, &config.permission_config, config.access_level,
@@ -226,7 +241,7 @@ pub async fn ask(
             ),
             load_errors_ctx,
             plan_ctx,
-            req.message,
+            speaker_line,
             plan_hint
         );
         // Push user message and get LLM messages (brief mutable borrow)
@@ -402,7 +417,10 @@ pub async fn ask_stream(
             let base = crate::prompt::system_prompt();
             let builtins = crate::builtins::format_for_prompt();
             let identity = crate::prompt::adapsis_identity();
-            format!("{base}\n\n{builtins}\n\n{identity}")
+            let mesh = crate::prompt::mesh_topology()
+                .map(|m| format!("\n\n{m}"))
+                .unwrap_or_default();
+            format!("{base}\n\n{builtins}\n\n{identity}{mesh}")
         };
 
             let mut messages = {
@@ -427,11 +445,19 @@ pub async fn ask_stream(
                     "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
                 } else { "" };
                 let load_errors_ctx = format_library_load_errors(&meta);
-                let context = format!("Working directory: {}\n{}{}{}\nUser: {}{}",
+                let speaker_line = match req.caller.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(caller) => format!(
+                        "Peer AdapsisOS node `{caller}` is contacting you over the VPN via /api/ask-stream. \
+                         Reply addressed to that peer (not to a local user): {}",
+                        req.message
+                    ),
+                    None => format!("User: {}", req.message),
+                };
+                let context = format!("Working directory: {}\n{}{}{}\n{}{}",
                     config_clone.project_dir,
                     program_summary,
                     load_errors_ctx,
-                    plan_ctx, req.message, plan_hint);
+                    plan_ctx, speaker_line, plan_hint);
                 let conv = meta.conversations.get_or_create("main");
                 conv.push_user(&context);
                 let msgs = conv.to_llm_messages();
@@ -800,8 +826,11 @@ pub async fn handle_llm_takeover(
                     // persona owns the identity/tone/safety; we still tell it how
                     // to actually invoke functions and the <code> reply mechanics,
                     // and show only the functions it may call.
+                    let mesh = crate::prompt::mesh_topology()
+                        .map(|m| format!("\n\n{m}"))
+                        .unwrap_or_default();
                     format!(
-                        "{}\n\n\
+                        "{}{}\n\n\
                          ## So führst du Aktionen aus (technisch)\n\
                          Wenn du etwas am Computer tun musst, rufe eine vorhandene Funktion in einem \
                          <code>…</code>-Block auf, z. B. <code>!eval Wolfi.install_app(\"firefox\")</code>. \
@@ -811,6 +840,7 @@ pub async fn handle_llm_takeover(
                          ## Verfügbare Funktionen\n{}\n\n\
                          Konversationskontext: '{context}'.",
                         crate::prompt::persona(),
+                        mesh,
                         program_summary,
                     )
                 } else {
@@ -823,8 +853,11 @@ pub async fn handle_llm_takeover(
                             available_models.join(", "),
                         )
                     };
+                    let mesh = crate::prompt::mesh_topology()
+                        .map(|m| format!("\n\n{m}"))
+                        .unwrap_or_default();
                     format!(
-                        "{}\n\n{}\n\n{}\n\nCurrent model: {llm_model}\n\
+                        "{}\n\n{}\n\n{}{}\n\nCurrent model: {llm_model}\n\
                          {models_line}\
                          Current program state:\n{}\n\n\
                          You are in conversation context '{context}'. Respond naturally. \
@@ -850,6 +883,7 @@ pub async fn handle_llm_takeover(
                         crate::prompt::system_prompt(),
                         crate::builtins::format_for_prompt(),
                         crate::prompt::adapsis_identity(),
+                        mesh,
                         program_summary,
                     )
                 }
