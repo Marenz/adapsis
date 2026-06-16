@@ -2985,13 +2985,18 @@ pub fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
         match parse_expr(line, input) {
             Ok(expr) => Ok(expr),
             Err(_) => {
-                // Single expression failed — try parsing as multiple space-separated
-                // values (e.g. "hello" "world" 42). This handles positional args for
+                // Single expression failed — try parsing as multiple values
+                // separated by spaces and/or commas (e.g. `"hello" "world" 42`
+                // or `"hello", "world", 42`). This handles positional args for
                 // !eval and +with when there's no key=value syntax.
                 let mut values = Vec::new();
                 let mut rest = input;
                 while !rest.is_empty() {
                     rest = rest.trim_start();
+                    // Allow a comma as an optional separator between values.
+                    if let Some(after) = rest.strip_prefix(',') {
+                        rest = after.trim_start();
+                    }
                     if rest.is_empty() {
                         break;
                     }
@@ -5138,6 +5143,23 @@ mod tests {
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].name, "_0");
                 assert_eq!(fields[1].name, "_1");
+            }
+            _ => panic!("expected positional StructLiteral, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_input_positional_comma_separated() {
+        // Comma-separated values are also accepted as positional args, so
+        // `!eval Peer.ask "10.0.0.4", "hi", "Kronk"` binds three params.
+        let e = parse_test_input(0, r#""10.0.0.4", "hi", "Kronk""#).unwrap();
+        match e {
+            Expr::StructLiteral(fields) => {
+                assert_eq!(fields.len(), 3, "expected 3 positional fields");
+                assert_eq!(fields[0].name, "_0");
+                assert_eq!(fields[1].name, "_1");
+                assert_eq!(fields[2].name, "_2");
+                assert!(matches!(&fields[2].value, Expr::String(s) if s == "Kronk"));
             }
             _ => panic!("expected positional StructLiteral, got {e:?}"),
         }
