@@ -187,14 +187,21 @@ impl OpenAiBackend {
     }
 
     fn request_body(&self, request: &LlmRequest, stream: bool) -> Value {
-        json!({
+        let mut body = json!({
             "model": self.model,
             "messages": request.messages,
-            "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "stream": stream,
             "tool_choice": "none",
-        })
+        });
+        // Some models (e.g. claude-opus-4-8 via the gateway) reject the
+        // `temperature` parameter outright ("temperature is deprecated for this
+        // model"). Treat a negative temperature as "unset" and omit it so those
+        // models work; positive values are still sent for models that accept it.
+        if request.temperature >= 0.0 {
+            body["temperature"] = json!(request.temperature);
+        }
+        body
     }
 
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -439,7 +446,7 @@ impl LlmClient<OpenAiBackend> {
         Self {
             http: Client::new(),
             backend: OpenAiBackend::new(base_url),
-            temperature: 0.7,
+            temperature: -1.0, // -1 = omit (max model compat; see request_body)
             max_tokens: 64000,
         }
     }
@@ -451,7 +458,7 @@ impl LlmClient<OpenAiBackend> {
                 .timeout(std::time::Duration::from_secs(300))
                 .build().unwrap_or_else(|_| Client::new()),
             backend: OpenAiBackend::new(base_url).with_model(model),
-            temperature: 0.7,
+            temperature: -1.0, // -1 = omit (max model compat; see request_body)
             max_tokens,
         }
     }
@@ -463,7 +470,7 @@ impl LlmClient<OpenAiBackend> {
                 .timeout(std::time::Duration::from_secs(300)) // 5 min per LLM request
                 .build().unwrap_or_else(|_| Client::new()),
             backend: OpenAiBackend::new(base_url).with_model(model).with_api_key(api_key),
-            temperature: 0.7,
+            temperature: -1.0, // -1 = omit (max model compat; see request_body)
             max_tokens,
         }
     }
@@ -552,7 +559,7 @@ where
         Self {
             http: Client::new(),
             backend,
-            temperature: 0.7,
+            temperature: -1.0, // -1 = omit (max model compat; see request_body)
             max_tokens: 128000,
         }
     }
