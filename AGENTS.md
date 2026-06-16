@@ -176,6 +176,35 @@ Spawned tasks (task_id set) always use the tree-walker (snapshot tracking).
 - Qwen3.5 family works from system prompt. Nemotron Cascade 2 handles Adapsis syntax reasonably well out-of-the-box.
 - LLM retries honor server-provided rate-limit hints when present (`Retry-After`, `x-ratelimit-reset`, JSON `retry_after[_ms]`) before falling back to exponential backoff.
 
+### LLM Gateway & `--model` (per-node)
+All AdapsisOS instances point `--url` at a **local llm-gateway** on `:4000`
+(`~/.config/llm-gateway/config.json`). Same gateway setup on every node; the
+**only difference is the `--model` name in each systemd `ExecStart`**, which the
+gateway resolves via `model_aliases` or `virtual_models`.
+- **`virtual_models`** are failover chains — the gateway tries each target in
+  order until one returns 200. Defined per gateway config, so a new virtual model
+  must be added to **every** node's gateway that uses it (here and sleek each run
+  their own gateway).
+- Current virtual models:
+  - `family-bot` (edox) → `chatgpt/gpt-5.5` → `claude-sonnet-4-5` → `deepseek-v4-flash`
+  - `dev-bot` (here, sleek) → `anthropic/claude-opus-4-8` → `chatgpt/gpt-5.5` → `deepseek-v4-flash`
+- **Pick an Adapsis-aware model for dev nodes.** Raw `deepseek/*` (incl. the
+  misleading `deepseek-reasoner` alias → `deepseek-v4-flash`) does NOT know
+  Adapsis syntax — it emits "Plan set" prose + fake `async {}`/`:=` code and
+  hallucinated builtins. Opus/sonnet/gpt-5.5 produce clean Adapsis. That's why
+  here/sleek were switched off DeepSeek onto `dev-bot`.
+- **Gotcha:** model IDs are picky and the provider `models` list in config.json
+  can contain IDs the upstream doesn't actually serve. Tested against the live
+  gateway: `anthropic/claude-opus-4-8` works (200); `claude-opus-4-6-20260205`,
+  `claude-opus-4-8-20260205`, and `...-4-8-latest` all **404**; an unprefixed
+  `claude-opus-4-8` errors (needs the `anthropic/` provider prefix). Always test
+  a new model ID directly (`POST /v1/chat/completions` with
+  `{"model":"...","messages":[...],"max_tokens":10}`) before putting it first in
+  a chain — the gateway silently advances past a 404 target to the next one.
+- After editing a gateway config: `systemctl --user restart llm-gateway.service`
+  (on each affected node). After changing a node's `--model`: edit its
+  `adapsis.service`/`adapsis-bot.service` `ExecStart`, `daemon-reload`, restart.
+
 ## Test Infrastructure
 - Tests persist in `session.stored_tests` (HashMap<fn_name, Vec<StoredTestCase>>)
 - Auto-rerun when functions change via `invalidate_and_retest()`
@@ -304,3 +333,83 @@ The system prompt only shows modules the model can at least Read. Execute-level 
 - llama-server: TurboQuant build with turbo3 KV cache, Gemma 4 fixes
 - Save-on-change (debounced), not periodic autosave
 - Panic hook + exit logging for crash debugging
+
+## Multi-Host Bind (`--host`)
+`adapsis os --host` accepts **multiple** bind addresses so one instance can listen
+on several interfaces at once:
+- Repeat the flag: `--host 127.0.0.1 --host 10.0.0.4`
+- Or comma-separate: `--host 127.0.0.1,10.0.0.4` (`value_delimiter = ','`)
+- Default stays `127.0.0.1` (loopback only — the code-executing API is not exposed
+  unless you opt in).
+
+Implementation (`src/main.rs`, `Command::Os`): addresses are trimmed/de-duped
+(order preserved), one `TcpListener` is bound per host (binding fails fast on a
+typo or busy port), and the same axum `Router` is served on all of them
+concurrently via `futures::future::try_join_all` (the Router is cloned per
+listener). Each interface prints its own API/Browser URL on startup.
+
+**Security note:** binding a `10.0.0.x` / `0.0.0.0` interface exposes
+`/api/eval`, `/api/mutate`, `/api/opencode` etc. to anyone who can reach that
+address. Only do it on a trusted network (the WireGuard mesh below). Prefer
+`127.0.0.1 + <own VPN IP>` over `0.0.0.0` so you don't also expose the LAN
+(`192.168.1.x`) interface.
+
+## AdapsisOS VPN Mesh (10.0.0.0/24)
+Three AdapsisOS nodes share a WireGuard VPN. Each binds `127.0.0.1` **and** its
+own `10.0.0.x` on port **3002**, and each has a `persona.md` (loaded at runtime
+by `prompt.rs::persona()` from `~/.config/adapsis/persona.md`, no rebuild needed)
+that names itself + its peers and lists the exposed endpoints so the bots can
+talk to each other via `http_get`/`http_post`/`http_request`.
+
+| VPN IP   | Host  | Persona  | Runs as / service                          | Binary path                |
+|----------|-------|----------|--------------------------------------------|----------------------------|
+| 10.0.0.1 | here  | Kronk    | marenz, **user** `adapsis.service`         | `~/.local/bin/adapsis`     |
+| 10.0.0.2 | sleek | Hobbes   | marenz, **user** `adapsis.service`         | `~/.local/bin/adapsis`     |
+| 10.0.0.4 | edox  | Moonwolf | `adapsis` user, **system** `adapsis-bot.service` (model `family-bot`, Renate's machine) | `/home/adapsis/bin/adapsis` |
+
+- **Persona vs capability module:** the persona (identity/tone) lives in
+  `persona.md`; the *capabilities* live in modules. On edox the family-bot's
+  capability module is still `Wolfi.ax` (don't rename — `Wolfi.remember(...)` is
+  a real function), but the bot's **identity** is "Moonwolf".
+- **Mesh topology = `mesh.md`, NOT `persona.md`.** The VPN/peer table + exposed
+  endpoints live in `~/.config/adapsis/mesh.md` (override path via
+  `ADAPSIS_MESH_FILE`), loaded by `prompt::mesh_topology()` at runtime (no
+  rebuild to edit content). `persona.md` is purely character/tone. Keep them
+  separate: mesh = facts (shared across conversations), persona = voice.
+- **Prompt builders — there are THREE, keep them in sync.** The system prompt is
+  assembled in three independent places; a fragment added to one does NOT appear
+  in the others:
+  1. `handle_llm_takeover` (`api/llm_handlers.rs` ~796) — **Telegram & agent**
+     path. Has two branches: sandboxed/non-admin (uses `persona()`) and
+     admin (uses `system_prompt()` + `adapsis_identity()`). Mesh is injected
+     into **both**.
+  2. `ask` (`api/llm_handlers.rs` ~197) — `POST /api/ask` (CLI/HTTP).
+  3. `ask_stream` (`api/llm_handlers.rs` ~404) — `POST /api/ask-stream` (SSE).
+  All three now append `mesh_topology()`. The original bug: the VPN info only
+  reached the non-admin llm_takeover branch, so **admin DMs and `/api/ask`
+  claimed to know nothing about peers**. Also: each builder caches its system
+  prompt at conversation creation (`if conv.messages.is_empty()`), so a
+  persona/mesh edit only takes effect for **new** conversations or after a
+  restart (which clears in-memory contexts when nothing is persisted).
+- **Topology = hub-and-spoke, NOT full mesh.** `here` (10.0.0.1) is the always-on
+  WireGuard **hub** (`wg0`, one `/32` peer per spoke). Spokes (sleek, edox) only
+  peer with the hub; their `AllowedIPs` toward the hub is `10.0.0.0/24` so all
+  intra-subnet traffic is crypto-routed to the hub. **Spoke↔spoke works only by
+  the hub relaying it** (and only while both spokes are online — only the hub is
+  always available).
+- **Hub relay persistence (survives reboot):**
+  - `/etc/sysctl.d/99-wg-hub-forward.conf` → `net.ipv4.ip_forward = 1`
+    (the `99-` prefix beats `70-yast.conf` which sets it to `0`).
+  - firewalld: hub `wg0` is in the `trusted` zone (allows forwarding); on sleek
+    `wg1` is also in the `trusted` zone so its `:3002` is reachable on the VPN.
+  - edox's WireGuard is managed by **netplan→NetworkManager** (NM keyfile is
+    ephemeral in `/run`; edit `/etc/netplan/90-NM-*.yaml`, not the `/run` file).
+    sleek/here use `wg-quick@.service` with `/etc/wireguard/*.conf`.
+- **Deploy = no auto-restart by default.** Replacing the binary (`install -m755`,
+  `-f` to overwrite; running process keeps its old inode) + editing the unit's
+  `ExecStart` + `daemon-reload` does NOT pick up changes until the service is
+  restarted. Restart commands: `systemctl --user restart adapsis.service` (here/
+  sleek), `sudo systemctl restart adapsis-bot.service` (edox).
+- **sudo:** edox runs the bot as the `adapsis` system user; for ops there use
+  `sudo` as `marenz` (in the `sudo` group). On `here`, use `sudo -A` (GUI askpass)
+  per the global AGENTS.md.
