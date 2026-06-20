@@ -309,7 +309,11 @@ fn reconstruct_function_source(func: &ast::FunctionDecl) -> String {
             } else {
                 tc.expected.clone()
             };
-            out.push_str(&format!("  +with {} -> expect {}\n", tc.input, expect_part));
+            out.push_str(&format!(
+                "  +with {} -> expect {}\n",
+                ast::escape_test_input_linebreaks(&tc.input),
+                expect_part
+            ));
             for ac in &tc.after_checks {
                 out.push_str(&format!(
                     "  +after {} {} \"{}\"\n",

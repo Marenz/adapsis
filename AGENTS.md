@@ -276,6 +276,21 @@ Unknown/empty specs fail safe to `deny`. For a locked-down box, set
 `ADAPSIS_SHELL_POLICY=deny` or an explicit allowlist. This is the OS-capability
 gate the per-module permissions do **not** provide.
 
+**Destructive-command guard (applies under EVERY policy, incl. `unrestricted`).**
+The design philosophy: a family/assistant bot needs *broad* shell reach to be
+useful (read logs, try fixes, install drivers, restart services), so an
+allowlist is the wrong tool — it cripples debugging. The real risk isn't
+"running commands" but an *irreversible* mistake. So `check()` enforces an
+absolute denylist **before** consulting the policy mode (`destructive_reason()`
+in `shell_policy.rs`): `rm -rf` of a critical root (`/`, `/etc`, `/home`,
+`/usr`, …), `dd` to a `/dev/*` block device, `mkfs*`/`wipefs`/`blkdiscard`/
+`shred` on a device, redirecting onto a raw disk, and fork bombs. Refusal
+message: `refused as destructive/irreversible: <reason>`. The guard is
+deliberately narrow (device-wipers + root-tree deletes only) to keep false
+positives near zero — `rm -rf /tmp/build`, `dd` to a regular file, `mkfs` on a
+loopback image, etc. all still run. edox runs `unrestricted` **plus** this guard:
+the bot can freely debug, but can't wipe Renate's laptop from a misread message.
+
 ### Model level (`--permissions-file` → `permissions.toml`)
 ```toml
 [groups]
@@ -329,10 +344,88 @@ The system prompt only shows modules the model can at least Read. Execute-level 
 
 ## Infrastructure
 - Caddy HTTPS on port 443 (Let's Encrypt), only `/webhook/telegram` exposed
-- Systemd services: `adapsis.service`, `llama-server.service`, `ace-step-gen.service`, `whisper-server.service`, `caddy.service`
+- Systemd services: `adapsis.service`, `llama-server.service`, `ace-step-gen.service`, `parakeet-server.service`, `caddy.service`
 - llama-server: TurboQuant build with turbo3 KV cache, Gemma 4 fixes
 - Save-on-change (debounced), not periodic autosave
 - Panic hook + exit logging for crash debugging
+
+## Voice Transcription (ASR)
+> **Voice messages required FOUR stacked bug fixes (2026-06-21).** Each masked
+> the next, so symptoms looked like "bot ignores voice". Validate ASR by
+> actually sending a real voice note (MCP `send_voice` to the bot's chat) and
+> watching for `llm_takeover ... done` + a delivered reply — NOT by sending a
+> `.wav` document and calling `transcribe_voice` directly (that skips the real
+> `message.voice` poll path and gives false confidence).
+>
+> 1. **`http_get` returns a `Result`, not a bare String.** `transcribe_voice`
+>    did `+await file_info:String = http_get(url)` then `json_get(file_info,…)`.
+>    The `:String` binding stored the `Ok("…")` wrapper → `json_get` got a
+>    non-String arg0 → `json_get expects (String, String)`. Text replies were
+>    unaffected (their `http_post` result is ignored, never fed to `json_get`).
+>    Fix: unwrap with `+match http_get(url)` / `+case Ok` / `+case Err`. **Rule:
+>    never bind a fallible IO builtin straight to a typed var then feed it to
+>    another builtin — `+match` it first.** (module fix, disk-persisted)
+> 2. **Module re-saved BROKEN by the rewriter.** `+test` `+with` inputs with
+>    literal newlines (multi-line string values) were serialized back to disk as
+>    raw newlines (`library.rs`/`session.rs`), producing a module that **failed
+>    to parse on next start** → `+startup`/`poll_loop` never ran → bot silently
+>    stopped polling. Fix: `ast::escape_test_input_linebreaks` escapes
+>    `\n`/`\r`/`\t` in serialized test inputs. (**runtime fix — needs rebuild**)
+> 3. **Tree-walker scope bug — the transcript was lost.** `+await text:String =
+>    transcribe_voice(…)` lived inside a nested `+if`. The `Await` handler used
+>    `env.set` (innermost scope) instead of `env.set_existing`, so it **shadowed**
+>    the outer `text` and the value vanished when the `+if` block ended →
+>    `handle_admin_dm` got an empty message → empty LLM call. Fix: `Await` uses
+>    `env.set_existing` (walk scopes, reassign the existing binding). Spawned
+>    tasks always use the tree-walker, so this only bit the real voice path.
+>    (**runtime fix — needs rebuild**; regression test
+>    `test_await_reassign_in_nested_if_escapes_block`)
+> 4. **llm-gateway: `cache_control` on empty text blocks.** Even with a valid
+>    transcript, an empty message anywhere in the last 3 turns made the gateway
+>    attach `cache_control` to an empty block → Anthropic 400
+>    `cache_control cannot be set for empty text blocks`. Fix in
+>    `~/Projects/llm-gateway` (`apply_cache_breakpoints`): skip the breakpoint
+>    when the block text is blank. (**gateway rebuild + `systemctl --user restart
+>    llm-gateway.service`**)
+>
+> Deploy note: rebuilds (#2,#3) ship in the adapsis binary — **stop the old
+> service BEFORE editing modules on disk**, or its save-on-change re-clobbers
+> your edit. Binary is glibc-2.39-linked; edox (Mint 22.3, glibc 2.39) runs it.
+
+`TelegramBot.transcribe_voice` downloads a Telegram voice note and POSTs it to
+`http://127.0.0.1:8090/transcribe` (multipart field `file`) expecting JSON
+`{"text": ...}`. The ASR backend is **server-agnostic** — adapsis just needs
+something on 8090 honoring that contract. (Was whisper; now Parakeet.)
+
+- **Backend: `parakeet-server.service`** runs `tools/parakeet_server.py` — a
+  FastAPI wrapper around NVIDIA `nemo-parakeet-tdt-0.6b-v3` via the `onnx-asr`
+  package (int8 ONNX, ~0.7 GB). Auto-detects 25 EU languages (incl. de/en),
+  emits punctuation + capitalization. Started via `uv run --with onnx-asr[...]`
+  (no venv to manage). Telegram sends OGG/Opus → ffmpeg transcodes to 16 kHz
+  mono WAV before inference (onnx-asr reads WAV only).
+- **Endpoints:** `POST /transcribe` (adapsis contract) and
+  `POST /v1/audio/transcriptions` (OpenAI-compatible alias), plus `GET /health`.
+- **Per-node variant (the only difference is GPU vs CPU):**
+  - **here/Kronk (RTX 3090):** `onnx-asr[gpu,hub]`, `CUDA_VISIBLE_DEVICES=0`,
+    user service. Has `Conflicts=` GPU mutex (llama-server, ace-step-gen,
+    comfyui, lucebox-dflash) AND `Conflicts=whisper-server.service` (both bind
+    8090). whisper-server is now disabled here.
+  - **edox/Moonwolf (no usable GPU — GTX 970M Maxwell left on CPU):**
+    `onnx-asr[cpu,hub]`, no CUDA env, no GPU mutex. **System** service
+    (`User=adapsis`, `/etc/systemd/system/`). 8 CPU cores handle short voice
+    notes well above real-time. Driver deliberately NOT installed (Optimus risk
+    on a family laptop, Maxwell too old for modern CUDA onnxruntime).
+- **Long audio / VAD:** Parakeet caps a single forward pass at ~20–30 s.
+  `parakeet_server.py` loads **Silero VAD** (`onnx-asr.load_vad("silero")` →
+  `model.with_vad(vad)`) and routes by clip length: clips ≤
+  `PARAKEET_VAD_THRESHOLD_SECS` (default 20 s, from the WAV header) take the
+  cheap single pass; longer clips are split into speech segments and the segment
+  texts joined. `GET /health` reports `vad: true/false`. Env knobs:
+  `PARAKEET_VAD=0` to disable, `PARAKEET_VAD_MODEL`, `PARAKEET_VAD_THRESHOLD_SECS`.
+  VAD load failures degrade gracefully (ASR still works, long audio truncates).
+- **Swapping backends = zero adapsis change.** Keep something on 8090 with the
+  `/transcribe` + `{"text":...}` contract. This is infra, not a language change
+  — do NOT use `!opencode` for it.
 
 ## Multi-Host Bind (`--host`)
 `adapsis os --host` accepts **multiple** bind addresses so one instance can listen

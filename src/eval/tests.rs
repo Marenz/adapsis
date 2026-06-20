@@ -284,6 +284,43 @@ fn test_async_function_nested_await_propagates_handle() {
     );
 }
 
+#[test]
+fn test_await_reassign_in_nested_if_escapes_block() {
+    // Regression: `+await text:String = io()` inside a nested +if must REASSIGN
+    // the outer `text`, not shadow it in the block scope. This mirrors the
+    // TelegramBot.process_update voice path where the transcript was computed
+    // inside an +if but `text` was still empty afterwards (so the LLM got an
+    // empty message). Outer `text` starts empty, is filled inside the +if,
+    // and must be non-empty when read after the block.
+    let source = "\
++fn fill_if_empty (seed:String)->String [io,async]
+  +let text:String = seed
+  +if text==\"\"
+    +await text:String = http_get(\"https://x\")
+  +return text
+";
+    let program = build_program(source);
+
+    let test_source = "\
++test fill_if_empty
+  +with seed=\"\" -> expect \"FROM_IO\"
+";
+    let cases = extract_test_cases(test_source);
+    let (fn_name, case) = &cases[0];
+
+    let mocks = vec![IoMock {
+        operation: "http_get".to_string(),
+        patterns: vec!["x".to_string()],
+        response: "FROM_IO".to_string(),
+    }];
+    let result = eval_test_case_with_mocks(&program, fn_name, case, &mocks, &[]);
+    assert!(
+        result.is_ok(),
+        "await reassignment inside +if must escape the block scope: {:?}",
+        result
+    );
+}
+
 // ── Mock JSON response tests ─────────────────────────────────────
 
 #[test]

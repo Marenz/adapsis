@@ -1102,7 +1102,11 @@ impl Session {
             for case in &ast_cases {
                 // Reconstruct the expect portion, including matcher syntax
                 let expect_str = reconstruct_expect(&case.expected, case.matcher.as_deref());
-                test_src.push_str(&format!("  +with {} -> expect {}\n", case.input, expect_str));
+                test_src.push_str(&format!(
+                    "  +with {} -> expect {}\n",
+                    ast::escape_test_input_linebreaks(&case.input),
+                    expect_str
+                ));
                 for ac in &case.after_checks {
                     test_src.push_str(&format!("  +after {} {} \"{}\"\n", ac.target, ac.matcher, ac.value));
                 }

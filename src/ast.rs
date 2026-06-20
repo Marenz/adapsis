@@ -1029,6 +1029,26 @@ pub fn escape_string_literal(s: &str) -> String {
     out
 }
 
+/// Escape only the line-breaking control characters (`\n`, `\r`, `\t`) in an
+/// already-composed fragment such as a `+test` `+with` input
+/// (`raw="a\nb" other=2`). The line-oriented parser treats a raw newline as a
+/// statement boundary, so serializing a test case whose string value contains a
+/// literal newline produces an unparseable module that silently fails to load
+/// on the next start. These three chars never appear structurally on a `+with`
+/// line — only inside string values — so escaping them is safe and reversible.
+pub fn escape_test_input_linebreaks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Format a string as a complete Adapsis string literal (with outer quotes).
 pub fn format_string_literal(s: &str) -> String {
     format!("\"{}\"", escape_string_literal(s))
@@ -1037,6 +1057,29 @@ pub fn format_string_literal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── escape_test_input_linebreaks ─────────────────────────────────────
+
+    #[test]
+    fn escape_test_input_linebreaks_escapes_only_control_chars() {
+        // Newlines/CR/tab inside a string value must be escaped so the
+        // serialized `+with` line stays a single parseable line. Quotes and
+        // backslashes are left untouched (they're structural in the input).
+        let input = "raw=\"1815217\n999\n\"";
+        let escaped = escape_test_input_linebreaks(input);
+        assert_eq!(escaped, "raw=\"1815217\\n999\\n\"");
+        assert!(!escaped.contains('\n'), "no raw newline may survive");
+        // Quotes preserved verbatim (not double-escaped like a full literal).
+        assert_eq!(escaped.matches('"').count(), 2);
+    }
+
+    #[test]
+    fn escape_test_input_linebreaks_handles_tab_and_cr() {
+        assert_eq!(
+            escape_test_input_linebreaks("a\tb\r\nc"),
+            "a\\tb\\r\\nc"
+        );
+    }
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
