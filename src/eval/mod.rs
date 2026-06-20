@@ -2159,75 +2159,35 @@ pub(crate) fn eval_function_body(
                         alias,
                         handler,
                     } => {
-                        let (src_type_str, interval_ms) = match source_type {
-                            ast::SourceType::Timer(expr) => {
-                                let val = eval_ast_expr(program, expr, env)?;
-                                let ms = match &val {
-                                    Value::Int(n) => *n as u64,
-                                    _ => bail!("timer interval must be Int, got {}", val),
-                                };
-                                ("timer".to_string(), Some(ms))
-                            }
-                            ast::SourceType::Channel => ("channel".to_string(), None),
-                            ast::SourceType::Event(module, event) => {
-                                (format!("event:{}.{}", module, event), None)
-                            }
-                        };
-                        // Determine the current module name
-                        let module_name = match env.get_raw("__module_name") {
-                            Some(Value::String(s)) => s.as_ref().clone(),
-                            _ => {
-                                if let Some(dot) = handler.rfind('.') {
-                                    handler[..dot].to_string()
-                                } else {
-                                    "unknown".to_string()
-                                }
-                            }
-                        };
-                        // Build fully-qualified handler name
-                        let full_handler = if handler.contains('.') {
-                            handler.clone()
-                        } else {
-                            format!("{}.{}", module_name, handler)
-                        };
-                        // Send through coroutine handle if in async context
-                        if let Some(Value::CoroutineHandle(handle)) =
-                            env.get_raw("__coroutine_handle")
-                        {
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                            let io_tx = handle.io_sender();
-                            let _ = io_tx.blocking_send(crate::coroutine::IoRequest::SourceAdd {
-                                module_name,
-                                source_type: src_type_str,
-                                interval_ms,
-                                alias: alias.clone(),
-                                handler: full_handler,
-                                reply: reply_tx,
-                            });
-                            match reply_rx.blocking_recv() {
-                                Ok(Ok(_msg)) => { /* source registered */ }
-                                Ok(Err(e)) => bail!("source add failed: {}", e),
-                                Err(_) => bail!("source add: reply channel closed"),
-                            }
-                        }
-                        // If no coroutine handle (sync context), silently skip
+                        source_add(program, env, source_type, alias, handler)?;
                     }
                     ast::SourceOp::Replace {
                         source_type,
                         alias,
                         handler,
                     } => {
-                        // Evaluate timer expression if present, but no runtime dispatch yet
-                        if let ast::SourceType::Timer(expr) = source_type {
-                            let _val = eval_ast_expr(program, expr, env)?;
-                        }
-                        let _ = (alias, handler); // suppress unused warnings
+                        // Atomic replace = remove the old source (if any), then
+                        // re-add with the new type/handler. Remove first so the
+                        // old timer task is aborted before the new one spawns.
+                        source_remove(program, env, alias)?;
+                        source_add(program, env, source_type, alias, handler)?;
                     }
                     ast::SourceOp::Remove { alias } => {
-                        let _ = alias; // no-op for now
+                        source_remove(program, env, alias)?;
                     }
                     ast::SourceOp::List => {
-                        // no-op for now
+                        // `+source list` is a debug statement; the listing is
+                        // surfaced via the `?sources` query. As a statement it
+                        // has no return slot, so dispatch and discard the result.
+                        if let Some(Value::CoroutineHandle(handle)) =
+                            env.get_raw("__coroutine_handle")
+                        {
+                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                            let _ = handle.io_sender().blocking_send(
+                                crate::coroutine::IoRequest::SourceList { reply: reply_tx },
+                            );
+                            let _ = reply_rx.blocking_recv();
+                        }
                     }
                 }
             }
@@ -2242,6 +2202,109 @@ pub(crate) fn eval_function_body(
 
     // If no explicit return, return None
     Ok(Value::None)
+}
+
+/// Resolve the module that owns a `+source` statement currently executing.
+/// Resolution order:
+///   1. `__module_name` env var (set by startup/timer/spawn drivers).
+///   2. The currently-executing function's module (top of `FN_NAME_STACK`),
+///      so a plain `!eval Svc.add_poll` attributes the source to `Svc`.
+///   3. A literal `Module.` prefix on the handler hint, if any.
+///   4. The handler's owning module resolved from the program.
+///   5. `"unknown"` as a last resort.
+fn current_module_name(program: &ast::Program, env: &Env, handler_hint: &str) -> String {
+    if let Some(Value::String(s)) = env.get_raw("__module_name") {
+        return s.as_ref().clone();
+    }
+    // Currently-executing function carries the most accurate module context.
+    if let Some(current) = FN_NAME_STACK.with(|s| s.borrow().last().cloned()) {
+        if let Some((module, _)) = current.split_once('.') {
+            return module.to_string();
+        }
+    }
+    // Already-qualified handler hint: take its module prefix.
+    if let Some((module, _)) = handler_hint.split_once('.') {
+        return module.to_string();
+    }
+    // Bare handler: find which module declares it.
+    match program.qualify_function_name(handler_hint).split_once('.') {
+        Some((module, _)) => module.to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Dispatch a `+source add` to the IO loop. Evaluates the timer interval (if
+/// any), resolves the module name + fully-qualified handler, and sends a
+/// `SourceAdd` request through the coroutine handle. No-op in sync context
+/// (no coroutine handle) so tests/tree-walk-without-IO don't fail.
+fn source_add(
+    program: &ast::Program,
+    env: &mut Env,
+    source_type: &ast::SourceType,
+    alias: &str,
+    handler: &str,
+) -> Result<()> {
+    let (src_type_str, interval_ms) = match source_type {
+        ast::SourceType::Timer(expr) => {
+            let val = eval_ast_expr(program, expr, env)?;
+            let ms = match &val {
+                Value::Int(n) => *n as u64,
+                _ => bail!("timer interval must be Int, got {}", val),
+            };
+            ("timer".to_string(), Some(ms))
+        }
+        ast::SourceType::Channel => ("channel".to_string(), None),
+        ast::SourceType::Event(module, event) => {
+            (format!("event:{}.{}", module, event), None)
+        }
+    };
+    let module_name = current_module_name(program, env, handler);
+    let full_handler = if handler.contains('.') {
+        handler.to_string()
+    } else {
+        format!("{}.{}", module_name, handler)
+    };
+    if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = handle.io_sender().blocking_send(
+            crate::coroutine::IoRequest::SourceAdd {
+                module_name,
+                source_type: src_type_str,
+                interval_ms,
+                alias: alias.to_string(),
+                handler: full_handler,
+                reply: reply_tx,
+            },
+        );
+        match reply_rx.blocking_recv() {
+            Ok(Ok(_msg)) => {}
+            Ok(Err(e)) => bail!("source add failed: {}", e),
+            Err(_) => bail!("source add: reply channel closed"),
+        }
+    }
+    Ok(())
+}
+
+/// Dispatch a `+source remove` to the IO loop. Resolves the module name and
+/// sends a `SourceRemove` request. No-op in sync context.
+fn source_remove(program: &ast::Program, env: &mut Env, alias: &str) -> Result<()> {
+    let module_name = current_module_name(program, env, alias);
+    if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = handle.io_sender().blocking_send(
+            crate::coroutine::IoRequest::SourceRemove {
+                module_name,
+                alias: alias.to_string(),
+                reply: reply_tx,
+            },
+        );
+        match reply_rx.blocking_recv() {
+            Ok(Ok(_msg)) => {}
+            Ok(Err(e)) => bail!("source remove failed: {}", e),
+            Err(_) => bail!("source remove: reply channel closed"),
+        }
+    }
+    Ok(())
 }
 
 // Shared thread-local state (moved to shared_state.rs to break the

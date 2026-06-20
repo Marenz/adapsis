@@ -2868,3 +2868,88 @@ async fn shell_exec_allowlist_blocks_unlisted_program() {
     assert_eq!(code, 0);
     assert!(stdout.contains("hello"));
 }
+
+// ── #33 service system: source registry ──────────────────────────────────
+
+fn empty_source_registry() -> SourceRegistry {
+    std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn insert_timer(reg: &SourceRegistry, module: &str, alias: &str, handler: &str, ms: u64) {
+    reg.lock().unwrap().insert(
+        source_key(module, alias),
+        ActiveSource {
+            module: module.to_string(),
+            alias: alias.to_string(),
+            source_type: "timer".to_string(),
+            handler: handler.to_string(),
+            interval_ms: Some(ms),
+            abort: None,
+        },
+    );
+}
+
+#[test]
+fn source_key_combines_module_and_alias() {
+    assert_eq!(source_key("GithubSync", "poll"), "GithubSync.poll");
+}
+
+#[test]
+fn format_source_list_empty() {
+    let reg = empty_source_registry();
+    assert_eq!(format_source_list(&reg), "No active sources.");
+}
+
+#[test]
+fn format_source_list_sorted_and_formatted() {
+    let reg = empty_source_registry();
+    insert_timer(&reg, "GithubSync", "poll", "GithubSync.on_tick", 300000);
+    insert_timer(&reg, "Bot", "mail", "Bot.on_inbox", 2000);
+    let listing = format_source_list(&reg);
+    // Sorted by "module.alias" key: "Bot.mail" before "GithubSync.poll".
+    let expected = "Bot.mail: timer (2000ms) -> Bot.on_inbox\n\
+                    GithubSync.poll: timer (300000ms) -> GithubSync.on_tick";
+    assert_eq!(listing, expected);
+}
+
+#[test]
+fn remove_source_removes_existing_and_reports() {
+    let reg = empty_source_registry();
+    insert_timer(&reg, "GithubSync", "poll", "GithubSync.on_tick", 1000);
+    assert!(remove_source(&reg, "GithubSync", "poll"));
+    assert_eq!(format_source_list(&reg), "No active sources.");
+}
+
+#[test]
+fn remove_source_missing_returns_false() {
+    let reg = empty_source_registry();
+    assert!(!remove_source(&reg, "Nope", "ghost"));
+}
+
+#[test]
+fn replace_semantics_overwrite_same_key() {
+    // Replace = remove + add. After removing the old source and inserting a
+    // new one under the same key, the registry holds exactly the new entry.
+    let reg = empty_source_registry();
+    insert_timer(&reg, "Svc", "tick", "Svc.handler_v1", 1000);
+    remove_source(&reg, "Svc", "tick");
+    insert_timer(&reg, "Svc", "tick", "Svc.handler_v2", 5000);
+    assert_eq!(reg.lock().unwrap().len(), 1);
+    let listing = format_source_list(&reg);
+    assert!(listing.contains("Svc.tick: timer (5000ms) -> Svc.handler_v2"), "got: {listing}");
+    assert!(!listing.contains("handler_v1"), "old handler should be gone: {listing}");
+}
+
+#[tokio::test]
+async fn source_list_io_request_returns_formatted_listing() {
+    // Drive the SourceList path the way `+source list` / query_sources does:
+    // send the IoRequest and confirm a registry-backed reply. Here we exercise
+    // the handle_io fallback (no registry) which must answer rather than hang.
+    let (mut runtime, _io_rx) = Runtime::new();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    runtime.handle_io(IoRequest::SourceList { reply: reply_tx }).await;
+    let res = reply_rx.await.expect("reply channel closed");
+    // The bare Runtime has no registry, so it reports unavailability instead of
+    // dropping the reply (the real listing comes from the main.rs IO loop).
+    assert!(res.is_err(), "bare runtime SourceList should error, got: {res:?}");
+}

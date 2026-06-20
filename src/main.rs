@@ -650,6 +650,8 @@ async fn main() -> Result<()> {
             let io_sender_for_spawn = runtime.io_sender();
             let task_registry_for_spawn = runtime.task_registry.clone();
             let snap_registry_for_spawn = runtime.snapshot_registry.clone();
+            let source_registry: coroutine::SourceRegistry =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             let rt_for_id = runtime.clone();
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
@@ -724,23 +726,28 @@ async fn main() -> Result<()> {
                         } => {
                             if source_type == "timer" {
                                 if let Some(ms) = interval_ms {
-                                    let _ = reply.send(Ok(format!("timer source '{}' registered ({}ms)", alias, ms)));
+                                    // Replace semantics: drop any existing source with
+                                    // the same module.alias key (abort its task) first.
+                                    coroutine::remove_source(&source_registry, &module_name, &alias);
                                     let prog = program_for_spawn.clone();
                                     let sender = io_sender_for_spawn.clone();
                                     let registry = task_registry_for_spawn.clone();
                                     let snap_reg = snap_registry_for_spawn.clone();
-                                    tokio::spawn(async move {
+                                    let timer_alias = alias.clone();
+                                    let timer_module = module_name.clone();
+                                    let timer_handler = handler.clone();
+                                    let join = tokio::spawn(async move {
                                         let mut interval = tokio::time::interval(std::time::Duration::from_millis(ms));
                                         interval.tick().await; // skip first immediate tick
                                         loop {
                                             interval.tick().await;
-                                            let handler_name = handler.clone();
+                                            let handler_name = timer_handler.clone();
                                             let prog = prog.clone();
                                             let sender = sender.clone();
                                             let registry = registry.clone();
                                             let snap_reg = snap_reg.clone();
-                                            let alias = alias.clone();
-                                            let module_name = module_name.clone();
+                                            let alias = timer_alias.clone();
+                                            let module_name = timer_module.clone();
                                             tokio::task::spawn_blocking(move || {
                                                 let ctx = eval::EvalContext {
                                                     runtime: None, meta: None, event_broadcast: None,
@@ -763,6 +770,20 @@ async fn main() -> Result<()> {
                                             });
                                         }
                                     });
+                                    if let Ok(mut reg) = source_registry.lock() {
+                                        reg.insert(
+                                            coroutine::source_key(&module_name, &alias),
+                                            coroutine::ActiveSource {
+                                                module: module_name.clone(),
+                                                alias: alias.clone(),
+                                                source_type: "timer".to_string(),
+                                                handler: handler.clone(),
+                                                interval_ms: Some(ms),
+                                                abort: Some(join.abort_handle()),
+                                            },
+                                        );
+                                    }
+                                    let _ = reply.send(Ok(format!("timer source '{}' registered ({}ms)", alias, ms)));
                                 } else {
                                     let _ = reply.send(Err(anyhow::anyhow!("timer source requires interval_ms")));
                                 }
@@ -771,6 +792,17 @@ async fn main() -> Result<()> {
                             } else {
                                 let _ = reply.send(Ok(format!("event source '{}' registered ({})", alias, source_type)));
                             }
+                        }
+                        coroutine::IoRequest::SourceRemove { module_name, alias, reply } => {
+                            let removed = coroutine::remove_source(&source_registry, &module_name, &alias);
+                            if removed {
+                                let _ = reply.send(Ok(format!("source '{}.{}' removed", module_name, alias)));
+                            } else {
+                                let _ = reply.send(Ok(format!("source '{}.{}' not found (nothing removed)", module_name, alias)));
+                            }
+                        }
+                        coroutine::IoRequest::SourceList { reply } => {
+                            let _ = reply.send(Ok(coroutine::format_source_list(&source_registry)));
                         }
                         _ => {
                             let rt = rt.clone();
@@ -945,8 +977,10 @@ async fn main() -> Result<()> {
             let io_sender_for_spawn = runtime.io_sender();
             let shared_runtime_for_spawn = shared_runtime.clone();
             let shared_meta_for_spawn = shared_meta.clone();
-            let shared_program_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
-            let llm_url_for_spawn = url.clone();
+             let shared_program_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
+             let source_registry: coroutine::SourceRegistry =
+                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+             let llm_url_for_spawn = url.clone();
             let llm_model_shared: std::sync::Arc<std::sync::RwLock<String>> = std::sync::Arc::new(std::sync::RwLock::new(model.clone()));
             let llm_model_for_spawn = llm_model_shared.clone();
             let llm_key_for_spawn = api_key.clone();
@@ -1054,24 +1088,29 @@ async fn main() -> Result<()> {
                         } => {
                             if source_type == "timer" {
                                 if let Some(ms) = interval_ms {
-                                    let _ = reply.send(Ok(format!("timer source '{}' registered ({}ms)", alias, ms)));
+                                    // Replace semantics: abort any existing source on
+                                    // the same module.alias key before spawning anew.
+                                    coroutine::remove_source(&source_registry, &module_name, &alias);
                                     let program_for_timer = shared_program_for_spawn.clone();
                                     let sender_for_timer = io_sender_for_spawn.clone();
                                     let registry_for_timer = task_registry_for_spawn.clone();
                                     let snap_reg_for_timer = snap_registry_for_spawn2.clone();
                                     let runtime_for_timer = shared_runtime_for_spawn.clone();
                                     let meta_for_timer = shared_meta_for_spawn.clone();
-                                    tokio::spawn(async move {
+                                    let timer_alias = alias.clone();
+                                    let timer_module = module_name.clone();
+                                    let timer_handler = handler.clone();
+                                    let join = tokio::spawn(async move {
                                         let mut interval = tokio::time::interval(std::time::Duration::from_millis(ms));
                                         interval.tick().await; // skip first immediate tick
                                         loop {
                                             interval.tick().await;
-                                            let handler_name = handler.clone();
+                                            let handler_name = timer_handler.clone();
                                             let prog = program_for_timer.read().await.clone();
                                             let func = match prog.get_function(&handler_name) {
                                                 Some(f) => f.clone(),
                                                 None => {
-                                                    eprintln!("[timer:{}] handler `{}` not found", alias, handler_name);
+                                                    eprintln!("[timer:{}] handler `{}` not found", timer_alias, handler_name);
                                                     continue;
                                                 }
                                             };
@@ -1080,8 +1119,8 @@ async fn main() -> Result<()> {
                                             let snap_reg = snap_reg_for_timer.clone();
                                             let rt_for_tick = runtime_for_timer.clone();
                                             let meta_for_tick = meta_for_timer.clone();
-                                            let alias_for_tick = alias.clone();
-                                            let module_for_tick = module_name.clone();
+                                            let alias_for_tick = timer_alias.clone();
+                                            let module_for_tick = timer_module.clone();
                                             tokio::task::spawn_blocking(move || {
                                                 let ctx = eval::EvalContext::new_minimal(
                                                     rt_for_tick, meta_for_tick,
@@ -1104,6 +1143,20 @@ async fn main() -> Result<()> {
                                             });
                                         }
                                     });
+                                    if let Ok(mut reg) = source_registry.lock() {
+                                        reg.insert(
+                                            coroutine::source_key(&module_name, &alias),
+                                            coroutine::ActiveSource {
+                                                module: module_name.clone(),
+                                                alias: alias.clone(),
+                                                source_type: "timer".to_string(),
+                                                handler: handler.clone(),
+                                                interval_ms: Some(ms),
+                                                abort: Some(join.abort_handle()),
+                                            },
+                                        );
+                                    }
+                                    let _ = reply.send(Ok(format!("timer source '{}' registered ({}ms)", alias, ms)));
                                 } else {
                                     let _ = reply.send(Err(anyhow::anyhow!("timer source requires interval_ms")));
                                 }
@@ -1115,6 +1168,17 @@ async fn main() -> Result<()> {
                                 let _ = reply.send(Ok(format!("event source '{}' registered ({})", alias, source_type)));
                                 // Event dispatch will be implemented in a later phase
                             }
+                        }
+                        coroutine::IoRequest::SourceRemove { module_name, alias, reply } => {
+                            let removed = coroutine::remove_source(&source_registry, &module_name, &alias);
+                            if removed {
+                                let _ = reply.send(Ok(format!("source '{}.{}' removed", module_name, alias)));
+                            } else {
+                                let _ = reply.send(Ok(format!("source '{}.{}' not found (nothing removed)", module_name, alias)));
+                            }
+                        }
+                        coroutine::IoRequest::SourceList { reply } => {
+                            let _ = reply.send(Ok(coroutine::format_source_list(&source_registry)));
                         }
                         coroutine::IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, permission_model, reply } => {
                             // Set or clear permission_model on the conversation.

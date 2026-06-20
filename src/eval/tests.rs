@@ -6069,7 +6069,9 @@ fn source_add_timer_non_int_expr_errors() {
 
 #[test]
 fn source_add_module_name_from_handler() {
-    // When __module_name isn't set, module_name is extracted from handler
+    // When __module_name isn't set, the module is resolved from the handler's
+    // owning module via the program (here `on_msg` lives in `MyMod`), so the
+    // source is correctly attributed to `MyMod` rather than `unknown`.
     let source = r#"
 +module MyMod
 +fn setup ()->String [io,async]
@@ -6094,7 +6096,7 @@ fn source_add_module_name_from_handler() {
             let mut env = Env::new();
             let handle = crate::coroutine::CoroutineHandle::new(tx);
             env.set("__coroutine_handle", Value::CoroutineHandle(handle));
-            // No __module_name set — should extract from handler "on_msg" -> "unknown"
+            // No __module_name set — resolve from handler "on_msg" -> "MyMod"
             eval_function_body(&prog, &func.body, &mut env)
         });
 
@@ -6105,8 +6107,8 @@ fn source_add_module_name_from_handler() {
             ..
         }) = rx.recv().await
         {
-            assert_eq!(module_name, "unknown");
-            assert_eq!(handler, "unknown.on_msg");
+            assert_eq!(module_name, "MyMod");
+            assert_eq!(handler, "MyMod.on_msg");
             let _ = reply.send(Ok("ok".to_string()));
         }
 

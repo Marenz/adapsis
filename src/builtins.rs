@@ -1112,6 +1112,17 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "query_sources",
+        aliases: &[],
+        short: "list active event sources: query_sources() -> String",
+        long: "Returns a list of all currently-active event sources (timers, channels, events) \
+               registered via +source add or a module +startup block, formatted as \
+               `module.alias: type (interval) -> handler`. Returns \"No active sources.\" if none. \
+               This is the runtime view that `+source list` surfaces. \
+               Takes no arguments. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "library_errors",
         aliases: &[],
         short: "get library load/save errors: library_errors() -> String",

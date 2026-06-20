@@ -160,9 +160,10 @@ Modules can define startup/shutdown blocks and manage event sources:
   The handler is auto-qualified with the current module name (e.g. `on_tick` → `Svc.on_tick`).
 - `+source timer <name> <ms>` — shorthand for adding a timer source inside +startup/+shutdown bodies.
   Equivalent to `+source add timer(<ms>) as <name> -> <name>`.
-- `+source remove <alias>` removes a source.
-- `+source replace <alias> <kind> -> <handler>` replaces a source.
-- `+source list` lists registered sources.
+- `+source remove <alias>` removes a source (timer sources are cancelled/aborted).
+- `+source replace <alias> <kind> -> <handler>` atomically replaces a source
+  (the old timer is aborted before the new one is spawned).
+- `+source list` lists active sources (same view as `query_sources()`).
 - `+event register <name>(<Type>)` declares an event this module can emit.
 - `+event emit <name> <expr>` emits an event with a payload value.
 - Source and event statements can appear inside any function body, including +startup/+shutdown.
@@ -170,6 +171,8 @@ Modules can define startup/shutdown blocks and manage event sources:
 - `+await result:String = run_module_startups()` — execute all module startup blocks and auto-register
   module-level source declarations. Use after library_reload or when modules change.
 - `+await result:String = query_startups()` — list which modules have startup/shutdown blocks.
+- `+await result:String = query_sources()` — list all active event sources
+  (`module.alias: type (interval) -> handler`), or "No active sources." if none.
 - Module-level source declarations (inside module, not inside a function):
   `+source <name> <type> [key=value ...] -> <handler>`
   Example: `+source sync_timer timer interval=300000 -> on_tick`
