@@ -106,6 +106,79 @@ pub struct TaskSnapshot {
 /// Shared snapshot registry — updated by the evaluator as tasks execute.
 pub type TaskSnapshotRegistry = Arc<std::sync::Mutex<HashMap<TaskId, TaskSnapshot>>>;
 
+/// A live event source registered by a module's `+startup`/`+source add`.
+/// Tracks enough to list it (`+source list` / `?sources`) and cancel it
+/// (`+source remove` / `+source replace`, which is remove-then-add).
+#[derive(Debug)]
+pub struct ActiveSource {
+    /// Owning module name.
+    pub module: String,
+    /// Source alias, unique within the module.
+    pub alias: String,
+    /// "timer", "channel", or "event:Module.event_name".
+    pub source_type: String,
+    /// Fully-qualified handler, e.g. "MyModule.on_tick".
+    pub handler: String,
+    /// Timer interval in ms (only for timer sources).
+    pub interval_ms: Option<u64>,
+    /// Abort handle for the spawned driver task (timers). Dropping/aborting
+    /// stops the source. `None` for source types with no backing task yet.
+    pub abort: Option<tokio::task::AbortHandle>,
+}
+
+/// Shared registry of active event sources, keyed by `"module.alias"`.
+/// Threaded into the IO loops so `+source add/remove/replace/list` operate on
+/// one shared view of running sources.
+pub type SourceRegistry = Arc<std::sync::Mutex<HashMap<String, ActiveSource>>>;
+
+/// Build the registry key for a source: `"module.alias"`.
+pub fn source_key(module: &str, alias: &str) -> String {
+    format!("{module}.{alias}")
+}
+
+/// Render the active sources as a human-readable list (for `+source list` /
+/// `?sources`). Sorted by key for stable output.
+pub fn format_source_list(registry: &SourceRegistry) -> String {
+    let guard = match registry.lock() {
+        Ok(g) => g,
+        Err(_) => return "source registry unavailable (poisoned lock)".to_string(),
+    };
+    if guard.is_empty() {
+        return "No active sources.".to_string();
+    }
+    let mut entries: Vec<&ActiveSource> = guard.values().collect();
+    entries.sort_by(|a, b| {
+        source_key(&a.module, &a.alias).cmp(&source_key(&b.module, &b.alias))
+    });
+    let mut lines = Vec::with_capacity(entries.len());
+    for s in entries {
+        let detail = match s.interval_ms {
+            Some(ms) => format!("{} ({}ms)", s.source_type, ms),
+            None => s.source_type.clone(),
+        };
+        lines.push(format!("{}.{}: {} -> {}", s.module, s.alias, detail, s.handler));
+    }
+    lines.join("\n")
+}
+
+/// Remove (and abort) a source by `module`/`alias`. Returns true if one was
+/// removed. Used by `+source remove` and the remove half of `+source replace`.
+pub fn remove_source(registry: &SourceRegistry, module: &str, alias: &str) -> bool {
+    let key = source_key(module, alias);
+    let removed = match registry.lock() {
+        Ok(mut g) => g.remove(&key),
+        Err(_) => return false,
+    };
+    if let Some(src) = removed {
+        if let Some(abort) = src.abort {
+            abort.abort();
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// IO operations that Adapsis code can request via +await.
 #[derive(Debug)]
 pub enum IoRequest {
@@ -164,6 +237,17 @@ pub enum IoRequest {
         interval_ms: Option<u64>,
         alias: String,
         handler: String,  // fully-qualified handler like "MyModule.on_tick"
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// Unregister a source by module + alias (`+source remove`). Aborts the
+    /// backing driver task if any. The replace half is remove-then-add.
+    SourceRemove {
+        module_name: String,
+        alias: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// List active sources (`+source list` / `?sources`).
+    SourceList {
         reply: oneshot::Sender<Result<String>>,
     },
     /// Conversational LLM call with per-context history.
@@ -617,6 +701,19 @@ impl Runtime {
             }
             IoRequest::SourceAdd { .. } => {
                 // SourceAdd is handled at a higher level (main.rs IO loop)
+            }
+            IoRequest::SourceRemove { reply, .. } => {
+                // Normally handled at a higher level (main.rs IO loop) where the
+                // SourceRegistry lives. If it reaches here there's no registry,
+                // so report that rather than silently dropping the reply.
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "source remove: not available in this runtime context"
+                )));
+            }
+            IoRequest::SourceList { reply } => {
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "source list: not available in this runtime context"
+                )));
             }
             IoRequest::LlmTakeover { .. } => {
                 // LlmTakeover is handled at a higher level (main.rs IO loop)
@@ -1426,6 +1523,19 @@ impl CoroutineHandle {
                     return Ok(Some(Value::string("No modules have startup or shutdown blocks.".to_string())));
                 }
                 return Ok(Some(Value::string(lines.join("\n"))));
+            }
+
+            "query_sources" => {
+                // Ask the IO loop (which owns the SourceRegistry) for the live
+                // list of active sources. Returns "No active sources." if none.
+                let (reply_tx, reply_rx) = oneshot::channel();
+                self.io_tx
+                    .blocking_send(IoRequest::SourceList { reply: reply_tx })
+                    .map_err(|_| anyhow::anyhow!("query_sources: IO loop unavailable"))?;
+                let listing = reply_rx
+                    .blocking_recv()
+                    .map_err(|_| anyhow::anyhow!("query_sources: reply channel closed"))??;
+                return Ok(Some(Value::string(listing)));
             }
 
             // ── Mutation operations — write to program AST via thread-local ──
