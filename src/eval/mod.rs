@@ -2033,7 +2033,12 @@ pub(crate) fn eval_function_body(
                         Value::Ok(inner) => *inner,
                         other => other,
                     };
-                    env.set(name, val);
+                    // Use set_existing so `+await text:String = f()` reassigns an
+                    // outer-scope `text` when one exists (e.g. inside a nested
+                    // +if) instead of shadowing it in the block scope and losing
+                    // the value when the block ends. Falls back to declaring in
+                    // the current scope when the name is new.
+                    env.set_existing(name, val);
                 } else {
                     // Builtin IO operation
                     let handle = match env.get_raw("__coroutine_handle") {
@@ -2083,7 +2088,9 @@ pub(crate) fn eval_function_body(
                         }
                     }
                     let result = handle.execute_await(&call.callee, &args)?;
-                    env.set(name, result);
+                    // See note above: reassign an existing outer-scope binding
+                    // rather than shadowing it in the current block scope.
+                    env.set_existing(name, result);
                 }
             }
             ast::StatementKind::Spawn { call, binding } => {
