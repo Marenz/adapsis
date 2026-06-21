@@ -1151,8 +1151,10 @@ fn query_symbols(_program: &Program, table: &SymbolTable, scope: &str) -> String
             ));
         }
     } else {
-        // Check if scope is a module name — list its contents
-        if let Some(module) = _program.modules.iter().find(|m| m.name == scope) {
+        // Check if scope is a module name — list its contents.
+        // Search recursively so nested sub-modules resolve too (issue #7:
+        // "?symbols Module returns not found despite module existing").
+        if let Some(module) = find_module_recursive(&_program.modules, scope) {
             out.push_str(&format!("Module {}:\n", scope));
             if !module.types.is_empty() {
                 out.push_str("  Types:\n");
@@ -1200,11 +1202,45 @@ fn query_symbols(_program: &Program, table: &SymbolTable, scope: &str) -> String
                 }
             }
         } else {
-            out.push_str(&format!("not found: {scope}\n"));
+            // Actionable diagnostic instead of a bare "not found": list the
+            // module names that DO exist so a typo / case / nesting mismatch is
+            // obvious (issue #7).
+            let mut module_names = Vec::new();
+            collect_module_names(&_program.modules, &mut module_names);
+            module_names.sort();
+            if module_names.is_empty() {
+                out.push_str(&format!("not found: {scope} (no modules defined yet)\n"));
+            } else {
+                out.push_str(&format!(
+                    "not found: {scope}\nAvailable modules: {}\n",
+                    module_names.join(", ")
+                ));
+            }
         }
     }
 
     out
+}
+
+/// Find a module by exact name, searching nested sub-modules depth-first.
+fn find_module_recursive<'a>(modules: &'a [crate::ast::Module], name: &str) -> Option<&'a crate::ast::Module> {
+    for m in modules {
+        if m.name == name {
+            return Some(m);
+        }
+        if let Some(found) = find_module_recursive(&m.modules, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Collect all module names (including nested sub-modules) for diagnostics.
+fn collect_module_names(modules: &[crate::ast::Module], out: &mut Vec<String>) {
+    for m in modules {
+        out.push(m.name.clone());
+        collect_module_names(&m.modules, out);
+    }
 }
 
 fn query_callers(program: &Program, target: &str) -> String {
@@ -1882,6 +1918,83 @@ mod tests {
         assert!(
             result.contains("origin"),
             "should list origin function: {result}"
+        );
+    }
+
+    #[test]
+    fn query_symbols_finds_module_and_lists_functions() {
+        let source = "\
++module Greeter
++fn hello ()->String
+  +return \"hi\"
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "?symbols Greeter", &[]);
+        assert!(result.contains("Module Greeter"), "should find module: {result}");
+        assert!(result.contains("hello"), "should list module fn: {result}");
+        assert!(!result.contains("not found"), "module exists: {result}");
+    }
+
+    #[test]
+    fn query_symbols_unknown_module_lists_available() {
+        // Issue #7: a bare "not found" was unhelpful. Now it lists what exists.
+        let source = "\
++module Alpha
++fn a ()->Int
+  +return 1
+";
+        let program = build_program(source);
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "?symbols Beta", &[]);
+        assert!(result.contains("not found: Beta"), "should report miss: {result}");
+        assert!(
+            result.contains("Available modules:") && result.contains("Alpha"),
+            "should list available modules: {result}"
+        );
+    }
+
+    #[test]
+    fn query_symbols_finds_nested_submodule() {
+        // A nested sub-module must resolve, not return "not found".
+        let mut program = Program::default();
+        let inner = crate::ast::Module {
+            id: "Inner".to_string(),
+            name: "Inner".to_string(),
+            doc: None,
+            types: vec![],
+            functions: vec![],
+            modules: vec![],
+            shared_vars: vec![],
+            startup: None,
+            shutdown: None,
+            sources: vec![],
+            event_decls: vec![],
+            routes: vec![],
+            fn_index: Default::default(),
+        };
+        let outer = crate::ast::Module {
+            id: "Outer".to_string(),
+            name: "Outer".to_string(),
+            doc: None,
+            types: vec![],
+            functions: vec![],
+            modules: vec![inner],
+            shared_vars: vec![],
+            startup: None,
+            shutdown: None,
+            sources: vec![],
+            event_decls: vec![],
+            routes: vec![],
+            fn_index: Default::default(),
+        };
+        program.modules.push(outer);
+        program.rebuild_function_index();
+        let table = build_symbol_table(&program);
+        let result = handle_query(&program, &table, "?symbols Inner", &[]);
+        assert!(
+            result.contains("Module Inner"),
+            "nested module should resolve: {result}"
         );
     }
 
