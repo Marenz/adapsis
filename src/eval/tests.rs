@@ -2612,6 +2612,63 @@ fn builtin_trim() {
     assert_eq!(eval_expr_str(&p, r#"trim("  hello  ")"#), r#""hello""#);
 }
 
+/// Issue #35: every registered builtin example must evaluate to its documented
+/// Display value. This is the per-builtin semantic guard that surfaces
+/// quote-artifact / Display-vs-raw bugs (like the `join` String-element bug)
+/// at the builtin level instead of only as a confusing higher-level mismatch.
+#[test]
+fn builtin_examples_match_semantics() {
+    let p = ast::Program::default();
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+    for (name, examples) in crate::builtins::BUILTIN_EXAMPLES {
+        for (expr, expected) in *examples {
+            checked += 1;
+            // Parse + eval defensively so a single bad example reports cleanly
+            // instead of panicking and hiding the rest.
+            let parsed = match parser::parse_expr_pub(0, expr) {
+                Ok(e) => e,
+                Err(e) => {
+                    failures.push(format!("[{name}] `{expr}` failed to parse: {e}"));
+                    continue;
+                }
+            };
+            match eval_inline_expr(&p, &parsed) {
+                Ok(val) => {
+                    let got = format!("{val}");
+                    if got != *expected {
+                        failures.push(format!(
+                            "[{name}] `{expr}` => `{got}` but expected `{expected}`"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("[{name}] `{expr}` eval error: {e}"));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} builtin example(s) failed (checked {checked}):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(checked > 40, "expected broad example coverage, only checked {checked}");
+}
+
+/// Issue #35: guard that every builtin example references a real registered
+/// builtin name (catches typos / removed builtins drifting out of sync).
+#[test]
+fn builtin_examples_reference_real_builtins() {
+    for (name, _) in crate::builtins::BUILTIN_EXAMPLES {
+        assert!(
+            crate::builtins::is_builtin(name),
+            "BUILTIN_EXAMPLES references `{name}` which is not a registered builtin"
+        );
+    }
+}
+
 #[test]
 fn builtin_to_string() {
     let p = ast::Program::default();
