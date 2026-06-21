@@ -14,6 +14,17 @@
 //!
 //! For a locked-down deployment (e.g. a family member's machine), set
 //! `ADAPSIS_SHELL_POLICY=deny` or an explicit allowlist.
+//!
+//! ## Destructive-command guard (applies under EVERY policy)
+//! A family/assistant bot needs broad shell reach to actually be useful —
+//! reading logs, trying fixes, installing drivers, restarting services. The
+//! danger is not "running commands" but a misunderstanding causing
+//! *irreversible* harm (wiping a disk, `rm -rf /`, reformatting). So instead of
+//! a restrictive allowlist (which would cripple debugging), an absolute
+//! denylist of catastrophic, unrecoverable operations is enforced *before* the
+//! policy mode is consulted. Even `Unrestricted` refuses these. The guard is
+//! intentionally narrow: it targets device-wipers and root-tree deletions, not
+//! merely "risky" commands, to keep false positives near zero.
 
 /// How shell command execution is gated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +98,167 @@ impl ShellPolicy {
         None
     }
 
+    /// Normalize a command for destructive-pattern matching: lowercase and
+    /// collapse all runs of whitespace to single spaces so `rm   -rf  /` and
+    /// `rm -rf /` look identical.
+    fn normalized(command: &str) -> String {
+        command.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
+    }
+
+    /// Detect catastrophic, irreversible operations that must never run no
+    /// matter the policy mode. Returns `Some(reason)` if the command is judged
+    /// destructive. Deliberately narrow — only true "cliff edge" operations,
+    /// to avoid blocking legitimate debugging/maintenance.
+    pub fn destructive_reason(command: &str) -> Option<String> {
+        let n = Self::normalized(command);
+
+        // Fork bomb: `:(){ :|:& };:` and common spacing variants.
+        let nospace: String = n.chars().filter(|c| !c.is_whitespace()).collect();
+        if nospace.contains(":(){:|:&};:") || nospace.contains(":(){:|:&}:") {
+            return Some("fork bomb".to_string());
+        }
+
+        // `dd` writing to a raw block device.
+        if n.starts_with("dd ") || n.contains(" dd ") || n.contains("|dd ") || n.contains("| dd ") {
+            if n.contains("of=/dev/sd")
+                || n.contains("of=/dev/nvme")
+                || n.contains("of=/dev/vd")
+                || n.contains("of=/dev/mmcblk")
+                || n.contains("of=/dev/disk")
+                || n.contains("of=/dev/hd")
+            {
+                return Some("dd writing directly to a block device".to_string());
+            }
+        }
+
+        // Filesystem creation / wipe on a whole device. `mkfs` also matches the
+        // `mkfs.ext4` / `mkfs.xfs` family by prefix.
+        let touches_device = n.contains("/dev/sd")
+            || n.contains("/dev/nvme")
+            || n.contains("/dev/vd")
+            || n.contains("/dev/mmcblk")
+            || n.contains("/dev/disk")
+            || n.contains("/dev/hd");
+        if touches_device {
+            for prog in ["mkfs", "wipefs", "blkdiscard", "shred"] {
+                if Self::has_program_token_prefix(&n, prog) {
+                    return Some(format!("{prog} on a block device (would destroy data)"));
+                }
+            }
+        }
+
+        // Redirecting output straight onto a raw disk device.
+        if n.contains("> /dev/sd")
+            || n.contains(">/dev/sd")
+            || n.contains("> /dev/nvme")
+            || n.contains(">/dev/nvme")
+            || n.contains("> /dev/mmcblk")
+            || n.contains(">/dev/mmcblk")
+        {
+            return Some("redirecting output onto a raw disk device".to_string());
+        }
+
+        // Recursive+forced removal of a critical system root.
+        if Self::is_rm_recursive_force(&n) {
+            if let Some(reason) = Self::rm_hits_critical_root(&n) {
+                return Some(reason);
+            }
+        }
+
+        None
+    }
+
+    /// True if `n` contains `prog` as a standalone program token (at the start,
+    /// or following a shell separator / pipe), not as a substring of a path.
+    fn has_program_token(n: &str, prog: &str) -> bool {
+        Self::program_tokens(n).any(|base| base == prog)
+    }
+
+    /// Like `has_program_token`, but also matches `prog.suffix` families such as
+    /// `mkfs.ext4`, `mkfs.xfs` for `prog == "mkfs"`.
+    fn has_program_token_prefix(n: &str, prog: &str) -> bool {
+        Self::program_tokens(n).any(|base| {
+            base == prog || base.strip_prefix(prog).map_or(false, |r| r.starts_with('.'))
+        })
+    }
+
+    /// Yield the basename of the first token of each pipe/`;`/`&`-separated
+    /// segment (i.e. the program being invoked in each stage).
+    fn program_tokens(n: &str) -> impl Iterator<Item = &str> {
+        n.split(|c| c == '|' || c == ';' || c == '&').filter_map(|seg| {
+            seg.trim()
+                .split_whitespace()
+                .next()
+                .map(|first| first.rsplit('/').next().unwrap_or(first))
+        })
+    }
+
+    /// Whether the command is an `rm` with both recursive and force semantics
+    /// (combined `-rf`/`-fr` or separate `-r`/`-R`/`--recursive` + `-f`/`--force`).
+    fn is_rm_recursive_force(n: &str) -> bool {
+        if !Self::has_program_token(n, "rm") {
+            return false;
+        }
+        let mut recursive = false;
+        let mut force = false;
+        for tok in n.split_whitespace() {
+            if tok == "--recursive" {
+                recursive = true;
+            }
+            if tok == "--force" {
+                force = true;
+            }
+            if tok.starts_with('-') && !tok.starts_with("--") {
+                if tok.contains('r') || tok.contains('R') {
+                    recursive = true;
+                }
+                if tok.contains('f') {
+                    force = true;
+                }
+            }
+        }
+        recursive && force
+    }
+
+    /// If an `rm -rf` targets `/` or a critical top-level system directory,
+    /// return the refusal reason. Allows deletions safely nested deeper.
+    fn rm_hits_critical_root(n: &str) -> Option<String> {
+        // Critical paths that must never be recursively force-removed wholesale.
+        const CRITICAL: &[&str] = &[
+            "/", "/*", "/etc", "/etc/*", "/boot", "/boot/*", "/usr", "/usr/*",
+            "/bin", "/sbin", "/lib", "/lib64", "/var", "/var/*", "/home",
+            "/home/*", "/root", "/dev", "/proc", "/sys", "/run", "/opt",
+        ];
+        for tok in n.split_whitespace() {
+            // Skip options.
+            if tok.starts_with('-') {
+                continue;
+            }
+            // Strip a trailing slash for comparison ("/etc/" == "/etc"), but keep
+            // bare "/" intact.
+            let stripped = if tok.len() > 1 {
+                tok.trim_end_matches('/')
+            } else {
+                tok
+            };
+            if CRITICAL.contains(&tok) || CRITICAL.contains(&stripped) {
+                return Some(format!("recursive force-remove of critical path `{tok}`"));
+            }
+        }
+        None
+    }
+
     /// Decide whether a command may run. `Ok(())` to allow, `Err(reason)` to
     /// refuse with a human-readable message.
     pub fn check(&self, command: &str) -> Result<(), String> {
+        // Absolute backstop: catastrophic, irreversible operations are refused
+        // under EVERY policy mode, including Unrestricted.
+        if let Some(reason) = Self::destructive_reason(command) {
+            return Err(format!(
+                "refused as destructive/irreversible: {reason}. This guard \
+                 applies under all shell policies."
+            ));
+        }
         match self {
             ShellPolicy::Unrestricted => Ok(()),
             ShellPolicy::Denied => Err(
@@ -117,10 +286,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unrestricted_allows_everything() {
+    fn unrestricted_allows_normal_commands() {
         let p = ShellPolicy::Unrestricted;
-        assert!(p.check("rm -rf /").is_ok());
         assert!(p.check("git status").is_ok());
+        assert!(p.check("apt-get install nvidia-driver").is_ok());
+        assert!(p.check("journalctl -u NetworkManager --no-pager").is_ok());
+        assert!(p.check("dmesg | tail -50").is_ok());
+        assert!(p.check("rm -rf /tmp/build").is_ok());
+        assert!(p.check("rm -rf /home/adapsis/.cache/foo").is_ok());
+    }
+
+    #[test]
+    fn destructive_guard_overrides_unrestricted() {
+        // The whole point: even unrestricted refuses the cliff edges.
+        let p = ShellPolicy::Unrestricted;
+        assert!(p.check("rm -rf /").is_err());
+        assert!(p.check("rm -rf /*").is_err());
+        assert!(p.check("rm -rf /etc").is_err());
+        assert!(p.check("rm -rf /home").is_err());
+        assert!(p.check("rm -fr /usr/").is_err());
+        assert!(p.check("dd if=/dev/zero of=/dev/sda bs=1M").is_err());
+        assert!(p.check("mkfs.ext4 /dev/sdb1").is_err());
+        assert!(p.check("wipefs -a /dev/nvme0n1").is_err());
+        assert!(p.check("blkdiscard /dev/sda").is_err());
+        assert!(p.check("echo x > /dev/sda").is_err());
+        assert!(p.check(":(){ :|:& };:").is_err());
+    }
+
+    #[test]
+    fn destructive_guard_allows_legit_lookalikes() {
+        let p = ShellPolicy::Unrestricted;
+        // dd to a regular file is fine.
+        assert!(p.check("dd if=/dev/zero of=/tmp/img.bin bs=1M count=10").is_ok());
+        // reading from a device is fine.
+        assert!(p.check("dd if=/dev/sda of=/tmp/backup.img bs=4M").is_ok());
+        // mkfs on a loopback file path that isn't /dev — still fine here.
+        assert!(p.check("mkfs.ext4 /tmp/disk.img").is_ok());
+        // rm -rf of a deep path is fine.
+        assert!(p.check("rm -rf /var/log/myapp/old").is_ok());
+        // rm without force, or without recursive, isn't the catastrophic combo.
+        assert!(p.check("rm -r /etc").is_ok());
+        assert!(p.check("rm /etc/hosts").is_ok());
+        // a file literally named /devsomething shouldn't trip the device check.
+        assert!(p.check("cat /home/x/devnotes").is_ok());
+    }
+
+    #[test]
+    fn destructive_reason_is_descriptive() {
+        assert!(ShellPolicy::destructive_reason("rm -rf /")
+            .unwrap()
+            .contains("critical path"));
+        assert!(ShellPolicy::destructive_reason("dd if=/dev/zero of=/dev/sda")
+            .unwrap()
+            .contains("block device"));
+        assert!(ShellPolicy::destructive_reason("git status").is_none());
     }
 
     #[test]

@@ -180,3 +180,27 @@
   +await _:String = write_file(notes_path, "")
   +return "Notizen geleert"
 +doc "Clear all of Wolfi's learned notes about Renate."
+
++fn suspend(context:String) -> String [io,async]
+  +spawn _power_and_report(context, "suspend", "Ich lege den Laptop jetzt schlafen.")
+  +return "Alles klar, ich lege den Laptop jetzt in den Schlafmodus."
++doc "Put this laptop to sleep (suspend to RAM). Use when asked to sleep/suspend/standby the computer. Pass the Telegram chat_id as context."
+
++fn reboot(context:String) -> String [io,async]
+  +spawn _power_and_report(context, "reboot", "Ich starte den Laptop jetzt neu.")
+  +return "Okay, ich starte den Laptop jetzt neu - bis gleich!"
++doc "Restart (reboot) this laptop. Use when asked to reboot/restart the computer. Pass the Telegram chat_id as context."
+
++fn shutdown(context:String) -> String [io,async]
+  +spawn _power_and_report(context, "poweroff", "Ich fahre den Laptop jetzt herunter.")
+  +return "Okay, ich fahre den Laptop jetzt herunter."
++doc "Shut down (power off) this laptop completely. Use when asked to shut down/turn off/power off the computer. After this the machine must be turned on by hand. Pass the Telegram chat_id as context."
+
++fn _power_and_report(context:String, action:String, msg:String) -> String [io,async]
+  +await _:String = conversation_notify(context, msg, "")
+  +await out:String = shell_exec(concat("sudo -n systemctl ", action))
+  +if starts_with(out, "EXIT")
+    +await _e:String = conversation_notify(context, concat("Das hat leider nicht geklappt: ", out), "")
+    +return "failed"
+  +return "ok"
++doc "Internal: notify the conversation, then run the privileged systemctl power command (suspend/reboot/poweroff) via the narrow sudoers grant. Reports failures back."
