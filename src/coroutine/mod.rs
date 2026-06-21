@@ -843,6 +843,88 @@ pub struct CoroutineHandle {
     stubs: Option<Vec<crate::session::FunctionStub>>,
 }
 
+/// Stringify a call argument for mock/stub matching (issue #7).
+///
+/// For `Value::String` this returns the **raw content** (no surrounding Display
+/// quotes), so patterns match what the user actually wrote — and so anchored
+/// exact patterns (`^...$`) work. Other value kinds use their `Display` form.
+/// Substring patterns are unaffected (the quote chars were never their target).
+fn mock_arg_string(arg: &Value) -> String {
+    match arg {
+        Value::String(s) => s.as_ref().clone(),
+        other => format!("{other}"),
+    }
+}
+
+/// Match a mock/stub `pattern` against an argument string (issue #7).
+///
+/// Backward-compatible matching modes, chosen by the pattern's own syntax so
+/// existing substring mocks keep working:
+///   - **Anchored / exact**: a pattern starting with `^` and/or ending with `$`
+///     anchors that side. `^foo$` = exact equality, `^foo` = prefix, `foo$` =
+///     suffix. (A literal `^`/`$` can still be matched via glob, below.)
+///   - **Glob**: a pattern containing `*` or `?` (and not anchored) is treated
+///     as a glob — `*` matches any run (including empty), `?` matches exactly
+///     one char. The glob must match the *whole* argument.
+///   - **Substring** (default, legacy): plain `contains` check.
+pub fn pattern_matches(pattern: &str, arg: &str) -> bool {
+    let anchored_start = pattern.starts_with('^');
+    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
+    if anchored_start || anchored_end {
+        let inner = &pattern[anchored_start as usize..pattern.len() - anchored_end as usize];
+        // Anchored patterns may still contain globs between the anchors.
+        return match (anchored_start, anchored_end) {
+            (true, true) => glob_match(inner, arg),
+            (true, false) => glob_match_prefix(inner, arg),
+            (false, true) => glob_match_suffix(inner, arg),
+            (false, false) => unreachable!(),
+        };
+    }
+    if pattern.contains('*') || pattern.contains('?') {
+        return glob_match(pattern, arg);
+    }
+    arg.contains(pattern)
+}
+
+/// Whole-string glob match: `*` = any run (incl. empty), `?` = exactly one char.
+/// All other chars match literally. Linear-time backtracking (patterns are tiny).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut star_ti): (Option<usize>, usize) = (None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            star_ti = ti;
+            pi += 1;
+        } else if let Some(sp) = star {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Anchored-start glob: `inner` must match a prefix of `text`.
+fn glob_match_prefix(inner: &str, text: &str) -> bool {
+    glob_match(&format!("{inner}*"), text)
+}
+
+/// Anchored-end glob: `inner` must match a suffix of `text`.
+fn glob_match_suffix(inner: &str, text: &str) -> bool {
+    glob_match(&format!("*{inner}"), text)
+}
+
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
         Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None }
@@ -967,14 +1049,15 @@ impl CoroutineHandle {
             return Ok(None);
         };
 
-        let arg_strs: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+        let arg_strs: Vec<String> = args.iter().map(mock_arg_string).collect();
         let arg_str = arg_strs.join(" ");
         'mock_loop: for mock in mocks {
             if mock.operation != op {
                 continue;
             }
             if mock.patterns.len() == 1 {
-                if arg_str.contains(&mock.patterns[0]) {
+                // Single-pattern mocks match against the whole joined arg string.
+                if pattern_matches(&mock.patterns[0], &arg_str) {
                     return Ok(Some(Value::string(mock.response.clone())));
                 }
             } else {
@@ -982,7 +1065,7 @@ impl CoroutineHandle {
                     continue;
                 }
                 for (pat, arg) in mock.patterns.iter().zip(arg_strs.iter()) {
-                    if !arg.contains(pat) {
+                    if !pattern_matches(pat, arg) {
                         continue 'mock_loop;
                     }
                 }
@@ -1003,14 +1086,14 @@ impl CoroutineHandle {
         let Some(stubs) = &self.stubs else {
             return Ok(None);
         };
-        let arg_strs: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+        let arg_strs: Vec<String> = args.iter().map(mock_arg_string).collect();
         let arg_str = arg_strs.join(" ");
         'stub_loop: for stub in stubs {
             if stub.function_name != func_name {
                 continue;
             }
             if stub.patterns.len() == 1 {
-                if arg_str.contains(&stub.patterns[0]) {
+                if pattern_matches(&stub.patterns[0], &arg_str) {
                     return Ok(Some(stub.response_expr.clone()));
                 }
             } else {
@@ -1018,7 +1101,7 @@ impl CoroutineHandle {
                     continue;
                 }
                 for (pat, arg) in stub.patterns.iter().zip(arg_strs.iter()) {
-                    if !arg.contains(pat) {
+                    if !pattern_matches(pat, arg) {
                         continue 'stub_loop;
                     }
                 }

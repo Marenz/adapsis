@@ -644,6 +644,12 @@ Use `!mock` to register fake IO responses, then `+test` works with async functio
 !mock llm_call "You are" -> "Hello! How can I help?"
 !mock llm_call "You are a bot" "What time is it?" -> "I don't know the time."
 
+Pattern matching (per argument):
+- plain text = substring match (default): "api.telegram.org"
+- glob with * or ? matches the WHOLE arg: "https://*/getUpdates", "v?"
+- ^ / $ anchor: "^GET /health$" (exact), "^https://" (prefix), ".json$" (suffix)
+String args match by raw content (no surrounding quotes).
+
 +test MyModule.get_updates
   +with offset=0 -> expect "{\"ok\":true,\"result\":[]}"
 
@@ -1027,6 +1033,14 @@ This library is shared across all git worktrees and sessions.
   deployment it can be denied entirely or restricted to an allowlist of programs;
   refused commands return an error "shell_exec refused: ...". Do not rely on
   shell_exec being available — prefer builtins, and handle the refusal gracefully.
+- Independent of policy, a small set of catastrophic, IRREVERSIBLE commands is
+  always refused (error contains "refused as destructive/irreversible"): wiping a
+  disk (dd to /dev/*, mkfs/wipefs/blkdiscard/shred on a device, redirect to a raw
+  device), recursive force-removal of a critical system root (rm -rf / /etc /home
+  /usr ...), and fork bombs. This is a safety backstop, not a restriction on
+  normal work — installing drivers, reading logs, restarting services, and rm of
+  ordinary paths all work fine. If you genuinely need such an operation, tell the
+  human to run it themselves.
 - Write Adapsis operations directly in your response. Any line starting with
   +, !, or ? is automatically detected and executed. Mix prose and code freely.
 "#

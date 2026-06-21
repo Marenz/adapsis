@@ -2953,3 +2953,114 @@ async fn source_list_io_request_returns_formatted_listing() {
     // dropping the reply (the real listing comes from the main.rs IO loop).
     assert!(res.is_err(), "bare runtime SourceList should error, got: {res:?}");
 }
+
+// ═════════════════════════════════════════════════════════════════════
+// Issue #7: mock/stub pattern matching — substring (default), glob, exact
+// ═════════════════════════════════════════════════════════════════════
+
+#[test]
+fn pattern_substring_is_default() {
+    // Legacy behavior: plain pattern = substring contains.
+    assert!(pattern_matches("api.github", "https://api.github.com/x"));
+    assert!(!pattern_matches("api.gitlab", "https://api.github.com/x"));
+    assert!(pattern_matches("", "anything")); // empty substring always matches
+}
+
+#[test]
+fn pattern_glob_star_and_question() {
+    assert!(pattern_matches("https://*/repos", "https://api.github.com/repos"));
+    assert!(pattern_matches("*.json", "config.json"));
+    assert!(!pattern_matches("*.json", "config.yaml"));
+    assert!(pattern_matches("v?", "v5"));
+    assert!(!pattern_matches("v?", "v50")); // ? is exactly one char
+    assert!(pattern_matches("a*b*c", "axxbyyc"));
+    // No glob char -> substring mode, so this matches.
+    assert!(pattern_matches("github.com", "github.com/extra"));
+    // A glob pattern matches the WHOLE arg.
+    assert!(pattern_matches("github.com*", "github.com/extra"));
+    assert!(!pattern_matches("*.json", "config.json.bak"));
+}
+
+#[test]
+fn pattern_anchored_exact_prefix_suffix() {
+    // ^...$ = exact equality
+    assert!(pattern_matches("^GET /health$", "GET /health"));
+    assert!(!pattern_matches("^GET /health$", "GET /health/x"));
+    assert!(!pattern_matches("^GET /health$", "x GET /health"));
+    // ^... = prefix
+    assert!(pattern_matches("^https://", "https://example.com"));
+    assert!(!pattern_matches("^https://", "http://example.com"));
+    // ...$ = suffix
+    assert!(pattern_matches(".json$", "config.json"));
+    assert!(!pattern_matches(".json$", "config.json.bak"));
+    // anchored + glob between anchors
+    assert!(pattern_matches("^GET /*$", "GET /anything/here"));
+    assert!(!pattern_matches("^POST /*$", "GET /x"));
+}
+
+#[test]
+fn mock_single_pattern_exact_match_via_handle() {
+    // Exact-anchored mock must NOT match a superstring (the substring default would).
+    let mocks = vec![crate::session::IoMock {
+        operation: "http_get".to_string(),
+        patterns: vec!["^https://api.example.com/v1$".to_string()],
+        response: "ok".to_string(),
+    }];
+    let handle = CoroutineHandle::new_mock(mocks);
+    // Exact arg matches.
+    let r = handle
+        .try_mock_io("http_get", &[Value::string("https://api.example.com/v1")], false)
+        .unwrap();
+    assert!(matches!(r, Some(Value::String(ref s)) if s.as_str() == "ok"));
+    // Superstring does NOT match an anchored-exact pattern.
+    let r = handle
+        .try_mock_io("http_get", &[Value::string("https://api.example.com/v1/users")], false)
+        .unwrap();
+    assert!(r.is_none(), "exact mock must not match a superstring arg");
+}
+
+#[test]
+fn mock_glob_pattern_via_handle() {
+    let mocks = vec![crate::session::IoMock {
+        operation: "http_get".to_string(),
+        patterns: vec!["https://*/users".to_string()],
+        response: "[]".to_string(),
+    }];
+    let handle = CoroutineHandle::new_mock(mocks);
+    let r = handle
+        .try_mock_io("http_get", &[Value::string("https://api.example.com/users")], false)
+        .unwrap();
+    assert!(matches!(r, Some(Value::String(ref s)) if s.as_str() == "[]"));
+    let r = handle
+        .try_mock_io("http_get", &[Value::string("https://api.example.com/posts")], false)
+        .unwrap();
+    assert!(r.is_none(), "glob must not match a non-matching path");
+}
+
+#[test]
+fn mock_multiarg_mixes_modes() {
+    // First arg exact-anchored, second arg substring.
+    let mocks = vec![crate::session::IoMock {
+        operation: "http_post".to_string(),
+        patterns: vec!["^https://api.example.com$".to_string(), "token".to_string()],
+        response: "posted".to_string(),
+    }];
+    let handle = CoroutineHandle::new_mock(mocks);
+    let r = handle
+        .try_mock_io(
+            "http_post",
+            &[Value::string("https://api.example.com"), Value::string("Bearer token123")],
+            false,
+        )
+        .unwrap();
+    assert!(matches!(r, Some(Value::String(ref s)) if s.as_str() == "posted"));
+    // Wrong exact first arg → no match.
+    let r = handle
+        .try_mock_io(
+            "http_post",
+            &[Value::string("https://api.example.com/v2"), Value::string("Bearer token123")],
+            false,
+        )
+        .unwrap();
+    assert!(r.is_none());
+}
