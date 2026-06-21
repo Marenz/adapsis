@@ -91,6 +91,73 @@ impl Program {
         self.rebuild_union_variants();
     }
 
+    /// Per-function copy-on-write three-way merge (issue #9).
+    ///
+    /// A mutation handler clones the live program (`base`), applies the
+    /// mutation to produce `new`, then must write the result back. A naive
+    /// `*live = new` clobbers any concurrent writer that modified a *different*
+    /// function in between. This merge instead computes the `base → new` delta
+    /// and applies only that delta onto `self` (the current live program), so
+    /// two writers touching different functions don't lose each other's work.
+    ///
+    /// Change detection relies on `Arc::ptr_eq`: the validator only allocates a
+    /// fresh `Arc<FunctionDecl>` for the function it actually replaced/added, so
+    /// untouched functions keep pointer identity with `base`. Structural deltas
+    /// (new/removed modules, types, shared-var decls, routes, lifecycle blocks)
+    /// fall back to taking the `new` version of the affected module, since those
+    /// are rare and not the hot concurrent path.
+    ///
+    /// Returns the number of functions whose definition was applied from `new`.
+    pub fn merge_changed_from(&mut self, base: &Program, new: &Program) -> usize {
+        let mut applied = 0usize;
+
+        // ── Top-level functions ───────────────────────────────────────────
+        applied += merge_fn_list(&mut self.functions, &base.functions, &new.functions);
+
+        // ── Top-level types ───────────────────────────────────────────────
+        if base.types != new.types {
+            self.types = new.types.clone();
+        }
+
+        // ── Modules ───────────────────────────────────────────────────────
+        // New modules (present in `new`, absent in `base`): add to self.
+        for nm in &new.modules {
+            let in_base = base.modules.iter().any(|bm| bm.name == nm.name);
+            let pos_self = self.modules.iter().position(|sm| sm.name == nm.name);
+            match (in_base, pos_self) {
+                (false, None) => {
+                    // Brand-new module created by this mutation.
+                    self.modules.push(nm.clone());
+                    applied += nm.functions.len();
+                }
+                (_, Some(i)) => {
+                    let base_mod = base.modules.iter().find(|bm| bm.name == nm.name);
+                    applied += merge_module_changed(&mut self.modules[i], base_mod, nm);
+                }
+                (true, None) => {
+                    // Existed in base, removed from self by a concurrent writer,
+                    // but still present in new. Re-add new's version so this
+                    // mutation's intent is preserved.
+                    self.modules.push(nm.clone());
+                    applied += nm.functions.len();
+                }
+            }
+        }
+        // Module removals: present in base, absent in new → drop from self.
+        let removed: Vec<String> = base
+            .modules
+            .iter()
+            .filter(|bm| !new.modules.iter().any(|nm| nm.name == bm.name))
+            .map(|bm| bm.name.clone())
+            .collect();
+        for name in removed {
+            self.modules.retain(|sm| sm.name != name);
+        }
+
+        self.rebuild_function_index();
+        applied
+    }
+
     /// Rebuild the set of all union variant names from type declarations.
     /// Called by `rebuild_function_index()` after every mutation.
     /// Uses interned IDs for O(1) integer-based lookups instead of string hashing.
@@ -511,6 +578,102 @@ impl Program {
             .iter_mut()
             .find_map(|module| module.get_function_mut(name))
     }
+}
+
+/// Merge the `base → new` delta of a function list onto `live` (issue #9 CoW).
+///
+/// For every function in `new`: if it's new (not in `base`) or its `Arc`
+/// pointer differs from the same-named function in `base` (meaning the mutation
+/// rewrote it), apply `new`'s version to `live`. Functions removed in `new`
+/// (present in base, absent in new) are dropped from `live`. Functions
+/// untouched by this mutation are left exactly as `live` has them, preserving a
+/// concurrent writer's changes.
+fn merge_fn_list(
+    live: &mut Vec<std::sync::Arc<FunctionDecl>>,
+    base: &[std::sync::Arc<FunctionDecl>],
+    new: &[std::sync::Arc<FunctionDecl>],
+) -> usize {
+    let mut applied = 0usize;
+
+    for nf in new {
+        let base_fn = base.iter().find(|bf| bf.name == nf.name);
+        let changed = match base_fn {
+            Some(bf) => !std::sync::Arc::ptr_eq(bf, nf),
+            None => true, // added by this mutation
+        };
+        if !changed {
+            continue;
+        }
+        match live.iter().position(|lf| lf.name == nf.name) {
+            Some(i) => live[i] = nf.clone(),
+            None => live.push(nf.clone()),
+        }
+        applied += 1;
+    }
+
+    // Removals: in base, not in new → drop from live.
+    for bf in base {
+        if !new.iter().any(|nf| nf.name == bf.name) {
+            live.retain(|lf| lf.name != bf.name);
+        }
+    }
+
+    applied
+}
+
+/// Apply the `base → new` delta of a single module onto the live module.
+/// Functions merge per-Arc; structural fields (types, shared vars, routes,
+/// lifecycle blocks, sub-modules, doc) are taken from `new` when they differ
+/// from `base`, since those are not the hot concurrent path.
+fn merge_module_changed(
+    live: &mut Module,
+    base: Option<&Module>,
+    new: &Module,
+) -> usize {
+    let empty_fns: Vec<std::sync::Arc<FunctionDecl>> = Vec::new();
+    let base_fns = base.map(|b| b.functions.as_slice()).unwrap_or(&empty_fns);
+    let applied = merge_fn_list(&mut live.functions, base_fns, &new.functions);
+
+    // Structural deltas: only overwrite when base→new actually changed the field
+    // (avoids clobbering a concurrent writer who touched the same field).
+    let changed_types = base.map(|b| b.types != new.types).unwrap_or(!new.types.is_empty());
+    if changed_types {
+        live.types = new.types.clone();
+    }
+    let changed_shared = base
+        .map(|b| b.shared_vars != new.shared_vars)
+        .unwrap_or(!new.shared_vars.is_empty());
+    if changed_shared {
+        live.shared_vars = new.shared_vars.clone();
+    }
+    let changed_routes = base.map(|b| b.routes != new.routes).unwrap_or(!new.routes.is_empty());
+    if changed_routes {
+        live.routes = new.routes.clone();
+    }
+    let changed_sources = base.map(|b| b.sources != new.sources).unwrap_or(!new.sources.is_empty());
+    if changed_sources {
+        live.sources = new.sources.clone();
+    }
+    let changed_events = base
+        .map(|b| b.event_decls != new.event_decls)
+        .unwrap_or(!new.event_decls.is_empty());
+    if changed_events {
+        live.event_decls = new.event_decls.clone();
+    }
+    if base.map(|b| b.startup != new.startup).unwrap_or(new.startup.is_some()) {
+        live.startup = new.startup.clone();
+    }
+    if base.map(|b| b.shutdown != new.shutdown).unwrap_or(new.shutdown.is_some()) {
+        live.shutdown = new.shutdown.clone();
+    }
+    if base.map(|b| b.doc != new.doc).unwrap_or(new.doc.is_some()) {
+        live.doc = new.doc.clone();
+    }
+    if base.map(|b| b.modules != new.modules).unwrap_or(!new.modules.is_empty()) {
+        live.modules = new.modules.clone();
+    }
+
+    applied
 }
 
 impl fmt::Display for Program {

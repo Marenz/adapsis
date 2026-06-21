@@ -392,8 +392,8 @@ impl Env {
     pub fn set_runtime(&mut self, rt: crate::session::SharedRuntime) {
         // Pre-populate the local cache from the runtime's current shared_vars.
         if let Ok(state) = rt.read() {
-            for (key, val) in &state.shared_vars {
-                self.shared_cache.insert(key.clone(), val.clone());
+            for (key, val) in state.shared_vars.snapshot() {
+                self.shared_cache.insert(key, val);
             }
         }
         self.shared_runtime = Some(rt);
@@ -481,12 +481,12 @@ impl Env {
 
     fn read_shared_value(&mut self, key: &str) -> Option<Value> {
         if let Some(rt) = &self.shared_runtime {
-            if let Ok(state) = rt.read() {
-                if let Some(value) = state.shared_vars.get(key) {
-                    let value = value.clone();
-                    self.shared_cache.insert(key.to_string(), value.clone());
-                    return Some(value);
-                }
+            // SharedVars::get does per-key locking internally; we only hold the
+            // structure read lock briefly to clone the inner Arc.
+            let value = rt.read().ok().and_then(|state| state.shared_vars.get(key));
+            if let Some(value) = value {
+                self.shared_cache.insert(key.to_string(), value.clone());
+                return Some(value);
             }
         }
         self.shared_cache.get(key).cloned()
@@ -505,11 +505,10 @@ impl Env {
         let value = eval_expr_standalone(&program, &shared.default).unwrap_or(Value::Int(0));
 
         if let Some(rt) = &self.shared_runtime {
-            if let Ok(mut state) = rt.write() {
-                state
-                    .shared_vars
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
+            // SharedVars has interior per-key locking, so a read guard on the
+            // structure suffices to insert-if-absent without blocking other vars.
+            if let Ok(state) = rt.read() {
+                state.shared_vars.get_or_insert(&key, value.clone());
             }
         }
         self.shared_cache.insert(key.clone(), value.clone());
@@ -530,7 +529,9 @@ impl Env {
         }
         if let Some((key, _)) = self.materialize_shared_value(name) {
             if let Some(rt) = &self.shared_runtime {
-                if let Ok(mut state) = rt.write() {
+                // Per-key locking inside SharedVars::insert — a structure read
+                // guard is enough since we're updating an existing slot.
+                if let Ok(state) = rt.read() {
                     state.shared_vars.insert(key.clone(), value.clone());
                 }
             }
@@ -1205,9 +1206,9 @@ pub fn init_missing_shared_runtime_vars(
         return;
     }
 
-    if let Ok(mut state) = runtime.write() {
+    if let Ok(state) = runtime.read() {
         for (key, value) in missing {
-            state.shared_vars.entry(key).or_insert(value);
+            state.shared_vars.get_or_insert(&key, value);
         }
     }
 }
@@ -1296,7 +1297,7 @@ pub(crate) fn fork_runtime_for_test(
     }
     let forked = crate::session::RuntimeState {
         http_routes: http_routes.to_vec(),
-        shared_vars,
+        shared_vars: crate::session::SharedVars::from_map(shared_vars),
         agent_mailbox: std::collections::HashMap::new(),
         pending_commands: Vec::new(),
         library_errors: Vec::new(),
