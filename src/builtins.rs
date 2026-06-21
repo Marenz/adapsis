@@ -1360,7 +1360,9 @@ Side-effect assertions with +after (checked after the function runs, state resto
         name: "!mock",
         args: "<operation> \"<pattern>\" -> \"<response>\"",
         short: "register mock IO response for testing. During +test, IO calls matching the pattern return the mock instead of real IO.",
-        long: "Registers a fake IO response for testing. During `+test`, if a `+await` call matches the operation and pattern strings, the mock response is returned instead of real IO.",
+        long: "Registers a fake IO response for testing. During `+test`, if a `+await` call matches the operation and pattern, the mock response is returned instead of real IO.\n\
+                Pattern matching modes (per argument): plain text = substring (default); `*`/`?` = glob (`*` any run, `?` one char, matches the whole arg); `^`/`$` = anchors (`^x$` exact, `^x` prefix, `x$` suffix). String args match by raw content (no surrounding quotes).\n\
+                Examples: `\"api.github.com\"` (substring), `\"https://*/repos\"` (glob), `\"^GET /health$\"` (exact). Multi-arg: one pattern per positional arg.",
     },
     ActionCommand {
         name: "!unmock",
