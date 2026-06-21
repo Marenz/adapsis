@@ -405,7 +405,7 @@ fn setup_query_runtime(source: &str) -> CoroutineHandle {
     // Also set up a runtime for query_routes/query_tasks
     let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
         http_routes: vec![],
-        shared_vars: std::collections::HashMap::new(),
+        shared_vars: crate::session::SharedVars::default(),
         ..Default::default()
     }));
     crate::shared_state::set_shared_runtime(Some(rt));
@@ -653,7 +653,7 @@ fn query_routes_with_routes() {
             path: "/health".to_string(),
             handler_fn: "health_check".to_string(),
         }],
-        shared_vars: std::collections::HashMap::new(),
+        shared_vars: crate::session::SharedVars::default(),
         ..Default::default()
     }));
     crate::shared_state::set_shared_runtime(Some(rt));
@@ -853,7 +853,7 @@ fn query_no_program_errors() {
     crate::shared_state::set_shared_program(None);
     let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
         http_routes: vec![],
-        shared_vars: std::collections::HashMap::new(),
+        shared_vars: crate::session::SharedVars::default(),
         ..Default::default()
     }));
     crate::shared_state::set_shared_runtime(Some(rt));
@@ -908,7 +908,7 @@ fn setup_mutation_runtime(
 
     let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
         http_routes: vec![],
-        shared_vars: std::collections::HashMap::new(),
+        shared_vars: crate::session::SharedVars::default(),
         ..Default::default()
     }));
     crate::shared_state::set_shared_runtime(Some(rt));
@@ -1275,7 +1275,7 @@ fn routes_list_alias_works() {
             path: "/api/data".to_string(),
             handler_fn: "handle_data".to_string(),
         }],
-        shared_vars: std::collections::HashMap::new(),
+        shared_vars: crate::session::SharedVars::default(),
         ..Default::default()
     }));
     crate::shared_state::set_shared_runtime(Some(rt));
@@ -1298,7 +1298,7 @@ fn alias_no_program_errors() {
     crate::shared_state::set_shared_program(None);
     let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
         http_routes: vec![],
-        shared_vars: std::collections::HashMap::new(),
+        shared_vars: crate::session::SharedVars::default(),
         ..Default::default()
     }));
     crate::shared_state::set_shared_runtime(Some(rt));
@@ -1501,7 +1501,7 @@ fn trace_run_no_program_fails() {
     crate::shared_state::set_shared_program(None);
     let rt = std::sync::Arc::new(std::sync::RwLock::new(crate::session::RuntimeState {
         http_routes: vec![],
-        shared_vars: std::collections::HashMap::new(),
+        shared_vars: crate::session::SharedVars::default(),
         ..Default::default()
     }));
     crate::shared_state::set_shared_runtime(Some(rt));

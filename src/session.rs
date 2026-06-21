@@ -16,15 +16,165 @@ use crate::ast;
 use crate::parser;
 use crate::validator;
 
+/// Per-resource locked map of `+shared` variable values (issue #9, Tier 2).
+///
+/// Each shared variable is wrapped in its own `Arc<RwLock<Value>>` so that two
+/// modules writing different `+shared` variables never contend on a single
+/// global lock — `+shared counter` writes don't block `+shared config` reads.
+/// Only the map *structure* (which keys exist) is guarded by the outer
+/// `RwLock`; reading/writing an existing var's value takes the outer lock only
+/// briefly to clone the inner `Arc`, then locks that inner value.
+///
+/// `Clone` deep-copies (fresh inner locks holding cloned values) so that
+/// RuntimeState forks (sandbox / AgentBranch / WorkingSet snapshots) stay
+/// isolated from the live map. Serde (de)serializes as a plain
+/// `HashMap<String, Value>` for backward-compatible session files.
+#[derive(Debug, Default)]
+pub struct SharedVars {
+    inner: Arc<RwLock<HashMap<String, Arc<RwLock<crate::eval::Value>>>>>,
+}
+
+impl SharedVars {
+    /// Read a variable's current value (clone). Takes the structure lock
+    /// briefly to find the per-var lock, then reads that.
+    pub fn get(&self, key: &str) -> Option<crate::eval::Value> {
+        let slot = {
+            let map = self.inner.read().ok()?;
+            map.get(key).cloned()
+        };
+        let slot = slot?;
+        let val = slot.read().ok()?;
+        Some(val.clone())
+    }
+
+    /// Insert or overwrite a variable. Reuses the existing per-var lock when
+    /// present (so concurrent readers of that var observe the new value), only
+    /// taking the structure write lock to add a brand-new key.
+    pub fn insert(&self, key: String, value: crate::eval::Value) {
+        // Fast path: key already exists — update its value under the per-var
+        // lock without taking the structure write lock.
+        {
+            let map = match self.inner.read() {
+                Ok(m) => m,
+                Err(_) => return,
+            };
+            if let Some(slot) = map.get(&key) {
+                if let Ok(mut v) = slot.write() {
+                    *v = value;
+                }
+                return;
+            }
+        }
+        // Slow path: new key — take the structure write lock.
+        if let Ok(mut map) = self.inner.write() {
+            map.entry(key)
+                .and_modify(|slot| {
+                    if let Ok(mut v) = slot.write() {
+                        *v = value.clone();
+                    }
+                })
+                .or_insert_with(|| Arc::new(RwLock::new(value)));
+        }
+    }
+
+    /// Insert `value` only if `key` is absent. Returns the value now stored.
+    pub fn get_or_insert(&self, key: &str, value: crate::eval::Value) -> crate::eval::Value {
+        if let Some(existing) = self.get(key) {
+            return existing;
+        }
+        if let Ok(mut map) = self.inner.write() {
+            let slot = map
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(RwLock::new(value.clone())));
+            if let Ok(v) = slot.read() {
+                return v.clone();
+            }
+        }
+        value
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.inner
+            .read()
+            .map(|m| m.contains_key(key))
+            .unwrap_or(false)
+    }
+
+    /// Part of the `SharedVars` API surface; used by tests and natural for
+    /// callers. `#[allow(dead_code)]` keeps non-test release builds warning-free.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().map(|m| m.is_empty()).unwrap_or(true)
+    }
+
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.inner.read().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Snapshot all (key, value) pairs into a plain map.
+    pub fn snapshot(&self) -> HashMap<String, crate::eval::Value> {
+        let map = match self.inner.read() {
+            Ok(m) => m,
+            Err(_) => return HashMap::new(),
+        };
+        map.iter()
+            .filter_map(|(k, slot)| slot.read().ok().map(|v| (k.clone(), v.clone())))
+            .collect()
+    }
+
+    /// Replace the entire contents from a plain map (used by tier write-back /
+    /// fork merge). Reuses existing per-var locks where keys overlap so live
+    /// readers see the new values; drops keys no longer present.
+    pub fn replace_from(&self, values: HashMap<String, crate::eval::Value>) {
+        if let Ok(mut map) = self.inner.write() {
+            map.retain(|k, _| values.contains_key(k));
+            for (k, v) in values {
+                match map.get(&k) {
+                    Some(slot) => {
+                        if let Ok(mut existing) = slot.write() {
+                            *existing = v;
+                        }
+                    }
+                    None => {
+                        map.insert(k, Arc::new(RwLock::new(v)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Clone for SharedVars {
+    /// Deep clone: independent inner locks holding cloned values. This keeps
+    /// RuntimeState forks isolated from the live map (sandbox/branch must not
+    /// alias the live shared variables).
+    fn clone(&self) -> Self {
+        SharedVars::from_map(self.snapshot())
+    }
+}
+
+impl SharedVars {
+    pub fn from_map(values: HashMap<String, crate::eval::Value>) -> Self {
+        let map = values
+            .into_iter()
+            .map(|(k, v)| (k, Arc::new(RwLock::new(v))))
+            .collect();
+        SharedVars {
+            inner: Arc::new(RwLock::new(map)),
+        }
+    }
+}
+
 /// Runtime infrastructure state (Tier 2) — shared across async tasks via Arc<RwLock>.
 /// Holds HTTP routes and shared variables, separate from the AST program state.
 /// Roadmap, plan, and io_mocks are NOT here — they live in SessionMeta (via SharedMeta).
-/// TODO(#9): Per-resource locks (each shared var gets its own Arc<RwLock<Value>>).
+/// `shared_vars` is now per-resource locked (issue #9): see [`SharedVars`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeState {
     pub http_routes: Vec<crate::ast::HttpRoute>,
     #[serde(skip)]
-    pub shared_vars: HashMap<String, crate::eval::Value>,
+    pub shared_vars: SharedVars,
     /// Agent mailbox mirror for builtin access during eval. Synced with SessionMeta.agent_mailbox.
     #[serde(skip)]
     pub agent_mailbox: HashMap<String, Vec<AgentMessage>>,
@@ -391,7 +541,7 @@ impl AgentBranch {
         meta: &SessionMeta,
     ) -> Self {
         let runtime_state = runtime.clone();
-        let snapshot = runtime_state.shared_vars.clone();
+        let snapshot = runtime_state.shared_vars.snapshot();
         Self {
             name: name.to_string(),
             scope,
@@ -617,13 +767,13 @@ impl AgentBranch {
 
         // Merge shared_vars that changed during the branch's lifetime.
         // Only copy vars where the branch value differs from the fork-time snapshot.
-        for (key, val) in &self.runtime_state.shared_vars {
-            let changed = match self.runtime_state_snapshot.get(key) {
+        for (key, val) in self.runtime_state.shared_vars.snapshot() {
+            let changed = match self.runtime_state_snapshot.get(&key) {
                 Some(old_val) => format!("{old_val}") != format!("{val}"),
                 None => true, // new key added during branch
             };
             if changed {
-                runtime.shared_vars.insert(key.clone(), val.clone());
+                runtime.shared_vars.insert(key, val);
             }
         }
 

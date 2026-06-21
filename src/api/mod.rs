@@ -42,20 +42,37 @@ use llm_handlers::EventSender;
 impl AppConfig {
     /// Build a temporary working snapshot from the live tiers.
     async fn snapshot_working_set(&self) -> WorkingSet {
+        let program = self.program.read().await.clone();
         WorkingSet {
-            program: self.program.read().await.clone(),
+            base_program: Some(program.clone()),
+            program,
             runtime: self.runtime.read().unwrap().clone(),
             meta: self.meta.lock().unwrap().clone(),
             sandbox: None,
         }
     }
 
+    /// Merge a mutated program back into the live program using per-function
+    /// copy-on-write (issue #9). `base` is the snapshot the mutation started
+    /// from; only the `base → new` function delta is applied, so a concurrent
+    /// writer that touched a *different* function is not clobbered. The live
+    /// program write lock is held only for the brief merge, never during eval.
+    async fn commit_program_delta(&self, base: &crate::ast::Program, new: &crate::ast::Program) {
+        let mut live = self.program.write().await;
+        live.merge_changed_from(base, new);
+    }
+
     /// Write a temporary working snapshot back into the live tiers.
+    /// Uses per-function CoW merge when a base snapshot is available (issue #9);
+    /// otherwise falls back to a full program overwrite.
     async fn write_back_working_set(&self, ws: &WorkingSet) {
-        *self.program.write().await = ws.program.clone();
+        match &ws.base_program {
+            Some(base) => self.commit_program_delta(base, &ws.program).await,
+            None => *self.program.write().await = ws.program.clone(),
+        }
         *self.meta.lock().unwrap() = ws.meta.clone();
         if let Ok(mut rt) = self.runtime.write() {
-            rt.shared_vars = ws.runtime.shared_vars.clone();
+            rt.shared_vars.replace_from(ws.runtime.shared_vars.snapshot());
             rt.http_routes = ws.runtime.http_routes.clone();
             rt.agent_mailbox = ws.meta.agent_mailbox.clone();
             // Sync library errors from LibraryState into RuntimeState
@@ -131,6 +148,12 @@ pub(crate) struct WorkingSet {
     runtime: RuntimeState,
     meta: SessionMeta,
     sandbox: Option<SandboxState>,
+    /// Snapshot of the live program at the moment this working set was created.
+    /// Used by `write_back_working_set` to compute the per-function CoW delta
+    /// (issue #9), so a concurrent writer touching a different function is not
+    /// clobbered. `None` when the working set was built by hand (e.g. tests or
+    /// llm_takeover), in which case write-back falls back to a full overwrite.
+    base_program: Option<crate::ast::Program>,
 }
 
 /// Thread-safe session manager: maps session IDs to independent Program instances.
@@ -234,7 +257,8 @@ pub async fn mutate(
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
     eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
-    let mut program = config.program.read().await.clone();
+    let base_program = config.program.read().await.clone();
+    let mut program = base_program.clone();
     let mut runtime = config.runtime.read().unwrap().clone();
     let mut meta = config.meta.lock().unwrap().clone();
     let mut sandbox = None;
@@ -261,8 +285,19 @@ pub async fn mutate(
                     .collect::<Vec<_>>()
                     .join("; ")
             };
-            *config.program.write().await = program;
-            *config.runtime.write().unwrap() = runtime;
+            // Per-function CoW merge (issue #9): apply only the base→program
+            // function delta so a concurrent writer to a different function is
+            // not clobbered.
+            config.commit_program_delta(&base_program, &program).await;
+            if let Ok(mut rt) = config.runtime.write() {
+                rt.shared_vars.replace_from(runtime.shared_vars.snapshot());
+                rt.http_routes = runtime.http_routes.clone();
+                rt.failure_history = runtime.failure_history.clone();
+                rt.library_errors = runtime.library_errors.clone();
+                rt.library_load_errors = runtime.library_load_errors.clone();
+                rt.agent_mailbox = runtime.agent_mailbox.clone();
+                rt.pending_commands = runtime.pending_commands.clone();
+            }
             *config.meta.lock().unwrap() = meta.clone();
             config.notify_save();
             emit_event(&config, &make_sse_event("mutation", serde_json::json!({
@@ -278,7 +313,10 @@ pub async fn mutate(
             } else {
                 message
             };
-            *config.runtime.write().unwrap() = runtime;
+            if let Ok(mut rt) = config.runtime.write() {
+                rt.shared_vars.replace_from(runtime.shared_vars.snapshot());
+                rt.failure_history = runtime.failure_history.clone();
+            }
             Json(MutateResponse {
                 revision: meta.revision,
                 results: vec![MutationResult {
@@ -337,6 +375,8 @@ pub async fn eval_fn(
                 if eval::expr_contains_io_builtin(&expr) {
                     if let Some(sender) = &config.io_sender {
                         let program = config.program.read().await.clone();
+                        // Base snapshot for the per-function CoW merge (issue #9).
+                        let base_program = program.clone();
                         let program_mut = crate::eval::make_shared_program_mut(&program);
                         let sender = sender.clone();
                         let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
@@ -344,9 +384,9 @@ pub async fn eval_fn(
                             ctx.install();
                             eval::eval_inline_expr_with_io(&program, &expr, sender)
                         }).await;
-                        // Sync mutations back to session if any occurred
+                        // Sync mutations back to session if any occurred (CoW merge).
                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-                            *config.program.write().await = mutated;
+                            config.program.write().await.merge_changed_from(&base_program, &mutated);
                         }
                         let response = match eval_result {
                             Ok(Ok(val)) => EvalResponse {
@@ -482,6 +522,8 @@ pub async fn eval_fn(
         if let Some(sender) = &config.io_sender {
             // Tier 1: clone program for the blocking task (lock released before blocking)
             let program = config.program.read().await.clone();
+            // Base snapshot for the per-function CoW merge (issue #9).
+            let base_program = program.clone();
             let program_mut = crate::eval::make_shared_program_mut(&program);
             let fn_name = ev.function_name.clone();
             let input = ev.input.clone();
@@ -494,9 +536,9 @@ pub async fn eval_fn(
                 eval::eval_async_function(&program, &fn_name, &input, handle)
             }).await;
 
-            // Sync mutations back to session if any occurred
+            // Sync mutations back to session if any occurred (CoW merge).
             if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-                *config.program.write().await = mutated;
+                config.program.write().await.merge_changed_from(&base_program, &mutated);
             }
 
             let response = match eval_result {
@@ -1673,6 +1715,8 @@ async fn adapsis_route_dispatch(
     let body_str = String::from_utf8_lossy(&body).to_string();
 
     let io_sender_for_blocking = config.io_sender.clone();
+    // Base snapshot for the per-function CoW merge (issue #9).
+    let base_program = program.clone();
     let program_mut = crate::eval::make_shared_program_mut(&program);
     let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
 
@@ -1706,9 +1750,9 @@ async fn adapsis_route_dispatch(
     })
     .await;
 
-    // Sync mutations back to program tier if any occurred
+    // Sync mutations back to program tier if any occurred (CoW merge, issue #9)
     if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
-        *config.program.write().await = mutated;
+        config.program.write().await.merge_changed_from(&base_program, &mutated);
     }
 
     match eval_result {

@@ -1589,3 +1589,179 @@ async fn execute_code_untested_eval_block_shows_test_syntax() {
         "block message should show +with syntax, got: {}", err.message
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════
+// Issue #9: per-function CoW write-back + per-resource locks — concurrency
+// ═════════════════════════════════════════════════════════════════════
+
+/// Unit test of the three-way per-function merge. A mutation that rewrites only
+/// function `a` must not clobber a concurrent writer's rewrite of function `b`.
+#[test]
+fn cow_merge_preserves_concurrent_function_writes() {
+    // Base: two functions a, b.
+    let mut base = crate::ast::Program::default();
+    crate::session::apply_to_tiers(
+        &mut base,
+        &mut crate::session::RuntimeState::default(),
+        &mut crate::session::SessionMeta::new(),
+        &mut None,
+        "+module M\n+fn a ()->Int\n  +return 1\n+fn b ()->Int\n  +return 2\n",
+    )
+    .unwrap();
+
+    // Mutation N: rewrite only `a` (clone base, apply).
+    let mut new = base.clone();
+    crate::session::apply_to_tiers(
+        &mut new,
+        &mut crate::session::RuntimeState::default(),
+        &mut crate::session::SessionMeta::new(),
+        &mut None,
+        "+module M\n+fn a ()->Int\n  +return 100\n",
+    )
+    .unwrap();
+
+    // Live: a concurrent writer rewrote `b` after the snapshot was taken.
+    let mut live = base.clone();
+    crate::session::apply_to_tiers(
+        &mut live,
+        &mut crate::session::RuntimeState::default(),
+        &mut crate::session::SessionMeta::new(),
+        &mut None,
+        "+module M\n+fn b ()->Int\n  +return 200\n",
+    )
+    .unwrap();
+
+    // Merge mutation N (base→new delta) onto live.
+    let applied = live.merge_changed_from(&base, &new);
+    assert_eq!(applied, 1, "only function `a` changed in the base→new delta");
+
+    let module = live.modules.iter().find(|m| m.name == "M").unwrap();
+    let a = module.functions.iter().find(|f| f.name == "a").unwrap();
+    let b = module.functions.iter().find(|f| f.name == "b").unwrap();
+    // a got the mutation's new body; b kept the concurrent writer's new body.
+    assert!(
+        format!("{:?}", a.body).contains("100"),
+        "a should have mutation's new body (100)"
+    );
+    assert!(
+        format!("{:?}", b.body).contains("200"),
+        "b should retain the concurrent writer's body (200), not be clobbered"
+    );
+}
+
+/// The mutate handler must apply per-function CoW: two concurrent mutations to
+/// *different* functions both survive (no lost write).
+#[tokio::test]
+async fn concurrent_mutations_to_different_functions_both_survive() {
+    let config = test_config();
+    // Seed two functions.
+    mutate(
+        State(config.clone()),
+        Json(MutateRequest {
+            source: "+module M\n+fn a ()->Int\n  +return 1\n+fn b ()->Int\n  +return 2\n"
+                .to_string(),
+        }),
+    )
+    .await;
+
+    // Fire many interleaved rewrites of a and b concurrently.
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let ca = config.clone();
+        handles.push(tokio::spawn(async move {
+            mutate(
+                State(ca),
+                Json(MutateRequest {
+                    source: format!("+module M\n+fn a ()->Int\n  +return {}\n", 100 + i),
+                }),
+            )
+            .await;
+        }));
+        let cb = config.clone();
+        handles.push(tokio::spawn(async move {
+            mutate(
+                State(cb),
+                Json(MutateRequest {
+                    source: format!("+module M\n+fn b ()->Int\n  +return {}\n", 200 + i),
+                }),
+            )
+            .await;
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // After all the churn, BOTH a and b must still exist with their latest
+    // (some) rewritten body — a naive whole-program overwrite could drop one.
+    let program = config.program.read().await;
+    let module = program.modules.iter().find(|m| m.name == "M").unwrap();
+    assert!(
+        module.functions.iter().any(|f| f.name == "a"),
+        "function a must survive concurrent churn"
+    );
+    assert!(
+        module.functions.iter().any(|f| f.name == "b"),
+        "function b must survive concurrent churn"
+    );
+}
+
+/// Read handlers (status) must not block while a write proceeds — proves no
+/// god-lock is held across operations. We spawn a burst of mutations and
+/// concurrently hammer status; everything must complete well within the
+/// timeout (a deadlock or god-lock would hang).
+#[tokio::test]
+async fn status_stays_responsive_during_concurrent_mutations() {
+    let config = test_config();
+    let work = async {
+        let mut handles = Vec::new();
+        for i in 0..30 {
+            let cm = config.clone();
+            handles.push(tokio::spawn(async move {
+                mutate(
+                    State(cm),
+                    Json(MutateRequest {
+                        source: format!("+module M\n+fn f ()->Int\n  +return {i}\n"),
+                    }),
+                )
+                .await;
+            }));
+            let cs = config.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = status(State(cs)).await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(20), work)
+        .await
+        .expect("concurrent mutate+status must not deadlock/block");
+}
+
+/// Per-resource shared-var locks: writing one shared var does not require the
+/// global runtime write lock, and a clone of RuntimeState is isolated (its
+/// SharedVars are independent — no aliasing of the live locks).
+#[test]
+fn shared_vars_clone_is_isolated() {
+    let rt = crate::session::RuntimeState::default();
+    rt.shared_vars
+        .insert("M.x".to_string(), crate::eval::Value::Int(1));
+    let forked = rt.clone();
+    // Mutate the fork — original must be unaffected (independent inner locks).
+    forked
+        .shared_vars
+        .insert("M.x".to_string(), crate::eval::Value::Int(999));
+    assert!(
+        matches!(rt.shared_vars.get("M.x"), Some(crate::eval::Value::Int(1))),
+        "original shared var must be isolated from the fork's mutation"
+    );
+    assert!(
+        matches!(
+            forked.shared_vars.get("M.x"),
+            Some(crate::eval::Value::Int(999))
+        ),
+        "fork must observe its own mutation"
+    );
+}

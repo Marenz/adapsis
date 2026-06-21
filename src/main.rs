@@ -1744,7 +1744,8 @@ async fn main() -> Result<()> {
 
                             // Apply code if any
                             if !code.is_empty() && code.trim() != "DONE" {
-                                let mut program = trigger_program.read().await.clone();
+                                let base_program = trigger_program.read().await.clone();
+                                let mut program = base_program.clone();
                                 let mut runtime = trigger_runtime.read().unwrap().clone();
                                 let mut meta = trigger_meta.lock().unwrap().clone();
                                 let mut sandbox = None;
@@ -1768,8 +1769,17 @@ async fn main() -> Result<()> {
                                 }
                                 let conv = meta.conversations.get_or_create("main");
                                 conv.push_assistant(format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()));
-                                *trigger_program.write().await = program;
-                                *trigger_runtime.write().unwrap() = runtime;
+                                // Per-function CoW merge (issue #9).
+                                trigger_program.write().await.merge_changed_from(&base_program, &program);
+                                if let Ok(mut rt) = trigger_runtime.write() {
+                                    rt.shared_vars.replace_from(runtime.shared_vars.snapshot());
+                                    rt.http_routes = runtime.http_routes.clone();
+                                    rt.failure_history = runtime.failure_history.clone();
+                                    rt.agent_mailbox = runtime.agent_mailbox.clone();
+                                    rt.pending_commands = runtime.pending_commands.clone();
+                                    rt.library_errors = runtime.library_errors.clone();
+                                    rt.library_load_errors = runtime.library_load_errors.clone();
+                                }
                                 *trigger_meta.lock().unwrap() = meta;
                             }
                         }

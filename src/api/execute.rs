@@ -458,6 +458,8 @@ pub async fn execute_code(
                             if needs_async_eval {
                                 if let Some(sender) = &config.io_sender {
                                     let program = session.program.clone();
+                                    // Base for the per-function CoW merge (issue #9).
+                                    let base_program = program.clone();
                                     let program_mut = crate::eval::make_shared_program_mut(&program);
                                     let expr = expr.clone();
                                     let sender = sender.clone();
@@ -479,7 +481,7 @@ pub async fn execute_code(
                                     }
                                     if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                                         session.program = mutated.clone();
-                                        *config.program.write().await = mutated;
+                                        config.program.write().await.merge_changed_from(&base_program, &mutated);
                                     }
                                     config.sync_async_side_effects_into(session);
                                     continue;
@@ -528,6 +530,8 @@ pub async fn execute_code(
                         if needs_async {
                             if let Some(sender) = &config.io_sender {
                                 let program = session.program.clone();
+                                // Base for the per-function CoW merge (issue #9).
+                                let base_program = program.clone();
                                 let program_mut = crate::eval::make_shared_program_mut(&program);
                                 let fn_name = ev.function_name.clone();
                                 let input = ev.input.clone();
@@ -552,7 +556,7 @@ pub async fn execute_code(
                                 }
                                 if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                                     session.program = mutated.clone();
-                                    *config.program.write().await = mutated;
+                                    config.program.write().await.merge_changed_from(&base_program, &mutated);
                                 }
                                 config.sync_async_side_effects_into(session);
                             }
@@ -770,8 +774,11 @@ pub async fn execute_code(
                                 }
                             }
 
-                            // Merge branch back
-                            let mut program = agent_program.read().await.clone();
+                            // Merge branch back. Capture the live program as the
+                            // base so we can do a per-function CoW write-back
+                            // (issue #9) instead of clobbering concurrent writes.
+                            let base_program = agent_program.read().await.clone();
+                            let mut program = base_program.clone();
                             let mut runtime = agent_runtime.read().unwrap().clone();
                             let mut meta = agent_meta.lock().unwrap().clone();
                             let mut sandbox = None;
@@ -795,8 +802,18 @@ pub async fn execute_code(
                                     s.message = conflicts.join("; ");
                                 }
                             }
-                            *agent_program.write().await = program;
-                            *agent_runtime.write().unwrap() = runtime;
+                            // Per-function CoW merge (issue #9): only apply the
+                            // branch's function delta onto the live program.
+                            agent_program.write().await.merge_changed_from(&base_program, &program);
+                            if let Ok(mut rt) = agent_runtime.write() {
+                                rt.shared_vars.replace_from(runtime.shared_vars.snapshot());
+                                rt.http_routes = runtime.http_routes.clone();
+                                rt.failure_history = runtime.failure_history.clone();
+                                rt.agent_mailbox = runtime.agent_mailbox.clone();
+                                rt.pending_commands = runtime.pending_commands.clone();
+                                rt.library_errors = runtime.library_errors.clone();
+                                rt.library_load_errors = runtime.library_load_errors.clone();
+                            }
                             *agent_meta.lock().unwrap() = meta;
                             if let Some(ref tx) = agent_save_notify {
                                 let _ = tx.try_send(());
