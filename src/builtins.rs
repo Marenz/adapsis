@@ -1412,6 +1412,149 @@ Side-effect assertions with +after (checked after the function runs, state resto
     },
 ];
 
+/// Executable, CI-verified examples for pure (non-IO) builtins (issue #35).
+///
+/// Each entry is `(builtin_name, &[(expression, expected_display)])`. The
+/// `expected_display` is the exact `Display` form of the result `Value`
+/// (Strings quoted, lists as `["a", "b"]`, Ints bare). These serve two
+/// purposes:
+///   1. `builtin_examples_match_semantics` (eval/tests.rs) evaluates every
+///      expression and asserts the output — so a builtin's documented behavior
+///      is verified on every test run. This is what catches quote-artifact /
+///      Display-vs-raw bugs (e.g. the `join` String-element bug) immediately,
+///      at the builtin level, instead of only as a confusing higher-level
+///      `.ax` test mismatch.
+///   2. `format_for_prompt` shows them to the model, so docs and verified
+///      behavior never drift.
+///
+/// Coverage intentionally includes **String elements** (not just Int) for every
+/// String/List builtin where element rendering matters — that's the gap #35
+/// identified. Order-dependent results (Map/Set iteration) are avoided.
+pub static BUILTIN_EXAMPLES: &[(&str, &[(&str, &str)])] = &[
+    // ── String ──────────────────────────────────────────────────────────
+    ("concat", &[
+        (r#"concat("foo", "bar")"#, r#""foobar""#),
+        (r#"concat("n=", to_string(42))"#, r#""n=42""#),
+    ]),
+    ("char_at", &[(r#"char_at("hello", 1)"#, r#""e""#)]),
+    ("substring", &[
+        (r#"substring("hello", 1, 3)"#, r#""el""#),
+        (r#"substring("hi", 0, 99)"#, r#""hi""#),
+    ]),
+    ("starts_with", &[
+        (r#"starts_with("hello", "he")"#, "true"),
+        (r#"starts_with("hello", "lo")"#, "false"),
+    ]),
+    ("ends_with", &[
+        (r#"ends_with("file.ax", ".ax")"#, "true"),
+        (r#"ends_with("file.ax", ".rs")"#, "false"),
+    ]),
+    ("contains", &[
+        (r#"contains("hello world", "o w")"#, "true"),
+        (r#"contains("hello", "xyz")"#, "false"),
+    ]),
+    ("index_of", &[
+        (r#"index_of("hello", "l")"#, "2"),
+        (r#"index_of("hello", "z")"#, "-1"),
+    ]),
+    ("split", &[
+        // String elements render quoted inside a list.
+        (r#"split("a,b,c", ",")"#, r#"["a", "b", "c"]"#),
+        (r#"split("solo", ",")"#, r#"["solo"]"#),
+    ]),
+    ("trim", &[(r#"trim("  hi  ")"#, r#""hi""#)]),
+    ("len", &[
+        (r#"len("hello")"#, "5"),
+        (r#"len(list(1, 2, 3))"#, "3"),
+    ]),
+    // ── Conversion ──────────────────────────────────────────────────────
+    ("to_string", &[
+        (r#"to_string(42)"#, r#""42""#),
+        (r#"to_string(true)"#, r#""true""#),
+    ]),
+    ("to_int", &[
+        (r#"to_int("42")"#, "42"),
+        (r#"to_int(3.7)"#, "3"),
+        (r#"to_int(true)"#, "1"),
+    ]),
+    ("digit_value", &[
+        (r#"digit_value("5")"#, "5"),
+        (r#"digit_value("a")"#, "-1"),
+    ]),
+    ("is_digit_char", &[
+        (r#"is_digit_char("7")"#, "true"),
+        (r#"is_digit_char("x")"#, "false"),
+    ]),
+    ("char_code", &[(r#"char_code("A")"#, "65")]),
+    ("from_char_code", &[(r#"from_char_code(65)"#, r#""A""#)]),
+    ("to_hex", &[
+        (r#"to_hex(255)"#, r#""000000ff""#),
+        (r#"to_hex(0)"#, r#""00000000""#),
+    ]),
+    ("base64_encode", &[(r#"base64_encode("hello")"#, r#""aGVsbG8=""#)]),
+    // ── Math ────────────────────────────────────────────────────────────
+    ("abs", &[(r#"abs(-5)"#, "5"), (r#"abs(5)"#, "5")]),
+    ("pow", &[(r#"pow(2, 10)"#, "1024")]),
+    ("min", &[(r#"min(3, 7)"#, "3")]),
+    ("max", &[(r#"max(3, 7)"#, "7")]),
+    ("floor", &[(r#"floor(3.9)"#, "3")]),
+    // ── Bitwise ─────────────────────────────────────────────────────────
+    ("bit_and", &[(r#"bit_and(12, 10)"#, "8")]),
+    ("bit_or", &[(r#"bit_or(12, 10)"#, "14")]),
+    ("bit_xor", &[(r#"bit_xor(12, 10)"#, "6")]),
+    ("shl", &[(r#"shl(1, 4)"#, "16")]),
+    ("shr", &[(r#"shr(16, 4)"#, "1")]),
+    // ── List ────────────────────────────────────────────────────────────
+    ("list", &[
+        (r#"list(1, 2, 3)"#, "[1, 2, 3]"),
+        (r#"list("a", "b")"#, r#"["a", "b"]"#),
+    ]),
+    ("push", &[
+        (r#"push(list(1, 2), 3)"#, "[1, 2, 3]"),
+        (r#"push(list("a"), "b")"#, r#"["a", "b"]"#),
+    ]),
+    ("get", &[
+        (r#"get(list(10, 20, 30), 1)"#, "20"),
+        (r#"get(list("x", "y"), 0)"#, r#""x""#),
+    ]),
+    ("join", &[
+        // The #35 regression: String elements must join by raw content,
+        // NOT their quoted Display form.
+        (r#"join(list(1, 2, 3), "-")"#, r#""1-2-3""#),
+        (r#"join(list("a", "b", "c"), ",")"#, r#""a,b,c""#),
+    ]),
+    ("reverse", &[
+        (r#"reverse(list(1, 2, 3))"#, "[3, 2, 1]"),
+        (r#"reverse(list("a", "b"))"#, r#"["b", "a"]"#),
+    ]),
+    ("sort", &[
+        (r#"sort(list(3, 1, 2))"#, "[1, 2, 3]"),
+        (r#"sort(list("c", "a", "b"))"#, r#"["a", "b", "c"]"#),
+    ]),
+    ("slice", &[(r#"slice(list(1, 2, 3, 4), 1, 3)"#, "[2, 3]")]),
+    // ── Result ──────────────────────────────────────────────────────────
+    ("Ok", &[(r#"Ok("done")"#, r#"Ok("done")"#)]),
+    ("Err", &[(r#"Err("boom")"#, r#"Err("boom")"#)]),
+    ("Some", &[(r#"Some(42)"#, "Some(42)")]),
+    // ── Regex ───────────────────────────────────────────────────────────
+    ("regex_match", &[
+        (r#"regex_match("^[0-9]+$", "12345")"#, "true"),
+        (r#"regex_match("^[0-9]+$", "abc")"#, "false"),
+    ]),
+    ("regex_replace", &[
+        (r#"regex_replace("[0-9]+", "N", "a1b22c")"#, r#""aNbNc""#),
+    ]),
+];
+
+/// Look up the verified examples for a builtin by name. Empty slice if none.
+pub fn examples_for(name: &str) -> &'static [(&'static str, &'static str)] {
+    BUILTIN_EXAMPLES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, ex)| *ex)
+        .unwrap_or(&[])
+}
+
 /// Get all builtin names (for the validator's shadow check).
 #[cfg(test)]
 pub fn all_builtin_names() -> Vec<&'static str> {
@@ -1446,6 +1589,9 @@ pub fn format_for_prompt() -> String {
             for line in b.long.lines() {
                 out.push_str(&format!("    {}\n", line));
             }
+        }
+        for (expr, expected) in examples_for(b.name) {
+            out.push_str(&format!("    e.g. {expr} => {expected}\n"));
         }
     }
     out.push_str("\n### IO Functions (require [io,async] effect, use +await)\n");
@@ -1541,6 +1687,16 @@ mod tests {
         assert!(!IO_BUILTINS.is_empty(), "IO_BUILTINS should not be empty");
         assert!(!QUERIES.is_empty(), "QUERIES should not be empty");
         assert!(!ACTIONS.is_empty(), "ACTIONS should not be empty");
+    }
+
+    #[test]
+    fn prompt_includes_builtin_examples() {
+        // Issue #35: verified examples must reach the model via the prompt.
+        let prompt = format_for_prompt();
+        assert!(
+            prompt.contains(r#"e.g. join(list("a", "b", "c"), ",") => "a,b,c""#),
+            "format_for_prompt must surface the join String-element example"
+        );
     }
 
     #[test]
