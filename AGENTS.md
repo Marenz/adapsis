@@ -351,7 +351,14 @@ The system prompt only shows modules the model can at least Read. Execute-level 
 - Caddy HTTPS on port 443 (Let's Encrypt), only `/webhook/telegram` exposed
 - Systemd services: `adapsis.service`, `llama-server.service`, `ace-step-gen.service`, `parakeet-server.service`, `caddy.service`
 - llama-server: TurboQuant build with turbo3 KV cache, Gemma 4 fixes
-- Save-on-change (debounced), not periodic autosave
+- Save-on-change (debounced), not periodic autosave. **Conversation turns count
+  as changes** (2026-07-06): `handle_llm_takeover` fires `save_notify` after the
+  user message and at loop end, so Telegram chats survive restarts — previously
+  only code mutations saved, and the bot "resumed" from a stale snapshot (the
+  "will shutdown now!" greeting bug on edox). `Session::save` is atomic
+  (temp file + rename). `llm_takeover` also writes `--log-file` entries now
+  (user/ai-text/llm-error), and an LLM failure returns a short apology to the
+  reply callback instead of silently dropping the message.
 - Panic hook + exit logging for crash debugging
 
 ## Voice Transcription (ASR)
@@ -488,7 +495,9 @@ talk to each other via `http_get`/`http_post`/`http_request`.
   claimed to know nothing about peers**. Also: each builder caches its system
   prompt at conversation creation (`if conv.messages.is_empty()`), so a
   persona/mesh edit only takes effect for **new** conversations or after a
-  restart (which clears in-memory contexts when nothing is persisted).
+  restart. (Conversations now persist across restarts — 2026-07-06 — so a
+  restart alone no longer refreshes a conversation's cached system prompt;
+  edit requires a new context or trimming the session file.)
 - **Topology = hub-and-spoke, NOT full mesh.** `here` (10.0.0.1) is the always-on
   WireGuard **hub** (`wg0`, one `/32` peer per spoke). Spokes (sleek, edox) only
   peer with the hub; their `AllowedIPs` toward the hub is `10.0.0.0/24` so all
@@ -511,3 +520,17 @@ talk to each other via `http_get`/`http_post`/`http_request`.
 - **sudo:** edox runs the bot as the `adapsis` system user; for ops there use
   `sudo` as `marenz` (in the `sudo` group). On `here`, use `sudo -A` (GUI askpass)
   per the global AGENTS.md.
+
+## Renate Desktop Helper (edox only, 2026-07-06)
+The `adapsis` service user cannot touch Renate's desktop session (correct OS
+behavior), so edox runs **`renate-agent`** — a stdlib-only Python HTTP daemon
+as user `renate` on `127.0.0.1:3010` (systemd **user** unit
+`~renate/.config/systemd/user/renate-agent.service`, script at
+`~renate/.local/bin/renate-agent.py`, linger enabled). Endpoints: `/notify`
+(notify-send), `/play` (paplay, named sounds only), `/open-url` (http/https
+only), `/dialog` (zenity yes/no, 2-min timeout), `GET /health`. The adapsis
+side is the **`RenateAgent.ax`** module (in the `assist` permission group, so
+Renate's sandboxed conversations may call it): `notify`, `play_sound`,
+`open_url`, `ask_yes_no` — all ≤2-statement io fns (exempt from the test gate)
+delegating JSON building to tested pure helpers. Use `ask_yes_no` for consent
+before invasive actions.

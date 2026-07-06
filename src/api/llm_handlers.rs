@@ -794,6 +794,10 @@ pub async fn handle_llm_takeover(
     training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     access_level: crate::permissions::AccessLevel,
     permission_config: std::sync::Arc<crate::permissions::PermissionConfig>,
+    // Persistence + observability (issue: conversations were only saved on
+    // mutations, and Telegram traffic never reached --log-file).
+    save_notify: Option<tokio::sync::mpsc::Sender<()>>,
+    log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> anyhow::Result<String> {
     let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
 
@@ -920,6 +924,13 @@ pub async fn handle_llm_takeover(
     }; // meta_guard dropped here
 
     eprintln!("[llm_takeover:{context}] calling LLM with {} messages", messages.len());
+    write_log_file(&log_file, "user", &format!("[{context}] {message}")).await;
+    // Persist the conversation now that the user message is appended —
+    // otherwise chats are lost on restart and the bot "resumes" from a
+    // stale snapshot (the "will shutdown now!" greeting bug).
+    if let Some(ref tx) = save_notify {
+        let _ = tx.try_send(());
+    }
 
     // Build a temporary AppConfig so we can reuse execute_code()
     let (self_trigger_tx, _self_trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
@@ -939,7 +950,7 @@ pub async fn handle_llm_takeover(
         self_trigger: self_trigger_tx,
         task_registry: Some(task_registry.clone()),
         snapshot_registry: Some(snap_registry.clone()),
-        log_file: None,
+        log_file: log_file.clone(),
         training_log: training_log.clone(),
         jit_cache: crate::eval::new_jit_cache(),
         event_broadcast: tokio::sync::broadcast::channel(16).0,
@@ -950,7 +961,7 @@ pub async fn handle_llm_takeover(
         max_iterations: 10,
         runtime: runtime.clone(),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        save_notify: None,
+        save_notify: save_notify.clone(),
         access_level,
         permission_config: permission_config.clone(),
     };
@@ -984,6 +995,18 @@ pub async fn handle_llm_takeover(
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[llm_takeover:{context}] LLM error: {e}");
+                write_log_file(&log_file, "llm-error", &format!("[{context}] {e}")).await;
+                // Never leave the user hanging: if we have no reply yet,
+                // return a short apology instead of silently dropping the
+                // message (the callback path sends whatever we return).
+                if reply_text.is_empty() {
+                    let detail: String = e.to_string().chars().take(120).collect();
+                    reply_text = format!(
+                        "Entschuldigung — ich habe gerade ein technisches Problem \
+                         und konnte deine Nachricht nicht verarbeiten. Bitte \
+                         versuch es gleich noch einmal. ({detail})"
+                    );
+                }
                 break;
             }
         };
@@ -1023,6 +1046,7 @@ pub async fn handle_llm_takeover(
         }
 
         eprintln!("[llm_takeover:{context}] reply: {}...", prose.chars().take(80).collect::<String>());
+        write_log_file(&log_file, "ai-text", &format!("[{context}] {}", output.text)).await;
 
         let code = output.code.trim().to_string();
 
@@ -1119,6 +1143,11 @@ pub async fn handle_llm_takeover(
             let args: Vec<String> = std::env::args().collect();
             let _ = exec::execvp(&exe, &args);
         }
+    }
+
+    // Persist assistant/feedback messages appended during the loop.
+    if let Some(ref tx) = save_notify {
+        let _ = tx.try_send(());
     }
 
     Ok(reply_text)

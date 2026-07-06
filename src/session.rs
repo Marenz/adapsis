@@ -1657,9 +1657,14 @@ impl Session {
     }
 
     /// Save session to a JSON file.
+    ///
+    /// Atomic: writes to a sibling temp file and renames it into place, so a
+    /// crash or full disk mid-write can't corrupt the existing session.
     pub fn save(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
