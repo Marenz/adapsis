@@ -990,6 +990,14 @@ async fn main() -> Result<()> {
             let opencode_git_dir_for_spawn = opencode_git_dir_shared.clone();
             let training_log_shared: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>>> = std::sync::Arc::new(std::sync::RwLock::new(None));
             let training_log_for_spawn = training_log_shared.clone();
+            // Late-filled after the save channel / log file are created below
+            // (the IO loop spawns before they exist). Same pattern as
+            // training_log_shared. Lets llm_takeover persist conversations
+            // and write to --log-file.
+            let save_notify_shared: std::sync::Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<()>>>> = std::sync::Arc::new(std::sync::RwLock::new(None));
+            let save_notify_for_spawn = save_notify_shared.clone();
+            let ai_log_shared: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>>> = std::sync::Arc::new(std::sync::RwLock::new(None));
+            let ai_log_for_spawn = ai_log_shared.clone();
             let access_level_parsed: permissions::AccessLevel = access_level.parse().expect("invalid --access-level");
             let perm_config = if let Some(ref path) = permissions_file {
                 permissions::PermissionConfig::load(std::path::Path::new(path)).expect("failed to load permissions file")
@@ -1204,6 +1212,8 @@ async fn main() -> Result<()> {
                             let t_log = training_log_for_spawn.read().unwrap().clone();
                             let al = access_level_for_spawn;
                             let pc = perm_config_for_spawn.clone();
+                            let save_notify = save_notify_for_spawn.read().unwrap().clone();
+                            let ai_log = ai_log_for_spawn.read().unwrap().clone();
 
                             tokio::spawn(async move {
                                 let result = crate::api::handle_llm_takeover(
@@ -1213,6 +1223,7 @@ async fn main() -> Result<()> {
                                     io_sender, task_registry, snap_registry,
                                     oc_lock, oc_git_dir, t_log,
                                     al, pc,
+                                    save_notify, ai_log,
                                 ).await;
                                 let _ = reply.send(result);
                             });
@@ -1554,6 +1565,7 @@ async fn main() -> Result<()> {
                 Some(std::sync::Arc::new(tokio::sync::Mutex::new(f)))
             };
             *training_log_shared.write().unwrap() = train_log.clone();
+            *ai_log_shared.write().unwrap() = ai_log.clone();
 
             // Build the three independent tiers from the loaded session.
             let tier1_program = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
@@ -1562,6 +1574,7 @@ async fn main() -> Result<()> {
             // Any code path calls try_send(()) when state changes; the background
             // task below debounces and saves after 2 seconds of quiet.
             let (save_tx, save_rx) = tokio::sync::mpsc::channel::<()>(1);
+            *save_notify_shared.write().unwrap() = Some(save_tx.clone());
 
             let permission_config = perm_config_for_config;
             let access_level_for_config = access_level_parsed;
