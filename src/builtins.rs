@@ -628,7 +628,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "llm_takeover",
         aliases: &[],
-        short: "conversational LLM with per-context history: llm_takeover(context, message[, reply_fn, reply_arg[, permission_model]])",
+        short: "conversational LLM with durable provenance: llm_takeover(context, message[, reply_fn, reply_arg[, permission_model[, attachment_or_metadata[, metadata]]]]])",
         long: "Calls the LLM with per-context conversation history and returns the text reply. \
                The context name (e.g. \"telegram:123\", \"agent:builder\") identifies the conversation — \
                each context has independent history. If the LLM response contains code, it is executed \
@@ -638,7 +638,14 @@ pub static IO_BUILTINS: &[Builtin] = &[
                reply_fn(reply_arg, text) is called to deliver agent completion summaries. \
                Optional permission_model overrides which model's permissions are used for the program \
                summary shown to the LLM (e.g. \"gemma4s\" to restrict non-admin users to execute-only view). \
-               Pass \"\" to use the default (active model's permissions).",
+                Pass \"\" to use the default (active model's permissions). An optional image Attachment is sent to vision-capable models with the user message. Optional JSON source metadata records message_id, speaker_name, and created_at_ms in Ladybug.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "memory_cypher",
+        aliases: &[],
+        short: "ACL-filtered graph traversal: memory_cypher(principal_id, cypher)",
+        long: "Runs read-only Cypher once per memory authorized for principal_id. The query must start with MATCH (memory:Memory {id: $memory_id}), use one MATCH clause, traverse outgoing provenance edges only, and RETURN bounded results. Independent patterns, reverse/variable-length traversal, mutation, CALL, SUPERSEDES, CONTRADICTS, and DENIED_TO are rejected so the query cannot escape the authorized memory anchor.",
         category: BuiltinCategory::Io,
     },
     Builtin {

@@ -1828,6 +1828,8 @@ async fn inject_message(
         let _ = sender.send(crate::coroutine::IoRequest::LlmTakeover {
             context: context.clone(),
             message: req.message.clone(),
+            attachment: None,
+            source_metadata: None,
             reply_fn: None,
             reply_arg: None,
             permission_model: None,

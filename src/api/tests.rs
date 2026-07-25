@@ -1384,6 +1384,44 @@ fn llm_takeover_enforces_permission_model_on_execution() {
     );
 }
 
+#[test]
+fn llm_takeover_requires_explicit_completion_for_prose_only_turns() {
+    let source = include_str!("llm_handlers.rs");
+    let takeover_start = source
+        .find("pub async fn handle_llm_takeover")
+        .expect("handle_llm_takeover not found");
+    let takeover = &source[takeover_start..];
+
+    assert!(
+        takeover.contains("if code == \"!done\"")
+            && takeover.contains("if code.is_empty()")
+            && takeover.contains("llm_messages.push(crate::llm::ChatMessage::user(correction.to_string()))")
+            && takeover.contains("Do not defer work to a future turn.")
+            && takeover.contains("estimate.clamp(1, MAX_TAKEOVER_ITERATION_BUDGET)")
+            && takeover.contains("requesting final summary after action limit"),
+        "llm_takeover must retry prose-only responses with an explicit execute-or-finish correction"
+    );
+}
+
+#[test]
+fn llm_takeover_parses_model_iteration_budget() {
+    use super::llm_handlers::takeover_iteration_budget;
+
+    assert_eq!(
+        takeover_iteration_budget("<iteration_budget>24</iteration_budget>Working"),
+        Some(24)
+    );
+    assert_eq!(
+        takeover_iteration_budget("<iteration_budget> 3 </iteration_budget>"),
+        Some(3)
+    );
+    assert_eq!(takeover_iteration_budget("no estimate"), None);
+    assert_eq!(
+        takeover_iteration_budget("<iteration_budget>many</iteration_budget>"),
+        None
+    );
+}
+
 /// Test: execute_code rejects +module on core modules for a restricted model.
 #[tokio::test]
 async fn execute_code_permission_blocks_core_module_write() {

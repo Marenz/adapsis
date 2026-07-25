@@ -846,6 +846,18 @@ impl Conversation {
         self.messages.push(ChatMessage { role: "user".to_string(), content: content.into(), attachments: vec![] });
     }
 
+    pub fn push_user_with_attachment(
+        &mut self,
+        content: impl Into<String>,
+        attachment: crate::attachment::Attachment,
+    ) {
+        self.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: content.into(),
+            attachments: vec![attachment],
+        });
+    }
+
     pub fn push_assistant(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMessage { role: "assistant".to_string(), content: content.into(), attachments: vec![] });
     }
@@ -854,12 +866,79 @@ impl Conversation {
         self.messages.push(ChatMessage { role: "system".to_string(), content: content.into(), attachments: vec![] });
     }
 
+    /// Install the current runtime prompt while preserving conversation history.
+    pub fn set_primary_system(&mut self, content: impl Into<String>) {
+        let message = ChatMessage { role: "system".to_string(), content: content.into(), attachments: vec![] };
+        if let Some(existing) = self.messages.first_mut().filter(|m| m.role == "system") {
+            *existing = message;
+        } else {
+            self.messages.insert(0, message);
+        }
+    }
+
     /// Convert conversation history to LLM-compatible message format.
     pub fn to_llm_messages(&self) -> Vec<crate::llm::ChatMessage> {
         self.messages.iter().map(|m| match m.role.as_str() {
             "system" => crate::llm::ChatMessage::system(m.content.clone()),
             "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-            _ => crate::llm::ChatMessage::user(m.content.clone()),
+            _ => crate::llm::ChatMessage::user_with_attachments(m.content.clone(), &m.attachments),
+        }).collect()
+    }
+
+    /// Build a bounded model-visible view without deleting persisted history.
+    pub fn to_llm_messages_bounded(
+        &self,
+        max_messages: usize,
+        max_chars: usize,
+        max_message_chars: usize,
+    ) -> Vec<crate::llm::ChatMessage> {
+        if self.messages.is_empty() || max_messages == 0 {
+            return Vec::new();
+        }
+
+        let system = self.messages.first().filter(|message| message.role == "system");
+        // The system prompt is mandatory and may itself exceed the history budget.
+        let mut remaining_chars = max_chars;
+        let recent_limit = max_messages.saturating_sub(usize::from(system.is_some()));
+        let mut recent = Vec::new();
+
+        for message in self.messages.iter().rev() {
+            if system.is_some_and(|first| std::ptr::eq(first, message)) || recent.len() >= recent_limit {
+                continue;
+            }
+            let content = truncate_middle(&message.content, max_message_chars.min(remaining_chars));
+            let content_chars = content.chars().count();
+            if content_chars == 0 || content_chars > remaining_chars {
+                continue;
+            }
+            let mut bounded = message.clone();
+            bounded.content = content;
+            bounded.attachments.clear();
+            recent.push(bounded);
+            remaining_chars -= content_chars;
+        }
+        recent.reverse();
+
+        let omitted = self.messages.len().saturating_sub(recent.len() + usize::from(system.is_some()));
+        let mut bounded = Vec::with_capacity(recent.len() + 2);
+        if let Some(system) = system {
+            bounded.push(system.clone());
+        }
+        if omitted > 0 {
+            bounded.push(ChatMessage {
+                role: "user".to_string(),
+                content: format!(
+                    "[System: {omitted} older message(s) are omitted from this model context; the raw history is retained.]"
+                ),
+                attachments: Vec::new(),
+            });
+        }
+        bounded.extend(recent);
+
+        bounded.into_iter().map(|message| match message.role.as_str() {
+            "system" => crate::llm::ChatMessage::system(message.content),
+            "assistant" => crate::llm::ChatMessage::assistant(&message.content),
+            _ => crate::llm::ChatMessage::user_with_attachments(message.content, &message.attachments),
         }).collect()
     }
 
@@ -873,6 +952,24 @@ impl Conversation {
             self.messages.extend(keep);
         }
     }
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars < 32 {
+        return value.chars().take(max_chars).collect();
+    }
+    const MARKER: &str = "\n[... content omitted ...]\n";
+    let marker_chars = MARKER.chars().count();
+    let kept = max_chars - marker_chars;
+    let head = kept / 2;
+    let tail = kept - head;
+    let prefix: String = value.chars().take(head).collect();
+    let suffix: String = value.chars().skip(count - tail).collect();
+    format!("{prefix}{MARKER}{suffix}")
 }
 
 /// Manages multiple independent conversation contexts.
@@ -2701,6 +2798,82 @@ mod tests {
         assert_eq!(conv.messages[0].role, "system");
         assert_eq!(conv.messages[1].role, "user");
         assert_eq!(conv.messages[2].role, "assistant");
+    }
+
+    #[test]
+    fn conversation_refreshes_primary_system_without_losing_history() {
+        let mut conv = Conversation::new();
+        conv.push_system("old prompt");
+        conv.push_user("hello");
+        conv.push_system("later event");
+
+        conv.set_primary_system("new prompt");
+
+        assert_eq!(conv.messages.len(), 3);
+        assert_eq!(conv.messages[0].content, "new prompt");
+        assert_eq!(conv.messages[1].content, "hello");
+        assert_eq!(conv.messages[2].content, "later event");
+    }
+
+    #[test]
+    fn conversation_inserts_primary_system_before_existing_history() {
+        let mut conv = Conversation::new();
+        conv.push_user("hello");
+        conv.push_system("later event");
+
+        conv.set_primary_system("current prompt");
+
+        assert_eq!(conv.messages.len(), 3);
+        assert_eq!(conv.messages[0].content, "current prompt");
+        assert_eq!(conv.messages[1].content, "hello");
+        assert_eq!(conv.messages[2].content, "later event");
+    }
+
+    #[test]
+    fn bounded_conversation_view_retains_raw_history() {
+        let mut conv = Conversation::new();
+        conv.push_system("system");
+        for index in 0..10 {
+            conv.push_user(format!("message {index}: {}", "x".repeat(30)));
+        }
+
+        let bounded = conv.to_llm_messages_bounded(5, 120, 50);
+
+        assert!(bounded.len() <= 6, "system, omission marker, and recent messages");
+        assert_eq!(conv.messages.len(), 11, "building a view must not prune persisted history");
+        let serialized = serde_json::to_string(&bounded).unwrap();
+        assert!(serialized.contains("older message(s) are omitted"));
+        assert!(serialized.contains("message 9"));
+        assert!(!serialized.contains("message 0"));
+    }
+
+    #[test]
+    fn bounded_conversation_view_truncates_one_oversized_message() {
+        let mut conv = Conversation::new();
+        conv.push_system("system");
+        conv.push_user(format!("start{}end", "x".repeat(200)));
+
+        let bounded = conv.to_llm_messages_bounded(4, 100, 60);
+        let serialized = serde_json::to_string(&bounded).unwrap();
+
+        assert!(serialized.contains("start"));
+        assert!(serialized.contains("end"));
+        assert!(serialized.contains("content omitted"));
+        assert_eq!(conv.messages[1].content.chars().count(), 208);
+    }
+
+    #[test]
+    fn bounded_conversation_view_keeps_latest_turn_when_system_exceeds_budget() {
+        let mut conv = Conversation::new();
+        conv.push_system("s".repeat(200));
+        conv.push_user("latest question");
+
+        let bounded = conv.to_llm_messages_bounded(4, 50, 50);
+
+        match &bounded.last().unwrap().content {
+            crate::llm::ChatContent::Text(text) => assert_eq!(text, "latest question"),
+            crate::llm::ChatContent::Parts(_) => panic!("expected a text-only user turn"),
+        }
     }
 
     #[test]
