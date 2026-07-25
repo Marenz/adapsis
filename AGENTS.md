@@ -191,7 +191,9 @@ gateway resolves via `model_aliases` or `virtual_models`.
   must be added to **every** node's gateway that uses it (here and sleek each run
   their own gateway).
 - Current virtual models:
-  - `family-bot` (edox) → `chatgpt/gpt-5.5` → `claude-sonnet-4-5` → `deepseek-v4-flash`
+  - `family-bot` (edox) → `deepseek-v4-flash` → `claude-sonnet-4-5` → `chatgpt/gpt-5.5`
+    (DeepSeek made primary 2026-07-06 to spare OpenAI quota — temporary, revert
+    when limits reset. Same reorder applied to the local gateway config on here.)
   - `dev-bot` (here, sleek) → `anthropic/claude-opus-4-8` → `chatgpt/gpt-5.5` → `deepseek-v4-flash`
 - **Pick an Adapsis-aware model for dev nodes.** Raw `deepseek/*` (incl. the
   misleading `deepseek-reasoner` alias → `deepseek-v4-flash`) does NOT know
@@ -247,8 +249,58 @@ gateway resolves via `model_aliases` or `virtual_models`.
 - Optional `permission_model` parameter overrides which model's permissions are used for the
   program summary shown to the LLM. Used for non-admin Telegram users (e.g. `"gemma4s"` = execute-only).
   The override only restricts visibility, not actual execution permissions.
+- A takeover turn ends only on explicit `<code>!done</code>` (or after executing a
+  background `!agent`). Prose without code receives corrective feedback and another
+  iteration. This prevents promises such as "I'll inspect that next" from ending the
+  turn without doing the work; final prose and clarification questions must include
+  the hidden completion command.
+- The model estimates each takeover's action-round budget in its first response with
+  `<iteration_budget>N</iteration_budget>`. Missing estimates default to 10; estimates
+  are clamped to the hard safety ceiling of 50. Protocol-correction rounds may extend
+  an exhausted estimate, but never beyond that ceiling.
+
+## Ladybug Episodic Memory
+
+- LadybugDB is the sole authoritative long-term memory database. The default path is
+  `~/.config/adapsis/memory.lbug`; override it with `ADAPSIS_MEMORY_DB`.
+- Every incoming message is written before inference and linked to its `Context`,
+  `Principal`, dynamic `AccessGroup`, original platform message ID, and timestamp.
+  Telegram participants receive Read+Contribute membership when first observed;
+  `telegram:user:1815217` also receives Manage. Membership grants the full context history.
+- Memories link explicitly to every origin context/access group and source message.
+  Cross-context recall requires membership in every governing group. `DENIED_TO` provides
+  a future per-memory/per-user override.
+- Attachments are SHA-256-addressed under `~/.local/share/adapsis/attachments/`; Ladybug
+  stores the hash, MIME type, platform reference, storage path, and source-message edge.
+- `fastembed` runs `intfloat/multilingual-e5-small` in-process for German/English recall.
+  Its cache is `~/.local/share/adapsis/.fastembed_cache`.
+- Automatic recall merges semantic vector ranking with lexical term matches and injects
+  compact source citations only after ACL filtering.
+- Compaction is non-destructive: raw messages remain forever. The active conversation
+  model creates immutable `Episode` summaries and source-backed index `Memory` nodes.
+  Failed compaction leaves raw history pending and uses prior episodes plus recent turns.
+- Checkpoint generation times out after 30 seconds and retries at most once per context every
+  15 minutes, so a slow provider cannot block every conversational turn.
+- The transient takeover view keeps up to 60k characters of recent conversation independently
+  of the mandatory system prompt. Subtracting the system-prompt size from this budget can omit
+  the newest user turn when the system prompt alone exceeds the limit.
+- Compaction defaults: 128k model context, 70% trigger, 32k output/tool reserve, and
+  120k-character checkpoint chunks. Override with `ADAPSIS_CONTEXT_TOKENS`,
+  `ADAPSIS_COMPACTION_PERCENT`, and `ADAPSIS_OUTPUT_RESERVE_TOKENS`.
+- `memory_cypher(principal_id, query)` exposes ACL-filtered, read-only Cypher anchored at
+  `MATCH (memory:Memory {id: $memory_id})`. It deliberately rejects query shapes that can
+  escape the authorized memory anchor.
+- Operations: `adapsis memory-migrate <session.json> [--database PATH]` is idempotent;
+  `adapsis memory-stats [--database PATH] [--context CONTEXT]` reports graph/checkpoint state.
+- On openSUSE, LibreSSL development symlinks can shadow OpenSSL 3. `build.rs` links
+  Ladybug's prebuilt archive to exact `libssl.so.3`/`libcrypto.so.3` SONAMEs.
 
 ## Telegram Bot (TelegramBot.ax)
+- **Photo input**: `process_update` accepts Telegram's largest `message.photo`
+  variant or an image MIME `message.document`, downloads it as an `Attachment`,
+  and passes it as the optional sixth `llm_takeover` argument. Adapsis emits
+  OpenAI `image_url` content using a base64 data URL; the gateway translates it
+  for the selected provider.
 - **Multi-admin**: `admin_user_ids` shared var, comma-separated (e.g. `"1815217,456789"`)
 - **Group chats**: messages in group/supergroup → `telegram:group:<chat_id>` context (shared by all senders)
 - **Admin DMs**: `telegram:<user_id>` context with full LLM access
@@ -492,12 +544,10 @@ talk to each other via `http_get`/`http_post`/`http_request`.
   3. `ask_stream` (`api/llm_handlers.rs` ~404) — `POST /api/ask-stream` (SSE).
   All three now append `mesh_topology()`. The original bug: the VPN info only
   reached the non-admin llm_takeover branch, so **admin DMs and `/api/ask`
-  claimed to know nothing about peers**. Also: each builder caches its system
-  prompt at conversation creation (`if conv.messages.is_empty()`), so a
-  persona/mesh edit only takes effect for **new** conversations or after a
-  restart. (Conversations now persist across restarts — 2026-07-06 — so a
-  restart alone no longer refreshes a conversation's cached system prompt;
-  edit requires a new context or trimming the session file.)
+  claimed to know nothing about peers**. Each builder refreshes the first system
+  message on every request while preserving the remaining conversation history,
+  so runtime prompt, persona, mesh and visible-capability changes reach existing
+  persisted conversations after the updated process handles its next message.
 - **Topology = hub-and-spoke, NOT full mesh.** `here` (10.0.0.1) is the always-on
   WireGuard **hub** (`wg0`, one `/32` peer per spoke). Spokes (sleek, edox) only
   peer with the hub; their `AllowedIPs` toward the hub is `10.0.0.0/24` so all

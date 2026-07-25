@@ -18,6 +18,278 @@ use super::execute_code;
 
 use axum::extract::State;
 use axum::Json;
+use anyhow::Context as _;
+
+const TAKEOVER_CONTEXT_MAX_MESSAGES: usize = 64;
+const TAKEOVER_CONTEXT_MAX_CHARS: usize = 60_000;
+const TAKEOVER_MESSAGE_MAX_CHARS: usize = 40_000;
+const COMPACTION_CHUNK_MAX_CHARS: usize = 120_000;
+const COMPACTION_RETRY_SECS: u64 = 15 * 60;
+
+#[derive(serde::Deserialize)]
+struct CompactionOutput {
+    summary: String,
+    #[serde(default)]
+    memories: Vec<CompactionMemory>,
+}
+
+#[derive(serde::Deserialize)]
+struct CompactionMemory {
+    content: String,
+    memory_type: String,
+    confidence: f64,
+}
+
+fn takeover_context_lock(context: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(Default::default);
+    let mut locks = locks.lock().unwrap();
+    locks.entry(context.to_string()).or_default().clone()
+}
+
+fn compaction_attempt_due(context: &str) -> bool {
+    static ATTEMPTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    let attempts = ATTEMPTS.get_or_init(Default::default);
+    let mut attempts = attempts.lock().unwrap();
+    let now = std::time::Instant::now();
+    if attempts
+        .get(context)
+        .is_some_and(|last| now.duration_since(*last).as_secs() < COMPACTION_RETRY_SECS)
+    {
+        return false;
+    }
+    attempts.insert(context.to_string(), now);
+    true
+}
+
+fn takeover_principal(context: &str, message: &str) -> (String, String) {
+    if let Some(rest) = message.strip_prefix("[user:") {
+        if let Some((id, content)) = rest.split_once("] ") {
+            return (format!("telegram:user:{id}"), content.to_string());
+        }
+    }
+    let principal = context
+        .strip_prefix("telegram:user:")
+        .or_else(|| context.strip_prefix("telegram:"))
+        .map_or_else(|| "user:unknown".to_string(), |id| format!("telegram:user:{id}"));
+    (principal, message.to_string())
+}
+
+async fn persist_takeover_message(
+    memory_graph: &std::sync::Arc<crate::memory_graph::MemoryGraph>,
+    context: &str,
+    principal_id: String,
+    role: &str,
+    content: String,
+    source_metadata: Option<&str>,
+) -> anyhow::Result<String> {
+    let metadata = source_metadata
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .unwrap_or_default();
+    let platform_message_id = metadata
+        .get("message_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let message_id = platform_message_id.as_ref().map_or_else(
+        || format!("message:{}", uuid::Uuid::new_v4()),
+        |id| format!("message:{context}:{id}"),
+    );
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let created_at_ms = metadata
+        .get("created_at_ms")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(observed_at_ms);
+    let speaker_name = metadata
+        .get("speaker_name")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&principal_id)
+        .to_string();
+    let context_kind = if context.starts_with("telegram:group:") {
+        "telegram_group"
+    } else if context.starts_with("telegram:") {
+        "telegram_direct"
+    } else {
+        "internal"
+    };
+    let source = crate::memory_graph::SourceMessage {
+        id: message_id.clone(),
+        platform_message_id,
+        context_id: context.to_string(),
+        context_kind: context_kind.to_string(),
+        speaker_id: principal_id.clone(),
+        speaker_name,
+        role: role.to_string(),
+        content,
+        created_at_ms,
+    };
+    let graph = memory_graph.clone();
+    tokio::task::spawn_blocking(move || graph.ingest_message(&source, "telegram:user:1815217"))
+        .await
+        .context("join Ladybug message write")??;
+    Ok(message_id)
+}
+
+fn compaction_trigger_chars() -> usize {
+    let context_tokens = std::env::var("ADAPSIS_CONTEXT_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(128_000);
+    let percent = std::env::var("ADAPSIS_COMPACTION_PERCENT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(70)
+        .min(100);
+    let reserve = std::env::var("ADAPSIS_OUTPUT_RESERVE_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(32_000);
+    let threshold_tokens = (context_tokens * percent / 100)
+        .min(context_tokens.saturating_sub(reserve));
+    threshold_tokens.saturating_mul(4)
+}
+
+fn parse_compaction_output(text: &str) -> anyhow::Result<CompactionOutput> {
+    let start = text.find('{').context("compaction response contained no JSON object")?;
+    let end = text.rfind('}').context("compaction response contained incomplete JSON")?;
+    serde_json::from_str(&text[start..=end]).context("parse compaction JSON")
+}
+
+async fn compact_context_if_needed(
+    graph: &std::sync::Arc<crate::memory_graph::MemoryGraph>,
+    embedder: &std::sync::Arc<crate::memory_graph::MemoryEmbedder>,
+    llm: &crate::llm::LlmClient,
+    llm_model: &str,
+    context: &str,
+) -> anyhow::Result<bool> {
+    let graph_for_read = graph.clone();
+    let context_for_read = context.to_string();
+    let trigger = compaction_trigger_chars();
+    let pending = tokio::task::spawn_blocking(move || {
+        graph_for_read.pending_context_messages(&context_for_read, trigger)
+    })
+    .await
+    .context("join Ladybug compaction scan")??;
+    let pending_chars: usize = pending.iter().map(|message| message.content.chars().count()).sum();
+    eprintln!(
+        "[memory:{context}] compaction scan: {} pending messages, {pending_chars}/{trigger} estimated characters",
+        pending.len()
+    );
+    if pending_chars < trigger || pending.len() < 4 {
+        return Ok(false);
+    }
+
+    let mut chunk = Vec::new();
+    let mut chunk_chars = 0usize;
+    for message in pending {
+        let chars = message.content.chars().count();
+        if !chunk.is_empty() && chunk_chars.saturating_add(chars) > COMPACTION_CHUNK_MAX_CHARS {
+            break;
+        }
+        chunk_chars = chunk_chars.saturating_add(chars);
+        chunk.push(message);
+    }
+    if let Some(boundary) = chunk.iter().rposition(|message| {
+        message.role == "assistant" && message.content.contains("!done")
+    }) {
+        chunk.truncate(boundary + 1);
+    }
+    if chunk.len() < 4 {
+        return Ok(false);
+    }
+
+    let transcript = chunk
+        .iter()
+        .map(|message| {
+            format!(
+                "[{} | {} | {}]\n{}",
+                message.id, message.speaker_name, message.role, message.content
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let prompt = format!(
+        "Compact this immutable conversation segment. Return one JSON object and no prose:\n\
+         {{\"summary\":\"self-contained episode summary preserving decisions, rationale, preferences, technical discoveries, commitments, relationships, and unfinished work\",\
+         \"memories\":[{{\"content\":\"concise source-backed index memory\",\"memory_type\":\"decision|preference|finding|commitment|relationship|work_state\",\"confidence\":0.0}}]}}\n\n\
+         Extract only durable knowledge. Memories are pointers and may rely on their linked source messages for detail. Do not invent facts.\n\n{transcript}"
+    );
+    let output = llm
+        .generate(vec![
+            crate::llm::ChatMessage::system(
+                "You create immutable episodic-memory checkpoints. Preserve provenance and return strict JSON.",
+            ),
+            crate::llm::ChatMessage::user(prompt),
+        ])
+        .await?;
+    let extraction = parse_compaction_output(&output.text)?;
+    anyhow::ensure!(!extraction.summary.trim().is_empty(), "compaction summary was empty");
+
+    let source_message_ids: Vec<String> = chunk.iter().map(|message| message.id.clone()).collect();
+    let created_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let episode = crate::memory_graph::EpisodeDraft {
+        context_id: context.to_string(),
+        summary: extraction.summary,
+        source_message_ids: source_message_ids.clone(),
+        model: llm_model.to_string(),
+        created_at_ms,
+    };
+    let graph_for_episode = graph.clone();
+    tokio::task::spawn_blocking(move || graph_for_episode.create_episode(&episode))
+        .await
+        .context("join Ladybug episode write")??;
+
+    let memories: Vec<_> = extraction
+        .memories
+        .into_iter()
+        .filter(|memory| !memory.content.trim().is_empty())
+        .take(16)
+        .collect();
+    if memories.is_empty() {
+        return Ok(true);
+    }
+    let contents: Vec<String> = memories.iter().map(|memory| memory.content.clone()).collect();
+    let embedder = embedder.clone();
+    let embeddings = tokio::task::spawn_blocking(move || embedder.embed_passages(&contents))
+        .await
+        .context("join FastEmbed compaction batch")??;
+    let run_id = format!("extraction:{}", uuid::Uuid::new_v4());
+    for (memory, embedding) in memories.into_iter().zip(embeddings) {
+        let draft = crate::memory_graph::MemoryDraft {
+            content: memory.content,
+            memory_type: memory.memory_type,
+            confidence: memory.confidence.clamp(0.0, 1.0),
+            embedding,
+            origin_context_ids: vec![context.to_string()],
+            source_message_ids: source_message_ids.clone(),
+            extraction_run_id: run_id.clone(),
+            extraction_model: llm_model.to_string(),
+            created_at_ms,
+        };
+        let graph = graph.clone();
+        tokio::task::spawn_blocking(move || graph.create_index_memory(&draft))
+            .await
+            .context("join Ladybug memory write")??;
+    }
+    eprintln!(
+        "[memory:{context}] immutable episode checkpointed: {} source messages",
+        source_message_ids.len()
+    );
+    Ok(true)
+}
 
 /// Write a llm_takeover working set's program back into the live program using
 /// per-function copy-on-write merge (issue #9), falling back to a full
@@ -227,9 +499,7 @@ pub async fn ask(
         // Ensure system prompt exists (brief mutable borrow)
         {
             let conv = session.meta.conversations.get_or_create("main");
-            if conv.messages.is_empty() {
-                conv.push_system(system_prompt);
-            }
+            conv.set_primary_system(system_prompt);
         }
         // Build context string (immutable borrows)
         let (plan_ctx, needs_plan) = build_plan_context(&session.meta.plan);
@@ -454,9 +724,7 @@ pub async fn ask_stream(
             let (context, msgs) = {
                 let mut meta = config_clone.meta.lock().unwrap();
                 let conv = meta.conversations.get_or_create("main");
-                if conv.messages.is_empty() {
-                    conv.push_system(system_prompt);
-                }
+                conv.set_primary_system(system_prompt);
                 let (plan_ctx, needs_plan) = build_plan_context(&meta.plan);
                 let plan_hint = if needs_plan {
                     "\n\nYour previous plan is completed (or none exists). Create a new plan with !plan set for this task before writing code. You can update it anytime with !plan set / !plan done N."
@@ -773,11 +1041,46 @@ pub async fn ask_stream(
 // handle_llm_takeover — Telegram/agent LLM handler
 // ═══════════════════════════════════════════════════════════════════════
 
+const DEFAULT_TAKEOVER_ITERATION_BUDGET: usize = 10;
+const MAX_TAKEOVER_ITERATION_BUDGET: usize = 50;
+
+pub(super) fn takeover_iteration_budget(text: &str) -> Option<usize> {
+    let start = text.find("<iteration_budget>")? + "<iteration_budget>".len();
+    let end = text[start..].find("</iteration_budget>")? + start;
+    text[start..end].trim().parse().ok()
+}
+
+fn visible_takeover_prose(text: &str) -> String {
+    let mut clean = text.to_string();
+    while let Some(start) = clean.find("<think>") {
+        if let Some(end) = clean[start..].find("</think>") {
+            clean.replace_range(start..start + end + 8, "");
+        } else {
+            break;
+        }
+    }
+    clean = clean.replace("</think>", "");
+    while let Some(start) = clean.find("<iteration_budget>") {
+        let Some(end) = clean[start..].find("</iteration_budget>") else {
+            break;
+        };
+        clean.replace_range(start..start + end + "</iteration_budget>".len(), "");
+    }
+    if let Some(start) = clean.find("<code>") {
+        clean.truncate(start);
+    }
+    clean.trim().trim_end_matches("!done").trim().to_string()
+}
+
 /// Handle a `llm_takeover` IO request: call LLM with per-context conversation
 /// history, return text reply immediately, execute any code in background.
 pub async fn handle_llm_takeover(
     context: String,
     message: String,
+    attachment: Option<crate::attachment::Attachment>,
+    source_metadata: Option<String>,
+    memory_graph: std::sync::Arc<crate::memory_graph::MemoryGraph>,
+    memory_embedder: std::sync::Arc<crate::memory_graph::MemoryEmbedder>,
     reply_fn: Option<String>,
     reply_arg: Option<String>,
     meta: crate::session::SharedMeta,
@@ -799,8 +1102,68 @@ pub async fn handle_llm_takeover(
     save_notify: Option<tokio::sync::mpsc::Sender<()>>,
     log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 ) -> anyhow::Result<String> {
+    let context_lock = takeover_context_lock(&context);
+    let _context_guard = context_lock.lock().await;
+    let (speaker_id, source_content) = takeover_principal(&context, &message);
+    let graph_message_id = persist_takeover_message(
+        &memory_graph,
+        &context,
+        speaker_id.clone(),
+        "user",
+        source_content.clone(),
+        source_metadata.as_deref(),
+    )
+    .await?;
+    if let Some(source_attachment) = attachment.clone() {
+        let graph = memory_graph.clone();
+        let message_id = graph_message_id.clone();
+        let platform_ref = source_metadata
+            .as_deref()
+            .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+            .and_then(|metadata| metadata.get("attachment_ref").and_then(|value| value.as_str()).map(str::to_string));
+        tokio::task::spawn_blocking(move || {
+            graph.ingest_attachment(&message_id, &source_attachment, platform_ref.as_deref())
+        })
+        .await
+        .context("join Ladybug attachment write")??;
+    }
     let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
-
+    let compaction = if compaction_attempt_due(&context) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            compact_context_if_needed(
+                &memory_graph,
+                &memory_embedder,
+                &llm,
+                llm_model,
+                &context,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("checkpoint generation timed out after 30 seconds"))
+        .and_then(|result| result)
+    } else {
+        Ok(false)
+    };
+    if let Err(error) = compaction {
+        eprintln!("[memory:{context}] compaction deferred: {error:#}");
+        write_log_file(
+            &log_file,
+            "memory-compaction-error",
+            &format!("[{context}] {error:#}"),
+        )
+        .await;
+    }
+    let recall_principal = speaker_id.clone();
+    let recall_query = source_content.clone();
+    let recall_graph = memory_graph.clone();
+    let recall_embedder = memory_embedder.clone();
+    let recalled = tokio::task::spawn_blocking(move || {
+        let embedding = recall_embedder.embed_query(&recall_query)?;
+        recall_graph.recall_authorized_hybrid(&recall_principal, &recall_query, &embedding, 5)
+    })
+    .await
+    .context("join Ladybug recall")??;
     // Get or create conversation, update callback info, build messages
     //
     // Use the actual permission config + access level so the program summary
@@ -826,7 +1189,7 @@ pub async fn handle_llm_takeover(
             access_level, &effective_model,
         )
     };
-    let messages = {
+    let mut messages = {
         let mut meta_guard = meta.lock().unwrap();
         let conv = meta_guard.conversations.get_or_create(&context);
 
@@ -838,10 +1201,9 @@ pub async fn handle_llm_takeover(
             conv.reply_arg = reply_arg.clone();
         }
 
-        // Add system prompt if this is a new conversation
-        if conv.messages.is_empty() {
-            let system = conv.system_prompt.clone().unwrap_or_else(|| {
-                if perm_model_override.is_some() {
+        // Refresh the runtime prompt after upgrades while preserving chat history.
+        let system = conv.system_prompt.clone().unwrap_or_else(|| {
+            if perm_model_override.is_some() {
                     // Sandboxed (non-admin) context, e.g. a family member: use the
                     // persona instead of the Adapsis-programmer framing. The
                     // persona owns the identity/tone/safety; we still tell it how
@@ -855,6 +1217,11 @@ pub async fn handle_llm_takeover(
                          ## So führst du Aktionen aus (technisch)\n\
                          Wenn du etwas am Computer tun musst, rufe eine vorhandene Funktion in einem \
                          <code>…</code>-Block auf, z. B. <code>!eval Wolfi.install_app(\"firefox\")</code>. \
+                         Kündige keine spätere Aktion nur im Text an: führe sie im selben Durchlauf im \
+                         <code>-Block aus. Beende eine reine Textantwort immer mit <code>!done</code>. \
+                         Beginne deine erste Antwort auf jede Nutzernachricht mit einer realistischen \
+                         Schätzung <iteration_budget>N</iteration_budget>: 1 für eine reine Antwort, \
+                         mehr für Aufgaben mit mehreren Aktionsschritten. Maximum ist 50. \
                          Der Nutzer sieht NUR den Text VOR dem ersten <code>-Block — schreibe also zuerst \
                          deine Antwort an Renate, dann den Code. Erfinde keine Funktionen; nutze nur die unten gelisteten. \
                          Lies bei Unklarheit den Quelltext mit ?source Modul.funktion.\n\n\
@@ -864,7 +1231,7 @@ pub async fn handle_llm_takeover(
                         mesh,
                         program_summary,
                     )
-                } else {
+            } else {
                     let available_models = permission_config.model_names();
                     let models_line = if available_models.is_empty() {
                         String::new()
@@ -889,7 +1256,12 @@ pub async fn handle_llm_takeover(
                          for pure code writing tasks (adding modules, functions, tests). \
                          IMPORTANT: The user only sees text BEFORE the first <code> block. \
                          Text after <code> blocks is discarded. Put your response to the user first, \
-                         then the code. Do not narrate what the code does after the <code> block. \
+                          then the code. Do not narrate what the code does after the <code> block. \
+                          Never promise an action for a later turn without executing it now. Every \
+                          completed prose-only response must end with <code>!done</code>. \
+                          Start your first response to each user message with a realistic action-round \
+                          estimate: <iteration_budget>N</iteration_budget>. Use 1 for a prose-only answer \
+                          and more for multi-step work. The maximum is 50. \
                          When you need to understand existing code, use ?source Module.function. \
                          Don't guess how things work — read the source. \
                          DESIGN PRINCIPLES: \
@@ -907,21 +1279,56 @@ pub async fn handle_llm_takeover(
                         mesh,
                         program_summary,
                     )
-                }
-            });
-            conv.push_system(system);
-        }
+            }
+        });
+        conv.set_primary_system(system);
 
         // Add user message
-        conv.push_user(&message);
+        if let Some(attachment) = attachment {
+            conv.push_user_with_attachment(&message, attachment);
+        } else {
+            conv.push_user(&message);
+        }
 
         // Build LLM messages from conversation history
-        conv.messages.iter().map(|m| match m.role.as_str() {
-            "system" => crate::llm::ChatMessage::system(m.content.clone()),
-            "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-            _ => crate::llm::ChatMessage::user(m.content.clone()),
-        }).collect::<Vec<_>>()
+        conv.to_llm_messages_bounded(
+            TAKEOVER_CONTEXT_MAX_MESSAGES,
+            TAKEOVER_CONTEXT_MAX_CHARS,
+            TAKEOVER_MESSAGE_MAX_CHARS,
+        )
     }; // meta_guard dropped here
+
+    let episode_graph = memory_graph.clone();
+    let episode_context = context.clone();
+    let episode_summaries = tokio::task::spawn_blocking(move || {
+        episode_graph.episode_summaries(&episode_context, 6)
+    })
+    .await
+    .context("join Ladybug episode recall")??;
+
+    if !episode_summaries.is_empty() {
+        messages.insert(
+            usize::from(!messages.is_empty()),
+            crate::llm::ChatMessage::system(format!(
+                "Immutable summaries of older episodes in this context:\n- {}",
+                episode_summaries.join("\n- ")
+            )),
+        );
+    }
+
+    if !recalled.is_empty() {
+        let recall = recalled
+            .iter()
+            .map(|memory| format!("- [{} | {}] {}", memory.id, memory.citation, memory.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        messages.insert(
+            usize::from(!messages.is_empty()),
+            crate::llm::ChatMessage::system(format!(
+                "Authorized long-term memory recall. Treat these as source-backed pointers and inspect provenance before relying on uncertain details:\n{recall}"
+            )),
+        );
+    }
 
     eprintln!("[llm_takeover:{context}] calling LLM with {} messages", messages.len());
     write_log_file(&log_file, "user", &format!("[{context}] {message}")).await;
@@ -984,12 +1391,18 @@ pub async fn handle_llm_takeover(
         })
     };
 
-    // Iterative loop: call LLM → execute_code → feed results back (max 10 iterations)
+    // Iterative loop: the model estimates its action budget on the first response;
+    // a hard ceiling remains to contain runaway or no-progress loops.
     let mut llm_messages = messages;
     let mut reply_text = String::new();
+    let mut final_summary_pending = false;
+    let mut iteration_budget = DEFAULT_TAKEOVER_ITERATION_BUDGET;
 
-    for iteration in 0..10 {
-        eprintln!("[llm_takeover:{context}] iteration {}/{}", iteration + 1, 10);
+    for iteration in 0..MAX_TAKEOVER_ITERATION_BUDGET {
+        if iteration >= iteration_budget {
+            break;
+        }
+        eprintln!("[llm_takeover:{context}] iteration {}/{}", iteration + 1, iteration_budget);
 
         let output = match llm.generate(llm_messages.clone()).await {
             Ok(o) => o,
@@ -1011,6 +1424,35 @@ pub async fn handle_llm_takeover(
             }
         };
 
+        if output.text.trim().is_empty() && output.code.trim().is_empty() {
+            let error = "model returned an empty response";
+            eprintln!("[llm_takeover:{context}] {error}");
+            write_log_file(&log_file, "llm-error", &format!("[{context}] {error}")).await;
+            if reply_text.is_empty() {
+                reply_text = "Entschuldigung — das Modell hat gerade leer geantwortet. Die Nachricht und der vollständige Verlauf sind gespeichert; bitte versuch es noch einmal.".to_string();
+            }
+            break;
+        }
+
+        persist_takeover_message(
+            &memory_graph,
+            &context,
+            "agent:kronk".to_string(),
+            "assistant",
+            output.text.clone(),
+            None,
+        )
+        .await?;
+
+        if iteration == 0 {
+            if let Some(estimate) = takeover_iteration_budget(&output.text) {
+                iteration_budget = estimate.clamp(1, MAX_TAKEOVER_ITERATION_BUDGET);
+                eprintln!("[llm_takeover:{context}] model estimated {iteration_budget} iteration(s)");
+            } else {
+                eprintln!("[llm_takeover:{context}] no iteration estimate; using default {iteration_budget}");
+            }
+        }
+
         // Store assistant response in conversation
         {
             let mut meta_guard = meta.lock().unwrap();
@@ -1022,24 +1464,7 @@ pub async fn handle_llm_takeover(
         llm_messages.push(crate::llm::ChatMessage::assistant(&output.text));
 
         // Extract text reply (prose without code/commands)
-        let prose = {
-            let mut clean = output.text.clone();
-            while let Some(s) = clean.find("<think>") {
-                if let Some(e) = clean[s..].find("</think>") {
-                    clean.replace_range(s..s + e + 8, "");
-                } else { break; }
-            }
-            // Strip orphan </think> tags (DeepSeek puts these without opening tag)
-            clean = clean.replace("</think>", "");
-            // Truncate at first <code> block
-            if let Some(s) = clean.find("<code>") {
-                clean.truncate(s);
-            }
-            // Strip !done — it's a command, not user-facing text.
-            // Can appear as the entire response or trailing after prose.
-            let trimmed = clean.trim().trim_end_matches("!done").trim().to_string();
-            trimmed
-        };
+        let prose = visible_takeover_prose(&output.text);
 
         if !prose.is_empty() {
             reply_text = prose.clone();
@@ -1050,10 +1475,24 @@ pub async fn handle_llm_takeover(
 
         let code = output.code.trim().to_string();
 
-        // If !done or no code, stop iterating
-        if code == "!done" || code.is_empty() {
+        if code == "!done" {
             eprintln!("[llm_takeover:{context}] done at iteration {}", iteration + 1);
             break;
+        }
+        if code.is_empty() {
+            let correction = "Your response contained no Adapsis operation. If you promised or need to do work, execute the next step now in a <code> block. If no action remains, end the response with <code>!done</code>. Do not defer work to a future turn.";
+            eprintln!("[llm_takeover:{context}] prose-only at iteration {}, requesting an operation or explicit completion", iteration + 1);
+            {
+                let mut meta_guard = meta.lock().unwrap();
+                if let Some(conv) = meta_guard.conversations.get_mut(&context) {
+                    conv.push_user(correction);
+                }
+            }
+            llm_messages.push(crate::llm::ChatMessage::user(correction.to_string()));
+            if iteration + 1 >= iteration_budget {
+                iteration_budget = (iteration_budget + 1).min(MAX_TAKEOVER_ITERATION_BUDGET);
+            }
+            continue;
         }
 
         // Check for !agent — spawn it and return prose (agent delivers callback later)
@@ -1113,7 +1552,7 @@ pub async fn handle_llm_takeover(
 
         eprintln!("[llm_takeover:{context}] code results: {}", feedback.join("; "));
 
-        let is_last_iteration = iteration == 9;
+        let is_last_iteration = iteration + 1 >= iteration_budget;
         let feedback_msg = if exec_result.has_errors {
             if is_last_iteration {
                 format!("Errors:\n{}\n\nThis is the last iteration. Tell the user where you got stuck and ask if they want you to continue.", feedback.join("\n"))
@@ -1135,6 +1574,7 @@ pub async fn handle_llm_takeover(
             }
         }
         llm_messages.push(crate::llm::ChatMessage::user(feedback_msg));
+        final_summary_pending = is_last_iteration;
 
         // Handle opencode restart if needed
         if exec_result.needs_opencode_restart {
@@ -1142,6 +1582,28 @@ pub async fn handle_llm_takeover(
             let exe = std::env::current_exe().unwrap_or_default();
             let args: Vec<String> = std::env::args().collect();
             let _ = exec::execvp(&exe, &args);
+        }
+    }
+
+    if final_summary_pending {
+        eprintln!("[llm_takeover:{context}] requesting final summary after action limit");
+        match llm.generate(llm_messages).await {
+            Ok(output) => {
+                let prose = visible_takeover_prose(&output.text);
+                if !prose.is_empty() {
+                    reply_text = prose;
+                }
+                {
+                    let mut meta_guard = meta.lock().unwrap();
+                    if let Some(conv) = meta_guard.conversations.get_mut(&context) {
+                        conv.push_assistant(&output.text);
+                    }
+                }
+                write_log_file(&log_file, "ai-text", &format!("[{context}] {}", output.text)).await;
+            }
+            Err(error) => {
+                eprintln!("[llm_takeover:{context}] final summary LLM error: {error}");
+            }
         }
     }
 

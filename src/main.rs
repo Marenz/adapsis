@@ -10,6 +10,7 @@ pub mod intern;
 mod permissions;
 pub mod library;
 mod llm;
+mod memory_graph;
 mod orchestrator;
 mod parser;
 mod prompt;
@@ -21,7 +22,7 @@ mod typeck;
 mod validator;
 mod vm;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -36,6 +37,113 @@ async fn snapshot_from_tiers(
         meta: meta.lock().unwrap().clone(),
         sandbox: None,
     }
+}
+
+fn migrate_conversations_to_memory(
+    session_path: &std::path::Path,
+    database_path: &std::path::Path,
+) -> Result<()> {
+    let session = session::Session::load(session_path)
+        .with_context(|| format!("load session {}", session_path.display()))?;
+    let graph = memory_graph::MemoryGraph::open(database_path)
+        .with_context(|| format!("open memory graph {}", database_path.display()))?;
+    let modified_at_ms = std::fs::metadata(session_path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_millis().min(i64::MAX as u128) as i64);
+    let mut contexts: Vec<_> = session.meta.conversations.contexts.iter().collect();
+    contexts.sort_by_key(|(context, _)| *context);
+    let total_messages: usize = contexts
+        .iter()
+        .map(|(_, conversation)| conversation.messages.len())
+        .sum();
+    let mut imported = 0usize;
+
+    for (context, conversation) in contexts {
+        for (index, message) in conversation.messages.iter().enumerate() {
+            let graph_message_id = format!("legacy:{context}:{index}");
+            if graph.has_message(&graph_message_id)? {
+                imported += 1;
+                continue;
+            }
+            let (speaker_id, speaker_name, content) = match message.role.as_str() {
+                "assistant" => (
+                    "agent:kronk".to_string(),
+                    "Kronk".to_string(),
+                    message.content.clone(),
+                ),
+                "system" => (
+                    "system:adapsis".to_string(),
+                    "Adapsis".to_string(),
+                    message.content.clone(),
+                ),
+                _ => legacy_user_source(context, &message.content),
+            };
+            let age_from_end = conversation.messages.len().saturating_sub(index) as i64;
+            graph.ingest_message(
+                &memory_graph::SourceMessage {
+                    id: graph_message_id,
+                    platform_message_id: None,
+                    context_id: context.clone(),
+                    context_kind: if context.starts_with("telegram:group:") {
+                        "telegram_group".to_string()
+                    } else if context.starts_with("telegram:") {
+                        "telegram_direct".to_string()
+                    } else {
+                        "internal".to_string()
+                    },
+                    speaker_id,
+                    speaker_name,
+                    role: message.role.clone(),
+                    content,
+                    created_at_ms: modified_at_ms.saturating_sub(age_from_end * 1_000),
+                },
+                "telegram:user:1815217",
+            )?;
+            imported += 1;
+        }
+    }
+
+    println!(
+        "Imported {imported}/{total_messages} messages from {} into {}",
+        session_path.display(),
+        database_path.display()
+    );
+    Ok(())
+}
+
+fn legacy_user_source(context: &str, content: &str) -> (String, String, String) {
+    if let Some(rest) = content.strip_prefix("[user:") {
+        if let Some((id, text)) = rest.split_once("] ") {
+            let name = match id {
+                "1815217" => "Marenz",
+                "520125610" => "Sven",
+                "47128798" => "Kata",
+                _ => id,
+            };
+            return (
+                format!("telegram:user:{id}"),
+                name.to_string(),
+                text.to_string(),
+            );
+        }
+    }
+    if let Some(id) = context
+        .strip_prefix("telegram:user:")
+        .or_else(|| context.strip_prefix("telegram:"))
+    {
+        return (
+            format!("telegram:user:{id}"),
+            id.to_string(),
+            content.to_string(),
+        );
+    }
+    (
+        "system:runtime".to_string(),
+        "Adapsis runtime".to_string(),
+        content.to_string(),
+    )
 }
 
 #[derive(Parser)]
@@ -303,6 +411,34 @@ enum Command {
         #[arg(short, long, default_value = "http://127.0.0.1:3001")]
         api: String,
     },
+
+    /// Import persisted JSON conversations into the Ladybug memory graph
+    MemoryMigrate {
+        /// Session JSON file to import
+        session: std::path::PathBuf,
+
+        /// Ladybug database path
+        #[arg(long, env = "ADAPSIS_MEMORY_DB")]
+        database: Option<std::path::PathBuf>,
+    },
+
+    /// Show Ladybug memory graph statistics and episode checkpoints
+    MemoryStats {
+        /// Ladybug database path
+        #[arg(long, env = "ADAPSIS_MEMORY_DB")]
+        database: Option<std::path::PathBuf>,
+
+        /// Also inspect the uncheckpointed prefix for this context
+        #[arg(long)]
+        context: Option<String>,
+    },
+
+    /// Recover a Ladybug WAL to its last checksum-valid transaction and checkpoint it
+    MemoryRecover {
+        /// Ladybug database path
+        #[arg(long, env = "ADAPSIS_MEMORY_DB")]
+        database: Option<std::path::PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -320,6 +456,40 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::MemoryRecover { database } => {
+            let database = database.unwrap_or_else(|| {
+                dirs::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("adapsis")
+                    .join("memory.lbug")
+            });
+            memory_graph::MemoryGraph::recover(&database)?;
+            println!("Recovered and checkpointed {}", database.display());
+        }
+        Command::MemoryStats { database, context } => {
+            let database = database.unwrap_or_else(|| {
+                dirs::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("adapsis")
+                    .join("memory.lbug")
+            });
+            let graph = memory_graph::MemoryGraph::open(&database)?;
+            print!("{}", graph.describe()?);
+            if let Some(context) = context {
+                let pending = graph.pending_context_messages(&context, usize::MAX)?;
+                let characters: usize = pending.iter().map(|message| message.content.chars().count()).sum();
+                println!("Pending {context}: {} messages, {characters} characters", pending.len());
+            }
+        }
+        Command::MemoryMigrate { session, database } => {
+            let database = database.unwrap_or_else(|| {
+                dirs::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("adapsis")
+                    .join("memory.lbug")
+            });
+            migrate_conversations_to_memory(&session, &database)?;
+        }
         Command::Run {
             task,
             url,
@@ -961,6 +1131,23 @@ async fn main() -> Result<()> {
             let shared_meta: crate::session::SharedMeta =
                 std::sync::Arc::new(std::sync::Mutex::new(sess.meta.clone()));
 
+            let memory_path = std::env::var_os("ADAPSIS_MEMORY_DB")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    dirs::config_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join("adapsis")
+                        .join("memory.lbug")
+                });
+            let memory_graph = std::sync::Arc::new(
+                memory_graph::MemoryGraph::open(&memory_path)
+                    .with_context(|| format!("open memory graph at {}", memory_path.display()))?,
+            );
+            let memory_embedder = std::sync::Arc::new(
+                memory_graph::MemoryEmbedder::new().context("initialize memory embeddings")?,
+            );
+            eprintln!("Ladybug memory graph: {}", memory_path.display());
+
             // Set up coroutine runtime for async IO
             let (mut runtime, mut io_rx) = coroutine::Runtime::new();
             runtime.llm_url = url.clone();
@@ -998,6 +1185,8 @@ async fn main() -> Result<()> {
             let save_notify_for_spawn = save_notify_shared.clone();
             let ai_log_shared: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>>> = std::sync::Arc::new(std::sync::RwLock::new(None));
             let ai_log_for_spawn = ai_log_shared.clone();
+            let memory_graph_for_spawn = memory_graph.clone();
+            let memory_embedder_for_spawn = memory_embedder.clone();
             let access_level_parsed: permissions::AccessLevel = access_level.parse().expect("invalid --access-level");
             let perm_config = if let Some(ref path) = permissions_file {
                 permissions::PermissionConfig::load(std::path::Path::new(path)).expect("failed to load permissions file")
@@ -1188,7 +1377,7 @@ async fn main() -> Result<()> {
                         coroutine::IoRequest::SourceList { reply } => {
                             let _ = reply.send(Ok(coroutine::format_source_list(&source_registry)));
                         }
-                        coroutine::IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, permission_model, reply } => {
+                        coroutine::IoRequest::LlmTakeover { context, message, attachment, source_metadata, reply_fn, reply_arg, permission_model, reply } => {
                             // Set or clear permission_model on the conversation.
                             // This is per-message: admin messages clear any restriction
                             // that a non-admin may have set on a shared group context.
@@ -1214,10 +1403,12 @@ async fn main() -> Result<()> {
                             let pc = perm_config_for_spawn.clone();
                             let save_notify = save_notify_for_spawn.read().unwrap().clone();
                             let ai_log = ai_log_for_spawn.read().unwrap().clone();
+                            let memory_graph = memory_graph_for_spawn.clone();
+                            let memory_embedder = memory_embedder_for_spawn.clone();
 
                             tokio::spawn(async move {
                                 let result = crate::api::handle_llm_takeover(
-                                    context, message, reply_fn, reply_arg,
+                                    context, message, attachment, source_metadata, memory_graph, memory_embedder, reply_fn, reply_arg,
                                     meta, program, runtime,
                                     &llm_url, &llm_model, llm_key,
                                     io_sender, task_registry, snap_registry,
@@ -1225,6 +1416,13 @@ async fn main() -> Result<()> {
                                     al, pc,
                                     save_notify, ai_log,
                                 ).await;
+                                let _ = reply.send(result);
+                            });
+                        }
+                        coroutine::IoRequest::MemoryCypher { principal_id, query, reply } => {
+                            let graph = memory_graph_for_spawn.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let result = graph.authorized_cypher(&principal_id, &query);
                                 let _ = reply.send(result);
                             });
                         }
@@ -1821,6 +2019,8 @@ async fn main() -> Result<()> {
                     let _ = inject_sender.send(crate::coroutine::IoRequest::LlmTakeover {
                         context: "main".to_string(),
                         message: msg,
+                        attachment: None,
+                        source_metadata: None,
                         reply_fn: None,
                         reply_arg: None,
                         permission_model: None,

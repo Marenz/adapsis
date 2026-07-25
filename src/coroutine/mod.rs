@@ -255,12 +255,20 @@ pub enum IoRequest {
     LlmTakeover {
         context: String,
         message: String,
+        attachment: Option<crate::attachment::Attachment>,
+        source_metadata: Option<String>,
         reply_fn: Option<String>,
         reply_arg: Option<String>,
         /// Optional permission model override — when set, the conversation uses
         /// this model's permissions instead of the active LLM model's.  Used for
         /// non-admin Telegram users who get a restricted view.
         permission_model: Option<String>,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// Execute a read-only, memory-anchored Cypher traversal after ACL filtering.
+    MemoryCypher {
+        principal_id: String,
+        query: String,
         reply: oneshot::Sender<Result<String>>,
     },
     /// Set the active LLM model at runtime.
@@ -717,6 +725,11 @@ impl Runtime {
             }
             IoRequest::LlmTakeover { .. } => {
                 // LlmTakeover is handled at a higher level (main.rs IO loop)
+            }
+            IoRequest::MemoryCypher { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "memory_cypher: not available in this runtime context"
+                )));
             }
             IoRequest::ConversationNotify { reply, .. } => {
                 // ConversationNotify is handled at a higher level (main.rs IO loop)
@@ -2613,15 +2626,41 @@ impl CoroutineHandle {
                 return Ok(Value::string(result));
             }
             "llm_takeover" => {
-                let context = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String[, permission_model:String]])") };
-                let message = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String[, permission_model:String]])") };
+                let context = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String[, permission_model:String[, attachment:Attachment]]])") };
+                let message = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_takeover expects (context:String, message:String[, reply_fn:String, reply_arg:String[, permission_model:String[, attachment:Attachment]]])") };
                 let reply_fn = args.get(2).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
                 let reply_arg = args.get(3).and_then(|v| match v { Value::String(s) => Some(s.as_ref().clone()), _ => None });
                 let permission_model = args.get(4).and_then(|v| match v { Value::String(s) => { let s = s.as_ref().clone(); if s.is_empty() { None } else { Some(s) } }, _ => None });
+                let attachment = args.get(5).and_then(|v| match v { Value::Attachment(att) => Some(att.clone()), _ => None });
+                let source_metadata = match args.get(5) {
+                    Some(Value::String(value)) if !value.is_empty() => Some(value.as_ref().clone()),
+                    Some(Value::Attachment(_)) => args.get(6).and_then(|value| match value {
+                        Value::String(value) if !value.is_empty() => Some(value.as_ref().clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(
                     WaitReason::LlmTakeover(context.clone()),
-                    IoRequest::LlmTakeover { context, message, reply_fn, reply_arg, permission_model, reply: tx },
+                    IoRequest::LlmTakeover { context, message, attachment, source_metadata, reply_fn, reply_arg, permission_model, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::string(result));
+            }
+            "memory_cypher" => {
+                let principal_id = match args.first() {
+                    Some(Value::String(value)) => value.as_ref().clone(),
+                    _ => bail!("memory_cypher expects (principal_id:String, query:String)"),
+                };
+                let query = match args.get(1) {
+                    Some(Value::String(value)) => value.as_ref().clone(),
+                    _ => bail!("memory_cypher expects (principal_id:String, query:String)"),
+                };
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::Running,
+                    IoRequest::MemoryCypher { principal_id, query, reply: tx },
                     rx,
                 )?;
                 return Ok(Value::string(result));

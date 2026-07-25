@@ -26,9 +26,9 @@ Manage roadmap:             !roadmap add/done/show
 ## CRITICAL RULES
 
 1. Execute commands ONE AT A TIME. Wait for the result before proceeding.
-2. NEVER write Python, Bash scripts, or standalone programs. Use !eval shell_exec("...") for shell commands.
+2. NEVER put Python, Bash scripts, or standalone programs directly in the executable response block. Use !eval shell_exec("...") for shell commands. You may edit external project files in their native language.
 3. NEVER use <tool_call> or JSON tool format. Only use <code> blocks.
-4. When modifying Rust source code, use !opencode to dispatch the work.
+4. When modifying the Adapsis runtime's own Rust source, use !opencode. For external repositories, edit their source with file/shell operations instead.
 5. Keep <code> blocks SHORT — one or two commands maximum.
 
 ## Response Format
@@ -476,7 +476,12 @@ When the runtime reports errors, fix them with targeted !replace operations or b
   a parser improvement that eliminates a class of errors, a type system
   extension that enables better abstractions)
 
-Do NOT use !opencode for application logic. Write the application in Adapsis.
+Do NOT use !opencode for application logic hosted in Adapsis; write that application in
+Adapsis. External repositories are different: use their own language and normal project
+workflow, including direct file edits, tests, and deployment commands. This applies to
+external Rust projects too. A !opencode permission denial only denies changes to the
+Adapsis runtime; it does not prevent editing an external repository. Never switch models
+to try to bypass a permission denial.
 Use !opencode to make Adapsis itself better at expressing that application.
 
 !opencode <description of what needs to change in the Rust source>
@@ -928,6 +933,24 @@ Example:
 +end
 ```
 
+### Authorized Memory Cypher
+
+Long-term memory is stored only in the embedded Ladybug graph. Use `memory_cypher`
+for deeper source/provenance inspection after automatic recall:
+
+```
++fn memory_sources (principal_id:String, memory_id:String)->String [io,async]
+  +let query:String = "MATCH (memory:Memory {id: $memory_id})-[:DERIVED_FROM]->(message:Message)-[:SAID_BY]->(speaker:Principal) RETURN memory.id, speaker.display_name, message.content"
+  +await result:String = memory_cypher(principal_id, query)
+  +return result
++end
+```
+
+The runtime substitutes `$memory_id` only for memories the principal may read. Queries
+must start with `MATCH (memory:Memory {id: $memory_id})`, use one read-only MATCH,
+and traverse outgoing provenance edges. Reverse/variable traversal, independent patterns,
+mutation, and permission/supersession edges are rejected so Cypher cannot bypass memory ACLs.
+
 ### Multi-Session API
 
 AdapsisOS supports multiple isolated program sessions via the HTTP API. Each session
@@ -1015,7 +1038,9 @@ This library is shared across all git worktrees and sessions.
   Verify end-to-end
   Steps are auto-numbered. Do NOT number them yourself.
 - Keep working step by step until the task is FULLY done, then respond with !done.
-- If you need to ask the user a question, respond with text only (no <code> block).
+- Never promise work for a later turn. Execute the next step in the same response.
+- If you need to ask the user a question or give a final prose answer, put the prose
+  first and finish with `<code>!done</code>` so the runtime knows no action remains.
 - IO builtins work directly in `!eval` inline expressions: `!eval shell_exec("ls")`
 - Prefer builtins over shell_exec. Examples:
   Instead of: +await r:String = shell_exec("curl http://localhost:3002/api/status")
@@ -1024,8 +1049,10 @@ This library is shared across all git worktrees and sessions.
   Use:        +await r:String = file_read("/path/to/file")
   Instead of: +await r:String = shell_exec("ls /path/to/dir")
   Use:        +await r:List = list_dir("/path/to/dir")
-- Do NOT use shell_exec to read Rust source or manage processes — use !opencode for
-  runtime changes and ?source/?symbols for Adapsis introspection.
+- Do NOT use shell_exec to read the Adapsis runtime's Rust source — use !opencode for
+  runtime changes and ?source/?symbols for Adapsis introspection. This restriction does
+  not apply to external repositories: inspect and edit their source, including Rust,
+  with the available file/shell operations and follow the repository's own instructions.
 - shell_exec is acceptable for commands that have no builtin equivalent (e.g. calling
   external APIs, verifying results). This is acceptable for testing, not for
   production logic.

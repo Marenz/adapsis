@@ -30,6 +30,17 @@ fn unwrap_string(v: Value) -> String {
 }
 
 #[test]
+fn memory_cypher_requires_principal_and_query_strings() {
+    let handle = CoroutineHandle::new_mock(vec![]);
+    assert!(handle.execute_await("memory_cypher", &[]).is_err());
+    assert!(
+        handle
+            .execute_await("memory_cypher", &[Value::string("telegram:user:1"), Value::Int(2)])
+            .is_err()
+    );
+}
+
+#[test]
 fn roadmap_list_empty() {
     let (handle, _rt) = setup_roadmap_runtime();
     let result = unwrap_string(handle.execute_await("roadmap_list", &[]).unwrap());

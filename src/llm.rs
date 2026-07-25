@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use base64::Engine;
 use reqwest::{Client, Response, StatusCode, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -91,28 +92,101 @@ pub enum ChatRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
-    pub content: String,
+    pub content: ChatContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatContent {
+    Text(String),
+    Parts(Vec<ChatContentPart>),
+}
+
+impl ChatContent {
+    fn debug_summary(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    ChatContentPart::Text { text } => text.clone(),
+                    ChatContentPart::ImageUrl { .. } => "[image]".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ChatImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatImageUrl {
+    pub url: String,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::System,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
         }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::User,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
+        }
+    }
+
+    pub fn user_with_attachments(
+        content: impl Into<String>,
+        attachments: &[crate::attachment::Attachment],
+    ) -> Self {
+        let content = content.into();
+        let mut parts = vec![ChatContentPart::Text { text: content.clone() }];
+        for attachment in attachments {
+            let extension = attachment.name.rsplit('.').next().unwrap_or_default();
+            let image_mime = if attachment.mime_type.starts_with("image/") {
+                attachment.mime_type.as_str()
+            } else {
+                match extension.to_ascii_lowercase().as_str() {
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "png" => "image/png",
+                    "gif" => "image/gif",
+                    "webp" => "image/webp",
+                    _ => continue,
+                }
+            };
+            if let Ok(bytes) = attachment.bytes() {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                parts.push(ChatContentPart::ImageUrl {
+                    image_url: ChatImageUrl {
+                        url: format!("data:{image_mime};base64,{encoded}"),
+                    },
+                });
+            }
+        }
+        if parts.len() == 1 {
+            Self::user(content)
+        } else {
+            Self {
+                role: ChatRole::User,
+                content: ChatContent::Parts(parts),
+            }
         }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::Assistant,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
         }
     }
 
@@ -578,7 +652,8 @@ where
         info!("LLM request: {} messages, temp={}, max_tokens={}", messages.len(), self.temperature, self.max_tokens);
         for (i, msg) in messages.iter().enumerate() {
             let role = format!("{:?}", msg.role).to_lowercase();
-            debug!("[msg {i}] {role} ({} chars):\n{}", msg.content.len(), msg.content);
+            let content = msg.content.debug_summary();
+            debug!("[msg {i}] {role} ({} chars):\n{}", content.len(), content);
         }
 
         let request = LlmRequest {
@@ -1077,6 +1152,45 @@ fn strip_tags(text: &str, tag: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serializes_image_attachment_as_openai_content_parts() {
+        let attachment = crate::attachment::Attachment::from_bytes(
+            b"image bytes".to_vec(),
+            "image/jpeg",
+            "photo.jpg",
+        )
+        .unwrap();
+
+        let message = ChatMessage::user_with_attachments("What is this?", &[attachment]);
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(value["content"][0]["type"], "text");
+        assert_eq!(value["content"][0]["text"], "What is this?");
+        assert_eq!(value["content"][1]["type"], "image_url");
+        assert_eq!(
+            value["content"][1]["image_url"]["url"],
+            "data:image/jpeg;base64,aW1hZ2UgYnl0ZXM="
+        );
+    }
+
+    #[test]
+    fn recognizes_downloaded_image_by_extension_when_mime_is_generic() {
+        let attachment = crate::attachment::Attachment::from_bytes(
+            b"image bytes".to_vec(),
+            "application/octet-stream",
+            "photos/file_42.jpg",
+        )
+        .unwrap();
+
+        let message = ChatMessage::user_with_attachments("Describe it", &[attachment]);
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(
+            value["content"][1]["image_url"]["url"],
+            "data:image/jpeg;base64,aW1hZ2UgYnl0ZXM="
+        );
+    }
 
     #[test]
     fn parses_retry_after_seconds_header() {
