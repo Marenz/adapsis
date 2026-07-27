@@ -2,7 +2,6 @@
 +doc "Wolfi's capabilities on Renate's laptop: software management (via the bounded adapsis-pkg sudo wrapper), read-only system info, screenshots, and self-maintained memory notes. All shell access goes through the ADAPSIS_SHELL_POLICY allowlist. Long operations run in the background and report completion via conversation_notify."
 
 +shared apt_get:String = "sudo -n apt-get -y -o APT::Get::Assume-Yes=true"
-+shared notes_path:String = "/home/adapsis/.config/adapsis/persona-notes.md"
 +shared shot_helper:String = "sudo -n /usr/local/sbin/adapsis-shot"
 
 +fn install_app(context:String, name:String) -> String [io,async]
@@ -161,10 +160,15 @@
   +return "ok"
 +doc "Internal: capture the desktop via the adapsis-shot helper and deliver the image to the conversation."
 
++fn notes_path() -> String
+  +return concat(home_dir(), "/.config/adapsis/persona-notes.md")
++doc "Path to the persona notes file. MUST stay derived from home_dir(): the Rust side reads this exact file from $HOME (prompt.rs persona_notes_path), so a hardcoded home directory makes the writer and the reader disagree and every remembered note is lost."
+
 +fn remember(note:String) -> String [io,async]
-  +await existing:String = read_or_empty(notes_path)
+  +let path:String = notes_path()
+  +await existing:String = read_or_empty(path)
   +let updated:String = concat(existing, "- ", note, "\n")
-  +await _:String = write_file(notes_path, updated)
+  +await _:String = write_file(path, updated)
   +return concat("gemerkt: ", note)
 +doc "Append a short note about Renate to Wolfi's persistent memory (recalled in every future conversation). Do not store sensitive data like passwords."
 
@@ -177,7 +181,7 @@
 +doc "Read a file, or return empty string if it does not exist."
 
 +fn forget_all() -> String [io,async]
-  +await _:String = write_file(notes_path, "")
+  +await _:String = write_file(notes_path(), "")
   +return "Notizen geleert"
 +doc "Clear all of Wolfi's learned notes about Renate."
 
