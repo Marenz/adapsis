@@ -1422,6 +1422,82 @@ fn llm_takeover_parses_model_iteration_budget() {
     );
 }
 
+/// Identity must come from structured metadata, never from the message text.
+///
+/// Regression for the #38 item 4 fallout: `format_sender` began emitting
+/// `[user:47128798 Kata] …`, and the old prefix-parsing principal turned that
+/// into `telegram:user:47128798 Kata` — a second `Principal` for the same
+/// person, re-minted on every Telegram display-name change.
+#[test]
+fn takeover_principal_ignores_the_sender_prefix_format() {
+    use super::llm_handlers::takeover_principal;
+
+    let metadata = r#"{"speaker_id":"telegram:user:47128798","speaker_name":"Kata"}"#;
+
+    // Same speaker, three prefix formats, one identity.
+    for message in [
+        "[user:47128798] hi",
+        "[user:47128798 Kata] hi",
+        "[user:47128798 Kata Example] hi",
+    ] {
+        let _ = message; // the prefix must not be consulted at all
+        assert_eq!(
+            takeover_principal("telegram:group:-5134158198", Some(metadata)),
+            "telegram:user:47128798",
+        );
+    }
+
+    // A display-name change must not mint a new principal.
+    let renamed = r#"{"speaker_id":"telegram:user:47128798","speaker_name":"Kata Renamed"}"#;
+    assert_eq!(
+        takeover_principal("telegram:group:-5134158198", Some(renamed)),
+        takeover_principal("telegram:group:-5134158198", Some(metadata)),
+        "principal identity must not depend on the display name"
+    );
+}
+
+/// Without metadata, a group must not masquerade as a user. The old fallback
+/// stripped `telegram:` off `telegram:group:-100…` and produced the nonsense
+/// principal `telegram:user:group:-100…`.
+#[test]
+fn takeover_principal_falls_back_to_a_context_principal() {
+    use super::llm_handlers::takeover_principal;
+
+    assert_eq!(
+        takeover_principal("telegram:group:-5134158198", None),
+        "telegram:group:-5134158198"
+    );
+    assert_eq!(
+        takeover_principal("telegram:user:7179396338", None),
+        "telegram:user:7179396338"
+    );
+    assert_eq!(takeover_principal("telegram:1815217", None), "telegram:user:1815217");
+    assert_eq!(takeover_principal("main", None), "user:unknown");
+
+    // Present-but-empty and malformed metadata fall back rather than minting "".
+    assert_eq!(
+        takeover_principal("telegram:1815217", Some(r#"{"speaker_id":""}"#)),
+        "telegram:user:1815217"
+    );
+    assert_eq!(
+        takeover_principal("telegram:1815217", Some("not json")),
+        "telegram:user:1815217"
+    );
+}
+
+/// The prefix is still stripped from stored content and the recall query — it
+/// just no longer carries identity.
+#[test]
+fn strip_sender_prefix_cleans_stored_content() {
+    use super::llm_handlers::strip_sender_prefix;
+
+    assert_eq!(strip_sender_prefix("[user:42 Kata] hallo"), "hallo");
+    assert_eq!(strip_sender_prefix("[user:42] hallo"), "hallo");
+    assert_eq!(strip_sender_prefix("hallo"), "hallo");
+    // A bracket that isn't a sender prefix must survive intact.
+    assert_eq!(strip_sender_prefix("[user:oops no close"), "[user:oops no close");
+}
+
 /// Test: execute_code rejects +module on core modules for a restricted model.
 #[tokio::test]
 async fn execute_code_permission_blocks_core_module_write() {
