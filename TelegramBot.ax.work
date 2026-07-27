@@ -188,18 +188,30 @@
   +with payload="{\"message\":{\"text\":\"hello\"}}" -> expect ""
   +with payload="{\"message\":{}}" -> expect ""
 
++fn speaker_principal (payload:String)->String
+  +let user_id:Int = extract_user_id(payload)
+  +if user_id==0
+    +return ""
+  +return concat("telegram:user:", to_string(user_id))
++doc "The sender's stable Ladybug principal. This is the ONLY identity channel: the model-facing [user:...] prefix is prose and must never be parsed back into an identity, because its format changes whenever the display format changes."
+
++test speaker_principal
+  +with payload="{\"message\":{\"from\":{\"id\":456}}}" -> expect "telegram:user:456"
+  +with payload="{\"message\":{}}" -> expect ""
+
 +fn source_metadata (payload:String)->String
   +let message_id:String = to_string(json_get(payload, "message.message_id"))
   +let attachment_ref:String = extract_image_file_id(payload)
   +if attachment_ref==""
     +set attachment_ref = json_get(payload, "message.voice.file_id")
   +let speaker_name:String = extract_sender_name(payload)
+  +let speaker_id:String = speaker_principal(payload)
   +let created_at_ms:Int = to_int(to_string(json_get(payload, "message.date")))*1000
-  +return concat("{\"message_id\":\"", json_escape(message_id), "\",\"speaker_name\":\"", json_escape(speaker_name), "\",\"created_at_ms\":", to_string(created_at_ms), ",\"attachment_ref\":\"", json_escape(attachment_ref), "\"}")
-+doc "Preserve Telegram message identity, timestamp, and speaker display name for Ladybug provenance."
+  +return concat("{\"message_id\":\"", json_escape(message_id), "\",\"speaker_id\":\"", json_escape(speaker_id), "\",\"speaker_name\":\"", json_escape(speaker_name), "\",\"created_at_ms\":", to_string(created_at_ms), ",\"attachment_ref\":\"", json_escape(attachment_ref), "\"}")
++doc "Preserve Telegram message identity, timestamp, speaker principal and display name for Ladybug provenance. speaker_id is what the runtime resolves the principal from."
 
 +test source_metadata
-  +with payload="{\"message\":{\"message_id\":42,\"date\":1700000000,\"from\":{\"first_name\":\"Kata\",\"last_name\":\"Example\"}}}" -> expect "{\"message_id\":\"42\",\"speaker_name\":\"Kata Example\",\"created_at_ms\":1700000000000,\"attachment_ref\":\"\"}"
+  +with payload="{\"message\":{\"message_id\":42,\"date\":1700000000,\"from\":{\"id\":456,\"first_name\":\"Kata\",\"last_name\":\"Example\"}}}" -> expect "{\"message_id\":\"42\",\"speaker_id\":\"telegram:user:456\",\"speaker_name\":\"Kata Example\",\"created_at_ms\":1700000000000,\"attachment_ref\":\"\"}"
 
 +fn process_update (payload:String)->String [io,async]
   +let text:String = extract_text(payload)
