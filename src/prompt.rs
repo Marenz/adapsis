@@ -943,6 +943,55 @@ Example:
 +end
 ```
 
+### Explicit Memory
+
+There are two kinds of long-term memory and they behave differently.
+
+**Extracted memories** are inferences. Compaction writes them automatically from the
+conversation; each has a confidence below 1.0 and source citations. On every turn the
+runtime picks the five most relevant to the current message and injects them under
+"Authorized long-term memory recall". You never write these.
+
+**Canonical memories** are assertions — things somebody told you to remember. You write
+them with `memory_remember`. They carry confidence 1.0, are never re-extracted, are never
+overridden by an inference, and **all of them are injected on every turn**, in full,
+regardless of what the current message is about. That is the point: a standing instruction
+like "always answer in German" must hold on the turn that does not mention German.
+
+```
++fn note_preference (note:String)->String [io,async]
+  +await id:String = memory_remember(note)
+  +return id
++end
+```
+
+Use `memory_remember` when someone says "remember that…", "from now on…", "always…",
+or states a durable preference. Do NOT use it to take notes on the conversation — that
+happens automatically, and every canonical memory permanently costs prompt space in
+every future turn.
+
+The context and the speaker come from the current turn and are **not** arguments, so a
+note cannot be filed against a conversation you are not in. An optional second argument
+sets the scope: `"context"` (the default — this conversation only) or `"global"` (every
+conversation on this node). Prefer `"context"`; use `"global"` only for facts that are
+true everywhere, and say that you are doing it.
+
+`memory_forget(id)` soft-deletes one memory by the id shown in brackets before it. The
+node and its provenance survive; only its status changes. To correct a canonical memory,
+forget it and remember the replacement — do not remember a contradicting one and leave
+both in the prompt.
+
+```
++fn correct_memory (old_id:String, replacement:String)->String [io,async]
+  +await _:String = memory_forget(old_id)
+  +await id:String = memory_remember(replacement)
+  +return id
++end
+```
+
+You can only forget memories the current conversation is authorized to change. Forgetting
+anything else reports that nothing was forgotten rather than confirming the id exists.
+
 ### Authorized Memory Cypher
 
 Long-term memory is stored only in the embedded Ladybug graph. Use `memory_cypher`

@@ -271,6 +271,20 @@ pub enum IoRequest {
         query: String,
         reply: oneshot::Sender<Result<String>>,
     },
+    /// Record an explicitly asserted (canonical) memory for the turn's context.
+    MemoryRemember {
+        context_id: String,
+        principal_id: String,
+        content: String,
+        scope: crate::memory_graph::MemoryScope,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// Soft-delete a memory the turn's speaker is authorized to contribute to.
+    MemoryForget {
+        principal_id: String,
+        memory_id: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
     /// Set the active LLM model at runtime.
     SetLlmModel {
         name: String,
@@ -729,6 +743,16 @@ impl Runtime {
             IoRequest::MemoryCypher { reply, .. } => {
                 let _ = reply.send(Err(anyhow::anyhow!(
                     "memory_cypher: not available in this runtime context"
+                )));
+            }
+            IoRequest::MemoryRemember { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "memory_remember: not available in this runtime context"
+                )));
+            }
+            IoRequest::MemoryForget { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "memory_forget: not available in this runtime context"
                 )));
             }
             IoRequest::ConversationNotify { reply, .. } => {
@@ -2777,6 +2801,86 @@ impl CoroutineHandle {
                 let result = self.send_and_wait(
                     WaitReason::Running,
                     IoRequest::MemoryCypher { principal_id, query, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::string(result));
+            }
+            "memory_remember" => {
+                // Neither the context nor the principal is an argument, for the
+                // reason `memory_cypher` does not take one: a persona module had
+                // to be *handed* a scope and could be handed the wrong one, which
+                // is how a note about an unrelated codebase was filed as something
+                // learned about a family member (issue #42).
+                let turn = self.require_turn("memory_remember")?;
+                let content = match args.first() {
+                    Some(Value::String(value)) if !value.trim().is_empty() => {
+                        value.as_ref().clone()
+                    }
+                    Some(Value::String(_)) => {
+                        bail!("memory_remember(note:String[, scope:String]) — the note is empty")
+                    }
+                    _ => bail!(
+                        "memory_remember expects (note:String[, scope:String]). The context \
+                         and the speaker are bound to the current conversation and are not \
+                         arguments."
+                    ),
+                };
+                let scope = match args.get(1) {
+                    None => crate::memory_graph::MemoryScope::Context,
+                    Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+                        "context" | "" => crate::memory_graph::MemoryScope::Context,
+                        "global" => crate::memory_graph::MemoryScope::Global,
+                        other => bail!(
+                            "memory_remember scope must be \"context\" (this conversation only, \
+                             the default) or \"global\" (every conversation); got {other:?}"
+                        ),
+                    },
+                    Some(_) => bail!(
+                        "memory_remember scope must be a String: \"context\" or \"global\""
+                    ),
+                };
+                if args.len() > 2 {
+                    bail!(
+                        "memory_remember expects (note:String[, scope:String]) — at most two \
+                         arguments"
+                    );
+                }
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::Running,
+                    IoRequest::MemoryRemember {
+                        context_id: turn.context.clone(),
+                        principal_id: turn.principal.clone(),
+                        content,
+                        scope,
+                        reply: tx,
+                    },
+                    rx,
+                )?;
+                return Ok(Value::string(result));
+            }
+            "memory_forget" => {
+                let turn = self.require_turn("memory_forget")?;
+                let memory_id = match args.first() {
+                    Some(Value::String(value)) if !value.trim().is_empty() => {
+                        value.as_ref().clone()
+                    }
+                    _ => bail!(
+                        "memory_forget expects (memory_id:String) — the id shown in brackets \
+                         before a recalled or always-known memory, e.g. \"memory:8f0e…\"."
+                    ),
+                };
+                if args.len() > 1 {
+                    bail!("memory_forget expects (memory_id:String) — one argument");
+                }
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::Running,
+                    IoRequest::MemoryForget {
+                        principal_id: turn.principal.clone(),
+                        memory_id,
+                        reply: tx,
+                    },
                     rx,
                 )?;
                 return Ok(Value::string(result));
