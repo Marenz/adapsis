@@ -463,10 +463,11 @@ pub async fn execute_code(
                                     let program_mut = crate::eval::make_shared_program_mut(&program);
                                     let expr = expr.clone();
                                     let sender = sender.clone();
+                                    let turn = config.turn.clone();
                                     let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                                     let eval_result = tokio::task::spawn_blocking(move || {
                                         ctx.install();
-                                        crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                        crate::eval::eval_inline_expr_with_io(&program, &expr, sender, turn)
                                     }).await;
                                     let (msg, success) = match &eval_result {
                                         Ok(Ok(val)) => (format!("= {val}"), true),
@@ -536,11 +537,13 @@ pub async fn execute_code(
                                 let fn_name = ev.function_name.clone();
                                 let input = ev.input.clone();
                                 let sender = sender.clone();
+                                let turn = config.turn.clone();
                                 let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                                 let eval_fn_name = ev.function_name.clone();
                                 let eval_result = tokio::task::spawn_blocking(move || {
                                     ctx.install();
-                                    let handle = crate::coroutine::CoroutineHandle::new(sender);
+                                    let handle = crate::coroutine::CoroutineHandle::new(sender)
+                                        .with_turn(turn);
                                     crate::eval::eval_async_function(&program, &fn_name, &input, handle)
                                 }).await;
                                 let (msg, success) = match &eval_result {
@@ -680,30 +683,66 @@ pub async fn execute_code(
                         let agent_callback = agent_callback.clone();
                         let agent_io_sender = config.io_sender.clone();
                         let agent_save_notify = config.save_notify.clone();
+                        let agent_turn = config.turn.clone();
+
+                        let scope_desc = match &branch.scope {
+                            crate::session::AgentScope::ReadOnly =>
+                                "SCOPE: read-only. You CAN: write +test blocks, use !eval, use ?queries. You CANNOT: define new functions or types, modify existing code.".to_string(),
+                            crate::session::AgentScope::NewOnly =>
+                                "SCOPE: new-only. You CAN: define NEW functions and types, write +test blocks, use !eval. You CANNOT: modify or replace existing functions.".to_string(),
+                            crate::session::AgentScope::Module(m) =>
+                                format!("SCOPE: module {m}. You CAN: modify anything in module {m}, add new functions to it. You CANNOT: modify code outside module {m}."),
+                            crate::session::AgentScope::Full =>
+                                "SCOPE: full. You can modify anything.".to_string(),
+                        };
+                        // An agent is the spawning conversation continuing by
+                        // other means, so it inherits that conversation's
+                        // composed prompt — identity included (issue #41).
+                        // Previously it rebuilt its own from `system_prompt()` +
+                        // builtins, which meant an agent spawned from a context
+                        // silently dropped that context's instructions.
+                        //
+                        // `--model` selects who *generates*; it must not decide
+                        // what the agent is allowed to do, so the authority is
+                        // the intersection of the spawner's and the chosen
+                        // model's: narrowing at spawn is fine, widening is not.
+                        let agent_authority = {
+                            let spawner = config
+                                .permission_config
+                                .authority(config.access_level, &model_name);
+                            match model {
+                                Some(m) => spawner.narrowed_to(
+                                    config.permission_config.authority(config.access_level, m),
+                                ),
+                                None => spawner,
+                            }
+                        };
+                        let available_models = config.permission_config.model_names();
+                        let agent_system = format!(
+                            "{}\n\nYou are agent '{agent_name}', spawned by the conversation above.\n\
+                             {scope_desc}\n\nYour task:\n{agent_task}\n\n\
+                             Work step by step. Always include a <code> block with Adapsis code. \
+                             When done, respond with !done in a <code> block.",
+                            crate::context_prompt::compose(&crate::context_prompt::PromptInputs {
+                                context: agent_turn.as_ref().map_or("main", |t| t.context.as_str()),
+                                program_summary: &program_summary,
+                                llm_model: &llm_model,
+                                available_models: &available_models,
+                                speaker: agent_turn
+                                    .as_ref()
+                                    .map_or("agent:local", |t| t.principal.as_str()),
+                                authority: agent_authority,
+                            }),
+                        );
 
                         tokio::spawn(async move {
                             eprintln!("[agent:{agent_name}] starting");
                             let agent_llm = crate::llm::LlmClient::new_with_model_and_key(&llm_url, &llm_model, llm_key);
 
-                            let scope_desc = match &branch.scope {
-                                crate::session::AgentScope::ReadOnly =>
-                                    "SCOPE: read-only. You CAN: write +test blocks, use !eval, use ?queries. You CANNOT: define new functions or types, modify existing code.".to_string(),
-                                crate::session::AgentScope::NewOnly =>
-                                    "SCOPE: new-only. You CAN: define NEW functions and types, write +test blocks, use !eval. You CANNOT: modify or replace existing functions.".to_string(),
-                                crate::session::AgentScope::Module(m) =>
-                                    format!("SCOPE: module {m}. You CAN: modify anything in module {m}, add new functions to it. You CANNOT: modify code outside module {m}."),
-                                crate::session::AgentScope::Full =>
-                                    "SCOPE: full. You can modify anything.".to_string(),
-                            };
-                            let agent_system = format!(
-                                "{}\n\n{}\n\nYou are agent '{agent_name}'.\n{scope_desc}\n\nYour task:\n{agent_task}\n\nWork step by step. Always include a <code> block with Adapsis code. When done, respond with !done in a <code> block.",
-                                crate::prompt::system_prompt(),
-                                crate::builtins::format_for_prompt()
-                            );
-
                             let mut agent_messages = vec![
                                 crate::llm::ChatMessage::system(agent_system),
-                                crate::llm::ChatMessage::user(format!("Program state:\n{program_summary}\n\nTask: {agent_task}")),
+                                // The program state is in the system prompt above.
+                                crate::llm::ChatMessage::user(format!("Task: {agent_task}")),
                             ];
 
                             let mut branch = branch;
@@ -970,6 +1009,7 @@ pub async fn execute_code(
                                 if let Some(sender) = &config.io_sender {
                                     env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
                                         crate::coroutine::CoroutineHandle::new(sender.clone())
+                                            .with_turn(config.turn.clone())
                                     ));
                                 }
                                 match crate::eval::eval_function_body_pub(&session.program, &[stmt], &mut env) {

@@ -542,6 +542,16 @@ Bad examples:
 This is a conversation. You send a change, see feedback, react. Use queries
 (`?source`, `?symbols`, `?tasks`, `?deps`) freely to understand state.
 
+**Design principles for anything you write:**
+
+1. REUSE over CREATE. Before writing new code, check whether an existing function
+   already does it, and call that with `!eval`.
+2. If you must write one, make it GENERIC and REUSABLE — parameterize everything
+   (chat_id, caption, duration, …) — and add it to the module it belongs in, not
+   a new one.
+3. Never create a one-off module for a single request.
+4. Write `+doc` for every new function.
+
 **DONE means verified working.** Do not say DONE until you have evidence that
 everything actually works. For async tasks, this means checking `?tasks` to see
 they're healthy, writing test functions to exercise the system end-to-end, and
@@ -939,17 +949,44 @@ Long-term memory is stored only in the embedded Ladybug graph. Use `memory_cyphe
 for deeper source/provenance inspection after automatic recall:
 
 ```
-+fn memory_sources (principal_id:String, memory_id:String)->String [io,async]
++fn memory_sources ()->String [io,async]
   +let query:String = "MATCH (memory:Memory {id: $memory_id})-[:DERIVED_FROM]->(message:Message)-[:SAID_BY]->(speaker:Principal) RETURN memory.id, speaker.display_name, message.content"
-  +await result:String = memory_cypher(principal_id, query)
+  +await result:String = memory_cypher(query)
   +return result
 +end
 ```
 
-The runtime substitutes `$memory_id` only for memories the principal may read. Queries
+`memory_cypher` takes ONE argument. The ACL principal is bound by the runtime to the
+speaker of the current turn — it is not a parameter, and there is no way to read another
+conversation's memories by naming its principal. Calling it outside a conversation
+(a route handler, a `+startup` task, the CLI) is refused rather than defaulted.
+
+The runtime substitutes `$memory_id` only for memories that principal may read. Queries
 must start with `MATCH (memory:Memory {id: $memory_id})`, use one read-only MATCH,
 and traverse outgoing provenance edges. Reverse/variable traversal, independent patterns,
 mutation, and permission/supersession edges are rejected so Cypher cannot bypass memory ACLs.
+
+### Per-Context Instructions
+
+Each conversation's identity lives in `~/.config/adapsis/contexts/<context>.md`, composed
+fresh into the system prompt on every turn. Its permissions come separately from whoever
+sent the current message — identity follows the conversation, authority follows the speaker.
+
+A conversation may propose a rewrite of its OWN instructions; only an administrator applies
+one:
+
+```
++fn ask_for_new_instructions (text:String)->String [io,async]
+  +await r:String = context_propose(text)
+  +return r
++end
+```
+
+`context_propose` takes the full replacement text, not a patch, and writes
+`<context>.proposed.md`. Nothing changes until an administrator runs
+`context_approve(\"<context key>\")`; `context_reject` discards it and
+`context_proposals()` lists what is pending, with diffs. The context is taken from the
+turn, so a conversation can only ever propose for itself.
 
 ### Multi-Session API
 
@@ -1084,50 +1121,16 @@ This library is shared across all git worktrees and sessions.
     .to_string()
 }
 
-/// Persona system prompt for non-admin (sandboxed) conversations — e.g. a
-/// family member on their own laptop.
-///
-/// Composed of two parts:
-///   1. An IMMUTABLE core (built in / from `$ADAPSIS_PERSONA_FILE` or
-///      `~/.config/adapsis/persona.md` if present) — the identity, language and
-///      safety guardrails. This is authoritative and is NOT self-editable.
-///   2. An EVOLVING notes addendum (`~/.config/adapsis/persona-notes.md`) that
-///      the assistant may update over time to remember the user's preferences
-///      and learnings. Kept separate so self-evolution can never erase the core
-///      identity or its safety rules.
-pub fn persona() -> String {
-    let core_path = std::env::var("ADAPSIS_PERSONA_FILE").ok().map(std::path::PathBuf::from)
-        .or_else(|| persona_notes_path().map(|p| p.with_file_name("persona.md")));
-    persona_from_paths(core_path.as_deref(), persona_notes_path().as_deref())
-}
-
-/// Assemble the persona from explicit paths.
-///
-/// Split out of `persona()` so the notes round-trip is testable without mutating
-/// `$HOME`, which is process-global and would race parallel tests that resolve
-/// their own paths from it.
-pub fn persona_from_paths(
-    core_path: Option<&std::path::Path>,
-    notes_path: Option<&std::path::Path>,
-) -> String {
-    let core = core_path
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(default_persona);
-
-    let notes = notes_path
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    match notes {
-        Some(n) => format!(
-            "{core}\n\n## Was du über Renate gelernt hast (von dir gepflegt)\n{n}"
-        ),
-        None => core,
-    }
-}
+// NOTE: `persona()` / `persona_from_paths()` / `default_persona()` were removed
+// with issue #41. They assembled a single GLOBAL identity — one `persona.md`
+// plus one notes file — which every sandboxed conversation fell back to. That is
+// precisely how one persona ended up serving audiences it was never written for:
+// a game-dev group answered as a family assistant whenever a non-admin spoke.
+// Identity is now per conversation and lives in
+// `~/.config/adapsis/contexts/<context>.md` (`context_prompt`), with no global
+// fallback — an unconfigured context is told it has no persona rather than being
+// handed someone else's. A context that wants the self-maintained notes opts in
+// with `context_prompt::PERSONA_NOTES_MARKER`.
 
 /// Path to the self-evolving persona notes file.
 ///
@@ -1162,40 +1165,6 @@ pub fn mesh_topology() -> Option<String> {
         .and_then(|p| std::fs::read_to_string(&p).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Built-in fallback persona (German, warm, plain-language) used when no
-/// persona file is present.
-pub fn default_persona() -> String {
-    r#"Du bist „Wolfi", ein freundlicher, geduldiger Computer-Assistent auf dem Laptop von Renate.
-
-WER DU BIST
-- Dein Name ist Wolfi (Moonwolf). Du hilfst Renate über Telegram bei allem rund um ihren Laptop.
-- Du sprichst Deutsch, warmherzig, geduldig und in einfacher Alltagssprache. Kein Fachjargon. Wenn ein technischer Begriff nötig ist, erkläre ihn kurz und freundlich.
-- Sprich Renate mit „du" an, freundlich und respektvoll.
-
-WIE DU HILFST
-- Halte Antworten kurz und klar. Eine Sache nach der anderen. Keine langen Listen, wenn ein, zwei Sätze reichen.
-- Frage einmal kurz nach, wenn etwas unklar ist, statt zu raten.
-- Bevor du etwas am Computer veränderst (Programme installieren/entfernen, aufräumen, einen Screenshot machen), sage in einem einfachen Satz, was du tun wirst, und mach es dann. Erkläre danach kurz, was passiert ist.
-- Wenn etwas nicht klappt, bleib ruhig und ermutigend. Erkläre verständlich, was schiefging, und biete einen nächsten Schritt an.
-- Erfinde nichts. Wenn du etwas nicht weißt oder nicht kannst, sag das ehrlich.
-
-WAS DU KANNST
-- Programme verwalten: suchen, installieren, entfernen, Updates einspielen, Speicher aufräumen.
-- Nachsehen, wie es dem Laptop geht (Speicherplatz, Updates, Akku, allgemeine Infos).
-- Auf Wunsch einen Screenshot vom Bildschirm machen, um zu sehen, wobei du helfen sollst.
-
-DAZULERNEN (über dich selbst)
-- Du darfst dir Dinge über Renate merken: ihre Vorlieben, wie sie Dinge nennt, was ihr schon geholfen hat, womit sie oft Probleme hat.
-- Wenn du etwas Nützliches lernst, ruf `Wolfi.remember("kurze Notiz")` auf, um es dauerhaft in deinen Notizen zu speichern. Diese Notizen siehst du bei jedem Gespräch wieder.
-- Halte die Notizen knapp und sachlich (z. B. „Renate nutzt Firefox", „mag große Schrift", „fragt oft nach Fotos"). Speichere nichts Sensibles wie Passwörter.
-- Deine Kern-Identität und die Sicherheitsregeln hier kannst du NICHT ändern — nur deine Notizen wachsen mit.
-
-WICHTIG
-- Du arbeitest auf Renates echtem Laptop. Geh sorgsam damit um. Entferne keine wichtigen System-Programme.
-- Antworte immer zuerst mit dem Text für Renate. Technische Befehle gehören danach und sieht sie nicht."#
-        .to_string()
 }
 
 /// Build the initial user message for a task.

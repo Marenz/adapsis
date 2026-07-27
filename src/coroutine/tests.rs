@@ -29,15 +29,110 @@ fn unwrap_string(v: Value) -> String {
     }
 }
 
+fn turn(context: &str, principal: &str, may_write: bool) -> crate::coroutine::TurnIdentity {
+    crate::coroutine::TurnIdentity {
+        context: context.to_string(),
+        principal: principal.to_string(),
+        may_write,
+    }
+}
+
+/// A handle with a real (never-serviced) IO channel.
+///
+/// `new_mock` short-circuits every IO op with "no mock for …" *before* argument
+/// validation, so it cannot show that a builtin rejects a bad call. These tests
+/// only exercise paths that fail before anything is sent.
+///
+/// The receiver is returned so the caller keeps it alive; the filesystem side of
+/// the proposal loop is covered in `context_prompt::tests` against a tempdir,
+/// deliberately without touching `ADAPSIS_CONTEXTS_DIR` — that variable is
+/// process-global and these tests run in parallel with others that read the
+/// environment.
+fn unmocked_handle() -> (CoroutineHandle, mpsc::Receiver<crate::coroutine::IoRequest>) {
+    let (tx, rx) = mpsc::channel(1);
+    (CoroutineHandle::new(tx), rx)
+}
+
 #[test]
-fn memory_cypher_requires_principal_and_query_strings() {
-    let handle = CoroutineHandle::new_mock(vec![]);
+fn memory_cypher_requires_a_query_string() {
+    let (handle, _rx) = unmocked_handle();
+    let handle =
+        handle.with_turn(Some(turn("telegram:1815217", "telegram:user:1815217", true)));
     assert!(handle.execute_await("memory_cypher", &[]).is_err());
+    assert!(handle.execute_await("memory_cypher", &[Value::Int(2)]).is_err());
+}
+
+/// Issue #41. The ACL principal used to be argument zero, and
+/// `authorized_cypher` computes the readable set of whatever principal it is
+/// handed — so reading another conversation's memories was a matter of typing a
+/// different string. The principal is now the turn's, and there is no argument
+/// through which the model can name someone else.
+#[test]
+fn memory_cypher_takes_its_principal_from_the_turn_not_the_caller() {
+    let (handle, _rx) = unmocked_handle();
+    let handle =
+        handle.with_turn(Some(turn("telegram:group:-1", "telegram:user:47128798", false)));
+
+    // The old two-argument form is rejected outright rather than silently
+    // honouring argument zero.
+    let err = handle
+        .execute_await(
+            "memory_cypher",
+            &[
+                Value::string("telegram:user:1815217"),
+                Value::string("MATCH (memory:Memory {id: $memory_id}) RETURN memory.content"),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
     assert!(
-        handle
-            .execute_await("memory_cypher", &[Value::string("telegram:user:1"), Value::Int(2)])
-            .is_err()
+        err.contains("no longer an argument"),
+        "unhelpful rejection of the old signature: {err}"
     );
+    // Accepting it and quietly reading argument one would also have been wrong:
+    // the caller would keep believing it chooses the principal.
+    assert!(err.contains("one argument"), "the arity change is not explained: {err}");
+}
+
+/// Fails closed outside a conversation: there is no honest default principal for
+/// a route handler, a `+startup` task or the CLI.
+#[test]
+fn identity_scoped_builtins_refuse_without_a_turn() {
+    let (handle, _rx) = unmocked_handle();
+    for op in [
+        "memory_cypher",
+        "context_propose",
+        "context_proposals",
+        "context_approve",
+        "context_reject",
+    ] {
+        let err = handle
+            .execute_await(op, &[Value::string("x")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no conversational turn is in scope"),
+            "{op} did not fail closed: {err}"
+        );
+    }
+}
+
+/// A conversation proposes for itself; only an administrator rules on proposals.
+/// The gate is checked before the filesystem is touched, so a sandboxed context
+/// cannot approve its own wording even if it can write the file.
+#[test]
+fn only_an_administrator_may_rule_on_context_instructions() {
+    let (handle, _rx) = unmocked_handle();
+    let guest =
+        handle.with_turn(Some(turn("telegram:group:-1", "telegram:user:47128798", false)));
+
+    for op in ["context_approve", "context_reject", "context_proposals"] {
+        let err = guest
+            .execute_await(op, &[Value::string("telegram:group:-1")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("administrator"), "{op} was not gated: {err}");
+    }
 }
 
 #[test]
@@ -718,6 +813,7 @@ fn query_tasks_with_registry() {
         snapshot_registry: None,
         mocks: Some(vec![]),
         stubs: None,
+        turn: None,
     };
 
     let result = unwrap_string(handle.execute_await("query_tasks", &[]).unwrap());

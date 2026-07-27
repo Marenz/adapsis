@@ -903,16 +903,21 @@ pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<V
 /// When the expression contains IO builtin calls (shell_exec, http_get, etc.),
 /// they are executed through the coroutine runtime automatically.
 /// Must be called from within a `spawn_blocking` context (not a tokio async task).
+///
+/// `turn` binds the execution to a conversational turn when there is one, so
+/// identity-scoped builtins resolve their principal from the runtime rather
+/// than from an argument (issue #41). Pass `None` outside a conversation.
 pub fn eval_inline_expr_with_io(
     program: &ast::Program,
     expr: &parser::Expr,
     io_sender: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+    turn: Option<crate::coroutine::TurnIdentity>,
 ) -> Result<Value> {
     set_shared_program(Some(std::sync::Arc::new(program.clone())));
     if let Some(rt) = get_shared_runtime() {
         init_missing_shared_runtime_vars(program, &rt);
     }
-    let handle = crate::coroutine::CoroutineHandle::new(io_sender);
+    let handle = crate::coroutine::CoroutineHandle::new(io_sender).with_turn(turn);
     let mut env = Env::new_with_shared_interner(&program.shared_interner);
     env.populate_shared_from_program(program);
     env.set("__coroutine_handle", Value::CoroutineHandle(handle));

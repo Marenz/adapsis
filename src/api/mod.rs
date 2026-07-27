@@ -213,6 +213,15 @@ pub struct AppConfig {
     pub access_level: crate::permissions::AccessLevel,
     /// Per-model permission configuration.
     pub permission_config: std::sync::Arc<crate::permissions::PermissionConfig>,
+    /// Conversational turn this execution belongs to, when there is one.
+    ///
+    /// Set only by `handle_llm_takeover`. Identity-scoped builtins
+    /// (`memory_cypher`, the context-proposal loop) read the speaker and context
+    /// from here rather than from their arguments, so a model cannot name a
+    /// different conversation to reach its memories (issue #41). `None` for HTTP
+    /// handlers, route handlers and the autonomous loop; those builtins refuse
+    /// there rather than guess.
+    pub turn: Option<crate::coroutine::TurnIdentity>,
 }
 
 impl AppConfig {
@@ -382,7 +391,7 @@ pub async fn eval_fn(
                         let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                         let eval_result = tokio::task::spawn_blocking(move || {
                             ctx.install();
-                            eval::eval_inline_expr_with_io(&program, &expr, sender)
+                            eval::eval_inline_expr_with_io(&program, &expr, sender, None)
                         }).await;
                         // Sync mutations back to session if any occurred (CoW merge).
                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
@@ -1454,7 +1463,7 @@ async fn session_eval(
                         let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                         let eval_result = tokio::task::spawn_blocking(move || {
                             ctx.install();
-                            eval::eval_inline_expr_with_io(&program, &expr, sender)
+                            eval::eval_inline_expr_with_io(&program, &expr, sender, None)
                         }).await;
                         // Note: session eval doesn't sync back to main session — mutations
                         // are scoped to the session's program_lock

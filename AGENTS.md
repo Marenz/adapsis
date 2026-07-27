@@ -103,6 +103,8 @@ src/
   session.rs     — Session persistence (program AST, tests, roadmap, plan, mocks, chat)
   library.rs     — ~/.config/adapsis/modules/ auto-load/persist
   prompt.rs      — System prompt with language spec, builtins, examples
+  context_prompt.rs — Per-context identity composition (core + identity file +
+                   speaker authority) and the instruction-proposal loop
   builtins.rs    — Single source of truth for all builtins/commands/queries
   typeck.rs      — Type checker, symbol table, ?source reconstruction, semantic queries
   telegram.rs    — Telegram bot integration
@@ -262,6 +264,80 @@ gateway resolves via `model_aliases` or `virtual_models`.
 - `http_upload(url, attachment, field, extra)` — multipart upload from Attachment
 - `conversation_notify(context, message, attachment)` — delivers to conversation with file
 
+## Per-Context Identity (issue #41)
+
+**The prompt keys on the conversation; the permissions key on the speaker.**
+
+The system prompt used to branch on `permission_model.is_some()` — i.e. on *who
+spoke last*. A shared group therefore had no stable identity: German family
+assistant when a non-admin spoke, English Adapsis programmer when the admin did,
+with `set_primary_system` rewriting `messages[0]` each turn, so the persisted
+history held assistant turns authored under two personas. `src/context_prompt.rs`
+replaces that branch with one composer.
+
+- **Composition order** (`context_prompt::compose`), each layer unable to undo the
+  one before it:
+  1. `technical_core` — `<code>` mechanics, `!done`, `<iteration_budget>`,
+     `?source`, the `!agent`-cannot-do-IO rule. Fixed text; a context file cannot
+     override it. **The `<iteration_budget>` instruction lives here and nowhere
+     else** — it used to be duplicated in both branches and the copies drifted.
+  2. `mesh_topology()` when a `mesh.md` exists.
+  3. Adapsis language reference + `adapsis_identity()` — **only when the speaker
+     may write.** Handing the language spec to an execute-only conversation
+     invites mutations the permission layer refuses, which reads as model
+     incompetence.
+  4. Permission-filtered program summary.
+  5. The context's identity file.
+  6. `speaker_section` — last, for salience. States what THIS speaker may do.
+- **Identity files:** `~/.config/adapsis/contexts/<stem>.md`, tracked originals in
+  `contexts/`. `<stem>` maps every character outside `[A-Za-z0-9_-]` to `_`
+  (`telegram:group:-513…` → `telegram_group_-513….md`). Total sanitizing, not a
+  `:`-only substitution: keys arrive from Telegram payloads and must not be able
+  to name a file outside the directory. `ADAPSIS_CONTEXTS_DIR` overrides the
+  directory. Read fresh every turn — no rebuild to edit one.
+- **Exact match only, and no fallback.** A context without a file gets the core
+  and is *told* it has no persona. It does NOT inherit `persona.md`. An
+  unconfigured conversation wearing someone else's persona is the bug.
+- **`prompt::persona()`, `persona_from_paths()` and `default_persona()` are
+  deleted.** They assembled one GLOBAL identity that every sandboxed conversation
+  fell back to — the mechanism by which a game-dev group answered as a family
+  assistant. The built-in German persona now lives in
+  `contexts/templates/family-assistant.md`, to be copied to a real context key on
+  a node that wants it. Nothing under `contexts/templates/` is ever loaded as a
+  context.
+- **`persona-notes.md` is opt-in per context.** `persona_notes_path()` is still
+  the single definition of where the notes live (`Wolfi.remember` derives the same
+  path via `home_dir()`), but the reader moved: a context file pulls them in with
+  `{{persona_notes}}` (`context_prompt::PERSONA_NOTES_MARKER`). Without the marker
+  the notes never reach that conversation. An unresolved marker is stripped rather
+  than shown. #42 replaces the file with per-context Ladybug memories.
+- **`Conversation::system_prompt` is gone.** It was initialized `None`, never
+  written, and read through `unwrap_or_else` — populating it would have *frozen*
+  the prompt, defeating the refresh-after-upgrade behaviour the read site exists
+  for. Old sessions carrying the field still deserialize.
+- **Turn binding (`coroutine::TurnIdentity`).** `AppConfig.turn` carries the
+  context, principal and write-capability of the conversational turn into
+  `CoroutineHandle::with_turn`. Identity-scoped builtins read it instead of
+  trusting an argument, and **fail closed** outside a conversation (route
+  handler, `+startup`, CLI) rather than defaulting.
+  - `memory_cypher(query)` takes **one** argument now. The ACL principal used to
+    be argument zero, and `authorized_cypher` faithfully computes the readable
+    set of whatever principal it is handed — so reading another conversation's
+    memories was a matter of typing a different string. The two-argument form is
+    rejected loudly; accepting it silently would leave callers believing they
+    still choose the principal.
+  - `context_propose(text)` writes `<stem>.proposed.md` for the **turn's** context
+    (not an argument), so a conversation can only propose for itself.
+    `context_proposals()` / `context_approve(key)` / `context_reject(key)` are
+    gated on the speaker's write capability. Proposals are disk-backed (survive
+    restart) and one file per context (concurrent proposals cannot collide).
+    Set `ADAPSIS_ADMIN_CONTEXT` to have the diff pushed to an admin conversation;
+    delivery is best-effort because the proposal is already durable.
+- **Sub-agents inherit the spawning context's composed prompt**, not a
+  freshly-built `system_prompt()`. `!agent --model X` chooses who *generates*; the
+  agent's authority is `spawner.narrowed_to(model)` — narrowing at spawn is fine,
+  widening is not.
+
 ## Conversation System (llm_takeover)
 - Per-context conversation history: `ConversationManager` in `SessionMeta`
 - `llm_takeover(context, message, reply_fn, reply_arg[, permission_model])` — conversational LLM with history
@@ -326,9 +402,10 @@ gateway resolves via `model_aliases` or `virtual_models`.
 - Compaction defaults: 128k model context, 70% trigger, 32k output/tool reserve, and
   120k-character checkpoint chunks. Override with `ADAPSIS_CONTEXT_TOKENS`,
   `ADAPSIS_COMPACTION_PERCENT`, and `ADAPSIS_OUTPUT_RESERVE_TOKENS`.
-- `memory_cypher(principal_id, query)` exposes ACL-filtered, read-only Cypher anchored at
+- `memory_cypher(query)` exposes ACL-filtered, read-only Cypher anchored at
   `MATCH (memory:Memory {id: $memory_id})`. It deliberately rejects query shapes that can
-  escape the authorized memory anchor.
+  escape the authorized memory anchor. The principal is **bound to the turn**, not passed
+  in — see "Per-Context Identity" above.
 - Operations: `adapsis memory-migrate <session.json> [--database PATH]` is idempotent;
   `adapsis memory-stats [--database PATH] [--context CONTEXT]` reports graph/checkpoint state.
 - On openSUSE, LibreSSL development symlinks can shadow OpenSSL 3. `build.rs` links
@@ -553,10 +630,11 @@ address. Only do it on a trusted network (the WireGuard mesh below). Prefer
 
 ## AdapsisOS VPN Mesh (10.0.0.0/24)
 Three AdapsisOS nodes share a WireGuard VPN. Each binds `127.0.0.1` **and** its
-own `10.0.0.x` on port **3002**, and each has a `persona.md` (loaded at runtime
-by `prompt.rs::persona()` from `~/.config/adapsis/persona.md`, no rebuild needed)
-that names itself + its peers and lists the exposed endpoints so the bots can
-talk to each other via `http_get`/`http_post`/`http_request`.
+own `10.0.0.x` on port **3002**, and each has a `mesh.md` (loaded at runtime by
+`prompt::mesh_topology()`, no rebuild needed) that names itself + its peers and
+lists the exposed endpoints so the bots can talk to each other via
+`http_get`/`http_post`/`http_request`. Who each node *is* now comes from its
+per-context files (`~/.config/adapsis/contexts/`), not from a `persona.md`.
 
 | VPN IP   | Host  | Persona  | Runs as / service                          | Binary path                |
 |----------|-------|----------|--------------------------------------------|----------------------------|
@@ -564,30 +642,29 @@ talk to each other via `http_get`/`http_post`/`http_request`.
 | 10.0.0.2 | sleek | Hobbes   | marenz, **user** `adapsis.service`         | `~/.local/bin/adapsis`     |
 | 10.0.0.4 | edox  | Moonwolf | `adapsis` user, **system** `adapsis-bot.service` (model `family-bot`, Renate's machine) | `/home/adapsis/bin/adapsis` |
 
-- **Persona vs capability module:** the persona (identity/tone) lives in
-  `persona.md`; the *capabilities* live in modules. On edox the family-bot's
-  capability module is still `Wolfi.ax` (don't rename — `Wolfi.remember(...)` is
-  a real function), but the bot's **identity** is "Moonwolf".
-- **Mesh topology = `mesh.md`, NOT `persona.md`.** The VPN/peer table + exposed
-  endpoints live in `~/.config/adapsis/mesh.md` (override path via
+- **Identity vs capability module:** identity/tone lives in the per-context file;
+  the *capabilities* live in modules. On edox the family-bot's capability module
+  is still `Wolfi.ax` (don't rename — `Wolfi.remember(...)` is a real function),
+  but the bot's **identity** is "Moonwolf". `~/.config/adapsis/persona.md` is no
+  longer read at all; migrate its content to a context file (start from
+  `contexts/templates/family-assistant.md` for a family node).
+- **Mesh topology = `mesh.md`, NOT an identity file.** The VPN/peer table +
+  exposed endpoints live in `~/.config/adapsis/mesh.md` (override path via
   `ADAPSIS_MESH_FILE`), loaded by `prompt::mesh_topology()` at runtime (no
-  rebuild to edit content). `persona.md` is purely character/tone. Keep them
-  separate: mesh = facts (shared across conversations), persona = voice.
-- **Prompt builders — there are THREE, keep them in sync.** The system prompt is
-  assembled in three independent places; a fragment added to one does NOT appear
-  in the others:
-  1. `handle_llm_takeover` (`api/llm_handlers.rs` ~796) — **Telegram & agent**
-     path. Has two branches: sandboxed/non-admin (uses `persona()`) and
-     admin (uses `system_prompt()` + `adapsis_identity()`). Mesh is injected
-     into **both**.
-  2. `ask` (`api/llm_handlers.rs` ~197) — `POST /api/ask` (CLI/HTTP).
-  3. `ask_stream` (`api/llm_handlers.rs` ~404) — `POST /api/ask-stream` (SSE).
-  All three now append `mesh_topology()`. The original bug: the VPN info only
-  reached the non-admin llm_takeover branch, so **admin DMs and `/api/ask`
-  claimed to know nothing about peers**. Each builder refreshes the first system
-  message on every request while preserving the remaining conversation history,
-  so runtime prompt, persona, mesh and visible-capability changes reach existing
-  persisted conversations after the updated process handles its next message.
+  rebuild to edit content). Keep them separate: mesh = facts (shared across
+  conversations), context file = voice (one conversation).
+- **Prompt builders — there were THREE and they drifted; there is now ONE
+  composer.** `handle_llm_takeover` (Telegram & agent), `ask` (`POST /api/ask`)
+  and `ask_stream` (`POST /api/ask-stream`) each used to assemble their own
+  system prompt, so a fragment added to one did not appear in the others — that
+  is how `mesh_topology()` once reached only the non-admin takeover branch and
+  **admin DMs and `/api/ask` claimed to know nothing about peers**. All three now
+  call `context_prompt::compose` (`ask`/`ask_stream` through the shared
+  `main_context_prompt` helper). Add fragments there, not in a handler. Each
+  builder still refreshes the first system message on every request while
+  preserving conversation history, so prompt, mesh, identity-file and
+  visible-capability changes reach existing persisted conversations on their next
+  turn.
 - **Topology = hub-and-spoke, NOT full mesh.** `here` (10.0.0.1) is the always-on
   WireGuard **hub** (`wg0`, one `/32` peer per spoke). Spokes (sleek, edox) only
   peer with the hub; their `AllowedIPs` toward the hub is `10.0.0.0/24` so all

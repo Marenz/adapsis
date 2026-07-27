@@ -1715,7 +1715,7 @@ fn test_eval_inline_io_with_coroutine_handle_via_mock() {
             });
 
             let eval_result = tokio::task::spawn_blocking(move || {
-                eval_inline_expr_with_io(&program, &expr, io_sender)
+                eval_inline_expr_with_io(&program, &expr, io_sender, None)
             })
             .await
             .unwrap();

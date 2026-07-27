@@ -114,10 +114,12 @@ fn bundled_module_pure_tests_pass() {
 }
 
 /// Issue #38 item 2: `Wolfi.remember` wrote to a hardcoded `/home/adapsis/...`
-/// while `prompt::persona()` read from `$HOME/...`. Reader and writer were
-/// split-brained by construction, so every remembered note was lost.
+/// while the prompt read from `$HOME/...`. Reader and writer were split-brained
+/// by construction, so every remembered note was lost.
 ///
 /// This asserts the writer's path and the reader's path are literally the same.
+/// `persona_notes_path` is still the single definition of that location; only
+/// the consumer changed with #41 (`context_prompt::PERSONA_NOTES_MARKER`).
 #[test]
 fn wolfi_notes_path_matches_the_rust_persona_reader() {
     let (program, _) = load("Wolfi.ax.work");
@@ -196,27 +198,53 @@ fn telegram_payload_resolves_a_stable_principal() {
 }
 
 /// The other half of issue #38 item 2: a note written to the notes path must
-/// actually come back out of the assembled persona.
+/// actually come back out of the prompt the model is given.
+///
+/// Issue #41 moved the reader. Notes no longer ride inside a global persona —
+/// they are pulled into a context's own instructions by
+/// `context_prompt::PERSONA_NOTES_MARKER`, so this asserts the round trip
+/// through the composed prompt rather than through a persona that no longer
+/// exists. Without this the writer would keep working and nothing would read it.
 #[test]
-fn persona_recalls_a_written_note() {
+fn a_written_note_reaches_the_composed_prompt() {
     let dir = std::env::temp_dir().join(format!("adapsis-persona-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let notes = dir.join("persona-notes.md");
     std::fs::write(&notes, "- Renate mag grossen Text\n").expect("write notes");
 
-    let persona = crate::prompt::persona_from_paths(None, Some(&notes));
+    let contexts = dir.join("contexts");
+    std::fs::create_dir_all(&contexts).expect("create contexts dir");
+    std::fs::write(
+        crate::context_prompt::identity_path(&contexts, "telegram:user:1"),
+        format!(
+            "Du bist Wolfi.\n\n{}",
+            crate::context_prompt::PERSONA_NOTES_MARKER
+        ),
+    )
+    .expect("write identity");
+
+    let section = crate::context_prompt::identity_section_with_notes(
+        Some(&contexts),
+        "telegram:user:1",
+        Some(&notes),
+    );
     assert!(
-        persona.contains("Renate mag grossen Text"),
-        "persona() dropped a written note; got:\n{persona}"
+        section.contains("Renate mag grossen Text"),
+        "a written note never reached the prompt; got:\n{section}"
     );
 
-    // Absent notes must not fabricate a notes section.
+    // Absent notes must not fabricate a notes section — or leave the marker.
     let missing = dir.join("does-not-exist.md");
-    let bare = crate::prompt::persona_from_paths(None, Some(&missing));
+    let bare = crate::context_prompt::identity_section_with_notes(
+        Some(&contexts),
+        "telegram:user:1",
+        Some(&missing),
+    );
     assert!(
         !bare.contains("Renate mag grossen Text"),
-        "persona() leaked notes from a previous read"
+        "notes leaked from a previous read"
     );
+    assert!(!bare.contains(crate::context_prompt::PERSONA_NOTES_MARKER));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -2,6 +2,7 @@ mod api;
 mod ast;
 mod attachment;
 mod builtins;
+mod context_prompt;
 #[cfg(test)]
 mod bundled_modules_tests;
 mod compiler;
@@ -1804,6 +1805,7 @@ async fn main() -> Result<()> {
                 save_notify: Some(save_tx),
                 access_level: access_level_for_config,
                 permission_config,
+                turn: None,
             };
 
             // Clone tier handles before config is moved into the router

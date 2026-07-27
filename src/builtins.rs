@@ -653,8 +653,49 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "memory_cypher",
         aliases: &[],
-        short: "ACL-filtered graph traversal: memory_cypher(principal_id, cypher)",
-        long: "Runs read-only Cypher once per memory authorized for principal_id. The query must start with MATCH (memory:Memory {id: $memory_id}), use one MATCH clause, traverse outgoing provenance edges only, and RETURN bounded results. Independent patterns, reverse/variable-length traversal, mutation, CALL, SUPERSEDES, CONTRADICTS, and DENIED_TO are rejected so the query cannot escape the authorized memory anchor.",
+        short: "ACL-filtered graph traversal: memory_cypher(cypher)",
+        long: "Runs read-only Cypher once per memory authorized for the CURRENT conversation's speaker. \
+               The ACL principal is bound by the runtime to the turn and is not an argument — you cannot \
+               read another conversation's memories by naming its principal. The query must start with \
+               MATCH (memory:Memory {id: $memory_id}), use one MATCH clause, traverse outgoing provenance \
+               edges only, and RETURN bounded results. Independent patterns, reverse/variable-length \
+               traversal, mutation, CALL, SUPERSEDES, CONTRADICTS, and DENIED_TO are rejected so the query \
+               cannot escape the authorized memory anchor.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "context_propose",
+        aliases: &[],
+        short: "propose new instructions for THIS conversation: context_propose(instructions)",
+        long: "Files a proposed replacement for the current context's own identity file. Takes the FULL \
+               replacement text, not a patch. The proposal is written to \
+               ~/.config/adapsis/contexts/<context>.proposed.md and has no effect until an administrator \
+               calls context_approve. A context may only propose for itself — the context is bound to the \
+               turn, not passed in. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "context_proposals",
+        aliases: &[],
+        short: "list pending context-instruction proposals: context_proposals() -> String",
+        long: "Returns every pending proposal as a diff against the instructions that context runs today. \
+               Administrator only. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "context_approve",
+        aliases: &[],
+        short: "apply a proposed context identity: context_approve(context_key)",
+        long: "Replaces a context's live instructions with its pending proposal and clears the proposal. \
+               Administrator only. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "context_reject",
+        aliases: &[],
+        short: "discard a proposed context identity: context_reject(context_key)",
+        long: "Deletes a context's pending proposal, leaving its live instructions untouched. \
+               Administrator only. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {

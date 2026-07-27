@@ -504,6 +504,38 @@ async fn log_training_data(
 // ask — non-streaming LLM handler
 // ═══════════════════════════════════════════════════════════════════════
 
+/// System prompt for the `main` context — `/api/ask` and `/api/ask-stream`.
+///
+/// There are three independent prompt builders (`ask`, `ask_stream`,
+/// `handle_llm_takeover`) and a fragment added to one does not appear in the
+/// others; that is how the mesh topology once reached only the non-admin
+/// takeover branch. Composition therefore lives in exactly one place, so
+/// `contexts/main.md` cannot reach two builders and miss the third.
+///
+/// `caller` is set when a peer AdapsisOS node calls over the VPN. That peer *is*
+/// the speaker for the turn, which is why it appears in the authority block
+/// rather than only in the user message.
+fn main_context_prompt(
+    config: &AppConfig,
+    program_summary: &str,
+    caller: Option<&str>,
+) -> String {
+    let model = config.llm_model.read().unwrap().clone();
+    let available_models = config.permission_config.model_names();
+    let speaker = caller
+        .map(str::trim)
+        .filter(|caller| !caller.is_empty())
+        .map_or_else(|| "local:api".to_string(), |caller| format!("peer:{caller}"));
+    crate::context_prompt::compose(&crate::context_prompt::PromptInputs {
+        context: "main",
+        program_summary,
+        llm_model: &model,
+        available_models: &available_models,
+        speaker: &speaker,
+        authority: config.permission_config.authority(config.access_level, &model),
+    })
+}
+
 pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
@@ -522,18 +554,16 @@ pub async fn ask(
     let mut all_code = String::new();
     let mut reply_text = String::new();
 
-    let system_prompt = {
-        let base = crate::prompt::system_prompt();
-        let builtins = crate::builtins::format_for_prompt();
-        let identity = crate::prompt::adapsis_identity();
-        let mesh = crate::prompt::mesh_topology()
-            .map(|m| format!("\n\n{m}"))
-            .unwrap_or_default();
-        format!("{base}\n\n{builtins}\n\n{identity}{mesh}")
-    };
-
     // Build messages from conversation history
     let mut session = config.snapshot_working_set().await;
+    let program_summary = {
+        let model = config.llm_model.read().unwrap().clone();
+        crate::validator::program_summary_for_model(
+            &session.program, &config.permission_config, config.access_level, &model,
+        )
+    };
+    let system_prompt =
+        main_context_prompt(&config, &program_summary, req.caller.as_deref());
     let mut messages = {
         // Ensure system prompt exists (brief mutable borrow)
         {
@@ -558,17 +588,11 @@ pub async fn ask(
             ),
             None => format!("User: {}", req.message),
         };
+        // The program summary is NOT repeated here — the composed system prompt
+        // above already carries it, permission-filtered.
         let context = format!(
-            "Working directory: {}\n{}{}{}\n{}{}",
-            config.project_dir,
-            crate::validator::program_summary_for_model(
-                &session.program, &config.permission_config, config.access_level,
-                &config.llm_model.read().unwrap(),
-            ),
-            load_errors_ctx,
-            plan_ctx,
-            speaker_line,
-            plan_hint
+            "Working directory: {}\n{}{}\n{}{}",
+            config.project_dir, load_errors_ctx, plan_ctx, speaker_line, plan_hint
         );
         // Push user message and get LLM messages (brief mutable borrow)
         let conv = session.meta.conversations.get_or_create("main");
@@ -739,25 +763,21 @@ pub async fn ask_stream(
 
         let _ = tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
 
-        let system_prompt = {
-            let base = crate::prompt::system_prompt();
-            let builtins = crate::builtins::format_for_prompt();
-            let identity = crate::prompt::adapsis_identity();
-            let mesh = crate::prompt::mesh_topology()
-                .map(|m| format!("\n\n{m}"))
-                .unwrap_or_default();
-            format!("{base}\n\n{builtins}\n\n{identity}{mesh}")
-        };
-
             let mut messages = {
             // Tier 1: read program briefly for summary
             let program_summary = {
                 let program = config_clone.program.read().await;
+                let model = config_clone.llm_model.read().unwrap().clone();
                 crate::validator::program_summary_for_model(
                     &program, &config_clone.permission_config, config_clone.access_level,
-                    &config_clone.llm_model.read().unwrap(),
+                    &model,
                 )
             };
+            let system_prompt = main_context_prompt(
+                &config_clone,
+                &program_summary,
+                req.caller.as_deref(),
+            );
             // Tier 3: read/write meta briefly for chat history + plan context
             // Note: guard must be dropped before any .await — std::sync::MutexGuard is not Send.
             let (context, msgs) = {
@@ -777,9 +797,10 @@ pub async fn ask_stream(
                     ),
                     None => format!("User: {}", req.message),
                 };
-                let context = format!("Working directory: {}\n{}{}{}\n{}{}",
+                // The program summary is NOT repeated here — the composed system
+                // prompt above already carries it, permission-filtered.
+                let context = format!("Working directory: {}\n{}{}\n{}{}",
                     config_clone.project_dir,
-                    program_summary,
                     load_errors_ctx,
                     plan_ctx, speaker_line, plan_hint);
                 let conv = meta.conversations.get_or_create("main");
@@ -1204,24 +1225,25 @@ pub async fn handle_llm_takeover(
     })
     .await
     .context("join Ladybug recall")??;
-    // Get or create conversation, update callback info, build messages
+    // The conversation's `permission_model` is rewritten per message by the
+    // caller (main.rs, on every LlmTakeover), so it describes the CURRENT
+    // SPEAKER, not the conversation. It therefore drives three things and only
+    // three: the filtered program view, the model identity code execution is
+    // gated against (without which the sandbox would be advisory — a non-admin
+    // could emit mutations that run at the admin's level), and the authority
+    // block in the prompt.
     //
-    // Use the actual permission config + access level so the program summary
-    // shown to the LLM is filtered correctly.  If the conversation has a
-    // `permission_model` override, use that model's permissions instead (this
-    // is how non-admin Telegram users get a restricted view).
-    // A conversation's permission_model override (e.g. "gemma4s" for non-admin
-    // Telegram users) determines BOTH the filtered program view shown to the LLM
-    // AND the model identity that code execution is gated against. Without using
-    // it for execution, the sandbox would be advisory only: a non-admin context
-    // could emit mutations or !opencode that execute at the admin model's
-    // permission level. We hoist it here so tmp_config below can enforce it.
+    // It must never again drive the *identity* of the prompt. That was issue
+    // #41: branching the whole system prompt on `is_some()` made a shared group
+    // present as a family assistant or an Adapsis programmer depending on who
+    // spoke last, and `set_primary_system` then rewrote `messages[0]` with it.
     let perm_model_override = {
         let meta_guard = meta.lock().unwrap();
         meta_guard.conversations.get(&context)
             .and_then(|c| c.permission_model.clone())
     };
-    let effective_model = perm_model_override.clone().unwrap_or_else(|| llm_model.to_string());
+    let effective_model = perm_model_override.unwrap_or_else(|| llm_model.to_string());
+    let authority = permission_config.authority(access_level, &effective_model);
     let program_summary = {
         let prog = program.read().await;
         crate::validator::program_summary_for_model(
@@ -1229,6 +1251,19 @@ pub async fn handle_llm_takeover(
             access_level, &effective_model,
         )
     };
+    // Composed fresh every turn (issue #41). The identity comes from the
+    // context's own file and the authority block from the current speaker, so a
+    // shared group keeps one identity across speakers while still telling each
+    // speaker the truth about what they may have done.
+    let available_models = permission_config.model_names();
+    let system = crate::context_prompt::compose(&crate::context_prompt::PromptInputs {
+        context: &context,
+        program_summary: &program_summary,
+        llm_model,
+        available_models: &available_models,
+        speaker: &speaker_id,
+        authority,
+    });
     let mut messages = {
         let mut meta_guard = meta.lock().unwrap();
         let conv = meta_guard.conversations.get_or_create(&context);
@@ -1241,86 +1276,6 @@ pub async fn handle_llm_takeover(
             conv.reply_arg = reply_arg.clone();
         }
 
-        // Refresh the runtime prompt after upgrades while preserving chat history.
-        let system = conv.system_prompt.clone().unwrap_or_else(|| {
-            if perm_model_override.is_some() {
-                    // Sandboxed (non-admin) context, e.g. a family member: use the
-                    // persona instead of the Adapsis-programmer framing. The
-                    // persona owns the identity/tone/safety; we still tell it how
-                    // to actually invoke functions and the <code> reply mechanics,
-                    // and show only the functions it may call.
-                    let mesh = crate::prompt::mesh_topology()
-                        .map(|m| format!("\n\n{m}"))
-                        .unwrap_or_default();
-                    format!(
-                        "{}{}\n\n\
-                         ## So führst du Aktionen aus (technisch)\n\
-                         Wenn du etwas am Computer tun musst, rufe eine vorhandene Funktion in einem \
-                         <code>…</code>-Block auf, z. B. <code>!eval Wolfi.install_app(\"firefox\")</code>. \
-                         Kündige keine spätere Aktion nur im Text an: führe sie im selben Durchlauf im \
-                         <code>-Block aus. Beende eine reine Textantwort immer mit <code>!done</code>. \
-                         Beginne deine erste Antwort auf jede Nutzernachricht mit einer realistischen \
-                         Schätzung <iteration_budget>N</iteration_budget>: 1 für eine reine Antwort, \
-                         mehr für Aufgaben mit mehreren Aktionsschritten. Maximum ist 50. \
-                         Der Nutzer sieht NUR den Text VOR dem ersten <code>-Block — schreibe also zuerst \
-                         deine Antwort an Renate, dann den Code. Erfinde keine Funktionen; nutze nur die unten gelisteten. \
-                         Lies bei Unklarheit den Quelltext mit ?source Modul.funktion.\n\n\
-                         ## Verfügbare Funktionen\n{}\n\n\
-                         Konversationskontext: '{context}'.",
-                        crate::prompt::persona(),
-                        mesh,
-                        program_summary,
-                    )
-            } else {
-                    let available_models = permission_config.model_names();
-                    let models_line = if available_models.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "Available models (switchable via llm_set_model): {}\n",
-                            available_models.join(", "),
-                        )
-                    };
-                    let mesh = crate::prompt::mesh_topology()
-                        .map(|m| format!("\n\n{m}"))
-                        .unwrap_or_default();
-                    format!(
-                        "{}\n\n{}\n\n{}{}\n\nCurrent model: {llm_model}\n\
-                         {models_line}\
-                         Current program state:\n{}\n\n\
-                         You are in conversation context '{context}'. Respond naturally. \
-                         If you need to do work (modify code, create modules, run tasks), include the \
-                         Adapsis commands in your response. Do NOT use !agent for tasks that require \
-                         IO execution (generating music, sending files, HTTP calls). Agents cannot run \
-                         [io,async] functions. Instead, do IO tasks inline using !eval. Use !agent ONLY \
-                         for pure code writing tasks (adding modules, functions, tests). \
-                         IMPORTANT: The user only sees text BEFORE the first <code> block. \
-                         Text after <code> blocks is discarded. Put your response to the user first, \
-                          then the code. Do not narrate what the code does after the <code> block. \
-                          Never promise an action for a later turn without executing it now. Every \
-                          completed prose-only response must end with <code>!done</code>. \
-                          Start your first response to each user message with a realistic action-round \
-                          estimate: <iteration_budget>N</iteration_budget>. Use 1 for a prose-only answer \
-                          and more for multi-step work. The maximum is 50. \
-                         When you need to understand existing code, use ?source Module.function. \
-                         Don't guess how things work — read the source. \
-                         DESIGN PRINCIPLES: \
-                         1. REUSE over CREATE. Before writing new code, check if existing functions \
-                            already do what you need. Use !eval with existing functions directly. \
-                         2. If you must write a new function, make it GENERIC and REUSABLE — parameterize \
-                            everything (chat_id, caption, duration, etc). Add it to the appropriate \
-                            existing module, not a new one. \
-                         3. Never create one-off modules for single requests. \
-                         4. Write +doc for every new function. \
-                         5. Music generation takes ~60 seconds — do not retry if it seems slow.",
-                        crate::prompt::system_prompt(),
-                        crate::builtins::format_for_prompt(),
-                        crate::prompt::adapsis_identity(),
-                        mesh,
-                        program_summary,
-                    )
-            }
-        });
         conv.set_primary_system(system);
 
         // Add user message
@@ -1411,6 +1366,13 @@ pub async fn handle_llm_takeover(
         save_notify: save_notify.clone(),
         access_level,
         permission_config: permission_config.clone(),
+        // Server-bound identity for this turn (issue #41). Code the model emits
+        // executes under it; it is not something the model can name.
+        turn: Some(crate::coroutine::TurnIdentity {
+            context: context.clone(),
+            principal: speaker_id.clone(),
+            may_write: authority.may_write,
+        }),
     };
 
     // Build agent completion callback from conversation's reply info

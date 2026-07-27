@@ -33,6 +33,7 @@ fn test_config() -> AppConfig {
         save_notify: None,
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+        turn: None,
     }
 }
 
@@ -689,6 +690,7 @@ fn test_config_with_io() -> (
         save_notify: None,
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+        turn: None,
     };
     (config, io_rx)
 }
@@ -1518,6 +1520,7 @@ async fn execute_code_permission_blocks_core_module_write() {
     let config = AppConfig {
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(perm_config),
+        turn: None,
         llm_model: std::sync::Arc::new(std::sync::RwLock::new("restricted-model".to_string())),
         ..config
     };
@@ -1556,6 +1559,7 @@ async fn execute_code_permission_blocks_opencode() {
     let config = AppConfig {
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(perm_config),
+        turn: None,
         llm_model: std::sync::Arc::new(std::sync::RwLock::new("no-opencode".to_string())),
         ..config
     };
@@ -1588,6 +1592,7 @@ async fn execute_code_permission_blocks_source_query() {
     let config = AppConfig {
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(perm_config),
+        turn: None,
         llm_model: std::sync::Arc::new(std::sync::RwLock::new("limited".to_string())),
         ..config
     };
@@ -1599,6 +1604,7 @@ async fn execute_code_permission_blocks_source_query() {
     // So create with a permissive config first
     let full_config = AppConfig {
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+        turn: None,
         ..config.clone()
     };
     let mut session = full_config.snapshot_working_set().await;
@@ -1622,6 +1628,7 @@ async fn execute_code_process_level_caps_everything() {
     let config = AppConfig {
         access_level: crate::permissions::AccessLevel::ExecuteOnly,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
+        turn: None,
         ..config
     };
 
