@@ -377,4 +377,75 @@ mod tests {
             PermissionLevel::Read
         );
     }
+
+    /// Issue #38 item 3, root cause. A group a profile does not mention does NOT
+    /// resolve to `None` — it resolves to `Execute`. That is precisely the
+    /// "callable but not readable" state that let a family-persona module be
+    /// bound in an unrelated project conversation and then be undebuggable when
+    /// it failed.
+    ///
+    /// This is deliberate current behaviour, not a bug being fixed here; the test
+    /// exists so that changing it is a conscious decision rather than a surprise.
+    #[test]
+    fn unlisted_group_resolves_to_execute_not_none() {
+        let config: PermissionConfig = toml::from_str(
+            r#"
+            [groups]
+            assist = ["Wolfi"]
+            core = ["TelegramBot"]
+
+            [model.coding]
+            core = "write"
+            opencode = true
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.group_for_module("Wolfi"), "assist");
+        assert_eq!(
+            config.resolve(AccessLevel::Full, "coding", "Wolfi"),
+            PermissionLevel::Execute,
+            "an unmentioned group must be known to fall through to Execute — \
+             every profile therefore has to name every group explicitly"
+        );
+    }
+
+    /// The shipped fix for the above: naming the group with `none` makes the
+    /// module genuinely invisible to that profile.
+    #[test]
+    fn explicit_none_hides_a_persona_module() {
+        let config: PermissionConfig = toml::from_str(
+            r#"
+            [groups]
+            assist = ["Wolfi"]
+            core = ["TelegramBot"]
+
+            [model.coding]
+            core = "write"
+            assist = "none"
+            opencode = true
+
+            [model.family]
+            assist = "execute"
+            core = "none"
+            opencode = false
+        "#,
+        )
+        .unwrap();
+
+        // Coding contexts cannot see the family persona at all.
+        assert_eq!(
+            config.resolve(AccessLevel::Full, "coding", "Wolfi"),
+            PermissionLevel::None
+        );
+        // The family sandbox still can, and still cannot reach core modules.
+        assert_eq!(
+            config.resolve(AccessLevel::Full, "family", "Wolfi"),
+            PermissionLevel::Execute
+        );
+        assert_eq!(
+            config.resolve(AccessLevel::Full, "family", "TelegramBot"),
+            PermissionLevel::None
+        );
+    }
 }

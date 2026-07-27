@@ -1098,14 +1098,26 @@ This library is shared across all git worktrees and sessions.
 pub fn persona() -> String {
     let core_path = std::env::var("ADAPSIS_PERSONA_FILE").ok().map(std::path::PathBuf::from)
         .or_else(|| persona_notes_path().map(|p| p.with_file_name("persona.md")));
+    persona_from_paths(core_path.as_deref(), persona_notes_path().as_deref())
+}
+
+/// Assemble the persona from explicit paths.
+///
+/// Split out of `persona()` so the notes round-trip is testable without mutating
+/// `$HOME`, which is process-global and would race parallel tests that resolve
+/// their own paths from it.
+pub fn persona_from_paths(
+    core_path: Option<&std::path::Path>,
+    notes_path: Option<&std::path::Path>,
+) -> String {
     let core = core_path
-        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(default_persona);
 
-    let notes = persona_notes_path()
-        .and_then(|p| std::fs::read_to_string(&p).ok())
+    let notes = notes_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
@@ -1118,6 +1130,11 @@ pub fn persona() -> String {
 }
 
 /// Path to the self-evolving persona notes file.
+///
+/// This is the ONLY definition of where persona notes live. `.ax.work` modules
+/// that write notes must derive the same path from the `home_dir()` builtin —
+/// a module hardcoding a home directory writes somewhere this function never
+/// looks, and every remembered note is silently lost (issue #38).
 pub fn persona_notes_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| {
         std::path::Path::new(&h).join(".config").join("adapsis").join("persona-notes.md")

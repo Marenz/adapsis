@@ -2600,6 +2600,16 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                 _ => bail!("trim expects String"),
             }
         }
+        "home_dir" => {
+            if !args.is_empty() {
+                bail!("home_dir() expects no arguments");
+            }
+            // Single source of truth with the Rust side: `prompt::persona_notes_path`
+            // and friends resolve from $HOME too. A module that hardcodes a home
+            // path instead writes somewhere the reader never looks (issue #38).
+            let home = std::env::var("HOME").unwrap_or_default();
+            Ok(Value::string(home.trim_end_matches('/').to_string()))
+        }
         "json_get" => {
             if args.len() != 2 {
                 bail!("json_get(json, key_path) expects 2 arguments");
@@ -3383,6 +3393,7 @@ pub fn eval_builtin_or_user(
         | "json_get"
         | "json_array_len"
         | "json_escape"
+        | "home_dir"
         | "base64_encode" => eval_builtin_string(callee, args),
         // List operations
         "list" | "push" | "get" | "join"
