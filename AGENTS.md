@@ -289,6 +289,22 @@ gateway resolves via `model_aliases` or `virtual_models`.
   `Principal`, dynamic `AccessGroup`, original platform message ID, and timestamp.
   Telegram participants receive Read+Contribute membership when first observed;
   `telegram:user:1815217` also receives Manage. Membership grants the full context history.
+- **The principal comes from `source_metadata.speaker_id`, never from the message
+  text.** An intake module fills that field (`TelegramBot.speaker_principal`);
+  `takeover_principal` reads only it, falling back to a context principal. The
+  `[user:<id> <name>] ` prefix a group module prepends is *prose for the model* —
+  `strip_sender_prefix` removes it from stored content and the recall query and
+  nothing else. This split exists because identity used to be parsed back out of
+  that prefix: when #38 item 4 added the display name, `[user:47128798 Kata] `
+  silently became the principal `telegram:user:47128798 Kata`, a second identity
+  for the same person that would re-mint on every Telegram rename. Adding a field
+  to the prefix must never be able to change who someone is. Guarded by
+  `telegram_payload_resolves_a_stable_principal` (bundled_modules_tests.rs), which
+  drives a real payload through the module into the runtime — both sides had
+  their own tests and neither caught it.
+- A context with no per-speaker metadata resolves to a context principal
+  (`telegram:group:<id>`, `kind = 'group'`), not a fabricated user. Stripping
+  `telegram:` off a group context used to yield `telegram:user:group:<id>`.
 - Memories link explicitly to every origin context/access group and source message.
   Cross-context recall requires membership in every governing group. `DENIED_TO` provides
   a future per-memory/per-user override.

@@ -307,11 +307,15 @@ impl MemoryGraph {
         display_name: &str,
         created_at_ms: i64,
     ) -> Result<()> {
+        // A context principal (a group speaking as itself, when a turn carries no
+        // per-speaker metadata) must not be recorded as a person.
+        let kind = if id.starts_with("telegram:group:") { "group" } else { "user" };
         execute(
             connection,
-            "MERGE (principal:Principal {id: $id}) ON CREATE SET principal.kind = 'user', principal.display_name = $display_name, principal.created_at_ms = $created_at_ms",
+            "MERGE (principal:Principal {id: $id}) ON CREATE SET principal.kind = $kind, principal.display_name = $display_name, principal.created_at_ms = $created_at_ms",
             vec![
                 ("id", id.into()),
+                ("kind", kind.into()),
                 ("display_name", display_name.into()),
                 ("created_at_ms", created_at_ms.into()),
             ],

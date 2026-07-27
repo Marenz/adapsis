@@ -146,6 +146,55 @@ fn wolfi_notes_path_matches_the_rust_persona_reader() {
     );
 }
 
+/// The seam that actually broke: `TelegramBot` builds both the model-facing
+/// sender prefix and the provenance metadata, and the runtime derives the
+/// Ladybug principal. Both sides had tests; nothing tested them together, so
+/// adding the display name to the prefix (#38 item 4) silently changed identity.
+///
+/// This drives a real Telegram payload through the module and asserts the
+/// resulting principal — and that the prefix format cannot influence it.
+#[test]
+fn telegram_payload_resolves_a_stable_principal() {
+    let (program, _) = load("TelegramBot.ax.work");
+
+    let payload = "{\"message\":{\"message_id\":42,\"date\":1700000000,\
+                   \"chat\":{\"id\":-5134158198,\"type\":\"group\"},\
+                   \"from\":{\"id\":47128798,\"first_name\":\"Kata\",\"last_name\":\"Example\"},\
+                   \"text\":\"hallo\"}}";
+
+    let call = |function: &str| -> String {
+        let input = parser::parse_test_input(0, &format!("payload={payload:?}"))
+            .unwrap_or_else(|e| panic!("test input for {function}: {e}"));
+        match eval::eval_compiled_or_interpreted(&program, function, &input) {
+            // The evaluator renders values for display; a String comes back quoted.
+            Ok((rendered, _)) => rendered
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .map_or(rendered.clone(), str::to_string),
+            Err(e) => panic!("{function}: {e}"),
+        }
+    };
+
+    let metadata = call("TelegramBot.source_metadata");
+    let sender_prefix = call("TelegramBot.speaker_principal");
+    assert_eq!(sender_prefix, "telegram:user:47128798");
+
+    let principal = crate::api::llm_handlers::takeover_principal(
+        "telegram:group:-5134158198",
+        Some(&metadata),
+    );
+    assert_eq!(
+        principal, "telegram:user:47128798",
+        "principal must come from metadata.speaker_id; got `{principal}` from `{metadata}`"
+    );
+
+    // And the display name must not leak into identity, whatever the prefix says.
+    assert!(
+        !principal.contains("Kata"),
+        "principal `{principal}` carries a display name — it will re-mint on rename"
+    );
+}
+
 /// The other half of issue #38 item 2: a note written to the notes path must
 /// actually come back out of the assembled persona.
 #[test]
