@@ -1093,8 +1093,9 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Reloads a module from the persistent library directory (~/.config/adapsis/modules/). \
                Takes `(name:String)` — the module name (e.g. \"MyModule\"). \
                If name is empty string \"\", reloads ALL .ax files from the library directory. \
-               The existing module is removed from the program and re-parsed from disk. \
-               Returns \"Reloaded ModuleName successfully\" on success, or fails with the error. \
+               The file is validated before atomically replacing the existing module, so a bad file leaves the working copy intact. \
+               The result explicitly reports when an externally changed file was adopted. \
+               Returns \"Reloaded ModuleName successfully\" on success, or fails with an actionable error. \
                Useful for recovering from load errors at startup without restarting. \
                Requires `+await`.",
         category: BuiltinCategory::Io,

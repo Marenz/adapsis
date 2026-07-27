@@ -4,11 +4,12 @@
 //! This provides a permanent library layer that works across git worktrees and sessions.
 //! Modules are stored as reconstructed `.ax` source files, one per module.
 
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::ast;
 use crate::parser;
@@ -33,6 +34,8 @@ pub struct LibraryState {
     pub errors: Arc<Mutex<Vec<String>>>,
     /// Structured load errors from startup — (module_name, error_message) pairs.
     pub load_errors: Arc<Mutex<Vec<LoadError>>>,
+    /// Hash of the last successfully loaded or persisted source per module.
+    file_hashes: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl LibraryState {
@@ -41,19 +44,53 @@ impl LibraryState {
             loaded_modules: Vec::new(),
             errors: Arc::new(Mutex::new(Vec::new())),
             load_errors: Arc::new(Mutex::new(Vec::new())),
+            file_hashes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn record_error(&self, msg: String) {
+    /// Record a save/persist error. Deduplicated: the save loop retries every
+    /// module on every debounced save, so a module stuck in a conflict would
+    /// otherwise append the same line every few seconds for the life of the
+    /// process — an unbounded leak surfaced verbatim by `library_errors()`.
+    pub(crate) fn record_error(&self, msg: String) {
         if let Ok(mut errs) = self.errors.lock() {
+            if errs.iter().any(|existing| existing == &msg) {
+                return;
+            }
+            if errs.len() >= MAX_RECORDED_ERRORS {
+                errs.remove(0);
+            }
             errs.push(msg);
         }
     }
 
     /// Record a structured load error with the module name and error message.
+    /// A module has exactly one current load error, so a repeat replaces the
+    /// previous entry instead of appending — `format_load_errors` is spliced
+    /// into every LLM turn, and an append-on-retry would grow the prompt
+    /// without bound each time a failing `library_reload` is retried.
     fn record_load_error(&self, module_name: String, error: String) {
         if let Ok(mut errs) = self.load_errors.lock() {
-            errs.push(LoadError { module_name, error });
+            match errs.iter_mut().find(|e| e.module_name == module_name) {
+                Some(existing) => existing.error = error,
+                None => errs.push(LoadError { module_name, error }),
+            }
+        }
+    }
+
+    fn file_hash(&self, module_name: &str) -> Option<String> {
+        self.file_hashes.lock().ok()?.get(module_name).cloned()
+    }
+
+    fn record_file_hash(&self, module_name: &str, source: &str) {
+        if let Ok(mut hashes) = self.file_hashes.lock() {
+            hashes.insert(module_name.to_string(), source_hash(source));
+        }
+    }
+
+    fn clear_load_error(&self, module_name: &str) {
+        if let Ok(mut errors) = self.load_errors.lock() {
+            errors.retain(|error| error.module_name != module_name);
         }
     }
 
@@ -70,6 +107,14 @@ impl LibraryState {
         }
         Some(out)
     }
+}
+
+/// Upper bound on retained save errors. Load errors are bounded by module count
+/// (one entry per module), so only this list needs an explicit cap.
+const MAX_RECORDED_ERRORS: usize = 50;
+
+fn source_hash(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
 /// Default library directory path.
@@ -397,17 +442,14 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
 
         match std::fs::read_to_string(path) {
             Ok(source) => {
-                // If this module already exists (e.g. from restored session state),
-                // remove it first to prevent "duplicate +startup" errors.
-                program.modules.retain(|m| m.name != file_module_name);
-
-                match load_module_source(program, &source) {
+                match replace_module_from_source(program, &file_module_name, &source) {
                     Ok(module_name) => {
                         eprintln!(
                             "[library] loaded module `{module_name}` from {}",
                             path.display()
                         );
                         state.loaded_modules.push(module_name);
+                        state.record_file_hash(&file_module_name, &source);
                     }
                     Err(e) => {
                         let err_msg = format!("{e}");
@@ -474,6 +516,34 @@ fn load_module_source(program: &mut ast::Program, source: &str) -> Result<String
     module_name.ok_or_else(|| anyhow::anyhow!("no +module declaration found in source"))
 }
 
+/// Validate and load a replacement into a candidate program before changing the live copy.
+///
+/// The `*program = candidate` below looks like the whole-program overwrite
+/// AGENTS.md forbids, but it is not a CoW regression: the clone and the
+/// assignment happen back-to-back with no await or lock release between them,
+/// and every caller already holds the `Program` write lock across this call
+/// (`coroutine::library_reload`) or runs before the tiers exist at all
+/// (`load_module_library` at startup). No concurrent writer can interleave, so
+/// there is no delta to lose. Do not lift the clone out of this function.
+fn replace_module_from_source(
+    program: &mut ast::Program,
+    expected_module_name: &str,
+    source: &str,
+) -> Result<String> {
+    let mut candidate = program.clone();
+    candidate
+        .modules
+        .retain(|module| module.name != expected_module_name);
+    let loaded_name = load_module_source(&mut candidate, source)?;
+    if loaded_name != expected_module_name {
+        bail!(
+            "module file `{expected_module_name}.ax` declares `+module {loaded_name}`; rename the file or declaration so they match"
+        );
+    }
+    *program = candidate;
+    Ok(loaded_name)
+}
+
 /// Restore `+test` blocks from parsed operations into the corresponding
 /// function's `tests` field. Called during library load to preserve test
 /// state across restarts.
@@ -527,29 +597,118 @@ fn restore_tests_from_operations(
 }
 
 /// Persist a module's reconstructed source to the library directory.
-/// Uses atomic write (write to temp file, then rename) for safety.
-pub fn persist_module(module: &ast::Module) -> Result<()> {
+/// Uses atomic write and refuses to overwrite a file changed since this process saw it.
+pub fn persist_module(module: &ast::Module, lib_state: Option<&LibraryState>) -> Result<()> {
     let dir = ensure_library_dir()?;
+    persist_module_to_dir(module, lib_state, &dir)
+}
+
+fn persist_module_to_dir(
+    module: &ast::Module,
+    lib_state: Option<&LibraryState>,
+    dir: &Path,
+) -> Result<()> {
     let target = dir.join(format!("{}.ax", module.name));
     let tmp = dir.join(format!(".{}.ax.tmp", module.name));
-
     let source = reconstruct_module_source(module);
+    persist_module_source(module, &source, lib_state, &target, &tmp)
+}
 
-    // Safety: don't overwrite a file with less content (prevents data loss
-    // when session state has a stub but the file has the full module)
+fn persist_module_source(
+    module: &ast::Module,
+    source: &str,
+    lib_state: Option<&LibraryState>,
+    target: &Path,
+    tmp: &Path,
+) -> Result<()> {
+    validate_reconstructed_source(&module.name, source)?;
+
+    let expected_hash = lib_state.and_then(|state| state.file_hash(&module.name));
     if target.exists() {
-        let existing = std::fs::read_to_string(&target).unwrap_or_default();
+        let existing = std::fs::read_to_string(target)
+            .with_context(|| format!("failed to read existing module file {}", target.display()))?;
+        if lib_state.is_some() {
+            verify_file_unchanged(&module.name, &existing, expected_hash.as_deref())?;
+        }
         if source.len() < existing.len() && module.functions.is_empty() {
-            // The module in memory has no functions but the file does - skip
-            return Ok(());
+            bail!(
+                "refusing to replace `{}` with an in-memory stub; reload the module, reconcile the definitions, and retry",
+                target.display()
+            );
         }
     }
 
-    std::fs::write(&tmp, &source)
+    std::fs::write(tmp, source)
         .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
-    std::fs::rename(&tmp, &target)
-        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), target.display()))?;
 
+    // Narrow re-check for an external write that landed between the guard above
+    // and this point. Only a *changed* file is a conflict — a file that vanished
+    // has nothing left to lose, so the rename below simply recreates it.
+    if let (Some(expected), true) = (expected_hash.as_deref(), target.exists()) {
+        let current = std::fs::read_to_string(target)
+            .with_context(|| format!("failed to re-read module file {}", target.display()))?;
+        if source_hash(&current) != expected {
+            let _ = std::fs::remove_file(tmp);
+            bail!(
+                "module file `{}` changed while it was being saved; the external version won. Reload it, reconcile the changes, and retry",
+                target.display()
+            );
+        }
+    }
+
+    std::fs::rename(tmp, target)
+        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), target.display()))?;
+    if let Some(state) = lib_state {
+        state.record_file_hash(&module.name, source);
+    }
+
+    Ok(())
+}
+
+fn validate_reconstructed_source(module_name: &str, source: &str) -> Result<()> {
+    let operations = parser::parse(source).with_context(|| {
+        format!("serializer produced invalid source for module `{module_name}`; disk was not changed")
+    })?;
+    let declared_name = operations.iter().find_map(|operation| match operation {
+        parser::Operation::Module(module) => Some(module.name.as_str()),
+        _ => None,
+    });
+    if declared_name != Some(module_name) {
+        bail!(
+            "serializer output for module `{module_name}` did not reproduce its `+module {module_name}` declaration; disk was not changed"
+        );
+    }
+    Ok(())
+}
+
+fn verify_file_unchanged(
+    module_name: &str,
+    existing_source: &str,
+    expected_hash: Option<&str>,
+) -> Result<()> {
+    // No baseline: this process never loaded or wrote the file, so there is
+    // nothing to diff against. Refusing unconditionally would wedge the exact
+    // scenario issue #40 was filed about — a file too corrupt to load leaves no
+    // hash, so the good in-memory module could never be written back and
+    // `library_reload` (the advice we would hand the model) can never succeed.
+    // Only protect content we could actually lose: if the file still parses it
+    // is someone's real work and we refuse; if it does not, overwrite it loudly.
+    let Some(expected_hash) = expected_hash else {
+        if parser::parse(existing_source).is_ok() {
+            bail!(
+                "module file `{module_name}.ax` already exists, parses, and was not loaded by this process; reload it with library_reload(\"{module_name}\"), reconcile the definitions, and retry"
+            );
+        }
+        eprintln!(
+            "[library] WARNING: overwriting unparseable `{module_name}.ax` with the in-memory module — the previous file contents could not be loaded and are lost"
+        );
+        return Ok(());
+    };
+    if source_hash(existing_source) != expected_hash {
+        bail!(
+            "module file `{module_name}.ax` changed on disk since this process last loaded or saved it; the external version won. Reload it, reconcile the changes, and retry"
+        );
+    }
     Ok(())
 }
 
@@ -562,93 +721,117 @@ pub fn persist_module(module: &ast::Module) -> Result<()> {
 /// reloads each one, replacing existing modules.
 ///
 /// Returns a status message describing what happened.
-pub fn reload_module(program: &mut ast::Program, module_name: &str) -> Result<String> {
+pub fn reload_module(
+    program: &mut ast::Program,
+    module_name: &str,
+    lib_state: Option<&LibraryState>,
+) -> Result<String> {
     let dir = ensure_library_dir()?;
-
     if module_name.is_empty() {
-        // Reload all modules
-        let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "ax"))
-                .collect(),
-            Err(e) => return Err(anyhow::anyhow!("could not read library dir: {e}")),
-        };
-        files.sort();
-
-        let mut reloaded = Vec::new();
-        let mut failed = Vec::new();
-
-        for path in &files {
-            let file_name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string();
-
-            match std::fs::read_to_string(path) {
-                Ok(source) => {
-                    // Remove existing module first
-                    program.modules.retain(|m| m.name != file_name);
-                    match load_module_source(program, &source) {
-                        Ok(name) => {
-                            eprintln!("[library] reloaded module `{name}` from {}", path.display());
-                            reloaded.push(name);
-                        }
-                        Err(e) => {
-                            eprintln!("[library] reload failed for {}: {e}", path.display());
-                            failed.push(format!("{file_name}: {e}"));
-                        }
-                    }
-                }
-                Err(e) => {
-                    failed.push(format!("{file_name}: could not read file: {e}"));
-                }
-            }
-        }
-
-        program.rebuild_function_index();
-
-        let mut msg = format!("Reloaded {} module(s)", reloaded.len());
-        if !reloaded.is_empty() {
-            msg.push_str(&format!(": {}", reloaded.join(", ")));
-        }
-        if !failed.is_empty() {
-            msg.push_str(&format!(
-                ". Failed ({}): {}",
-                failed.len(),
-                failed.join("; ")
-            ));
-        }
-        Ok(msg)
+        reload_all_modules(program, &dir, lib_state)
     } else {
-        // Reload a specific module
-        let path = dir.join(format!("{module_name}.ax"));
-        if !path.exists() {
-            return Err(anyhow::anyhow!(
-                "library file not found: {}.ax",
-                module_name
-            ));
-        }
+        reload_specific_module(program, &dir, module_name, lib_state)
+    }
+}
 
-        let source = std::fs::read_to_string(&path)
-            .with_context(|| format!("could not read {}", path.display()))?;
+fn reload_all_modules(
+    program: &mut ast::Program,
+    dir: &Path,
+    lib_state: Option<&LibraryState>,
+) -> Result<String> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("could not read library dir {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "ax"))
+        .collect();
+    files.sort();
 
-        // Remove the existing module first
-        program.modules.retain(|m| m.name != module_name);
-
-        match load_module_source(program, &source) {
-            Ok(name) => {
-                program.rebuild_function_index();
-                eprintln!("[library] reloaded module `{name}` from {}", path.display());
-                Ok(format!("Reloaded {name} successfully"))
+    let mut reloaded = Vec::new();
+    let mut failed = Vec::new();
+    for path in &files {
+        let file_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        match reload_file(program, path, &file_name, lib_state) {
+            Ok((name, changed)) => reloaded.push(if changed {
+                format!("{name} (adopted externally changed file)")
+            } else {
+                name
+            }),
+            Err(error) => {
+                record_reload_error(lib_state, &file_name, &error);
+                failed.push(format!("{file_name}: {error}"));
             }
-            Err(e) => {
-                program.rebuild_function_index();
-                Err(anyhow::anyhow!("Reload failed: {e}"))
-            }
         }
+    }
+    program.rebuild_function_index();
+
+    let mut message = format!("Reloaded {} module(s)", reloaded.len());
+    if !reloaded.is_empty() {
+        message.push_str(&format!(": {}", reloaded.join(", ")));
+    }
+    if !failed.is_empty() {
+        message.push_str(&format!(". Failed ({}): {}", failed.len(), failed.join("; ")));
+    }
+    Ok(message)
+}
+
+fn reload_specific_module(
+    program: &mut ast::Program,
+    dir: &Path,
+    module_name: &str,
+    lib_state: Option<&LibraryState>,
+) -> Result<String> {
+    let path = dir.join(format!("{module_name}.ax"));
+    if !path.exists() {
+        bail!("library file not found: {module_name}.ax");
+    }
+
+    let result = reload_file(program, &path, module_name, lib_state);
+    program.rebuild_function_index();
+    match result {
+        Ok((name, true)) => Ok(format!(
+            "Reloaded {name} successfully; adopted externally changed file"
+        )),
+        Ok((name, false)) => Ok(format!("Reloaded {name} successfully")),
+        Err(error) => {
+            record_reload_error(lib_state, module_name, &error);
+            Err(anyhow::anyhow!("Reload failed: {error}"))
+        }
+    }
+}
+
+fn reload_file(
+    program: &mut ast::Program,
+    path: &Path,
+    module_name: &str,
+    lib_state: Option<&LibraryState>,
+) -> Result<(String, bool)> {
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let changed = lib_state
+        .and_then(|state| state.file_hash(module_name))
+        .is_some_and(|hash| hash != source_hash(&source));
+    let name = replace_module_from_source(program, module_name, &source)?;
+    eprintln!("[library] reloaded module `{name}` from {}", path.display());
+    if let Some(state) = lib_state {
+        state.record_file_hash(&name, &source);
+        state.clear_load_error(&name);
+    }
+    Ok((name, changed))
+}
+
+fn record_reload_error(
+    lib_state: Option<&LibraryState>,
+    module_name: &str,
+    error: &anyhow::Error,
+) {
+    eprintln!("[library] reload failed for `{module_name}`: {error}");
+    if let Some(state) = lib_state {
+        state.record_load_error(module_name.to_string(), error.to_string());
     }
 }
 
@@ -674,27 +857,34 @@ pub fn affected_module_names(operations: &[parser::Operation]) -> BTreeSet<Strin
 }
 
 /// Persist all modules whose names are in the given set.
-/// Logs warnings on failure but does not abort.
-/// Records errors into the LibraryState if provided.
+/// Returns actionable errors so the mutation caller can report them immediately.
+/// Also records errors into the LibraryState if provided.
 pub fn persist_affected_modules(
     program: &ast::Program,
     module_names: &BTreeSet<String>,
     lib_state: Option<&LibraryState>,
-) {
+) -> Vec<String> {
+    let mut errors = Vec::new();
     for name in module_names {
         if let Some(module) = program.modules.iter().find(|m| &m.name == name) {
-            match persist_module(module) {
+            match persist_module(module, lib_state) {
                 Ok(()) => {}
                 Err(e) => {
-                    let msg = format!("failed to persist module `{name}`: {e}");
+                    let msg = format!(
+                        "module `{name}` was changed in memory but NOT saved to disk: {e} \
+                         (the in-memory definition is live; do not re-apply the mutation, \
+                         reconcile with the file instead)"
+                    );
                     eprintln!("[library] warning: {msg}");
                     if let Some(state) = lib_state {
-                        state.record_error(msg);
+                        state.record_error(msg.clone());
                     }
+                    errors.push(msg);
                 }
             }
         }
     }
+    errors
 }
 
 /// Format a summary of the library state for the ?library query.
@@ -785,6 +975,12 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn module_from_source(source: &str) -> ast::Module {
+        let mut program = ast::Program::default();
+        load_module_source(&mut program, source).unwrap();
+        program.modules.remove(0)
+    }
 
     #[test]
     fn test_reconstruct_module_source_roundtrips() {
@@ -1085,7 +1281,7 @@ mod tests {
         let mut program = ast::Program::default();
         // This will fail because the file doesn't exist in the real library dir
         // (or if it does, it's a valid module — either way tests the path)
-        let result = reload_module(&mut program, "NonExistentModule99999");
+        let result = reload_module(&mut program, "NonExistentModule99999", None);
         assert!(result.is_err(), "should fail for nonexistent module");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1305,5 +1501,167 @@ mod tests {
         );
         assert_eq!(program.modules[0].functions[0].name, "compute");
         assert_eq!(program.modules[0].functions[1].name, "extra");
+    }
+
+    #[test]
+    fn corrupt_replacement_keeps_last_known_good_module() {
+        let source = "+module Stable\n+fn value ()->Int\n  +return 1\n";
+        let mut program = ast::Program::default();
+        load_module_source(&mut program, source).unwrap();
+
+        let result = replace_module_from_source(
+            &mut program,
+            "Stable",
+            "+module Stable\n+fn broken ()->Int\n  +return\n",
+        );
+
+        assert!(result.is_err(), "corrupt replacement unexpectedly loaded");
+        assert!(program.get_function("Stable.value").is_some());
+        assert!(program.get_function("Stable.broken").is_none());
+    }
+
+    #[test]
+    fn unparseable_serialized_source_never_reaches_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("Safe.ax");
+        let temp_file = tmp.path().join(".Safe.ax.tmp");
+        std::fs::write(&target, "last known good").unwrap();
+        let module = module_from_source(
+            "+module Safe\n+fn value ()->Int\n  +return 1\n",
+        );
+
+        let result = persist_module_source(
+            &module,
+            "+module Safe\n+fn broken ()->Int\n  +return\n",
+            None,
+            &target,
+            &temp_file,
+        );
+
+        assert!(result.is_err(), "invalid serializer output was accepted");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "last known good"
+        );
+        assert!(!temp_file.exists());
+    }
+
+    #[test]
+    fn persist_refuses_to_clobber_external_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = "+module Conflict\n+fn value ()->Int\n  +return 1\n";
+        let external = "+module Conflict\n+fn external ()->Int\n  +return 2\n";
+        let updated = "+module Conflict\n+fn value ()->Int\n  +return 3\n";
+        let target = tmp.path().join("Conflict.ax");
+        std::fs::write(&target, original).unwrap();
+        let state = LibraryState::new();
+        state.record_file_hash("Conflict", original);
+        std::fs::write(&target, external).unwrap();
+        let module = module_from_source(updated);
+
+        let result = persist_module_to_dir(&module, Some(&state), tmp.path());
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("changed on disk"), "wrong error: {error}");
+        assert!(error.contains("Reload it"), "error is not actionable: {error}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), external);
+    }
+
+    /// The wedge case: startup could not load the file, so no baseline hash was
+    /// recorded. The in-memory module (restored from the session) must still be
+    /// able to repair the file — refusing here would make the corruption
+    /// permanent, since `library_reload` cannot parse it either.
+    #[test]
+    fn unparseable_file_without_baseline_is_repaired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("Broken.ax");
+        std::fs::write(&target, "+module Broken\n+fn v ()->Int\n  +return\n").unwrap();
+        let good = "+module Broken\n+fn v ()->Int\n  +return 1\n";
+        let module = module_from_source(good);
+        let state = LibraryState::new();
+
+        persist_module_to_dir(&module, Some(&state), tmp.path())
+            .expect("good module could not overwrite an unloadable file");
+
+        let on_disk = std::fs::read_to_string(&target).unwrap();
+        assert!(on_disk.contains("+return 1"), "file not repaired: {on_disk}");
+        let mut reloaded = ast::Program::default();
+        load_module_source(&mut reloaded, &on_disk).expect("repaired file must parse");
+    }
+
+    /// A file that parses is someone's real work, so an unknown-provenance
+    /// write is still refused even without a baseline.
+    #[test]
+    fn parseable_file_without_baseline_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("Foreign.ax");
+        let external = "+module Foreign\n+fn theirs ()->Int\n  +return 2\n";
+        std::fs::write(&target, external).unwrap();
+        let module = module_from_source("+module Foreign\n+fn mine ()->Int\n  +return 1\n");
+        let state = LibraryState::new();
+
+        let error = persist_module_to_dir(&module, Some(&state), tmp.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("library_reload(\"Foreign\")"),
+            "error must name a command that can actually resolve it: {error}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), external);
+    }
+
+    /// An externally deleted file has nothing left to lose, so the next save
+    /// recreates it rather than reporting a phantom conflict.
+    #[test]
+    fn externally_deleted_file_is_recreated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("Gone.ax");
+        let source = "+module Gone\n+fn v ()->Int\n  +return 1\n";
+        std::fs::write(&target, source).unwrap();
+        let state = LibraryState::new();
+        state.record_file_hash("Gone", source);
+        std::fs::remove_file(&target).unwrap();
+        let module = module_from_source(source);
+
+        persist_module_to_dir(&module, Some(&state), tmp.path())
+            .expect("deleted file should be recreated, not treated as a conflict");
+
+        assert!(target.exists(), "file was not recreated");
+    }
+
+    /// The save loop retries every module on every debounced save, so an
+    /// unresolvable conflict must not append a fresh line each time.
+    #[test]
+    fn repeated_save_errors_are_deduplicated_and_capped() {
+        let state = LibraryState::new();
+        for _ in 0..500 {
+            state.record_error("failed to persist module `Stuck`: conflict".to_string());
+        }
+        assert_eq!(state.errors.lock().unwrap().len(), 1);
+
+        for i in 0..MAX_RECORDED_ERRORS * 2 {
+            state.record_error(format!("distinct error {i}"));
+        }
+        assert_eq!(state.errors.lock().unwrap().len(), MAX_RECORDED_ERRORS);
+    }
+
+    /// `format_load_errors` is spliced into every LLM turn, so a retried
+    /// failing reload must replace its entry rather than grow the prompt.
+    #[test]
+    fn repeated_load_errors_replace_instead_of_appending() {
+        let state = LibraryState::new();
+        for attempt in 0..100 {
+            state.record_load_error("Broken".to_string(), format!("parse error (try {attempt})"));
+        }
+        state.record_load_error("Other".to_string(), "parse error".to_string());
+
+        let errors = state.load_errors.lock().unwrap();
+        assert_eq!(errors.len(), 2, "load errors grew per retry: {errors:?}");
+        let broken = errors.iter().find(|e| e.module_name == "Broken").unwrap();
+        assert_eq!(
+            broken.error, "parse error (try 99)",
+            "latest error should win"
+        );
     }
 }

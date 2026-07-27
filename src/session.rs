@@ -1615,6 +1615,16 @@ impl Session {
             }
         }
 
+        if any_definition && results.iter().all(|(_, ok)| *ok) {
+            let affected = crate::library::affected_module_names(&operations);
+            let persist_errors = crate::library::persist_affected_modules(
+                &self.program,
+                &affected,
+                self.meta.library_state.as_ref(),
+            );
+            results.extend(persist_errors.into_iter().map(|error| (error, false)));
+        }
+
         let success = results.iter().all(|(_, ok)| *ok);
         let summary = if results.is_empty() {
             "no mutations".to_string()
@@ -1643,14 +1653,6 @@ impl Session {
             });
             self.meta.sources.push(source.to_string());
 
-            let affected = crate::library::affected_module_names(&operations);
-            if success && !affected.is_empty() {
-                crate::library::persist_affected_modules(
-                    &self.program,
-                    &affected,
-                    self.meta.library_state.as_ref(),
-                );
-            }
         }
 
         record_mutation_failures(&mut self.runtime, &results);

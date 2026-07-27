@@ -759,7 +759,7 @@ They return the same output as the corresponding `?` query commands.
 - `+await result:String = query_tasks()` — spawned async tasks (same as `?tasks`)
 - `+await result:String = query_inbox()` — current inbox contents (same as `?inbox`). Returns `[timestamp] from sender: message` lines, or `No messages.` when empty.
 - `+await result:String = query_library()` — library status (same as `?library`)
-- `+await result:String = library_reload("ModuleName")` — reload a specific module from disk. Re-reads the .ax file, removes old module, and re-parses. Returns "Reloaded ModuleName successfully" or fails with error.
+- `+await result:String = library_reload("ModuleName")` — reload a specific module from disk. It validates the file before replacing the working module and reports when it adopts an external edit. A bad file leaves the last-known-good module intact.
 - `+await result:String = library_reload("")` — reload ALL modules from the library directory. Useful for recovering from startup load errors.
 - `+await result:String = library_errors()` — get all library load/save errors from this session as a formatted string. Returns "No library errors." if none. Useful for diagnosing why modules failed to load at startup.
 - `+await result:String = failure_history()` — get the last 20 mutation or validation failures from this session as newline-separated error messages.
@@ -1008,6 +1008,16 @@ This library is shared across all git worktrees and sessions.
   reconstructed source is atomically written to `~/.config/adapsis/modules/<Name>.ax`.
 - On startup, all `.ax` files from the library directory are auto-loaded in sorted
   filename order, before the session begins. This means modules survive restarts.
+- Library loads are transactional per module: an invalid file raises a prominent
+  load error while the last-known-good in-memory module remains available.
+- Before saving, reconstructed source is parsed again. Saving refuses to overwrite
+  a file changed externally since the process last loaded or wrote it. Use
+  `library_reload("Name")`, reconcile the definitions, then retry the mutation.
+- A save conflict does NOT undo the mutation — the new definition is live in
+  memory and only the disk write was skipped. Reconcile with the file; do not
+  re-apply the same mutation.
+- A library file that failed to load and still does not parse is overwritten by
+  the in-memory module on the next save, so a corrupt file repairs itself.
 - Use `?library` to see which modules were auto-loaded, files on disk, and any
   load/save errors this session.
 - The library only contains module definitions (types, functions). Transient data

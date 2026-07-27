@@ -1907,8 +1907,16 @@ async fn main() -> Result<()> {
                     // Persist all library modules (picks up test changes, shared var updates, etc.)
                     let mut lib_errors = 0usize;
                     for module in &sess.program.modules {
-                        if let Err(e) = crate::library::persist_module(module) {
-                            eprintln!("[save] failed to persist module `{}`: {e}", module.name);
+                        if let Err(e) = crate::library::persist_module(
+                            module,
+                            sess.meta.library_state.as_ref(),
+                        ) {
+                            let message =
+                                format!("failed to persist module `{}`: {e}", module.name);
+                            eprintln!("[save] {message}");
+                            if let Some(state) = sess.meta.library_state.as_ref() {
+                                state.record_error(message);
+                            }
                             lib_errors += 1;
                         }
                     }
