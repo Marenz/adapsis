@@ -194,9 +194,11 @@ gateway resolves via `model_aliases` or `virtual_models`.
   - `family-bot` (edox) → `deepseek-v4-flash` → `claude-sonnet-4-5` → `chatgpt/gpt-5.5`
     (DeepSeek made primary 2026-07-06 to spare OpenAI quota — temporary, revert
     when limits reset. Same reorder applied to the local gateway config on here.)
-  - `dev-bot` (here, sleek) → `anthropic/claude-opus-5` → `anthropic/claude-opus-4-8`
-    → `deepseek-v4-flash` → `deepinfra/zai-org/GLM-5.2` → `chatgpt/gpt-5.5`
-    (opus-5 promoted to primary 2026-07-27, verified 200 against the live gateway)
+  - `dev-bot` (here, sleek) → `anthropic/claude-opus-5` → `chatgpt/gpt-5.6-sol`
+    → `chatgpt/gpt-5.5` → `deepseek-v4-flash` → `deepinfra/zai-org/GLM-5.2`
+    (2026-07-27: opus-5 promoted to primary, opus-4-8 dropped; both verified 200
+    against the live gateway. Adapsis-fluent models lead, deepseek/GLM are
+    last-resort only.)
 - **Pick an Adapsis-aware model for dev nodes.** Raw `deepseek/*` (incl. the
   misleading `deepseek-reasoner` alias → `deepseek-v4-flash`) does NOT know
   Adapsis syntax — it emits "Plan set" prose + fake `async {}`/`:=` code and
@@ -210,14 +212,24 @@ gateway resolves via `model_aliases` or `virtual_models`.
   a new model ID directly (`POST /v1/chat/completions` with
   `{"model":"...","messages":[...],"max_tokens":10}`) before putting it first in
   a chain — the gateway silently advances past a 404 target to the next one.
-- **Dead targets as of 2026-07-27 (here):** `deepinfra/zai-org/GLM-5.2` returns
-  **402** on every request (no credit) — it was `dev-bot`'s first target, so each
-  call burned a round trip before falling through; demoted to the tail. The whole
-  **`chatgpt` provider hangs** (no response, no log line, 120 s+ timeout) for
-  `gpt-5.5` *and* `gpt-5.6-sol`, and the `openai` provider 401s on `/models`
-  (`OPENAI_API_KEY` stale) — so `chatgpt/*` targets are effectively dead weight
-  and `/v1/models` on the gateway hangs because it enumerates them. Fix the
-  Codex/OpenAI auth before relying on any `chatgpt/*` target again.
+- **`deepinfra/zai-org/GLM-5.2` returns 402** on every request (no credit). It
+  used to be `dev-bot`'s *first* target, so every call burned a round trip
+  before falling through — now demoted to the tail. The `openai` provider also
+  401s on `/models` (`OPENAI_API_KEY` stale), but that's cosmetic: `chatgpt/*`
+  routes through the Codex OAuth provider, not `openai`.
+- **A hung gateway is usually a stale `*-auth.json.lock`, not broken auth.**
+  Symptom (seen 2026-07-27): every `chatgpt/*` request times out with **no
+  gateway log line at all**, `GET /v1/models` hangs, and `llm-gateway login
+  chatgpt` hangs *after* you paste the callback URL. Cause: llm-gateway's
+  `TokenStore` guards the token file with a `create_new` lock file
+  (`~/.config/llm-gateway/<provider>-auth.json.lock`) that only `Drop` removes —
+  so a killed/crashed process (e.g. `systemctl restart` during a token refresh)
+  orphans it, and *every* later token read spun at 50 ms **forever**. Diagnose
+  with `ls -l ~/.config/llm-gateway/*.lock` plus `fuser` on it; if nobody holds
+  it, `rm` the lock and the blocked processes resume instantly. Fixed upstream in
+  `~/Projects/llm-gateway` (`src/oauth/token_store.rs`): locks older than 30 s
+  are reclaimed, acquisition times out after 15 s with an actionable error, and
+  the owning PID is written into the lock file.
 - After editing a gateway config: `systemctl --user restart llm-gateway.service`
   (on each affected node). After changing a node's `--model`: edit its
   `adapsis.service`/`adapsis-bot.service` `ExecStart`, `daemon-reload`, restart.
