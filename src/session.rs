@@ -667,7 +667,7 @@ impl AgentBranch {
                                     crate::eval::set_shared_meta(Some(m));
                                 }
                                 crate::eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
-                                crate::eval::eval_inline_expr_with_io(&program, &expr, sender)
+                                crate::eval::eval_inline_expr_with_io(&program, &expr, sender, None)
                             }).await;
                             match eval_result {
                                 Ok(Ok(val)) => results.push((format!("= {val}"), true)),
@@ -805,9 +805,16 @@ pub struct Conversation {
     /// Argument to pass to reply_fn (e.g. chat_id as string)
     #[serde(default)]
     pub reply_arg: Option<String>,
-    /// System prompt override for this conversation (if None, uses default)
-    #[serde(default)]
-    pub system_prompt: Option<String>,
+    // NOTE: there is deliberately no `system_prompt` override field here.
+    // One existed, was initialized to `None`, was never written by anything, and
+    // was read through `unwrap_or_else` — so it only ever selected the fallback.
+    // Populating it would have *frozen* the prompt for that conversation, which
+    // is the opposite of what the read site wants: the prompt is recomposed every
+    // turn so runtime upgrades, mesh changes and edited context files reach
+    // existing persisted conversations. Per-conversation wording belongs in
+    // `~/.config/adapsis/contexts/<context>.md` (issue #41), not in the session
+    // snapshot. Old sessions carrying the field still deserialize — serde ignores
+    // unknown fields.
     /// Override the model name used for permission checks in this context.
     /// When set, permissions are resolved using this name instead of the active model.
     /// Can only restrict, not expand beyond the active model's permissions.
@@ -822,7 +829,6 @@ impl Conversation {
             temporary: false,
             reply_fn: None,
             reply_arg: None,
-            system_prompt: None,
             permission_model: None,
         }
     }

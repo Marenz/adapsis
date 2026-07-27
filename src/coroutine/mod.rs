@@ -839,6 +839,34 @@ impl Runtime {
     }
 }
 
+/// Contexts directory, or an actionable error naming the override.
+fn contexts_dir_or_err(op: &str) -> Result<std::path::PathBuf> {
+    crate::context_prompt::contexts_dir().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{op}: cannot locate the contexts directory — neither \
+             ADAPSIS_CONTEXTS_DIR nor HOME is set"
+        )
+    })
+}
+
+/// Who this code is running on behalf of (issue #41).
+///
+/// Server-bound, never model-supplied. `memory_cypher` used to take the ACL
+/// principal as an *argument*, which made cross-context reads a matter of
+/// typing a different string: `authorized_cypher` faithfully computes the
+/// readable set of whatever principal it is handed. Identity is a property of
+/// the turn, so the turn carries it and the builtin has no say.
+#[derive(Clone, Debug)]
+pub struct TurnIdentity {
+    /// Conversation this turn belongs to, e.g. `telegram:group:-100…`.
+    pub context: String,
+    /// Ladybug principal of the speaker.
+    pub principal: String,
+    /// Whether the speaker may modify code — the administrator test for the
+    /// context-instruction proposal loop.
+    pub may_write: bool,
+}
+
 /// A coroutine handle — gives Adapsis code access to the IO runtime.
 /// This is passed into the evaluator as a context.
 #[derive(Clone, Debug)]
@@ -854,6 +882,10 @@ pub struct CoroutineHandle {
     mocks: Option<Vec<crate::session::IoMock>>,
     /// Function stubs for testing — intercepts user function calls.
     stubs: Option<Vec<crate::session::FunctionStub>>,
+    /// Conversational turn this code runs for, when there is one. `None` for
+    /// route handlers, `+startup` tasks and CLI evaluation — identity-scoped
+    /// builtins refuse rather than guess in that case.
+    turn: Option<TurnIdentity>,
 }
 
 /// Stringify a call argument for mock/stub matching (issue #7).
@@ -940,7 +972,7 @@ fn glob_match_suffix(inner: &str, text: &str) -> bool {
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None }
     }
 
     pub fn new_with_task(
@@ -949,31 +981,88 @@ impl CoroutineHandle {
         registry: TaskRegistry,
         snapshot_registry: TaskSnapshotRegistry,
     ) -> Self {
-        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None }
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None, turn: None }
     }
 
     /// Create a mock handle for testing — no real IO, returns mock responses.
     #[allow(dead_code)]
     pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None }
     }
 
     /// Create a mock handle with function stubs for testing.
     pub fn new_mock_with_stubs(mocks: Vec<crate::session::IoMock>, stubs: Vec<crate::session::FunctionStub>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs) }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs), turn: None }
     }
 
     /// Create a handle with mocks AND a real IO sender — mocks are checked first,
     /// unmatched operations fall through to real IO via the sender.
     #[cfg(test)]
     pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None }
+    }
+
+    /// Bind this handle to the conversational turn it executes for.
+    ///
+    /// Everything identity-scoped (`memory_cypher`, the context-instruction
+    /// proposal loop) reads the binding instead of trusting an argument.
+    pub fn with_turn(mut self, turn: Option<TurnIdentity>) -> Self {
+        self.turn = turn;
+        self
+    }
+
+    /// Turn identity, or an actionable refusal.
+    ///
+    /// Deliberately fails closed. A builtin scoped by identity has no safe
+    /// default outside a conversation: falling back to "whatever the caller
+    /// passed" is the hole being closed, and falling back to "everything" is
+    /// worse.
+    fn require_turn(&self, op: &str) -> Result<&TurnIdentity> {
+        self.turn.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{op}: no conversational turn is in scope. This builtin is bound to \
+                 the context and speaker of a live conversation, so it cannot run from \
+                 a route handler, a +startup task or the CLI."
+            )
+        })
     }
 
     pub fn io_sender(&self) -> mpsc::Sender<IoRequest> {
         self.io_tx.clone()
+    }
+
+    /// Push a filed proposal at the administrator, best-effort.
+    ///
+    /// Best-effort on purpose: the proposal is already durable on disk and
+    /// listable with `context_proposals`, so a missing or unreachable admin
+    /// context must not turn into a failed `context_propose` call. Set
+    /// `ADAPSIS_ADMIN_CONTEXT` to the conversation that reviews them.
+    fn notify_admin_of_proposal(&self, context: &str, diff: &str) {
+        let Some(admin) = std::env::var("ADAPSIS_ADMIN_CONTEXT").ok().filter(|c| !c.is_empty())
+        else {
+            return;
+        };
+        if admin == context {
+            return;
+        }
+        let message = format!(
+            "Context `{context}` proposes new instructions for itself:\n\n{diff}\n\n\
+             Apply with context_approve(\"{context}\") or discard with \
+             context_reject(\"{context}\")."
+        );
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send_and_wait(
+            WaitReason::Running,
+            IoRequest::ConversationNotify {
+                context: admin,
+                message,
+                attachment: None,
+                reply: tx,
+            },
+            rx,
+        );
     }
 
     /// Mark this task as waiting on a specific operation.
@@ -2658,13 +2747,31 @@ impl CoroutineHandle {
                 return Ok(Value::string(result));
             }
             "memory_cypher" => {
-                let principal_id = match args.first() {
+                // The ACL principal is NOT an argument (issue #41). It used to
+                // be, and `authorized_cypher` then computed the readable set of
+                // whatever principal it was handed — so reading another
+                // conversation's memories was a matter of passing its principal
+                // string. It now comes from the turn, which the model cannot set.
+                let turn = self.require_turn("memory_cypher")?;
+                let principal_id = turn.principal.clone();
+                // Reject the old two-argument form loudly. Accepting it and
+                // reading the query out of argument one would work; accepting it
+                // and reading argument zero as the query would fail somewhere
+                // deep in Cypher validation. Neither teaches the caller that the
+                // principal is no longer theirs to choose.
+                if args.len() > 1 {
+                    bail!(
+                        "memory_cypher expects (query:String) — one argument. The ACL \
+                         principal is bound to the current conversation and is no longer \
+                         an argument; drop it."
+                    );
+                }
+                let query = match args.first() {
                     Some(Value::String(value)) => value.as_ref().clone(),
-                    _ => bail!("memory_cypher expects (principal_id:String, query:String)"),
-                };
-                let query = match args.get(1) {
-                    Some(Value::String(value)) => value.as_ref().clone(),
-                    _ => bail!("memory_cypher expects (principal_id:String, query:String)"),
+                    _ => bail!(
+                        "memory_cypher expects (query:String). The ACL principal is \
+                         bound to the current conversation and is no longer an argument."
+                    ),
                 };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(
@@ -2673,6 +2780,71 @@ impl CoroutineHandle {
                     rx,
                 )?;
                 return Ok(Value::string(result));
+            }
+            "context_propose" => {
+                let turn = self.require_turn("context_propose")?;
+                let body = match args.first() {
+                    Some(Value::String(value)) => value.as_ref().clone(),
+                    _ => bail!(
+                        "context_propose expects (instructions:String) — the full \
+                         replacement text for THIS context's instructions"
+                    ),
+                };
+                let dir = contexts_dir_or_err("context_propose")?;
+                crate::context_prompt::write_proposal(&dir, &turn.context, &body)?;
+                let diff = crate::context_prompt::proposal_diff(&dir, &turn.context)
+                    .unwrap_or_default();
+                self.notify_admin_of_proposal(&turn.context, &diff);
+                return Ok(Value::string(format!(
+                    "proposal filed for context '{}'. It does not take effect until an \
+                     administrator approves it.",
+                    turn.context
+                )));
+            }
+            "context_proposals" => {
+                let turn = self.require_turn("context_proposals")?;
+                if !turn.may_write {
+                    bail!(
+                        "context_proposals: only an administrator may review pending \
+                         context instructions"
+                    );
+                }
+                let dir = contexts_dir_or_err("context_proposals")?;
+                let pending = crate::context_prompt::list_proposals(&dir);
+                if pending.is_empty() {
+                    return Ok(Value::string("no pending context proposals"));
+                }
+                let rendered = pending
+                    .iter()
+                    .map(|(key, _)| {
+                        let diff = crate::context_prompt::proposal_diff(&dir, key)
+                            .unwrap_or_else(|| "(no diff available)".to_string());
+                        format!("### {key}\n{diff}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                return Ok(Value::string(rendered));
+            }
+            "context_approve" | "context_reject" => {
+                let turn = self.require_turn(op.as_str())?;
+                if !turn.may_write {
+                    bail!("{op}: only an administrator may rule on context instructions");
+                }
+                let key = match args.first() {
+                    Some(Value::String(value)) => value.as_ref().clone(),
+                    _ => bail!("{op} expects (context_key:String)"),
+                };
+                let dir = contexts_dir_or_err(op.as_str())?;
+                let path = if op == "context_approve" {
+                    crate::context_prompt::approve_proposal(&dir, &key)?
+                } else {
+                    crate::context_prompt::reject_proposal(&dir, &key)?
+                };
+                let verb = if op == "context_approve" { "approved" } else { "rejected" };
+                return Ok(Value::string(format!(
+                    "{verb} context instructions for '{key}' ({})",
+                    path.display()
+                )));
             }
             "llm_set_model" => {
                 let name = match args.get(0) {
