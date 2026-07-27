@@ -102,7 +102,7 @@ fn migrate_conversations_to_memory(
                     content,
                     created_at_ms: modified_at_ms.saturating_sub(age_from_end * 1_000),
                 },
-                "telegram:user:1815217",
+                memory_graph::admin_principal(),
             )?;
             imported += 1;
         }
@@ -112,6 +112,88 @@ fn migrate_conversations_to_memory(
         "Imported {imported}/{total_messages} messages from {} into {}",
         session_path.display(),
         database_path.display()
+    );
+    Ok(())
+}
+
+fn default_memory_db() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("adapsis")
+        .join("memory.lbug")
+}
+
+/// Split a legacy `persona-notes.md` into one note per entry.
+///
+/// `Wolfi.remember` appended free text with no delimiter contract, so the only
+/// safe reading is "a note is a non-empty block of lines". Leading list markers
+/// are stripped because most entries were written as `- …`; a markdown heading
+/// is dropped entirely, since the one heading these files carry was the hardcoded
+/// "Was du über Renate gelernt hast" banner, not content.
+fn split_persona_notes(raw: &str) -> Vec<String> {
+    raw.split("\n\n")
+        .flat_map(|block| block.split('\n'))
+        .map(|line| line.trim().trim_start_matches(['-', '*', '+']).trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+fn import_persona_notes(
+    notes_path: &std::path::Path,
+    database_path: &std::path::Path,
+    context_id: &str,
+    principal_id: &str,
+    scope: memory_graph::MemoryScope,
+    dry_run: bool,
+) -> Result<()> {
+    let raw = std::fs::read_to_string(notes_path)
+        .with_context(|| format!("read {}", notes_path.display()))?;
+    let notes = split_persona_notes(&raw);
+    if notes.is_empty() {
+        println!(
+            "{} holds no notes ({} bytes) — nothing to import.",
+            notes_path.display(),
+            raw.len()
+        );
+        return Ok(());
+    }
+    println!(
+        "{} note(s) from {} -> context {context_id} (asserted by {principal_id}, scope {scope:?})",
+        notes.len(),
+        notes_path.display()
+    );
+    for note in &notes {
+        println!("  - {note}");
+    }
+    if dry_run {
+        println!("\n--dry-run: nothing written.");
+        return Ok(());
+    }
+
+    let graph = memory_graph::MemoryGraph::open(database_path)
+        .with_context(|| format!("open memory graph {}", database_path.display()))?;
+    let embedder = memory_graph::MemoryEmbedder::new().context("initialize embedding model")?;
+    let embeddings = embedder.embed_passages(&notes).context("embed persona notes")?;
+    let created_at_ms = memory_graph::now_ms();
+    for (index, (note, embedding)) in notes.iter().zip(embeddings).enumerate() {
+        let id = graph
+            .remember_canonical(&memory_graph::CanonicalDraft {
+                content: note.clone(),
+                context_id: context_id.to_string(),
+                principal_id: principal_id.to_string(),
+                embedding,
+                scope,
+                // Keep the original order stable; these have no real timestamps.
+                created_at_ms: created_at_ms + index as i64,
+            })
+            .with_context(|| format!("import note {:?}", note))?;
+        println!("  {id}");
+    }
+    println!(
+        "\nImported {} note(s). {} can now be archived — the read path is Ladybug.",
+        notes.len(),
+        notes_path.display()
     );
     Ok(())
 }
@@ -359,6 +441,13 @@ enum Command {
         #[arg(long)]
         permissions_file: Option<String>,
 
+        /// Ladybug principal granted Manage membership in every context's access
+        /// group — i.e. cross-context memory recall. This was a literal
+        /// `telegram:user:1815217` in the ingest path, so every node built its
+        /// memory ACL around one person's Telegram id regardless of who owned it.
+        #[arg(long, default_value = "telegram:user:1815217")]
+        admin_id: String,
+
         /// Address(es) to bind the HTTP API to. Defaults to 127.0.0.1 (loopback
         /// only) so the code-executing API is not exposed on the network. Pass
         /// 0.0.0.0 to expose on all interfaces, or repeat the flag / use a
@@ -423,6 +512,43 @@ enum Command {
         /// Ladybug database path
         #[arg(long, env = "ADAPSIS_MEMORY_DB")]
         database: Option<std::path::PathBuf>,
+
+        /// Principal granted Manage membership in every imported context's group
+        #[arg(long, default_value = "telegram:user:1815217")]
+        admin_id: String,
+    },
+
+    /// Import a legacy persona-notes.md into per-context canonical memories
+    ///
+    /// The file this reads is the second long-term store #42 removes: one global
+    /// markdown file, no scope, no provenance, appended to by `Wolfi.remember`.
+    /// Run this BEFORE deleting the read path on any node whose file is
+    /// non-empty, or everything the bot learned there is lost.
+    MemoryImportNotes {
+        /// persona-notes.md to import (default: ~/.config/adapsis/persona-notes.md)
+        notes: Option<std::path::PathBuf>,
+
+        /// Ladybug database path
+        #[arg(long, env = "ADAPSIS_MEMORY_DB")]
+        database: Option<std::path::PathBuf>,
+
+        /// Context the notes become canonical memories of, e.g. telegram:user:12345.
+        /// Required: a global file has no context of its own, and guessing one is
+        /// how these notes ended up filed under the wrong person to begin with.
+        #[arg(long)]
+        context: String,
+
+        /// Principal recorded as having asserted them (defaults to --context)
+        #[arg(long)]
+        principal: Option<String>,
+
+        /// Make them readable from every context instead of just --context
+        #[arg(long)]
+        global: bool,
+
+        /// Print what would be imported without writing anything
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Show Ladybug memory graph statistics and episode checkpoints
@@ -484,14 +610,27 @@ async fn main() -> Result<()> {
                 println!("Pending {context}: {} messages, {characters} characters", pending.len());
             }
         }
-        Command::MemoryMigrate { session, database } => {
-            let database = database.unwrap_or_else(|| {
-                dirs::config_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("adapsis")
-                    .join("memory.lbug")
-            });
+        Command::MemoryMigrate { session, database, admin_id } => {
+            memory_graph::set_admin_principal(&admin_id);
+            let database = database.unwrap_or_else(default_memory_db);
             migrate_conversations_to_memory(&session, &database)?;
+        }
+        Command::MemoryImportNotes { notes, database, context, principal, global, dry_run } => {
+            let notes = notes
+                .or_else(|| crate::prompt::persona_notes_path())
+                .context("cannot resolve persona-notes.md: $HOME is unset, pass the path")?;
+            import_persona_notes(
+                &notes,
+                &database.unwrap_or_else(default_memory_db),
+                &context,
+                principal.as_deref().unwrap_or(&context),
+                if global {
+                    memory_graph::MemoryScope::Global
+                } else {
+                    memory_graph::MemoryScope::Context
+                },
+                dry_run,
+            )?;
         }
         Command::Run {
             task,
@@ -1059,7 +1198,7 @@ async fn main() -> Result<()> {
 
             repl::run_repl(&api_url).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, access_level, permissions_file, host } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, access_level, permissions_file, admin_id, host } => {
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -1190,6 +1329,10 @@ async fn main() -> Result<()> {
             let ai_log_for_spawn = ai_log_shared.clone();
             let memory_graph_for_spawn = memory_graph.clone();
             let memory_embedder_for_spawn = memory_embedder.clone();
+            // Before any message can be ingested: the admin principal decides who
+            // gets Manage membership in every context's access group, and a group
+            // created under the wrong admin keeps that membership forever.
+            memory_graph::set_admin_principal(&admin_id);
             let access_level_parsed: permissions::AccessLevel = access_level.parse().expect("invalid --access-level");
             let perm_config = if let Some(ref path) = permissions_file {
                 permissions::PermissionConfig::load(std::path::Path::new(path)).expect("failed to load permissions file")
@@ -1426,6 +1569,58 @@ async fn main() -> Result<()> {
                             let graph = memory_graph_for_spawn.clone();
                             tokio::task::spawn_blocking(move || {
                                 let result = graph.authorized_cypher(&principal_id, &query);
+                                let _ = reply.send(result);
+                            });
+                        }
+                        coroutine::IoRequest::MemoryRemember {
+                            context_id,
+                            principal_id,
+                            content,
+                            scope,
+                            reply,
+                        } => {
+                            let graph = memory_graph_for_spawn.clone();
+                            let embedder = memory_embedder_for_spawn.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let result = embedder.embed_passages(&[content.clone()]).and_then(
+                                    |embeddings| {
+                                        let embedding = embeddings.into_iter().next().context(
+                                            "FastEmbed returned no embedding for the note",
+                                        )?;
+                                        graph.remember_canonical(
+                                            &crate::memory_graph::CanonicalDraft {
+                                                content,
+                                                context_id,
+                                                principal_id,
+                                                embedding,
+                                                scope,
+                                                created_at_ms: crate::memory_graph::now_ms(),
+                                            },
+                                        )
+                                    },
+                                );
+                                let _ = reply.send(result.map(|id| {
+                                    format!("remembered as {id}")
+                                }));
+                            });
+                        }
+                        coroutine::IoRequest::MemoryForget { principal_id, memory_id, reply } => {
+                            let graph = memory_graph_for_spawn.clone();
+                            tokio::task::spawn_blocking(move || {
+                                // "Not yours" and "does not exist" deliberately
+                                // read the same: distinguishing them turns forget
+                                // into a probe for other conversations' memory ids.
+                                let result = graph.forget_memory(&principal_id, &memory_id).map(
+                                    |forgotten| {
+                                        if forgotten {
+                                            format!("forgot {memory_id}")
+                                        } else {
+                                            format!(
+                                                "nothing forgotten: {memory_id} is not a memory this conversation can change"
+                                            )
+                                        }
+                                    },
+                                );
                                 let _ = reply.send(result);
                             });
                         }

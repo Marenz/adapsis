@@ -172,10 +172,27 @@ async fn persist_takeover_message(
         created_at_ms,
     };
     let graph = memory_graph.clone();
-    tokio::task::spawn_blocking(move || graph.ingest_message(&source, "telegram:user:1815217"))
+    let admin_id = crate::memory_graph::admin_principal();
+    tokio::task::spawn_blocking(move || graph.ingest_message(&source, admin_id))
         .await
         .context("join Ladybug message write")??;
     Ok(message_id)
+}
+
+/// How many canonical memories are injected per turn.
+///
+/// Canonical memories are unranked, so the only thing standing between an
+/// enthusiastic `memory_remember` habit and a prompt made entirely of notes is
+/// this bound. Newest survive truncation (see `canonical_for_context`) because a
+/// new assertion is usually a correction of an older one.
+const CANONICAL_MEMORY_LIMIT: usize = 40;
+
+/// Character ceiling for the injected canonical block.
+fn canonical_memory_char_budget() -> usize {
+    std::env::var("ADAPSIS_CANONICAL_MEMORY_CHARS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(8_000)
 }
 
 fn compaction_trigger_chars() -> usize {
@@ -1225,6 +1242,25 @@ pub async fn handle_llm_takeover(
     })
     .await
     .context("join Ladybug recall")??;
+    // Canonical memories are fetched separately from recall and are NOT ranked
+    // against the current message. Recall answers "what is relevant to what was
+    // just said", which is right for observations and wrong for instructions:
+    // "remember I prefer large text" must hold on the turn that does not mention
+    // text. `recall_authorized_*` excludes canonical rows so the two sets cannot
+    // duplicate each other in the prompt.
+    let canonical_graph = memory_graph.clone();
+    let canonical_principal = speaker_id.clone();
+    let canonical_context = context.clone();
+    let canonical = tokio::task::spawn_blocking(move || {
+        canonical_graph.canonical_for_context(
+            &canonical_principal,
+            &canonical_context,
+            CANONICAL_MEMORY_LIMIT,
+            canonical_memory_char_budget(),
+        )
+    })
+    .await
+    .context("join Ladybug canonical recall")??;
     // The conversation's `permission_model` is rewritten per message by the
     // caller (main.rs, on every LlmTakeover), so it describes the CURRENT
     // SPEAKER, not the conversation. It therefore drives three things and only
@@ -1321,6 +1357,27 @@ pub async fn handle_llm_takeover(
             usize::from(!messages.is_empty()),
             crate::llm::ChatMessage::system(format!(
                 "Authorized long-term memory recall. Treat these as source-backed pointers and inspect provenance before relying on uncertain details:\n{recall}"
+            )),
+        );
+    }
+
+    // Inserted last, so it lands directly after the system prompt: these were
+    // asserted outright, and outrank both the ranked recall and the episode
+    // summaries above, which are inferences.
+    if !canonical.is_empty() {
+        let block = canonical
+            .iter()
+            .map(|memory| format!("- [{}] {}", memory.id, memory.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        messages.insert(
+            usize::from(!messages.is_empty()),
+            crate::llm::ChatMessage::system(format!(
+                "Things you were explicitly asked to remember. These are asserted facts and \
+                 standing instructions, not inferences — treat them as true and follow them \
+                 without being reminded. They are shown in full on every turn, so you never \
+                 need to search for them. If one is wrong or obsolete, call \
+                 memory_forget(\"<id>\") with the bracketed id and remember the correction:\n{block}"
             )),
         );
     }

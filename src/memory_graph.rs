@@ -8,6 +8,48 @@ use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: i64 = 1;
 
+/// The one access group every principal joins.
+///
+/// Ladybug authorizes a memory when the reader is a member of *every* group
+/// governing it, so a memory governed by this group alone is readable from any
+/// context. "Global" is therefore a governance choice inside the existing model,
+/// not a second concept bolted onto it — which is why there is no `global`
+/// column on `Memory`.
+pub const GLOBAL_GROUP_ID: &str = "access:global";
+
+/// `memory_type` of an explicitly remembered memory.
+///
+/// Every other value in this column names a *category the extractor inferred*
+/// ("finding", "preference", "inference", …). This one records how the memory
+/// arrived instead: somebody said "remember this".
+pub const ASSERTED_MEMORY_TYPE: &str = "asserted";
+
+fn context_group_id(context_id: &str) -> String {
+    format!("access:{context_id}")
+}
+
+/// Fallback admin principal, kept only so an un-flagged process behaves as it
+/// did before `--admin-id` existed. New deployments should pass the flag.
+const DEFAULT_ADMIN_PRINCIPAL: &str = "telegram:user:1815217";
+
+static ADMIN_PRINCIPAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the principal that receives Manage membership in every context's access
+/// group, i.e. the one identity with cross-context recall.
+///
+/// Process-level and set once at startup from `--admin-id`: it does not vary per
+/// request, and threading it through every `AppConfig` literal would invite the
+/// one thing that must not happen — two ingest paths disagreeing about who the
+/// admin is. Ignored if called twice.
+pub fn set_admin_principal(principal_id: &str) {
+    let _ = ADMIN_PRINCIPAL.set(principal_id.to_string());
+}
+
+/// The configured admin principal, or the historical literal when unset.
+pub fn admin_principal() -> &'static str {
+    ADMIN_PRINCIPAL.get().map_or(DEFAULT_ADMIN_PRINCIPAL, String::as_str)
+}
+
 #[derive(Clone)]
 pub struct MemoryGraph {
     database: Arc<Database>,
@@ -41,6 +83,32 @@ pub struct MemoryDraft {
     pub source_message_ids: Vec<String>,
     pub extraction_run_id: String,
     pub extraction_model: String,
+    pub created_at_ms: i64,
+}
+
+/// How far an explicitly remembered memory reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryScope {
+    /// Readable only from the context it was asserted in.
+    Context,
+    /// Readable from every context, via [`GLOBAL_GROUP_ID`].
+    Global,
+}
+
+/// An asserted memory: somebody said "remember this".
+///
+/// Deliberately not a [`MemoryDraft`]. An extraction is an *observation* and
+/// carries a confidence, an extraction run and the messages it was inferred
+/// from. An assertion has none of those — its provenance is "this principal
+/// said so, in this context, at this time", so it links `ASSERTED_BY` instead
+/// of `DERIVED_FROM`/`EXTRACTED_BY` and its confidence is fixed at 1.0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanonicalDraft {
+    pub content: String,
+    pub context_id: String,
+    pub principal_id: String,
+    pub embedding: Vec<f32>,
+    pub scope: MemoryScope,
     pub created_at_ms: i64,
 }
 
@@ -144,6 +212,7 @@ impl MemoryGraph {
              CREATE REL TABLE IF NOT EXISTS HAS_ATTACHMENT(FROM Message TO Attachment);
              CREATE REL TABLE IF NOT EXISTS SUPERSEDES(FROM Memory TO Memory);
              CREATE REL TABLE IF NOT EXISTS CONTRADICTS(FROM Memory TO Memory);
+             CREATE REL TABLE IF NOT EXISTS ASSERTED_BY(FROM Memory TO Principal);
              CREATE REL TABLE IF NOT EXISTS DENIED_TO(FROM Memory TO Principal);",
         )?;
         let mut statement = connection.prepare(
@@ -234,7 +303,7 @@ impl MemoryGraph {
         ensure!(!message.context_id.is_empty(), "context id cannot be empty");
         ensure!(!message.speaker_id.is_empty(), "speaker id cannot be empty");
 
-        let group_id = format!("access:{}", message.context_id);
+        let group_id = context_group_id(&message.context_id);
         execute(
             connection,
             "MERGE (context:Context {id: $id}) ON CREATE SET context.kind = $kind, context.display_name = $id, context.created_at_ms = $created_at_ms",
@@ -262,10 +331,16 @@ impl MemoryGraph {
             ],
         )?;
 
+        self.ensure_global_group(connection, message.created_at_ms)?;
+
         self.upsert_principal(connection, &message.speaker_id, &message.speaker_name, message.created_at_ms)?;
-        self.upsert_principal(connection, admin_id, "Marenz", message.created_at_ms)?;
+        self.upsert_principal(connection, admin_id, admin_id, message.created_at_ms)?;
         self.upsert_membership(connection, &message.speaker_id, &group_id, false, message.created_at_ms)?;
         self.upsert_membership(connection, admin_id, &group_id, true, message.created_at_ms)?;
+        // Everyone joins the global group, which is what makes a globally-scoped
+        // memory readable everywhere without a second ACL mechanism.
+        self.upsert_membership(connection, &message.speaker_id, GLOBAL_GROUP_ID, false, message.created_at_ms)?;
+        self.upsert_membership(connection, admin_id, GLOBAL_GROUP_ID, true, message.created_at_ms)?;
 
         execute(
             connection,
@@ -338,6 +413,18 @@ impl MemoryGraph {
                 ("group_id", group_id.into()),
                 ("can_manage", Value::Bool(manage)),
                 ("valid_from_ms", valid_from_ms.into()),
+            ],
+        )
+    }
+
+    fn ensure_global_group(&self, connection: &Connection<'_>, created_at_ms: i64) -> Result<()> {
+        execute(
+            connection,
+            "MERGE (access_group:AccessGroup {id: $id}) ON CREATE SET access_group.display_name = $display_name, access_group.created_at_ms = $created_at_ms",
+            vec![
+                ("id", GLOBAL_GROUP_ID.into()),
+                ("display_name", "global memory".into()),
+                ("created_at_ms", created_at_ms.into()),
             ],
         )
     }
@@ -516,17 +603,19 @@ impl MemoryGraph {
         draft: &MemoryDraft,
     ) -> Result<()> {
         ensure!(draft.embedding.len() == 384, "memory embedding must have 384 dimensions");
-        execute(
+        // `canonical` stays false on this path by construction: extraction infers,
+        // it does not assert. Only `remember_canonical` sets the flag, which is
+        // what keeps an inference from quietly overwriting something a person
+        // stated outright.
+        create_memory_node(
             connection,
-            "CREATE (:Memory {id: $id, content: $content, memory_type: $memory_type, canonical: false, status: 'active', confidence: $confidence, embedding: $embedding, created_at_ms: $created_at_ms})",
-            vec![
-                ("id", id.into()),
-                ("content", draft.content.clone().into()),
-                ("memory_type", draft.memory_type.clone().into()),
-                ("confidence", draft.confidence.into()),
-                ("embedding", embedding_value(&draft.embedding)?),
-                ("created_at_ms", draft.created_at_ms.into()),
-            ],
+            id,
+            &draft.content,
+            &draft.memory_type,
+            false,
+            draft.confidence,
+            &draft.embedding,
+            draft.created_at_ms,
         )?;
         execute(
             connection,
@@ -547,7 +636,7 @@ impl MemoryGraph {
         )?;
 
         for context_id in &draft.origin_context_ids {
-            let group_id = format!("access:{context_id}");
+            let group_id = context_group_id(context_id);
             execute(
                 connection,
                 "MATCH (memory:Memory {id: $memory_id}), (context:Context {id: $context_id}), (access_group:AccessGroup {id: $group_id}) CREATE (memory)-[:ORIGINATED_IN]->(context), (memory)-[:GOVERNED_BY]->(access_group)",
@@ -571,11 +660,227 @@ impl MemoryGraph {
         Ok(())
     }
 
+    /// Record an explicitly asserted memory and return its id.
+    ///
+    /// The context and principal are the *turn's* — the caller cannot name them
+    /// (see `coroutine::TurnIdentity`), so a memory cannot be filed against a
+    /// conversation the speaker is not in.
+    pub fn remember_canonical(&self, draft: &CanonicalDraft) -> Result<String> {
+        ensure!(!draft.content.trim().is_empty(), "a remembered memory cannot be empty");
+        ensure!(!draft.context_id.is_empty(), "a remembered memory requires a context");
+        ensure!(!draft.principal_id.is_empty(), "a remembered memory requires a principal");
+        let id = format!("memory:{}", uuid::Uuid::new_v4());
+        let group_id = match draft.scope {
+            MemoryScope::Context => context_group_id(&draft.context_id),
+            MemoryScope::Global => GLOBAL_GROUP_ID.to_string(),
+        };
+
+        let _guard = self.write_lock.lock().unwrap();
+        let connection = Connection::new(&self.database)?;
+        connection.query("BEGIN TRANSACTION")?;
+        let result = (|| {
+            self.ensure_global_group(&connection, draft.created_at_ms)?;
+            // A context that has never carried a message has no group yet, and a
+            // `MATCH` against a missing group silently writes nothing — the memory
+            // would exist ungoverned and be recallable by nobody.
+            execute(
+                &connection,
+                "MERGE (context:Context {id: $id}) ON CREATE SET context.kind = 'conversation', context.display_name = $id, context.created_at_ms = $created_at_ms",
+                vec![
+                    ("id", draft.context_id.clone().into()),
+                    ("created_at_ms", draft.created_at_ms.into()),
+                ],
+            )?;
+            execute(
+                &connection,
+                "MERGE (access_group:AccessGroup {id: $id}) ON CREATE SET access_group.display_name = $id, access_group.created_at_ms = $created_at_ms",
+                vec![
+                    ("id", group_id.clone().into()),
+                    ("created_at_ms", draft.created_at_ms.into()),
+                ],
+            )?;
+            self.upsert_principal(
+                &connection,
+                &draft.principal_id,
+                &draft.principal_id,
+                draft.created_at_ms,
+            )?;
+            // Asserting into a context makes you a member of it; otherwise a
+            // speaker could write a memory they are then not authorized to read.
+            self.upsert_membership(
+                &connection,
+                &draft.principal_id,
+                &group_id,
+                false,
+                draft.created_at_ms,
+            )?;
+            create_memory_node(
+                &connection,
+                &id,
+                draft.content.trim(),
+                ASSERTED_MEMORY_TYPE,
+                true,
+                1.0,
+                &draft.embedding,
+                draft.created_at_ms,
+            )?;
+            execute(
+                &connection,
+                "MATCH (memory:Memory {id: $memory_id}), (context:Context {id: $context_id}), (access_group:AccessGroup {id: $group_id}) CREATE (memory)-[:ORIGINATED_IN]->(context), (memory)-[:GOVERNED_BY]->(access_group)",
+                vec![
+                    ("memory_id", id.clone().into()),
+                    ("context_id", draft.context_id.clone().into()),
+                    ("group_id", group_id.clone().into()),
+                ],
+            )?;
+            execute(
+                &connection,
+                "MATCH (memory:Memory {id: $memory_id}), (principal:Principal {id: $principal_id}) CREATE (memory)-[:ASSERTED_BY]->(principal)",
+                vec![
+                    ("memory_id", id.clone().into()),
+                    ("principal_id", draft.principal_id.clone().into()),
+                ],
+            )
+        })();
+        finish_transaction(&connection, result)?;
+        Ok(id)
+    }
+
+    /// Soft-delete a memory the principal is authorized to contribute to.
+    ///
+    /// `status` moves to `forgotten` rather than the node being deleted, so the
+    /// assertion and its provenance survive an accidental forget. Returns false
+    /// when the id does not exist or is not the principal's to forget — the
+    /// caller must not be able to tell those apart, or forgetting becomes a probe
+    /// for which memories other conversations hold.
+    pub fn forget_memory(&self, principal_id: &str, memory_id: &str) -> Result<bool> {
+        ensure!(!memory_id.trim().is_empty(), "memory_forget requires a memory id");
+        let memory_id = memory_id.trim();
+        let _guard = self.write_lock.lock().unwrap();
+        let connection = Connection::new(&self.database)?;
+        if !self.may_contribute_to(&connection, principal_id, memory_id)? {
+            return Ok(false);
+        }
+        connection.query("BEGIN TRANSACTION")?;
+        let result = execute(
+            &connection,
+            "MATCH (memory:Memory {id: $memory_id}) SET memory.status = 'forgotten'",
+            vec![("memory_id", memory_id.into())],
+        );
+        finish_transaction(&connection, result)?;
+        Ok(true)
+    }
+
+    /// The same all-governing-groups test recall uses, but on the contribute bit.
+    fn may_contribute_to(
+        &self,
+        connection: &Connection<'_>,
+        principal_id: &str,
+        memory_id: &str,
+    ) -> Result<bool> {
+        let mut statement = connection.prepare(
+            "MATCH (principal:Principal {id: $principal_id})-[membership:MEMBER_OF]->(access_group:AccessGroup)<-[:GOVERNED_BY]-(memory:Memory {id: $memory_id})
+             WHERE membership.can_contribute = true AND memory.status = 'active' AND NOT (memory)-[:DENIED_TO]->(principal)
+             WITH memory, count(DISTINCT access_group) AS accessible_groups
+             MATCH (memory)-[:GOVERNED_BY]->(required_group:AccessGroup)
+             WITH memory, accessible_groups, count(DISTINCT required_group) AS required_groups
+             WHERE accessible_groups = required_groups
+             RETURN count(memory)",
+        )?;
+        let count = connection
+            .execute(
+                &mut statement,
+                vec![
+                    ("principal_id", principal_id.into()),
+                    ("memory_id", memory_id.into()),
+                ],
+            )?
+            .next()
+            .and_then(|row| row.first().and_then(|value| int64_value(value).ok()))
+            .unwrap_or(0);
+        Ok(count > 0)
+    }
+
+    /// Every canonical memory this turn must always know, newest first.
+    ///
+    /// Not ranked and not filtered by the current message: an extraction is an
+    /// observation that competes for the top-5 recall slots, but an assertion is
+    /// an instruction. "Remember I prefer large text" must not depend on today's
+    /// message being lexically similar to it. Bounded by count and characters so
+    /// an unbounded set cannot crowd out the conversation.
+    pub fn canonical_for_context(
+        &self,
+        principal_id: &str,
+        context_id: &str,
+        max_count: usize,
+        max_chars: usize,
+    ) -> Result<Vec<RecalledMemory>> {
+        if max_count == 0 || max_chars == 0 {
+            return Ok(Vec::new());
+        }
+        let connection = Connection::new(&self.database)?;
+        let mut statement = connection.prepare(
+            "MATCH (principal:Principal {id: $principal_id})-[membership:MEMBER_OF]->(access_group:AccessGroup)<-[:GOVERNED_BY]-(memory:Memory)
+             WHERE membership.can_read = true AND memory.status = 'active' AND memory.canonical = true
+               AND NOT (memory)-[:DENIED_TO]->(principal)
+             WITH memory, count(DISTINCT access_group) AS accessible_groups
+             MATCH (memory)-[:GOVERNED_BY]->(required_group:AccessGroup)
+             WITH memory, accessible_groups, count(DISTINCT required_group) AS required_groups,
+                  collect(DISTINCT required_group.id) AS group_ids
+             WHERE accessible_groups = required_groups
+               AND (list_contains(group_ids, $group_id) OR list_contains(group_ids, $global_group_id))
+             RETURN memory.id, memory.content, memory.memory_type, memory.canonical, memory.confidence
+             ORDER BY memory.created_at_ms DESC LIMIT $limit",
+        )?;
+        let result = connection.execute(
+            &mut statement,
+            vec![
+                ("principal_id", principal_id.into()),
+                ("group_id", context_group_id(context_id).into()),
+                ("global_group_id", GLOBAL_GROUP_ID.into()),
+                ("limit", (max_count as i64).into()),
+            ],
+        )?;
+        let mut budget = max_chars;
+        let mut memories = Vec::new();
+        for row in result {
+            if row.len() != 5 {
+                return Err(anyhow!("unexpected Ladybug canonical row width: {}", row.len()));
+            }
+            let content = string_value(&row[1])?;
+            // Drop from the oldest end: the newest assertion is the one most
+            // likely to be a correction of an older one.
+            if content.len() > budget {
+                break;
+            }
+            budget -= content.len();
+            memories.push(RecalledMemory {
+                id: string_value(&row[0])?,
+                content,
+                memory_type: string_value(&row[2])?,
+                canonical: bool_value(&row[3])?,
+                confidence: double_value(&row[4])?,
+                citation: String::new(),
+            });
+        }
+        // Selected newest-first so truncation drops the oldest; rendered
+        // oldest-first so the model reads them in the order they were asserted.
+        memories.reverse();
+        Ok(memories)
+    }
+
+    /// Ranked recall over *extracted* memories only.
+    ///
+    /// Canonical memories are excluded here because
+    /// [`Self::canonical_for_context`] injects them unconditionally — leaving
+    /// them in would spend top-5 recall slots re-stating text that is already in
+    /// the prompt verbatim.
     pub fn recall_authorized(&self, principal_id: &str, limit: i64) -> Result<Vec<RecalledMemory>> {
         let connection = Connection::new(&self.database)?;
         let mut statement = connection.prepare(
             "MATCH (principal:Principal {id: $principal_id})-[membership:MEMBER_OF]->(access_group:AccessGroup)<-[:GOVERNED_BY]-(memory:Memory)
-             WHERE membership.can_read = true AND memory.status = 'active' AND NOT (memory)-[:DENIED_TO]->(principal)
+             WHERE membership.can_read = true AND memory.status = 'active' AND memory.canonical = false
+               AND NOT (memory)-[:DENIED_TO]->(principal)
              WITH memory, count(DISTINCT access_group) AS accessible_groups
              MATCH (memory)-[:GOVERNED_BY]->(required_group:AccessGroup)
              WITH memory, accessible_groups, count(DISTINCT required_group) AS required_groups
@@ -619,7 +924,8 @@ impl MemoryGraph {
         let connection = Connection::new(&self.database)?;
         let mut statement = connection.prepare(
             "MATCH (principal:Principal {id: $principal_id})-[membership:MEMBER_OF]->(access_group:AccessGroup)<-[:GOVERNED_BY]-(memory:Memory)
-             WHERE membership.can_read = true AND memory.status = 'active' AND NOT (memory)-[:DENIED_TO]->(principal)
+             WHERE membership.can_read = true AND memory.status = 'active' AND memory.canonical = false
+               AND NOT (memory)-[:DENIED_TO]->(principal)
              WITH memory, count(DISTINCT access_group) AS accessible_groups
              MATCH (memory)-[:GOVERNED_BY]->(required_group:AccessGroup)
              WITH memory, accessible_groups, count(DISTINCT required_group) AS required_groups
@@ -755,6 +1061,39 @@ impl MemoryEmbedder {
     }
 }
 
+/// The single `CREATE (:Memory …)` in the codebase.
+///
+/// `canonical` and `confidence` used to be string literals inside the extraction
+/// path's Cypher, which is why the flag existed in the schema for so long without
+/// ever being true. Both are parameters now so there is exactly one place that
+/// decides them.
+#[allow(clippy::too_many_arguments)]
+fn create_memory_node(
+    connection: &Connection<'_>,
+    id: &str,
+    content: &str,
+    memory_type: &str,
+    canonical: bool,
+    confidence: f64,
+    embedding: &[f32],
+    created_at_ms: i64,
+) -> Result<()> {
+    ensure!(embedding.len() == 384, "memory embedding must have 384 dimensions");
+    execute(
+        connection,
+        "CREATE (:Memory {id: $id, content: $content, memory_type: $memory_type, canonical: $canonical, status: 'active', confidence: $confidence, embedding: $embedding, created_at_ms: $created_at_ms})",
+        vec![
+            ("id", id.into()),
+            ("content", content.into()),
+            ("memory_type", memory_type.into()),
+            ("canonical", Value::Bool(canonical)),
+            ("confidence", confidence.into()),
+            ("embedding", embedding_value(embedding)?),
+            ("created_at_ms", created_at_ms.into()),
+        ],
+    )
+}
+
 fn execute(connection: &Connection<'_>, query: &str, params: Vec<(&str, Value)>) -> Result<()> {
     let mut statement = connection.prepare(query)?;
     connection.execute(&mut statement, params)?;
@@ -767,6 +1106,11 @@ fn embedding_value(embedding: &[f32]) -> Result<Value> {
         LogicalType::Float,
         embedding.iter().copied().map(Value::Float).collect(),
     ))
+}
+
+/// Wall-clock milliseconds, for callers that mint a memory outside this module.
+pub fn now_ms() -> i64 {
+    unix_time_ms()
 }
 
 fn unix_time_ms() -> i64 {
@@ -945,6 +1289,166 @@ mod tests {
         let pending = graph.pending_context_messages("chronica", 10_000)?;
         assert_eq!(pending.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), vec!["m3", "m4"]);
         assert_eq!(graph.episode_summaries("chronica", 10)?, vec!["First task completed"]);
+        Ok(())
+    }
+
+    fn asserted(content: &str, context_id: &str, principal_id: &str, scope: MemoryScope) -> CanonicalDraft {
+        CanonicalDraft {
+            content: content.to_string(),
+            context_id: context_id.to_string(),
+            principal_id: principal_id.to_string(),
+            embedding: vec![0.5; 384],
+            scope,
+            created_at_ms: 300,
+        }
+    }
+
+    #[test]
+    fn a_remembered_memory_is_canonical_and_scoped_to_its_context() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&message("m1", "chronica", "kata"), "marenz")?;
+        graph.ingest_message(&message("m2", "family", "renate"), "marenz")?;
+
+        let id = graph.remember_canonical(&asserted(
+            "Kata prefers metric units",
+            "chronica",
+            "kata",
+            MemoryScope::Context,
+        ))?;
+
+        let mine = graph.canonical_for_context("kata", "chronica", 10, 10_000)?;
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].id, id);
+        assert!(mine[0].canonical, "an asserted memory must be canonical");
+        assert_eq!(mine[0].confidence, 1.0, "an assertion is not an estimate");
+        assert_eq!(mine[0].memory_type, ASSERTED_MEMORY_TYPE);
+
+        // The defect this replaces: a note taken in one conversation surfacing in
+        // an unrelated one.
+        assert!(
+            graph.canonical_for_context("renate", "family", 10, 10_000)?.is_empty(),
+            "a context-scoped memory must not leak into another context"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_global_memory_is_readable_from_every_context() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&message("m1", "chronica", "kata"), "marenz")?;
+        graph.ingest_message(&message("m2", "family", "renate"), "marenz")?;
+
+        graph.remember_canonical(&asserted(
+            "Always answer in German",
+            "chronica",
+            "kata",
+            MemoryScope::Global,
+        ))?;
+
+        assert_eq!(graph.canonical_for_context("kata", "chronica", 10, 10_000)?.len(), 1);
+        assert_eq!(
+            graph.canonical_for_context("renate", "family", 10, 10_000)?.len(),
+            1,
+            "global scope is membership in the one group everybody joins"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_memories_bypass_ranking_but_not_the_budget() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&message("m1", "chronica", "kata"), "marenz")?;
+        for index in 0..5 {
+            let mut draft = asserted(
+                &format!("assertion number {index}"),
+                "chronica",
+                "kata",
+                MemoryScope::Context,
+            );
+            draft.created_at_ms = 300 + index;
+            graph.remember_canonical(&draft)?;
+        }
+
+        let all = graph.canonical_for_context("kata", "chronica", 10, 10_000)?;
+        assert_eq!(all.len(), 5, "canonical memories are not similarity-ranked away");
+        assert_eq!(all[0].content, "assertion number 0", "rendered oldest first");
+        assert_eq!(all[4].content, "assertion number 4");
+
+        let capped = graph.canonical_for_context("kata", "chronica", 2, 10_000)?;
+        assert_eq!(capped.len(), 2);
+        assert_eq!(
+            capped.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+            vec!["assertion number 3", "assertion number 4"],
+            "the count bound drops the oldest, keeping the newest correction"
+        );
+
+        let starved = graph.canonical_for_context("kata", "chronica", 10, 40)?;
+        assert_eq!(starved.len(), 2, "the character budget bounds it too");
+        Ok(())
+    }
+
+    #[test]
+    fn an_extraction_never_lands_in_the_canonical_set() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&message("m1", "chronica", "kata"), "marenz")?;
+        graph.create_index_memory(&MemoryDraft {
+            content: "The mobile header overflows".to_string(),
+            memory_type: "finding".to_string(),
+            confidence: 0.9,
+            embedding: vec![1.0; 384],
+            origin_context_ids: vec!["chronica".to_string()],
+            source_message_ids: vec!["m1".to_string()],
+            extraction_run_id: "run:1".to_string(),
+            extraction_model: "dev-bot".to_string(),
+            created_at_ms: 200,
+        })?;
+        let remembered = graph.remember_canonical(&asserted(
+            "Ship on Fridays",
+            "chronica",
+            "kata",
+            MemoryScope::Context,
+        ))?;
+
+        let canonical = graph.canonical_for_context("kata", "chronica", 10, 10_000)?;
+        assert_eq!(canonical.len(), 1, "inference must not enter the asserted set");
+        assert_eq!(canonical[0].id, remembered);
+
+        // And the reverse: the asserted memory does not also burn a ranked slot.
+        let ranked = graph.recall_authorized("kata", 10)?;
+        assert_eq!(ranked.len(), 1);
+        assert_ne!(ranked[0].id, remembered);
+        assert!(
+            graph.recall_authorized_semantic("kata", &vec![0.5; 384], 10)?
+                .iter()
+                .all(|memory| memory.id != remembered),
+            "a canonical memory is injected verbatim, so it must not be recalled twice"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forgetting_is_a_status_change_an_outsider_cannot_make() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&message("m1", "chronica", "kata"), "marenz")?;
+        graph.ingest_message(&message("m2", "family", "renate"), "marenz")?;
+        let id = graph.remember_canonical(&asserted(
+            "Kata prefers metric units",
+            "chronica",
+            "kata",
+            MemoryScope::Context,
+        ))?;
+
+        assert!(
+            !graph.forget_memory("renate", &id)?,
+            "a principal outside the governing group cannot forget it"
+        );
+        assert_eq!(graph.canonical_for_context("kata", "chronica", 10, 10_000)?.len(), 1);
+
+        assert!(graph.forget_memory("kata", &id)?);
+        assert!(graph.canonical_for_context("kata", "chronica", 10, 10_000)?.is_empty());
+        // Soft delete: the node and its provenance survive the status change.
+        assert!(!graph.forget_memory("kata", &id)?, "forgetting twice is not an error path");
+        assert!(graph.forget_memory("kata", "memory:does-not-exist").is_ok());
         Ok(())
     }
 

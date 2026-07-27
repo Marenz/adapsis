@@ -101,6 +101,8 @@ fn identity_scoped_builtins_refuse_without_a_turn() {
     let (handle, _rx) = unmocked_handle();
     for op in [
         "memory_cypher",
+        "memory_remember",
+        "memory_forget",
         "context_propose",
         "context_proposals",
         "context_approve",
@@ -115,6 +117,89 @@ fn identity_scoped_builtins_refuse_without_a_turn() {
             "{op} did not fail closed: {err}"
         );
     }
+}
+
+/// Issue #42. `Wolfi.remember` was a persona-module function that had to be
+/// *handed* the scope it wrote to, and could be handed the wrong one — a note
+/// about an unrelated codebase was filed as something learned about a family
+/// member. A builtin reads the scope off the turn, so there is no argument
+/// through which it can be misdirected.
+#[test]
+fn memory_remember_takes_its_context_and_speaker_from_the_turn() {
+    let (handle, _rx) = unmocked_handle();
+    let handle =
+        handle.with_turn(Some(turn("telegram:group:-1", "telegram:user:47128798", false)));
+
+    // No argument names a context or a principal, so a third one is not a scope
+    // the caller forgot — it is a misunderstanding worth rejecting.
+    let err = handle
+        .execute_await(
+            "memory_remember",
+            &[Value::string("a note"), Value::string("context"), Value::string("telegram:1815217")],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("at most two"), "arity is not explained: {err}");
+
+    let err = handle.execute_await("memory_remember", &[]).unwrap_err().to_string();
+    assert!(
+        err.contains("are not arguments"),
+        "the caller is not told the scope is bound to the turn: {err}"
+    );
+}
+
+/// An empty note would produce a canonical memory that is injected into every
+/// turn and says nothing.
+#[test]
+fn memory_remember_rejects_an_empty_note() {
+    let (handle, _rx) = unmocked_handle();
+    let handle =
+        handle.with_turn(Some(turn("telegram:group:-1", "telegram:user:47128798", false)));
+    for empty in ["", "   ", "\n"] {
+        let err = handle
+            .execute_await("memory_remember", &[Value::string(empty)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty"), "empty note {empty:?} accepted: {err}");
+    }
+}
+
+/// The scope is a closed set. A typo must not silently downgrade a memory the
+/// speaker asked to be global, nor silently promote a private one.
+#[test]
+fn memory_remember_scope_is_context_or_global_and_nothing_else() {
+    let (handle, _rx) = unmocked_handle();
+    let handle =
+        handle.with_turn(Some(turn("telegram:group:-1", "telegram:user:47128798", false)));
+
+    let err = handle
+        .execute_await("memory_remember", &[Value::string("a note"), Value::string("everywhere")])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("\"global\""), "the valid scopes are not listed: {err}");
+    assert!(err.contains("everywhere"), "the rejected value is not echoed back: {err}");
+
+    let err = handle
+        .execute_await("memory_remember", &[Value::string("a note"), Value::Int(1)])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("String"), "a non-string scope is not explained: {err}");
+}
+
+#[test]
+fn memory_forget_requires_a_memory_id() {
+    let (handle, _rx) = unmocked_handle();
+    let handle =
+        handle.with_turn(Some(turn("telegram:group:-1", "telegram:user:47128798", false)));
+    for bad in [Value::Int(3), Value::string("")] {
+        let err = handle.execute_await("memory_forget", &[bad]).unwrap_err().to_string();
+        assert!(err.contains("memory_id"), "unhelpful rejection: {err}");
+    }
+    let err = handle
+        .execute_await("memory_forget", &[Value::string("memory:a"), Value::string("memory:b")])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("one argument"), "arity is not explained: {err}");
 }
 
 /// A conversation proposes for itself; only an administrator rules on proposals.

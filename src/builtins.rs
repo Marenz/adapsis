@@ -664,6 +664,34 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "memory_remember",
+        aliases: &[],
+        short: "remember something permanently: memory_remember(note[, scope]) -> String",
+        long: "Records a note as a CANONICAL memory and returns its id. Canonical memories are asserted, \
+               not inferred: confidence is 1.0, they are never re-extracted, and every one of them is put \
+               in front of you on every turn of the conversation — unlike ordinary recall, which ranks \
+               observations against the current message and shows only the closest few. Use it for \
+               instructions and stable facts (\"answer in German\", \"I prefer metric units\"), not for \
+               things the conversation will summarize on its own. The context and the speaker come from \
+               the current turn and are NOT arguments, so a note cannot be filed against the wrong \
+               conversation. Optional scope: \"context\" (default — this conversation only) or \"global\" \
+               (every conversation on this node). Prefer \"context\"; \"global\" is for facts that are true \
+               everywhere. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "memory_forget",
+        aliases: &[],
+        short: "forget a specific memory: memory_forget(memory_id) -> String",
+        long: "Soft-deletes one memory by the id shown in brackets before it, e.g. \"memory:8f0e…\". The \
+               node and its provenance survive — only its status changes — so a mistaken forget is \
+               recoverable. You can only forget memories the current conversation is authorized to \
+               contribute to; forgetting anything else reports that nothing was forgotten rather than \
+               confirming the id exists. To correct a canonical memory, forget it and remember the \
+               replacement. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "context_propose",
         aliases: &[],
         short: "propose new instructions for THIS conversation: context_propose(instructions)",

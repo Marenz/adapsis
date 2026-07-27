@@ -361,7 +361,64 @@ replaces that branch with one composer.
 ## Ladybug Episodic Memory
 
 - LadybugDB is the sole authoritative long-term memory database. The default path is
-  `~/.config/adapsis/memory.lbug`; override it with `ADAPSIS_MEMORY_DB`.
+  `~/.config/adapsis/memory.lbug`; override it with `ADAPSIS_MEMORY_DB`. This claim was
+  false until #42: `persona-notes.md` was a second store — one global markdown file, no
+  scope, no provenance, written by `Wolfi.remember` and read into the persona under a
+  hardcoded German heading naming one person. #41 made the read opt-in per context; #42
+  replaces the file with canonical memories.
+
+### Canonical vs extracted memories (#42)
+
+Two kinds of `Memory` node, distinguished by the `canonical` flag that existed in the
+schema since day one and was never set:
+
+| | extracted | canonical |
+|---|---|---|
+| written by | compaction (`llm_handlers.rs`) | `memory_remember` builtin |
+| provenance | `DERIVED_FROM` messages, `EXTRACTED_BY` a run | `ASSERTED_BY` a principal |
+| confidence | model estimate | fixed 1.0 |
+| injected | top-5, ranked against the current message | **all of them, every turn, unranked** |
+
+- **The split is observation vs instruction.** Ranking is right for "the mobile header
+  overflows" and wrong for "I prefer large text" — the latter must hold on a turn that
+  mentions neither text nor size. So canonical memories bypass ranking entirely and are
+  bounded by count (`CANONICAL_MEMORY_LIMIT` = 40) and characters
+  (`ADAPSIS_CANONICAL_MEMORY_CHARS`, default 8000) instead. Truncation drops the
+  **oldest**, because a new assertion is usually a correction of an old one; they are then
+  rendered oldest-first so the model reads them in the order they were asserted.
+- **`recall_authorized*` filters `canonical = false`.** Otherwise a canonical memory would
+  appear twice in the prompt — once injected verbatim, once occupying a ranked recall slot.
+- **`create_memory_node` is the only `CREATE (:Memory …)`.** `canonical` and `confidence`
+  used to be string literals inside the extraction path's Cypher, which is exactly why the
+  flag sat unused for so long. Extraction passes `false` structurally, so an inference
+  cannot become an assertion.
+- **Scope is governance, not a new concept.** Recall requires membership in *every* group
+  governing a memory, so a memory governed only by `access:global` — which every principal
+  joins on first message — is readable everywhere. `MemoryScope::{Context,Global}`. There is
+  no `global` column.
+- **`memory_remember` / `memory_forget` are builtins, not module functions.** `remember`
+  was a method on the `Wolfi` family-persona module, so it had to be *handed* a scope and
+  could be handed the wrong one: a feature request about an unrelated codebase was filed as
+  something learned about Renate. A builtin reads context + principal off
+  `coroutine::TurnIdentity` and fails closed outside a conversation. **Do not add an
+  argument that names a context or a principal to either one.**
+- **Forget is a status change**, not a delete — provenance survives. "Not yours" and "does
+  not exist" return the same message on purpose; distinguishing them turns `memory_forget`
+  into a probe for other conversations' memory ids.
+- **`--admin-id`** replaces the hardcoded `telegram:user:1815217` in the ingest path (and
+  the hardcoded `"Marenz"` display name). Process-level via
+  `memory_graph::set_admin_principal`, set once at startup — it does not vary per request,
+  and two ingest paths disagreeing about who the admin is would silently mis-ACL every new
+  group. Defaults to the old literal so an un-flagged process is unchanged.
+- **Migration:** `adapsis memory-import-notes --context <ctx> [--principal P] [--global]
+  [--dry-run] [notes.md]` turns a legacy `persona-notes.md` into canonical memories.
+  `--context` is required — a global file has no context of its own, and guessing one is
+  how these notes ended up filed under the wrong person. **Run this on any node whose
+  `persona-notes.md` is non-empty before the read path is deleted.** On `here` the file is
+  0 bytes (the #38 path bug sent every write to `/home/adapsis/…`); on **edox** `$HOME` *is*
+  `/home/adapsis`, so writer and reader agreed there and the file may hold real notes.
+- **Still to do (blocked on edox being reachable):** delete `Wolfi.remember` /
+  `Wolfi.forget_all`, drop `persona_notes_path` and the `{{persona_notes}}` marker.
 - Every incoming message is written before inference and linked to its `Context`,
   `Principal`, dynamic `AccessGroup`, original platform message ID, and timestamp.
   Telegram participants receive Read+Contribute membership when first observed;
