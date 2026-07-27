@@ -93,6 +93,15 @@ pub static BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::String,
     },
     Builtin {
+        name: "home_dir",
+        aliases: &[],
+        short: "current user's home directory: home_dir() -> String",
+        long: "Returns the current user's home directory as a String (from $HOME), without a trailing slash. Empty when $HOME is unset. \
+               ALWAYS use this instead of writing a literal home path — a module that hardcodes `/home/someone/...` silently fails on \
+               every other host, and it will disagree with the Rust side, which resolves the same files from $HOME.",
+        category: BuiltinCategory::String,
+    },
+    Builtin {
         name: "len",
         aliases: &["length"],
         short: "length of string or list",

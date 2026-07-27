@@ -2,6 +2,8 @@ mod api;
 mod ast;
 mod attachment;
 mod builtins;
+#[cfg(test)]
+mod bundled_modules_tests;
 mod compiler;
 mod coroutine;
 mod eval;
