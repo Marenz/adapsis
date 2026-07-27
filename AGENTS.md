@@ -194,7 +194,9 @@ gateway resolves via `model_aliases` or `virtual_models`.
   - `family-bot` (edox) → `deepseek-v4-flash` → `claude-sonnet-4-5` → `chatgpt/gpt-5.5`
     (DeepSeek made primary 2026-07-06 to spare OpenAI quota — temporary, revert
     when limits reset. Same reorder applied to the local gateway config on here.)
-  - `dev-bot` (here, sleek) → `anthropic/claude-opus-4-8` → `chatgpt/gpt-5.5` → `deepseek-v4-flash`
+  - `dev-bot` (here, sleek) → `anthropic/claude-opus-5` → `anthropic/claude-opus-4-8`
+    → `deepseek-v4-flash` → `deepinfra/zai-org/GLM-5.2` → `chatgpt/gpt-5.5`
+    (opus-5 promoted to primary 2026-07-27, verified 200 against the live gateway)
 - **Pick an Adapsis-aware model for dev nodes.** Raw `deepseek/*` (incl. the
   misleading `deepseek-reasoner` alias → `deepseek-v4-flash`) does NOT know
   Adapsis syntax — it emits "Plan set" prose + fake `async {}`/`:=` code and
@@ -208,6 +210,14 @@ gateway resolves via `model_aliases` or `virtual_models`.
   a new model ID directly (`POST /v1/chat/completions` with
   `{"model":"...","messages":[...],"max_tokens":10}`) before putting it first in
   a chain — the gateway silently advances past a 404 target to the next one.
+- **Dead targets as of 2026-07-27 (here):** `deepinfra/zai-org/GLM-5.2` returns
+  **402** on every request (no credit) — it was `dev-bot`'s first target, so each
+  call burned a round trip before falling through; demoted to the tail. The whole
+  **`chatgpt` provider hangs** (no response, no log line, 120 s+ timeout) for
+  `gpt-5.5` *and* `gpt-5.6-sol`, and the `openai` provider 401s on `/models`
+  (`OPENAI_API_KEY` stale) — so `chatgpt/*` targets are effectively dead weight
+  and `/v1/models` on the gateway hangs because it enumerates them. Fix the
+  Codex/OpenAI auth before relying on any `chatgpt/*` target again.
 - After editing a gateway config: `systemctl --user restart llm-gateway.service`
   (on each affected node). After changing a node's `--model`: edit its
   `adapsis.service`/`adapsis-bot.service` `ExecStart`, `daemon-reload`, restart.
