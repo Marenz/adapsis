@@ -111,6 +111,7 @@ web/
 ```
 
 - Shared module vars live in `RuntimeState.shared_vars` under `Module.name` keys; eval/test paths must install both shared runtime and shared program snapshots so missing shared slots can be materialized from `+shared` defaults.
+- Module library synchronization is first-writer-wins. `LibraryState` hashes every successfully loaded/written `.ax` file; persistence refuses to overwrite an external edit, reconstructed source must parse before rename, and a failed load keeps the last-known-good in-memory module. Reconcile conflicts with `library_reload("Name")` and retry rather than bypassing the check. **The one deliberate exception: a file this process never loaded *and* that does not parse is overwritten (loudly) by the in-memory module** — refusing there would make corruption permanent, since the reload we would tell the model to run cannot parse it either. Load errors are keyed per module and save errors are deduplicated + capped, because both feed strings the LLM sees on every turn.
 
 ## Concurrency / Three-Tier State (issue #9)
 - **Tier 1 Program** = `Arc<RwLock<Program>>`; **Tier 2 RuntimeState** = `Arc<RwLock<RuntimeState>>` (`SharedRuntime`); **Tier 3 SessionMeta** = `Arc<Mutex<SessionMeta>>` (`SharedMeta`). No god-lock — a handler locks only what it touches, and **never** holds a lock across an LLM call, eval, test, or IO. `ask_stream` clones state → drops locks → calls the LLM → re-locks briefly per operation.
@@ -474,9 +475,10 @@ The system prompt only shows modules the model can at least Read. Execute-level 
 >    when the block text is blank. (**gateway rebuild + `systemctl --user restart
 >    llm-gateway.service`**)
 >
-> Deploy note: rebuilds (#2,#3) ship in the adapsis binary — **stop the old
-> service BEFORE editing modules on disk**, or its save-on-change re-clobbers
-> your edit. Binary is glibc-2.39-linked; edox (Mint 22.3, glibc 2.39) runs it.
+> Deploy note: rebuilds (#2,#3) ship in the adapsis binary. The module library now
+> detects edits made while a process is running and refuses to clobber them; use
+> `library_reload("Name")`, reconcile, and retry. Binary is glibc-2.39-linked;
+> edox (Mint 22.3, glibc 2.39) runs it.
 
 `TelegramBot.transcribe_voice` downloads a Telegram voice note and POSTs it to
 `http://127.0.0.1:8090/transcribe` (multipart field `file`) expecting JSON

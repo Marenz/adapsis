@@ -1494,12 +1494,21 @@ impl CoroutineHandle {
                     Some(other) => format!("{other}"),
                     None => String::new(),
                 };
+                let library_state = crate::shared_state::get_shared_meta().and_then(|meta| {
+                    meta.lock()
+                        .ok()
+                        .and_then(|meta| meta.library_state.clone())
+                });
                 let program_lock = crate::shared_state::get_shared_program_mut()
                     .ok_or_else(|| anyhow::anyhow!("library_reload: program not available (no async context)"))?;
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("library_reload: could not acquire program write lock"))?;
 
-                let result = crate::library::reload_module(&mut program, &name)?;
+                let result = crate::library::reload_module(
+                    &mut program,
+                    &name,
+                    library_state.as_ref(),
+                )?;
                 // Update the read-only snapshot so query builtins see the changes
                 crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
                 return Ok(Some(Value::string(result)));
