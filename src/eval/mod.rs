@@ -1704,13 +1704,27 @@ pub fn eval_expr_standalone(program: &ast::Program, expr: &ast::Expr) -> Result<
 
 /// Public entry point that also sets the top-level function name for snapshot tracking.
 /// Use this for spawned tasks so `?inspect task N` shows the correct function name.
+///
+/// The name is qualified to `Module.fn` before it goes on `FN_NAME_STACK`.
+/// This is the choke point for that invariant: `Env::current_module_name()`
+/// derives the module purely from the `.`-prefix of the stack top, so an
+/// unqualified entry point makes every `+shared` read in that function fail
+/// with `undefined variable`. Callers reach here with names typed by a human
+/// or read out of a `+route`/`+source` declaration, i.e. routinely bare —
+/// `!eval get_node_types` used to report a perfectly healthy module as broken
+/// while `!eval Stratum.get_node_types` worked. Qualifying at each call site
+/// was tried and drifted; do not move it back out.
+/// `qualify_function_name` is a no-op for already-qualified, top-level and
+/// unknown names, so this is safe for synthetic labels such as
+/// `"Module.startup"`.
 pub fn eval_function_body_named(
     program: &ast::Program,
     function_name: &str,
     body: &[ast::Statement],
     env: &mut Env,
 ) -> Result<Value> {
-    FN_NAME_STACK.with(|s| s.borrow_mut().push(function_name.to_string()));
+    let qualified = program.qualify_function_name(function_name);
+    FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
     let result = eval_function_body(program, body, env);
     FN_NAME_STACK.with(|s| s.borrow_mut().pop());
     result
