@@ -6638,6 +6638,85 @@ fn async_eval_falls_back_to_interpreter_for_shared_vars() {
 }
 
 #[test]
+fn async_eval_resolves_shared_vars_for_an_unqualified_name() {
+    // `!eval get_node_types` / POST /api/eval {"function":"get_node_types"} hand
+    // eval_async_function a BARE name. The name goes on FN_NAME_STACK, and
+    // Env::current_module_name() derives the module from its `.`-prefix — so an
+    // unqualified entry point used to make every +shared read in that function
+    // fail with `undefined variable`, reporting a healthy module as broken.
+    // The sibling test above passes "Cfg.tag" and therefore never covered this.
+    let source = "\
++module Cfg
++shared prefix:String = \"pre-\"
+
++fn tag (name:String)->String [io,async]
+  +return concat(prefix, name)
++end
+";
+    let program = build_program(source);
+    let handle = crate::coroutine::CoroutineHandle::new_mock(vec![]);
+    let input = parser::parse_single_expr("{name: \"x\"}").unwrap();
+    let result = eval_async_function(&program, "tag", &input, handle)
+        .expect("bare function name must still resolve +shared vars");
+    assert_eq!(format!("{result}"), "\"pre-x\"");
+}
+
+#[test]
+fn sync_eval_resolves_shared_vars_for_an_unqualified_name() {
+    // The sync tier already qualified (in eval_call_with_input) and so was
+    // never broken — this pins that, because the async tier looking correct
+    // next to a working sync tier is exactly what made the bug read as
+    // "Stratum is broken in production" rather than "eval is".
+    let source = "\
++module Cfg
++shared prefix:String = \"pre-\"
+
++fn tag (name:String)->String
+  +return concat(prefix, name)
++end
+";
+    let program = build_program(source);
+    let input = parser::parse_single_expr("{name: \"x\"}").unwrap();
+    let (result, _) = eval_compiled_or_interpreted(&program, "tag", &input)
+        .expect("bare function name must still resolve +shared vars");
+    assert_eq!(result, "\"pre-x\"");
+}
+
+#[test]
+fn eval_function_body_named_qualifies_the_stack_entry() {
+    // The invariant lives in eval_function_body_named, not at its call sites:
+    // every entry point (route handler, +source handler, spawned task, async
+    // eval) pushes through it, and several are reached with bare names.
+    let source = "\
++module Cfg
++shared prefix:String = \"pre-\"
+
++fn tag (name:String)->String
+  +return concat(prefix, name)
++end
+";
+    let program = build_program(source);
+    let func = program.get_function("Cfg.tag").unwrap();
+
+    let runtime = std::sync::Arc::new(std::sync::RwLock::new(
+        crate::session::RuntimeState::default(),
+    ));
+    set_shared_runtime(Some(runtime));
+    set_shared_program(Some(std::sync::Arc::new(program.clone())));
+
+    // No populate_shared_from_program: force resolution through the runtime +
+    // program-default path that materialize_shared_value uses in production.
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
+    env.set("name", Value::String(std::sync::Arc::new("x".to_string())));
+    let result = eval_function_body_named(&program, "tag", &func.body, &mut env)
+        .expect("bare name must be qualified before it reaches FN_NAME_STACK");
+    assert_eq!(format!("{result}"), "\"pre-x\"");
+
+    set_shared_runtime(None);
+    set_shared_program(None);
+}
+
+#[test]
 fn async_eval_unmocked_io_error_is_surfaced() {
     // With a mock-only handle and no matching mock, the IO call fails.
     // The error must be surfaced — not silently retried.
