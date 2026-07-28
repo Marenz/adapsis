@@ -896,7 +896,7 @@ pub fn eval_inline_expr(program: &ast::Program, expr: &parser::Expr) -> Result<V
     if let Some(rt) = get_shared_runtime() {
         init_missing_shared_runtime_vars(program, &rt);
     }
-    eval_parser_expr_with_program(expr, program)
+    eval_parser_expr_inline(expr, program)
 }
 
 /// Evaluate an inline expression with IO support via a coroutine handle.
@@ -953,17 +953,60 @@ pub fn expr_contains_io_builtin(expr: &parser::Expr) -> bool {
     }
 }
 
+/// Resolve an expression that *names* a zero-argument user function without
+/// calling syntax — `health` or `Chronica.health`.
+///
+/// A dotted name is parsed as `FieldAccess`, which the standalone evaluator
+/// turns into `Value::Err("Chronica.health")` (a deliberate hack so test
+/// expectations can write `result.name`). Reaching that hack from `!eval` is
+/// how `adapsis eval Chronica.health` used to report a plausible-looking
+/// `Err(Chronica.health)` with `success: true` instead of calling the function.
+/// Resolving the name first keeps `result.name` working — nothing is declared
+/// under that name — while making the module-qualified form mean what it says.
+fn named_zero_arg_function<'p>(
+    expr: &parser::Expr,
+    program: &'p crate::ast::Program,
+) -> Option<(String, &'p crate::ast::FunctionDecl)> {
+    let name = match expr {
+        parser::Expr::Ident(name) => name.clone(),
+        parser::Expr::FieldAccess { base, field } => match base.as_ref() {
+            parser::Expr::Ident(base_name) => format!("{base_name}.{field}"),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let func = program.get_function(&name)?;
+    func.params.is_empty().then_some((name, func))
+}
+
+/// Refuse a module-qualified name that resolved to nothing, in inline `!eval`.
+///
+/// The standalone evaluator's last resort is "treat it as a union variant
+/// constructor", which is right for a test expectation like `Circle(3)` and
+/// wrong for a typo: `!eval Chronica.helth()` answered `= Chronica.helth` with
+/// `success: true`. A dotted name is never a variant constructor — variants are
+/// bare identifiers — so this is decidable without touching that fallback for
+/// test expressions, which still need it.
+fn reject_unresolved_qualified_name(name: &str, pure_ctx: PureEvalContext) -> Result<()> {
+    if pure_ctx == PureEvalContext::InlineEval && name.contains('.') {
+        bail!("no function `{name}` in the program — check `?symbols` for the exact name");
+    }
+    Ok(())
+}
+
+fn declares_io_effect(func: &crate::ast::FunctionDecl) -> bool {
+    func.effects
+        .iter()
+        .any(|e| matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async))
+}
+
 /// Check if an expression calls a user function that has [io] or [async] effects.
 pub fn expr_calls_io_function(expr: &parser::Expr, program: &crate::ast::Program) -> bool {
     match expr {
         parser::Expr::Call { callee, args } => {
             let name = parser_callee_name(callee);
             if let Some(func) = program.get_function(&name) {
-                if func
-                    .effects
-                    .iter()
-                    .any(|e| matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async))
-                {
+                if declares_io_effect(func) {
                     return true;
                 }
             }
@@ -972,14 +1015,34 @@ pub fn expr_calls_io_function(expr: &parser::Expr, program: &crate::ast::Program
         parser::Expr::Binary { left, right, .. } => {
             expr_calls_io_function(left, program) || expr_calls_io_function(right, program)
         }
-        parser::Expr::Unary { expr: inner, .. }
-        | parser::Expr::Cast { expr: inner, .. }
-        | parser::Expr::FieldAccess { base: inner, .. } => expr_calls_io_function(inner, program),
+        parser::Expr::Unary { expr: inner, .. } | parser::Expr::Cast { expr: inner, .. } => {
+            expr_calls_io_function(inner, program)
+        }
+        parser::Expr::FieldAccess { base, .. } => {
+            named_zero_arg_function(expr, program).is_some_and(|(_, f)| declares_io_effect(f))
+                || expr_calls_io_function(base, program)
+        }
+        parser::Expr::Ident(_) => {
+            named_zero_arg_function(expr, program).is_some_and(|(_, f)| declares_io_effect(f))
+        }
         parser::Expr::StructLiteral(fields) => fields
             .iter()
             .any(|f| expr_calls_io_function(&f.value, program)),
         _ => false,
     }
+}
+
+/// Whether an inline `!eval` expression must be dispatched through the
+/// coroutine runtime rather than the pure evaluator.
+///
+/// The two halves used to be checked separately at each call site, and
+/// `/api/eval` only ever checked the builtin half — so `Chronica.health()`,
+/// an `[io,async]` *user* function, fell through to the pure evaluator and was
+/// refused as if it were a test expression, even though the runtime servicing
+/// the request could have made the call (the `{"function": ...}` form did).
+/// One predicate, used by every entry point, is what keeps them in step.
+pub fn expr_needs_io_runtime(expr: &parser::Expr, program: &crate::ast::Program) -> bool {
+    expr_contains_io_builtin(expr) || expr_calls_io_function(expr, program)
 }
 
 /// Evaluate a test case against a function in the program.
@@ -3722,13 +3785,33 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
     }
 }
 
+/// Why an expression is being evaluated without an environment — i.e. purely.
+///
+/// The guard is the same either way; only the diagnostic differs. That matters
+/// because "use !mock" is actively wrong advice for the `!eval` caller: mocking
+/// an HTTP call verifies the mock, not the endpoint, and the whole point of
+/// evaluating an API client against a running instance is to reach the endpoint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PureEvalContext {
+    /// A `+with` input or `expect` value. These genuinely must stay pure.
+    TestExpression,
+    /// An inline `!eval` expression that found no coroutine runtime to run on.
+    InlineEval,
+}
+
 /// Evaluate a parser::Expr directly (for test case inputs/expected values).
 /// Evaluate a parser expression with access to the program (can call user functions).
 pub fn eval_parser_expr_with_program(
     expr: &parser::Expr,
     program: &ast::Program,
 ) -> Result<Value> {
-    eval_parser_expr_impl(expr, program, None)
+    eval_parser_expr_impl(expr, program, None, PureEvalContext::TestExpression)
+}
+
+/// Like `eval_parser_expr_with_program`, but reports refusals as an inline
+/// `!eval` rather than as a test expression.
+pub fn eval_parser_expr_inline(expr: &parser::Expr, program: &ast::Program) -> Result<Value> {
+    eval_parser_expr_impl(expr, program, None, PureEvalContext::InlineEval)
 }
 
 /// Like `eval_parser_expr_with_program`, but threads an environment through
@@ -3739,7 +3822,7 @@ fn eval_parser_expr_with_env(
     program: &ast::Program,
     env: &mut Env,
 ) -> Result<Value> {
-    eval_parser_expr_impl(expr, program, Some(env))
+    eval_parser_expr_impl(expr, program, Some(env), PureEvalContext::InlineEval)
 }
 
 /// Unified implementation for evaluating parser expressions with optional env.
@@ -3752,25 +3835,45 @@ fn eval_parser_expr_impl(
     expr: &parser::Expr,
     program: &ast::Program,
     mut env: Option<&mut Env>,
+    pure_ctx: PureEvalContext,
 ) -> Result<Value> {
-    // Helper: check for side-effect functions (only in "no env" / test-expression mode)
-    fn check_side_effects(func: &ast::FunctionDecl, name: &str, has_env: bool) -> Result<()> {
-        if !has_env {
-            let has_side_effects = func.effects.iter().any(|e| {
-                matches!(
-                    e,
-                    ast::Effect::Io | ast::Effect::Async | ast::Effect::Mut | ast::Effect::Unsafe
-                )
-            });
-            if has_side_effects {
+    // Helper: check for side-effect functions (only in "no env" / pure mode)
+    fn check_side_effects(
+        func: &ast::FunctionDecl,
+        name: &str,
+        has_env: bool,
+        pure_ctx: PureEvalContext,
+    ) -> Result<()> {
+        if has_env {
+            return Ok(());
+        }
+        let has_side_effects = func.effects.iter().any(|e| {
+            matches!(
+                e,
+                ast::Effect::Io | ast::Effect::Async | ast::Effect::Mut | ast::Effect::Unsafe
+            )
+        });
+        if !has_side_effects {
+            return Ok(());
+        }
+        match pure_ctx {
+            PureEvalContext::TestExpression => bail!(
+                "cannot call `{name}` in a test expression: it has side effects {:?}. `+with` \
+                 inputs and `expect` values must be pure — call it from the function under test \
+                 instead",
+                func.effects
+            ),
+            PureEvalContext::InlineEval => {
+                let args = if func.params.is_empty() { "()" } else { "(...)" };
                 bail!(
-                    "cannot call `{name}` in test expression: function has side effects {:?} — \
-                     use !mock and an async test wrapper instead",
+                    "cannot call `{name}`: it has side effects {:?} and this evaluation has no \
+                     coroutine runtime. A running AdapsisOS dispatches such calls live — evaluate \
+                     it there (`adapsis eval '{name}{args}' --api http://127.0.0.1:<port>`). \
+                     Mocking it would verify the mock, not the real call",
                     func.effects
-                );
+                )
             }
         }
-        Ok(())
     }
 
     // Helper: build an env for calling a user function, inheriting from ambient env if present.
@@ -3793,10 +3896,11 @@ fn eval_parser_expr_impl(
         args: &[parser::Expr],
         program: &ast::Program,
         mut env: Option<&mut Env>,
+        pure_ctx: PureEvalContext,
     ) -> Result<Vec<Value>> {
         let mut result = Vec::with_capacity(args.len());
         for a in args {
-            result.push(eval_parser_expr_impl(a, program, env.as_deref_mut())?);
+            result.push(eval_parser_expr_impl(a, program, env.as_deref_mut(), pure_ctx)?);
         }
         Ok(result)
     }
@@ -3819,7 +3923,7 @@ fn eval_parser_expr_impl(
             // Check zero-arg user functions
             if let Some(func) = program.get_function(name) {
                 if func.params.is_empty() {
-                    check_side_effects(&func, name, env.is_some())?;
+                    check_side_effects(func, name, env.is_some(), pure_ctx)?;
                     let mut call_env = make_call_env(program, env.as_deref());
                     let qualified = program.qualify_function_name(name);
                     FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
@@ -3834,7 +3938,7 @@ fn eval_parser_expr_impl(
             let name = parser_callee_name(callee);
             // Union variant constructor
             if is_union_variant(program, &name) {
-                let payload = eval_args(args, program, env)?;
+                let payload = eval_args(args, program, env, pure_ctx)?;
                 return Ok(Value::Union {
                     variant: intern::intern_display(&name),
                     payload,
@@ -3842,8 +3946,8 @@ fn eval_parser_expr_impl(
             }
             // User function call
             if let Some(func) = program.get_function(&name) {
-                check_side_effects(&func, &name, env.is_some())?;
-                let eval_args_vec = eval_args(args, program, env.as_deref_mut())?;
+                check_side_effects(func, &name, env.is_some(), pure_ctx)?;
+                let eval_args_vec = eval_args(args, program, env.as_deref_mut(), pure_ctx)?;
                 let mut call_env = make_call_env(program, env.as_deref());
                 for (param, arg) in func.params.iter().zip(eval_args_vec) {
                     call_env.set(&param.name, arg);
@@ -3858,7 +3962,7 @@ fn eval_parser_expr_impl(
             if crate::builtins::is_builtin(&name)
                 && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "None")
             {
-                let eval_args_vec = eval_args(args, program, env.as_deref_mut())?;
+                let eval_args_vec = eval_args(args, program, env.as_deref_mut(), pure_ctx)?;
                 if let Some(env) = env {
                     return eval_builtin_or_user(program, &name, eval_args_vec, env);
                 } else {
@@ -3866,19 +3970,37 @@ fn eval_parser_expr_impl(
                     return eval_builtin_or_user(program, &name, eval_args_vec, &mut fresh_env);
                 }
             }
+            reject_unresolved_qualified_name(&name, pure_ctx)?;
+            eval_parser_expr_standalone(expr)
+        }
+        parser::Expr::FieldAccess { .. } => {
+            // A dotted name that resolves to a zero-argument function is a call,
+            // not a field path. Without this, `!eval Chronica.health` fell to the
+            // standalone evaluator's `result.name` hack and answered with a
+            // plausible-looking `Err(Chronica.health)` and `success: true`.
+            if let Some((name, func)) = named_zero_arg_function(expr, program) {
+                check_side_effects(func, &name, env.is_some(), pure_ctx)?;
+                let mut call_env = make_call_env(program, env.as_deref());
+                let qualified = program.qualify_function_name(&name);
+                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
+                let result = eval_function_body(program, &func.body, &mut call_env);
+                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+                return result;
+            }
+            reject_unresolved_qualified_name(&parser_callee_name(expr), pure_ctx)?;
             eval_parser_expr_standalone(expr)
         }
         parser::Expr::StructLiteral(fields) => {
             let empty_id = intern::intern_display("");
             let mut field_map: HashMap<InternedId, Value> = HashMap::new();
             for f in fields {
-                let val = eval_parser_expr_impl(&f.value, program, env.as_deref_mut())?;
+                let val = eval_parser_expr_impl(&f.value, program, env.as_deref_mut(), pure_ctx)?;
                 field_map.insert(intern::intern_display(&f.name), val);
             }
             Ok(Value::strct_interned(empty_id, field_map))
         }
         parser::Expr::Unary { op, expr: inner } => {
-            let val = eval_parser_expr_impl(inner, program, env)?;
+            let val = eval_parser_expr_impl(inner, program, env, pure_ctx)?;
             match op {
                 parser::UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
                 parser::UnaryOp::Neg => match val {
@@ -3889,8 +4011,8 @@ fn eval_parser_expr_impl(
             }
         }
         parser::Expr::Binary { left, op, right } => {
-            let l = eval_parser_expr_impl(left, program, env.as_deref_mut())?;
-            let r = eval_parser_expr_impl(right, program, env)?;
+            let l = eval_parser_expr_impl(left, program, env.as_deref_mut(), pure_ctx)?;
+            let r = eval_parser_expr_impl(right, program, env, pure_ctx)?;
             let ast_op = match op {
                 parser::BinaryOp::Add => ast::BinaryOp::Add,
                 parser::BinaryOp::Sub => ast::BinaryOp::Sub,

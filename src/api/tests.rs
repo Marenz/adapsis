@@ -767,6 +767,87 @@ async fn execute_code_eval_io_function_positional_args() {
     );
 }
 
+/// Define an `[io,async]` module function with a pure body, so the coroutine
+/// runtime is *entered* without an IO request nobody is draining.
+///
+/// The module name is per-test: library persistence is real even in tests, and
+/// two tests writing the same module race on the same temp-file rename.
+async fn define_live_io_module(config: &AppConfig, module_name: &str) {
+    let module = format!(
+        "+module {module_name}\n+fn ping ()->String [io,async]\n  +return \"pong\"\n+end"
+    );
+    let mut session = config.snapshot_working_set().await;
+    let res = execute_code(&module, config, &mut session, None).await;
+    assert!(
+        !res.has_errors,
+        "module definition should succeed: {:?}",
+        res.mutation_results
+    );
+    config.write_back_working_set(&session).await;
+}
+
+#[tokio::test]
+async fn eval_endpoint_runs_an_io_user_function_expression() {
+    // `/api/eval` used to ask only "does this contain an IO *builtin*", so an
+    // [io,async] user function was refused as a test expression by the very
+    // process that answers {"function": "Live.ping"} with a live call. That
+    // left no supported way to smoke-test an API client against the daemon.
+    let (config, _io_rx) = test_config_with_io();
+    define_live_io_module(&config, "LiveEval").await;
+
+    for expression in ["LiveEval.ping()", "LiveEval.ping"] {
+        let response = super::eval_fn(
+            axum::extract::State(config.clone()),
+            axum::Json(super::EvalRequest {
+                function: String::new(),
+                input: String::new(),
+                expression: Some(expression.to_string()),
+            }),
+        )
+        .await;
+        assert!(
+            response.0.success,
+            "`{expression}` should evaluate live: {}",
+            response.0.result
+        );
+        assert!(
+            response.0.result.contains("pong"),
+            "`{expression}` should reach the function body: {}",
+            response.0.result
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_eval_endpoint_runs_an_io_user_function_expression() {
+    // The per-session endpoint carried its own copy of the same predicate and
+    // has to stay in step with the main one.
+    let (config, _io_rx) = test_config_with_io();
+    define_live_io_module(&config, "LiveSessionEval").await;
+    let program = config.program.read().await.clone();
+    config
+        .sessions
+        .lock()
+        .await
+        .insert("scratch".to_string(), std::sync::Arc::new(tokio::sync::Mutex::new(program)));
+
+    let response = super::session_eval(
+        axum::extract::State(config.clone()),
+        axum::extract::Path("scratch".to_string()),
+        axum::Json(super::EvalRequest {
+            function: String::new(),
+            input: String::new(),
+            expression: Some("LiveSessionEval.ping()".to_string()),
+        }),
+    )
+    .await;
+    assert!(
+        response.0.success,
+        "session eval should evaluate live: {}",
+        response.0.result
+    );
+}
+
 #[tokio::test]
 async fn execute_code_agent_spawned_flag() {
     let (config, _io_rx) = test_config_with_io();

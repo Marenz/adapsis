@@ -248,6 +248,55 @@ gateway resolves via `model_aliases` or `virtual_models`.
 - Pure function calls allowed in test inputs (e.g. `+with config=default_config()`)
 - **Test matchers**: `contains("substr")`, `starts_with("prefix")`, bare `Ok`/`Err`, `Err("msg")`
 - **+after assertions**: `+after routes contains "/chat"`, `+after modules contains "Name"` — check side effects after test execution
+- **`cargo test` must never touch `~/.config/adapsis/modules/`.** The suite drives
+  `execute_code`/`mutate` with fixture modules and library persistence is real, so
+  `TestIO.ax`, `Math.ax`, `Live.ax` … used to be written into the developer's live
+  library — which the running daemon auto-loads at startup, i.e. running the tests
+  injected fixtures into production, and two tests defining the same module raced on
+  the same `.tmp` rename. `library::library_dir()` now returns a per-process temp dir
+  under `cfg(test)`; `ADAPSIS_MODULES_DIR` overrides it outside tests (useful for a
+  second instance without also relocating `$HOME`). A fixture module still needs a
+  name unique to its test.
+
+## Smoke-testing an IO module against the running instance
+
+An API client is `[io,async]` by construction, so the useful test is the live call:
+mocking an HTTP call verifies the mock, not the endpoint. Everything below runs in
+the **daemon's** process, on the daemon's program state, through its coroutine
+runtime — which is what makes it evidence that the daemon has the code, unlike
+copying the module to `/tmp` and running `run-async` (a different process).
+
+```
+adapsis eval --api http://127.0.0.1:3002 'Chronica.health()'   # real HTTP call
+adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no parens
+!eval Chronica.health()                                        # same, from a <code> block
+```
+
+- **One predicate decides**: `eval::expr_needs_io_runtime` = an IO builtin **or** a
+  user function declaring `[io]`/`[async]`. `/api/eval` and
+  `/api/sessions/:id/eval` used to check only the builtin half, so
+  `{"expression": "Chronica.health()"}` was refused as a *test expression* by the
+  very process that answered `{"function": "Chronica.health"}` with a live call.
+  Add a new inline-eval entry point and it must call that predicate, not re-derive it.
+- **A dotted name is resolved before the `result.name` hack.** `Chronica.health`
+  parses as `FieldAccess`, which the standalone evaluator turns into
+  `Value::Err("Chronica.health")` so test expectations can write `result.name` —
+  reaching it from `!eval` reported a plausible `Err(Chronica.health)` with
+  `success: true`. `named_zero_arg_function` resolves the name first; nothing is
+  declared as `result.name`, so test expectations are untouched.
+- **A dotted name that resolves to nothing is an error in inline eval.** Standalone's
+  last resort is "treat an unknown call as a union variant constructor", so
+  `Chronica.helth()` answered `= Chronica.helth`, successfully. Variants are bare
+  identifiers, so a dotted name is decidable — but only the `InlineEval` context
+  rejects it; test expressions keep the lenient fallback.
+- **`PureEvalContext` exists for the diagnostic, not the rule.** The effect guard is
+  identical either way. `TestExpression` says `+with`/`expect` must be pure;
+  `InlineEval` says there is no coroutine runtime here and names the live path. It
+  must not tell an `!eval` caller to mock — that was the original wrong advice.
+- There is deliberately **no `--live` flag**: `adapsis eval` has always dispatched to
+  the running instance over `/api/eval`. The default `--api` port is 3001 while the
+  daemon here runs on **3002**, and a bare reqwest failure reads as "this does not
+  work" — so a connect/timeout failure now names the flag and the cause chain.
 
 ## Training Data
 - JSONL training log at `--training-log` path (default: `training.jsonl`)

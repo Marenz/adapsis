@@ -118,12 +118,33 @@ fn source_hash(source: &str) -> String {
 }
 
 /// Default library directory path.
+///
+/// `ADAPSIS_MODULES_DIR` overrides it, so a second instance can be run against
+/// a throwaway library without also relocating `$HOME`.
+///
+/// Under `cfg(test)` the default is a per-process temp directory instead of the
+/// real one. The test suite drives `execute_code`/`mutate` with fixture modules,
+/// and library persistence is not mocked — so `cargo test` used to leave
+/// `TestIO.ax`, `Math.ax`, `Live.ax` … in `~/.config/adapsis/modules`, which the
+/// running daemon auto-loads at startup. Running the tests injected fixtures
+/// into production, and two tests defining the same module raced on the same
+/// `.tmp` rename.
 pub fn library_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home)
-        .join(".config")
-        .join("adapsis")
-        .join("modules")
+    if let Ok(dir) = std::env::var("ADAPSIS_MODULES_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(test)]
+    {
+        return std::env::temp_dir().join(format!("adapsis-test-modules-{}", std::process::id()));
+    }
+    #[cfg(not(test))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(home)
+            .join(".config")
+            .join("adapsis")
+            .join("modules")
+    }
 }
 
 /// Ensure the library directory exists, creating it if necessary.

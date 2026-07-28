@@ -1835,6 +1835,116 @@ fn test_impure_function_rejected_in_test_param_call() {
     );
 }
 
+// ── Inline `!eval` of an IO module against a live runtime ─────────
+//
+// An API client is `[io,async]` by construction, so "smoke-test it against the
+// running instance" is the *normal* case, not an exotic one. These pin the
+// three ways that used to fail.
+
+/// Source for a module whose only function is a zero-arg `[io,async]` call —
+/// i.e. the shape of every health check.
+const IO_MODULE_SOURCE: &str = "\
++module Chronica
++fn health ()->String [io,async]
+  +await body:String = http_get(\"http://127.0.0.1:1/health\")
+  +return body
++end
+";
+
+#[test]
+fn inline_eval_of_an_io_user_function_is_dispatched_to_the_runtime() {
+    // `/api/eval` only ever asked "does this contain an IO *builtin*", so an
+    // [io,async] user function fell through to the pure evaluator and was
+    // refused — by the very process that answers the named form with a live
+    // call. The predicate has to see both.
+    let program = build_program(IO_MODULE_SOURCE);
+    for expression in ["Chronica.health()", "Chronica.health"] {
+        let expr = parser::parse_expr_pub(0, expression).expect("expression should parse");
+        assert!(
+            expr_needs_io_runtime(&expr, &program),
+            "`{expression}` must be routed through the coroutine runtime"
+        );
+    }
+}
+
+#[test]
+fn a_bare_module_function_name_is_a_call_not_a_field_path() {
+    // `Chronica.health` parses as FieldAccess, and the standalone evaluator
+    // turns FieldAccess into Value::Err("Chronica.health") so that test
+    // expectations can write `result.name`. Reaching that hack from !eval
+    // reported a plausible `Err(Chronica.health)` with success: true.
+    let program = build_program(
+        "\
++module Pure
++fn answer ()->Int
+  +return 42
++end
+",
+    );
+    let expr = parser::parse_expr_pub(0, "Pure.answer").expect("expression should parse");
+    let value = eval_inline_expr(&program, &expr).expect("should call the function");
+    assert!(matches!(value, Value::Int(42)), "got {value}");
+}
+
+#[test]
+fn a_field_path_that_names_no_function_still_reaches_the_test_expectation_hack() {
+    // The FieldAccess resolution above must not break `+with`/`expect` values
+    // like `result.name`, which rely on the Err-path formatting.
+    let program = build_program("+fn id (x:Int)->Int\n  +return x\n");
+    let expr = parser::parse_expr_pub(0, "result.name").expect("expression should parse");
+    let value = eval_parser_expr_with_program(&expr, &program).expect("should stay lenient");
+    assert!(
+        matches!(&value, Value::Err(label) if label == "result.name"),
+        "got {value}"
+    );
+}
+
+#[test]
+fn a_misspelled_module_function_is_an_error_not_a_union_variant() {
+    // Standalone's last resort is "treat an unknown call as a variant
+    // constructor", so a typo answered `= Chronica.helth` with success: true.
+    // A dotted name is never a variant constructor, so this is decidable.
+    let program = build_program(IO_MODULE_SOURCE);
+    for expression in ["Chronica.helth()", "Chronica.helth"] {
+        let expr = parser::parse_expr_pub(0, expression).expect("expression should parse");
+        let err = eval_inline_expr(&program, &expr)
+            .expect_err("a misspelled function must not succeed")
+            .to_string();
+        assert!(
+            err.contains("no function `Chronica.helth`"),
+            "error should name the missing function: {err}"
+        );
+    }
+}
+
+#[test]
+fn refusing_an_io_call_without_a_runtime_does_not_advise_mocking() {
+    // Mocking an HTTP call verifies the mock, not the endpoint. Telling the
+    // caller to mock is the wrong advice when they asked for a live call; the
+    // actionable answer is "evaluate it on a running instance".
+    let program = build_program(IO_MODULE_SOURCE);
+    let expr = parser::parse_expr_pub(0, "Chronica.health()").expect("expression should parse");
+    let err = eval_inline_expr(&program, &expr)
+        .expect_err("without a coroutine handle this cannot run")
+        .to_string();
+    assert!(
+        !err.contains("!mock"),
+        "inline eval must not recommend mocking a live call: {err}"
+    );
+    assert!(
+        err.contains("adapsis eval"),
+        "error should name the live path: {err}"
+    );
+    // The test-expression path keeps its own (correct) wording.
+    let test_err = eval_parser_expr_with_program(&expr, &program)
+        .expect_err("test expressions must stay pure")
+        .to_string();
+    assert!(
+        test_err.contains("test expression"),
+        "test-expression refusal should say so: {test_err}"
+    );
+}
+
 #[test]
 fn test_fail_effect_allowed_in_test_param() {
     // [fail] is not a side effect — it should be allowed
