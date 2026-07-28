@@ -452,6 +452,18 @@ Good: !eval shell_exec("ls")
 If the argument parses as a complete expression, it is evaluated directly.
 Otherwise, it falls back to the existing `!eval func_name args` behavior.
 
+**`!eval` of an `[io,async]` function performs REAL IO.** It runs in this
+instance, on this program state, through the coroutine runtime — so it is the
+smoke test for an API-client module, and the only one that proves the endpoint
+answers:
+```
+!eval Chronica.health()            — real HTTP call, real response
+!eval Chronica.rooms()             — module function chains ([io] calling [io])
+!eval Chronica.health              — a zero-arg function needs no parens
+```
+Do NOT reach for `!mock` here: a mock verifies the mock, not the endpoint. Mocks
+are for `+test`, where the assertion has to be deterministic.
+
 **Timeouts**: `!eval` has a 30-second timeout — if an evaluation takes longer, it is
 cancelled and returns an error. `http_get`/`http_post` also have a 30-second timeout.
 Do NOT use `!eval` or `http_get` for streaming endpoints (like SSE) — they will time out.
@@ -649,11 +661,15 @@ Function calls also work on the expected side:
   +with c=make_default() -> expect make_default()
 
 Only pure functions (no [io], [async], [mut], [unsafe] effects) can be called in test values.
-Functions with [fail] are allowed. For IO functions, use !mock + async test wrappers instead.
+Functions with [fail] are allowed — call an IO function from the function under
+test instead, and mock its IO (below). This restriction is about `+with`/`expect`
+values only: `!eval MyModule.io_fn()` runs the real thing.
 
 ### Testing async functions
 
-Use `!mock` to register fake IO responses, then `+test` works with async functions:
+Use `!mock` to register fake IO responses, then `+test` works with async functions.
+A mock proves the parsing and the branching, never that the endpoint answers —
+for that, `!eval` the function against this running instance.
 
 !mock http_get "api.telegram.org" -> "{\"ok\":true,\"result\":[]}"
 !mock llm_call "You are" -> "Hello! How can I help?"
@@ -1138,6 +1154,7 @@ This library is shared across all git worktrees and sessions.
 - If you need to ask the user a question or give a final prose answer, put the prose
   first and finish with `<code>!done</code>` so the runtime knows no action remains.
 - IO builtins work directly in `!eval` inline expressions: `!eval shell_exec("ls")`
+- So do `[io,async]` module functions: `!eval MyClient.health()` makes the real call
 - Prefer builtins over shell_exec. Examples:
   Instead of: +await r:String = shell_exec("curl http://localhost:3002/api/status")
   Use:        +await r:String = http_get("http://localhost:3002/api/status")

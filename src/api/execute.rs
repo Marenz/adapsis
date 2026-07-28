@@ -453,8 +453,8 @@ pub async fn execute_code(
                         // Inline expression: evaluate directly
                         if let Some(ref expr) = ev.inline_expr {
                             // Check if expression needs async eval: IO builtins or [io,async] user functions
-                            let needs_async_eval = crate::eval::expr_contains_io_builtin(expr)
-                                || crate::eval::expr_calls_io_function(expr, &session.program);
+                            let needs_async_eval =
+                                crate::eval::expr_needs_io_runtime(expr, &session.program);
                             if needs_async_eval {
                                 if let Some(sender) = &config.io_sender {
                                     let program = session.program.clone();

@@ -123,6 +123,62 @@ fn default_memory_db() -> std::path::PathBuf {
         .join("memory.lbug")
 }
 
+/// Turn a transport failure against a running AdapsisOS into an error that says
+/// which instance was meant.
+///
+/// These subcommands exist to reach a *live* instance, and the port they default
+/// to is often not the one it was started on — a bare reqwest "connection
+/// refused" reads as "this does not work" rather than "point --api somewhere".
+fn api_transport_error(api: &str, path: &str, err: reqwest::Error) -> anyhow::Error {
+    // reqwest's Display renders connect-refused, DNS failure and TLS errors
+    // identically, so flatten the source chain into the message.
+    let mut cause = String::new();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
+    while let Some(inner) = source {
+        cause.push_str(": ");
+        cause.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    if err.is_connect() || err.is_timeout() {
+        anyhow::anyhow!(
+            "no AdapsisOS answered at {api}{path} ({err}{cause}). Start one \
+             (`adapsis os --port N ...`) or point --api at the running instance's port"
+        )
+    } else {
+        anyhow::anyhow!("{api}{path}: {err}{cause}")
+    }
+}
+
+/// POST JSON to a running AdapsisOS instance.
+async fn post_api_json(
+    api: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{api}{path}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| api_transport_error(api, path, e))?;
+    response
+        .json()
+        .await
+        .map_err(|e| api_transport_error(api, path, e))
+}
+
+/// GET JSON from a running AdapsisOS instance.
+async fn get_api_json(api: &str, path: &str) -> Result<serde_json::Value> {
+    let response = reqwest::get(format!("{api}{path}"))
+        .await
+        .map_err(|e| api_transport_error(api, path, e))?;
+    response
+        .json()
+        .await
+        .map_err(|e| api_transport_error(api, path, e))
+}
+
 /// Split a legacy `persona-notes.md` into one note per entry.
 ///
 /// `Wolfi.remember` appended free text with no delimiter contract, so the only
@@ -2261,12 +2317,7 @@ async fn main() -> Result<()> {
         }
         Command::Ask { message, api } => {
             let msg = message.join(" ");
-            let client = reqwest::Client::new();
-            let resp: serde_json::Value = client
-                .post(format!("{api}/api/ask"))
-                .json(&serde_json::json!({ "message": msg }))
-                .send().await?
-                .json().await?;
+            let resp = post_api_json(&api, "/api/ask", serde_json::json!({ "message": msg })).await?;
             if let Some(reply) = resp.get("reply").and_then(|r| r.as_str()) {
                 if !reply.is_empty() { println!("{reply}"); }
             }
@@ -2297,8 +2348,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Status { api } => {
-            let resp: serde_json::Value = reqwest::get(format!("{api}/api/status"))
-                .await?.json().await?;
+            let resp = get_api_json(&api, "/api/status").await?;
             println!("Revision: {}", resp.get("revision").unwrap_or(&serde_json::json!(0)));
             if let Some(fns) = resp.get("functions").and_then(|f| f.as_array()) {
                 println!("Functions ({}): {}", fns.len(), fns.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>().join(", "));
@@ -2311,11 +2361,7 @@ async fn main() -> Result<()> {
         }
         Command::Mutate { source, api } => {
             let src = source.join(" ");
-            let client = reqwest::Client::new();
-            let resp: serde_json::Value = client
-                .post(format!("{api}/api/mutate"))
-                .json(&serde_json::json!({ "source": src }))
-                .send().await?.json().await?;
+            let resp = post_api_json(&api, "/api/mutate", serde_json::json!({ "source": src })).await?;
             println!("Revision: {}", resp.get("revision").unwrap_or(&serde_json::json!(0)));
             if let Some(results) = resp.get("results").and_then(|r| r.as_array()) {
                 for r in results {
@@ -2335,19 +2381,13 @@ async fn main() -> Result<()> {
             } else {
                 false
             };
-            let client = reqwest::Client::new();
-            let resp: serde_json::Value = if is_inline {
-                client
-                    .post(format!("{api}/api/eval"))
-                    .json(&serde_json::json!({ "function": "", "expression": parts }))
-                    .send().await?.json().await?
+            let body = if is_inline {
+                serde_json::json!({ "function": "", "expression": parts })
             } else {
                 let (func, input) = parts.split_once(' ').unwrap_or((&parts, ""));
-                client
-                    .post(format!("{api}/api/eval"))
-                    .json(&serde_json::json!({ "function": func, "input": input }))
-                    .send().await?.json().await?
+                serde_json::json!({ "function": func, "input": input })
             };
+            let resp = post_api_json(&api, "/api/eval", body).await?;
             let result = resp.get("result").and_then(|r| r.as_str()).unwrap_or("(none)");
             let success = resp.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
             let compiled = resp.get("compiled").and_then(|c| c.as_bool()).unwrap_or(false);
@@ -2360,11 +2400,7 @@ async fn main() -> Result<()> {
         }
         Command::Query { query, api } => {
             let q = query.join(" ");
-            let client = reqwest::Client::new();
-            let resp: serde_json::Value = client
-                .post(format!("{api}/api/query"))
-                .json(&serde_json::json!({ "query": q }))
-                .send().await?.json().await?;
+            let resp = post_api_json(&api, "/api/query", serde_json::json!({ "query": q })).await?;
             let response = resp.get("response").and_then(|r| r.as_str()).unwrap_or("(none)");
             println!("{response}");
         }

@@ -380,8 +380,16 @@ pub async fn eval_fn(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
-                // Check if the expression contains IO builtins — run async if so
-                if eval::expr_contains_io_builtin(&expr) {
+                // Run through the coroutine runtime when the expression needs IO —
+                // an IO builtin, or a user function declaring [io]/[async]. The
+                // second half used to be missing here, so `Chronica.health()` was
+                // refused as a "test expression" by the very process that answers
+                // `{"function": "Chronica.health"}` with a live call.
+                let needs_io_runtime = {
+                    let program = config.program.read().await;
+                    eval::expr_needs_io_runtime(&expr, &program)
+                };
+                if needs_io_runtime {
                     if let Some(sender) = &config.io_sender {
                         let program = config.program.read().await.clone();
                         // Base snapshot for the per-function CoW merge (issue #9).
@@ -1454,8 +1462,9 @@ async fn session_eval(
         }
         match parser::parse_expr_pub(0, expr_str) {
             Ok(expr) => {
-                // Check if the expression contains IO builtins — run async if so
-                if eval::expr_contains_io_builtin(&expr) {
+                // Same predicate as the main session's eval — IO builtins and
+                // [io]/[async] user functions both need the coroutine runtime.
+                if eval::expr_needs_io_runtime(&expr, &program) {
                     if let Some(sender) = &config.io_sender {
                         let program = program.clone();
                         let program_mut = crate::eval::make_shared_program_mut(&program);
