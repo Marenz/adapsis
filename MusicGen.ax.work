@@ -1,0 +1,14 @@
++module MusicGen
++doc "Administrator music delivery via ACE-Step. For guest conversations use the native music_generate tool, which binds delivery to the current chat. Port 8092 is music; 8091 belongs to Chronica."
++shared daemon_url:String = "http://127.0.0.1:8092"
+
++fn _generate_and_deliver (context:String, caption:String, duration:Int, lyrics:String, metas:String)->String [io,async]
+  +let url:String = "http://127.0.0.1:8092/generate"
+  +let body:String = concat("{\"caption\":\"", json_escape(caption), "\",\"lyrics\":\"", json_escape(lyrics), "\",\"metas\":\"", json_escape(metas), "\",\"duration_s\":", to_string(duration), ",\"output\":\"song.mp3\"}")
+  +await audio:Attachment = http_post_binary(url, body)
+  +await _:String = conversation_notify(context, concat("Here is your song: ", caption), audio)
+  +return "delivered"
+
++fn generate (context:String, caption:String, duration:Int, lyrics:String, metas:String)->String [io,async]
+  +spawn _generate_and_deliver(context, caption, duration, lyrics, metas)
+  +return "Generation started"

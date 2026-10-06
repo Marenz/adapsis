@@ -34,6 +34,7 @@ fn turn(context: &str, principal: &str, may_write: bool) -> crate::coroutine::Tu
         context: context.to_string(),
         principal: principal.to_string(),
         may_write,
+        guest_tools: None,
     }
 }
 

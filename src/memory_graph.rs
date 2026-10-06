@@ -6,6 +6,10 @@ use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use lbug::{Connection, Database, LogicalType, SystemConfig, Value};
 use sha2::{Digest, Sha256};
 
+mod activity;
+mod history;
+pub use activity::is_private_admin;
+
 const SCHEMA_VERSION: i64 = 1;
 
 /// The one access group every principal joins.
