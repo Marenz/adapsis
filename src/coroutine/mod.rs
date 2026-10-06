@@ -21,6 +21,11 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::eval::Value;
 
 pub mod shell_policy;
+pub mod scoped;
+mod matching;
+pub use matching::pattern_matches;
+#[cfg(test)]
+mod scoped_tests;
 pub use shell_policy::ShellPolicy;
 
 /// A handle that Adapsis code uses to represent sockets/connections.
@@ -182,6 +187,10 @@ pub fn remove_source(registry: &SourceRegistry, module: &str, alias: &str) -> bo
 /// IO operations that Adapsis code can request via +await.
 #[derive(Debug)]
 pub enum IoRequest {
+    Scoped {
+        request: scoped::Request,
+        reply: oneshot::Sender<Result<String>>,
+    },
     TcpListen { port: u16, reply: oneshot::Sender<Result<Handle>> },
     TcpAccept { listener: Handle, reply: oneshot::Sender<Result<Handle>> },
     TcpRead { conn: Handle, reply: oneshot::Sender<Result<String>> },
@@ -740,6 +749,9 @@ impl Runtime {
             IoRequest::LlmTakeover { .. } => {
                 // LlmTakeover is handled at a higher level (main.rs IO loop)
             }
+            IoRequest::Scoped { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!("scoped tools require the AdapsisOS runtime")));
+            }
             IoRequest::MemoryCypher { reply, .. } => {
                 let _ = reply.send(Err(anyhow::anyhow!(
                     "memory_cypher: not available in this runtime context"
@@ -889,6 +901,7 @@ pub struct TurnIdentity {
     /// Whether the speaker may modify code — the administrator test for the
     /// context-instruction proposal loop.
     pub may_write: bool,
+    pub guest_tools: Option<Vec<String>>,
 }
 
 /// A coroutine handle — gives Adapsis code access to the IO runtime.
@@ -923,75 +936,6 @@ fn mock_arg_string(arg: &Value) -> String {
         Value::String(s) => s.as_ref().clone(),
         other => format!("{other}"),
     }
-}
-
-/// Match a mock/stub `pattern` against an argument string (issue #7).
-///
-/// Backward-compatible matching modes, chosen by the pattern's own syntax so
-/// existing substring mocks keep working:
-///   - **Anchored / exact**: a pattern starting with `^` and/or ending with `$`
-///     anchors that side. `^foo$` = exact equality, `^foo` = prefix, `foo$` =
-///     suffix. (A literal `^`/`$` can still be matched via glob, below.)
-///   - **Glob**: a pattern containing `*` or `?` (and not anchored) is treated
-///     as a glob — `*` matches any run (including empty), `?` matches exactly
-///     one char. The glob must match the *whole* argument.
-///   - **Substring** (default, legacy): plain `contains` check.
-pub fn pattern_matches(pattern: &str, arg: &str) -> bool {
-    let anchored_start = pattern.starts_with('^');
-    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
-    if anchored_start || anchored_end {
-        let inner = &pattern[anchored_start as usize..pattern.len() - anchored_end as usize];
-        // Anchored patterns may still contain globs between the anchors.
-        return match (anchored_start, anchored_end) {
-            (true, true) => glob_match(inner, arg),
-            (true, false) => glob_match_prefix(inner, arg),
-            (false, true) => glob_match_suffix(inner, arg),
-            (false, false) => unreachable!(),
-        };
-    }
-    if pattern.contains('*') || pattern.contains('?') {
-        return glob_match(pattern, arg);
-    }
-    arg.contains(pattern)
-}
-
-/// Whole-string glob match: `*` = any run (incl. empty), `?` = exactly one char.
-/// All other chars match literally. Linear-time backtracking (patterns are tiny).
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let (mut star, mut star_ti): (Option<usize>, usize) = (None, 0);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            star_ti = ti;
-            pi += 1;
-        } else if let Some(sp) = star {
-            pi = sp + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
-}
-
-/// Anchored-start glob: `inner` must match a prefix of `text`.
-fn glob_match_prefix(inner: &str, text: &str) -> bool {
-    glob_match(&format!("{inner}*"), text)
-}
-
-/// Anchored-end glob: `inner` must match a suffix of `text`.
-fn glob_match_suffix(inner: &str, text: &str) -> bool {
-    glob_match(&format!("*{inner}"), text)
 }
 
 impl CoroutineHandle {
@@ -1241,12 +1185,16 @@ impl CoroutineHandle {
     /// This is called from the synchronous evaluator, so we use block_on
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
+        self.check_guest_tool(op, args)?;
         if op != "mock_set" && op != "mock_clear" {
             if let Some(result) = self.try_mock_io(op, args, false)? {
                 return Ok(result);
             }
         }
 
+        if let Some(value) = self.execute_scoped(op, args)? {
+            return Ok(value);
+        }
         // Try in-process operations (shared state, queries, mutations, misc)
         if let Some(result) = self.execute_local_op(op, args)? {
             return Ok(result);

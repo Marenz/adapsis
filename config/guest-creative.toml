@@ -1,0 +1,17 @@
+# Merge these tables into the node's permissions.toml; keep existing profiles.
+# Stable speaker identity comes from Telegram metadata, not message prose.
+[principals]
+"telegram:user:8967661082" = "creative"
+
+# Native tool allowlist, enforced before parsing/executing a guest code block
+# and again at the IO boundary. This does not grant general module access.
+[guest_profiles]
+creative = ["music_generate", "web_search", "web_read", "memory_remember", "memory_forget", "context_propose"]
+
+[model.creative]
+core = "none"
+data = "none"
+infra = "none"
+assist = "none"
+user = "none"
+opencode = false

@@ -1278,9 +1278,20 @@ pub async fn handle_llm_takeover(
         meta_guard.conversations.get(&context)
             .and_then(|c| c.permission_model.clone())
     };
-    let effective_model = perm_model_override.unwrap_or_else(|| llm_model.to_string());
-    let authority = permission_config.authority(access_level, &effective_model);
-    let program_summary = {
+    let effective_model = permission_config.principals.get(&speaker_id).cloned()
+        .or(perm_model_override).unwrap_or_else(|| llm_model.to_string());
+    let guest_tools = permission_config.guest_profiles.get(&effective_model).cloned();
+    let mut authority = permission_config.authority(access_level, &effective_model);
+    if guest_tools.is_some() {
+        authority.may_execute = true;
+        authority.may_read_source = false;
+        authority.may_write = false;
+        authority.may_agent = false;
+        authority.may_opencode = false;
+    }
+    let program_summary = if let Some(ref tools) = guest_tools {
+        crate::coroutine::scoped::prompt(tools)
+    } else {
         let prog = program.read().await;
         crate::validator::program_summary_for_model(
             &prog, &permission_config,
@@ -1291,7 +1302,7 @@ pub async fn handle_llm_takeover(
     // context's own file and the authority block from the current speaker, so a
     // shared group keeps one identity across speakers while still telling each
     // speaker the truth about what they may have done.
-    let available_models = permission_config.model_names();
+    let available_models = if guest_tools.is_some() { Vec::new() } else { permission_config.model_names() };
     let system = crate::context_prompt::compose(&crate::context_prompt::PromptInputs {
         context: &context,
         program_summary: &program_summary,
@@ -1382,6 +1393,19 @@ pub async fn handle_llm_takeover(
         );
     }
 
+    let activity_graph = memory_graph.clone();
+    let activity_context = context.clone();
+    let activity_principal = speaker_id.clone();
+    match tokio::task::spawn_blocking(move || {
+        activity_graph.admin_activity_prompt(&activity_context, &activity_principal)
+    }).await {
+        Ok(Ok(Some(activity))) => messages.insert(
+            usize::from(!messages.is_empty()), crate::llm::ChatMessage::system(activity),
+        ),
+        Ok(Ok(None)) => {},
+        error => eprintln!("[memory:{context}] activity snapshot unavailable: {error:?}"),
+    }
+
     eprintln!("[llm_takeover:{context}] calling LLM with {} messages", messages.len());
     write_log_file(&log_file, "user", &format!("[{context}] {message}")).await;
     // Persist the conversation now that the user message is appended —
@@ -1429,6 +1453,7 @@ pub async fn handle_llm_takeover(
             context: context.clone(),
             principal: speaker_id.clone(),
             may_write: authority.may_write,
+            guest_tools,
         }),
     };
 

@@ -32,6 +32,8 @@ dirs = "6.0.0"
 fastembed = { version = "5.17.3", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 lbug = "0.18.3"
 uuid = { version = "1", features = ["v4"] }
+scraper = "0.24"
+roxmltree = "0.20"
 
 [dev-dependencies]
 tempfile = "3"

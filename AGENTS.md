@@ -519,6 +519,42 @@ schema since day one and was never set:
   Ladybug's prebuilt archive to exact `libssl.so.3`/`libcrypto.so.3` SONAMEs.
 
 ## Telegram Bot (TelegramBot.ax)
+- **Native guest tools (creative profile):** `[principals]` maps server-observed
+  speaker IDs to permission profiles, taking precedence over the intake module's
+  generic non-admin profile. `[guest_profiles]` explicitly lists native tools;
+  `config/guest-creative.toml` is a mergeable deployment example. Guest blocks
+  are validated in full before execution and admit only `!done` or direct
+  `!eval tool(literals)` calls. Module calls, nested calls, tests, mutations,
+  shell/raw HTTP/file IO and agents are not guest tools. The coroutine IO boundary
+  independently enforces the same list. Identity text never grants a capability.
+- `src/coroutine/scoped.rs` implements turn-bound argument checks and requests;
+  `src/capabilities{,/music,/web}.rs` handles host IO. `music_generate` always
+  delivers to the bound turn context, accepts 10–120 seconds, and allows one
+  native job at a time. Failure also produces a notification. The existing
+  `MusicGen.generate(context,...)` module remains an admin tool for explicit
+  cross-chat delivery, not a guest capability.
+- `conversation_history(context[, limit, before_ms])` reads original messages
+  with read-membership checks. It is restricted to the configured administrator's
+  private Telegram DM, not group turns. Pages are 1–100 messages (default 30),
+  at most 30k content characters, chronological within each page; `before_ms` is
+  exclusive (equal-timestamp rows may straddle pages). Assistant rows establish
+  generation only, not successful delivery. Guests cannot invoke this tool.
+- Guest `memory_remember` accepts context scope only. Guest `memory_forget`
+  additionally requires an assertion by that principal governed solely by that
+  context, so global notes and other conversations cannot be changed.
+- Public web tools use Bing RSS (`roxmltree`) and static HTML extraction
+  (`scraper`), returning source URLs. Fetching verifies public IPs, pins DNS for
+  the request, rechecks each redirect, disables ambient proxies, and caps response
+  size/time. No authenticated pages, cookies or JavaScript execution. Test with
+  `cargo test --release capabilities` and `cargo test --release scoped`.
+- Immediate inbox awareness: `memory_graph/activity.rs` reads latest incoming-message
+  timestamps per speaker/context directly from Message nodes, before compaction.
+  `llm_takeover` injects a fresh metadata-only snapshot (30 latest pairs) exclusively
+  into the configured `--admin-id` principal's private Telegram DM. Both speaker
+  and destination must match; admin turns in groups never receive this snapshot.
+  Read membership is checked, message contents are omitted, and the snapshot is
+  transient rather than appended to persisted conversation history. Missing rows
+  do not prove absence of older messages; receipt does not prove reply delivery.
 - **Photo input**: `process_update` accepts Telegram's largest `message.photo`
   variant or an image MIME `message.document`, downloads it as an `Attachment`,
   and passes it as the optional sixth `llm_takeover` argument. Adapsis emits
@@ -613,14 +649,25 @@ The system prompt only shows modules the model can at least Read. Execute-level 
 - `llm_set_model(name)` — switch LLM at runtime (validates before switching)
 - `llm_get_model()` — returns current model name
 - `!agent --model gemma4-31b task` — per-agent model override
-- MusicGen auto-switches to `gemma4s` during generation to free VRAM
+- Music generation runs in its own daemon and leaves the conversational model unchanged.
 
 ## Music Generation (ace-step-rs)
-- HTTP endpoint: `POST http://127.0.0.1:8091/generate` → raw OGG bytes
+- HTTP endpoint: `POST http://127.0.0.1:8092/generate` → encoded audio bytes.
+  **8091 is occupied by Chronica**; the old endpoint returned HTTP 405. Native
+  tools honor `ADAPSIS_MUSIC_URL` (base URL; default `http://127.0.0.1:8092`).
+- Backend build: `cargo build --release --bin generation-daemon --features audio-all,http`
+  in `~/Projects/ace-step-rs`, with that project's CUDA build environment. Both
+  MP3 and HTTP features are required by the deployed callers. The user service
+  must point at the actual built executable and use `--http-port 8092`.
+- On this 24GB node the int8 Parakeet ASR service may coexist with CPU-offloaded
+  ACE-Step. Remove `ace-step-gen.service` from Parakeet's `Conflicts=` list;
+  otherwise starting music silently stops voice transcription. Keep the heavy
+  LLM/image-service conflicts. Verify `/health` on 8090 after enabling music.
 - CPU offload: text encoder on CPU, DiT+VAE on GPU (13GB → 10GB VRAM)
 - Non-blocking: `MusicGen.generate()` spawns background task, returns immediately
 - Delivery: `conversation_notify` with Attachment → `send_reply_with_attachment`
-- Auto model switch: saves current model, switches to gemma4s, generates, switches back
+- Generation uses the dedicated daemon; the deployed MusicGen module and native
+  music tool do not switch the conversational LLM model.
 
 ## Infrastructure
 - Caddy HTTPS on port 443 (Let's Encrypt), only `/webhook/telegram` exposed
@@ -695,7 +742,7 @@ something on 8090 honoring that contract. (Was whisper; now Parakeet.)
   `POST /v1/audio/transcriptions` (OpenAI-compatible alias), plus `GET /health`.
 - **Per-node variant (the only difference is GPU vs CPU):**
   - **here/Kronk (RTX 3090):** `onnx-asr[gpu,hub]`, `CUDA_VISIBLE_DEVICES=0`,
-    user service. Has `Conflicts=` GPU mutex (llama-server, ace-step-gen,
+    user service. Has `Conflicts=` GPU mutex (llama-server,
     comfyui, lucebox-dflash) AND `Conflicts=whisper-server.service` (both bind
     8090). whisper-server is now disabled here.
   - **edox/Moonwolf (no usable GPU — GTX 970M Maxwell left on CPU):**

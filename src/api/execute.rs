@@ -256,6 +256,13 @@ pub async fn execute_code(
 ) -> CodeExecutionResult {
     let mut result = CodeExecutionResult::new();
 
+    if let Some(tools) = config.turn.as_ref().and_then(|t| t.guest_tools.as_ref()) {
+        if let Err(error) = crate::coroutine::scoped::validate_guest_code(code, tools, &session.program) {
+            result.push_err(error.to_string());
+            return result;
+        }
+    }
+
     match crate::parser::parse(code) {
         Ok(ops) => {
             let opencode_tasks = collect_opencode_tasks(&ops);

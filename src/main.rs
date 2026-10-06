@@ -11,6 +11,7 @@ mod eval;
 mod events;
 pub mod intern;
 mod permissions;
+mod capabilities;
 pub mod library;
 mod llm;
 mod memory_graph;
@@ -1619,6 +1620,13 @@ async fn main() -> Result<()> {
                                     save_notify, ai_log,
                                 ).await;
                                 let _ = reply.send(result);
+                            });
+                        }
+                        coroutine::IoRequest::Scoped { request, reply } => {
+                            let graph = memory_graph_for_spawn.clone();
+                            let sender = io_sender_for_spawn.clone();
+                            tokio::spawn(async move {
+                                let _ = reply.send(crate::capabilities::dispatch(request, graph, sender).await);
                             });
                         }
                         coroutine::IoRequest::MemoryCypher { principal_id, query, reply } => {

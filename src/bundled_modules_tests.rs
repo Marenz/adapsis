@@ -11,7 +11,7 @@
 use crate::{ast, eval, parser, validator};
 
 /// Modules shipped at the repository root that must always load.
-const BUNDLED: &[&str] = &["TelegramBot.ax.work", "Wolfi.ax.work"];
+const BUNDLED: &[&str] = &["TelegramBot.ax.work", "Wolfi.ax.work", "MusicGen.ax.work"];
 
 fn load(path: &str) -> (ast::Program, Vec<parser::Operation>) {
     let source = std::fs::read_to_string(path)

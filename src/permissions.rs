@@ -121,6 +121,12 @@ pub struct ModelPermissions {
 /// Full permission configuration loaded from TOML.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PermissionConfig {
+    /// Stable, server-observed speaker IDs mapped to permission profiles.
+    #[serde(default)]
+    pub principals: HashMap<String, String>,
+    /// Explicit native tool capabilities for restricted guest profiles.
+    #[serde(default)]
+    pub guest_profiles: HashMap<String, Vec<String>>,
     /// Named module groups: group_name → [module_names].
     #[serde(default)]
     pub groups: HashMap<String, Vec<String>>,
@@ -132,6 +138,8 @@ pub struct PermissionConfig {
 impl Default for PermissionConfig {
     fn default() -> Self {
         Self {
+            principals: HashMap::new(),
+            guest_profiles: HashMap::new(),
             groups: HashMap::new(),
             model: HashMap::new(),
         }
@@ -147,6 +155,13 @@ impl PermissionConfig {
         let config: Self = toml::from_str(&content).map_err(|e| {
             anyhow::anyhow!("failed to parse permissions file {}: {e}", path.display())
         })?;
+        for (profile, ops) in &config.guest_profiles {
+            anyhow::ensure!(config.model.contains_key(profile), "guest profile {profile} has no model permissions");
+            for op in ops {
+                anyhow::ensure!(crate::coroutine::scoped::GUEST_TOOLS.contains(&op.as_str()),
+                    "guest profile {profile}: unsupported tool {op}");
+            }
+        }
         Ok(config)
     }
 
@@ -320,6 +335,20 @@ mod tests {
         assert_eq!(config.group_for_module("TelegramBot"), "core");
         assert_eq!(config.group_for_module("Stratum"), "data");
         assert_eq!(config.group_for_module("MyCustomModule"), "user");
+    }
+
+    #[test]
+    fn creative_profile_is_explicit_and_does_not_grant_module_access() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), include_str!("../config/guest-creative.toml")).unwrap();
+        let config = PermissionConfig::load(file.path()).unwrap();
+        assert_eq!(config.principals["telegram:user:8967661082"], "creative");
+        assert!(!config.principals.contains_key("telegram:user:1815217"));
+        assert!(config.guest_profiles["creative"].contains(&"web_search".to_string()));
+        assert_eq!(config.resolve(AccessLevel::AdapsisOnly, "creative", "AnyModule"), PermissionLevel::None);
+        let bad = include_str!("../config/guest-creative.toml").replace("\"web_search\"", "\"shell_exec\"");
+        std::fs::write(file.path(), bad).unwrap();
+        assert!(PermissionConfig::load(file.path()).unwrap_err().to_string().contains("unsupported tool shell_exec"));
     }
 
     #[test]
