@@ -9,7 +9,7 @@ fn guest() -> TurnIdentity {
 fn scoped_tools_fail_closed_without_a_turn() {
     let (tx, _rx) = mpsc::channel(1);
     let handle = CoroutineHandle::new(tx);
-    for op in ["conversation_history", "music_generate", "cad_prepare", "video_stabilize", "web_search", "web_read"] {
+    for op in ["conversation_history", "music_generate", "cad_prepare", "video_stabilize", "web_search", "web_read", "memory_inspect"] {
         let error = handle.execute_await(op, &[]).unwrap_err().to_string();
         assert!(error.contains("no conversational turn"), "{op}: {error}");
     }
@@ -40,6 +40,8 @@ fn guest_code_is_checked_before_any_side_effects() {
         "!eval cad_prepare(\"referenced part\", \"match the photo\", \"PETG\", true)",
         "!eval web_search(\"Rust\")\n!done",
         "!eval video_stabilize()",
+        "!eval memory_inspect()",
+        "!eval memory_inspect(\"bicycle\")",
         "!eval memory_remember(\"I like jazz\")",
         // `+await`-prefixed forms must pass the same guest checks as the bare call.
         "!eval +await cad_prepare(\"test part\", \"Z=0\", \"PLA\")",
@@ -155,6 +157,31 @@ fn video_stabilize_is_bound_to_turn_and_accepts_no_paths_or_destination() {
         }
     });
     assert_eq!(handle.execute_await("video_stabilize", &[]).unwrap().to_string(), "\"queued\"");
+    worker.join().unwrap();
+}
+
+#[test]
+fn guest_memory_inspection_is_bound_to_the_turn() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let worker = std::thread::spawn(move || match rx.blocking_recv().unwrap() {
+        IoRequest::MemoryInspect {
+            context_id,
+            principal_id,
+            query,
+            reply,
+        } => {
+            assert_eq!(context_id, "telegram:user:42");
+            assert_eq!(principal_id, "telegram:user:42");
+            assert_eq!(query, "metric units");
+            reply.send(Ok("bounded inspection".into())).unwrap();
+        }
+        _ => panic!("wrong request"),
+    });
+    let result = CoroutineHandle::new(tx)
+        .with_turn(Some(guest()))
+        .execute_await("memory_inspect", &[Value::string("metric units")])
+        .unwrap();
+    assert_eq!(result.to_string(), "\"bounded inspection\"");
     worker.join().unwrap();
 }
 

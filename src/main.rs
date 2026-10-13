@@ -1887,6 +1887,41 @@ async fn main() -> Result<()> {
                                 let _ = reply.send(result);
                             });
                         }
+                        coroutine::IoRequest::MemoryInspect {
+                            context_id,
+                            principal_id,
+                            query,
+                            reply,
+                        } => {
+                            let graph = memory_graph_for_spawn.clone();
+                            let embedder = memory_embedder_for_spawn.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let embedding = if query.trim().is_empty()
+                                    || query.trim().starts_with("memory:")
+                                {
+                                    None
+                                } else {
+                                    match embedder.embed_query(&query) {
+                                        Ok(embedding) => Some(embedding),
+                                        Err(error) => {
+                                            eprintln!(
+                                                "[memory:{context_id}] inspection embedding unavailable; using lexical fallback: {error:#}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                };
+                                let result = graph
+                                    .inspect(
+                                        &principal_id,
+                                        &context_id,
+                                        &query,
+                                        embedding.as_deref(),
+                                    )
+                                    .map(|inspection| crate::memory_graph::render_inspection(&inspection));
+                                let _ = reply.send(result);
+                            });
+                        }
                         coroutine::IoRequest::MemoryRemember {
                             context_id,
                             principal_id,

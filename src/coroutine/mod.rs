@@ -317,6 +317,13 @@ pub enum IoRequest {
         query: String,
         reply: oneshot::Sender<Result<String>>,
     },
+    /// Render a bounded, current-context view of memories authorized for the turn.
+    MemoryInspect {
+        context_id: String,
+        principal_id: String,
+        query: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
     /// Record an explicitly asserted (canonical) memory for the turn's context.
     MemoryRemember {
         context_id: String,
@@ -784,6 +791,11 @@ impl Runtime {
                     "memory_cypher: not available in this runtime context"
                 )));
             }
+            IoRequest::MemoryInspect { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "memory_inspect: not available in this runtime context"
+                )));
+            }
             IoRequest::MemoryRemember { reply, .. } => {
                 let _ = reply.send(Err(anyhow::anyhow!(
                     "memory_remember: not available in this runtime context"
@@ -1001,7 +1013,7 @@ impl CoroutineHandle {
 
     /// Bind this handle to the conversational turn it executes for.
     ///
-    /// Everything identity-scoped (`memory_cypher`, the context-instruction
+    /// Everything identity-scoped (`memory_inspect`, `memory_cypher`, the context-instruction
     /// proposal loop) reads the binding instead of trusting an argument.
     pub fn with_turn(mut self, turn: Option<TurnIdentity>) -> Self {
         self.turn = turn;
@@ -2785,6 +2797,35 @@ impl CoroutineHandle {
                 let result = self.send_and_wait(
                     WaitReason::Running,
                     IoRequest::MemoryCypher { principal_id, query, reply: tx },
+                    rx,
+                )?;
+                return Ok(Value::string(result));
+            }
+            "memory_inspect" => {
+                let turn = self.require_turn("memory_inspect")?;
+                if args.len() > 1 {
+                    bail!(
+                        "memory_inspect([query:String]) expects zero or one argument. The context \
+                         and speaker are bound to the current conversation and are not arguments."
+                    );
+                }
+                let query = match args.first() {
+                    None => String::new(),
+                    Some(Value::String(value)) => value.as_ref().clone(),
+                    Some(_) => bail!(
+                        "memory_inspect([query:String]) expects an optional String. The context \
+                         and speaker are bound to the current conversation and are not arguments."
+                    ),
+                };
+                let (tx, rx) = oneshot::channel();
+                let result = self.send_and_wait(
+                    WaitReason::Running,
+                    IoRequest::MemoryInspect {
+                        context_id: turn.context.clone(),
+                        principal_id: turn.principal.clone(),
+                        query,
+                        reply: tx,
+                    },
                     rx,
                 )?;
                 return Ok(Value::string(result));

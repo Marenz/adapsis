@@ -693,6 +693,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "memory_inspect",
+        aliases: &[],
+        short: "inspect memories visible in THIS chat: memory_inspect([query]) -> String",
+        long: "Returns a bounded, conversational view of active memories authorized for the current speaker AND governed by the current context or the global group. Takes zero or one String: empty shows canonical assertions (newest retained, rendered oldest-first) plus recent extracted observations; a non-empty value resolves an exact memory id first, then performs topic search with truthful lexical fallback if embedding generation or similarity search is unavailable. Results separate asserted from inferred data and include copyable memory_forget ids, timestamps, safe scope/origin, confidence/provenance and up to three source citations. A global memory never reveals its private origin context. The context and principal are server-bound, never arguments; even administrators cannot widen this tool to another context. Missing and unauthorized ids are indistinguishable. Requires +await.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "memory_cypher",
         aliases: &[],
         short: "ACL-filtered graph traversal: memory_cypher(cypher)",

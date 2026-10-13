@@ -3,7 +3,7 @@ use super::*;
 use anyhow::ensure;
 
 pub const GUEST_TOOLS: &[&str] = &[
-    "music_generate", "web_search", "web_read", "memory_remember", "memory_forget",
+    "music_generate", "web_search", "web_read", "memory_inspect", "memory_remember", "memory_forget",
     "context_propose", "cad_prepare", "video_stabilize",
 ];
 

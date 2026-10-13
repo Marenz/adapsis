@@ -101,6 +101,7 @@ fn memory_cypher_takes_its_principal_from_the_turn_not_the_caller() {
 fn identity_scoped_builtins_refuse_without_a_turn() {
     let (handle, _rx) = unmocked_handle();
     for op in [
+        "memory_inspect",
         "memory_cypher",
         "memory_remember",
         "memory_forget",
@@ -118,6 +119,46 @@ fn identity_scoped_builtins_refuse_without_a_turn() {
             "{op} did not fail closed: {err}"
         );
     }
+}
+
+#[test]
+fn memory_inspect_accepts_zero_or_one_string_and_binds_the_turn() {
+    let (tx, mut rx) = mpsc::channel(3);
+    let worker = std::thread::spawn(move || {
+        for expected_query in ["", "topic", ""] {
+            match rx.blocking_recv().unwrap() {
+                IoRequest::MemoryInspect {
+                    context_id,
+                    principal_id,
+                    query,
+                    reply,
+                } => {
+                    assert_eq!(context_id, "telegram:group:-1");
+                    assert_eq!(principal_id, "telegram:user:100000103");
+                    assert_eq!(query, expected_query);
+                    reply.send(Ok("inspection".into())).unwrap();
+                }
+                _ => panic!("unexpected request"),
+            }
+        }
+    });
+    let handle = CoroutineHandle::new(tx).with_turn(Some(turn(
+        "telegram:group:-1",
+        "telegram:user:100000103",
+        false,
+    )));
+    handle.execute_await("memory_inspect", &[]).unwrap();
+    handle
+        .execute_await("memory_inspect", &[Value::string("topic")])
+        .unwrap();
+    handle
+        .execute_await("memory_inspect", &[Value::string("")])
+        .unwrap();
+    for bad in [vec![Value::Int(1)], vec![Value::string("a"), Value::string("b")]] {
+        let error = handle.execute_await("memory_inspect", &bad).unwrap_err().to_string();
+        assert!(error.contains("zero or one") || error.contains("optional String"), "{error}");
+    }
+    worker.join().unwrap();
 }
 
 /// Issue #42. `Wolfi.remember` was a persona-module function that had to be

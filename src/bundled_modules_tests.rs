@@ -195,6 +195,35 @@ fn telegram_payload_resolves_a_stable_principal() {
         !principal.contains("Kata"),
         "principal `{principal}` carries a display name — it will re-mint on rename"
     );
+
+    // The user-facing inspector receives that same server-derived principal and
+    // the actual Telegram group context; neither can be supplied by model code.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let expected_principal = principal.clone();
+    let worker = std::thread::spawn(move || match rx.blocking_recv().unwrap() {
+        crate::coroutine::IoRequest::MemoryInspect {
+            context_id,
+            principal_id,
+            query,
+            reply,
+        } => {
+            assert_eq!(context_id, "telegram:group:-100000005");
+            assert_eq!(principal_id, expected_principal);
+            assert!(query.is_empty());
+            reply.send(Ok("inspection".into())).unwrap();
+        }
+        _ => panic!("unexpected request"),
+    });
+    let handle = crate::coroutine::CoroutineHandle::new(tx).with_turn(Some(
+        crate::coroutine::TurnIdentity {
+            context: "telegram:group:-100000005".into(),
+            principal,
+            may_write: false,
+            guest_tools: None,
+        },
+    ));
+    handle.execute_await("memory_inspect", &[]).unwrap();
+    worker.join().unwrap();
 }
 
 /// The other half of issue #38 item 2: a note written to the notes path must

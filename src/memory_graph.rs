@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 
 mod activity;
 mod history;
+pub mod inspect;
 pub use activity::is_private_admin;
+pub use inspect::render_inspection;
+use inspect::SourceCitation;
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -30,6 +33,26 @@ pub const ASSERTED_MEMORY_TYPE: &str = "asserted";
 
 fn context_group_id(context_id: &str) -> String {
     format!("access:{context_id}")
+}
+
+/// Shared read predicate for user-facing, current-context memory operations.
+///
+/// Membership in every governing group remains mandatory. The final group-id
+/// clause additionally prevents an administrator's broad memberships from
+/// widening a conversational operation into unrelated contexts.
+fn context_authorized_memory_query(tail: &str) -> String {
+    format!(
+        "MATCH (principal:Principal {{id: $principal_id}})-[membership:MEMBER_OF]->(access_group:AccessGroup)<-[:GOVERNED_BY]-(memory:Memory) \
+         WHERE membership.can_read = true AND memory.status = 'active' \
+           AND NOT (memory)-[:DENIED_TO]->(principal) \
+         WITH memory, count(DISTINCT access_group) AS accessible_groups \
+         MATCH (memory)-[:GOVERNED_BY]->(required_group:AccessGroup) \
+         WITH memory, accessible_groups, count(DISTINCT required_group) AS required_groups, \
+              collect(DISTINCT required_group.id) AS group_ids \
+         WHERE accessible_groups = required_groups \
+           AND (list_contains(group_ids, $group_id) OR list_contains(group_ids, $global_group_id)) \
+         {tail}"
+    )
 }
 
 /// Fallback admin principal, kept only so an un-flagged process behaves as it
@@ -832,19 +855,12 @@ impl MemoryGraph {
             return Ok(Vec::new());
         }
         let connection = Connection::new(&self.database)?;
-        let mut statement = connection.prepare(
-            "MATCH (principal:Principal {id: $principal_id})-[membership:MEMBER_OF]->(access_group:AccessGroup)<-[:GOVERNED_BY]-(memory:Memory)
-             WHERE membership.can_read = true AND memory.status = 'active' AND memory.canonical = true
-               AND NOT (memory)-[:DENIED_TO]->(principal)
-             WITH memory, count(DISTINCT access_group) AS accessible_groups
-             MATCH (memory)-[:GOVERNED_BY]->(required_group:AccessGroup)
-             WITH memory, accessible_groups, count(DISTINCT required_group) AS required_groups,
-                  collect(DISTINCT required_group.id) AS group_ids
-             WHERE accessible_groups = required_groups
-               AND (list_contains(group_ids, $group_id) OR list_contains(group_ids, $global_group_id))
+        let query = context_authorized_memory_query(
+            "AND memory.canonical = true
              RETURN memory.id, memory.content, memory.memory_type, memory.canonical, memory.confidence
-             ORDER BY memory.created_at_ms DESC LIMIT $limit",
-        )?;
+             ORDER BY memory.created_at_ms DESC, memory.id DESC LIMIT $limit",
+        );
+        let mut statement = connection.prepare(&query)?;
         let result = connection.execute(
             &mut statement,
             vec![
@@ -1009,32 +1025,16 @@ impl MemoryGraph {
     }
 
     fn add_citations(&self, memories: &mut [RecalledMemory]) -> Result<()> {
-        let connection = Connection::new(&self.database)?;
-        let mut statement = connection.prepare(
-            "MATCH (memory:Memory {id: $memory_id})-[:DERIVED_FROM]->(message:Message)-[:IN_CONTEXT]->(context:Context), (message)-[:SAID_BY]->(speaker:Principal) RETURN context.id, speaker.display_name, message.created_at_ms, message.platform_message_id, message.id ORDER BY message.created_at_ms LIMIT 3",
-        )?;
+        let ids = memories.iter().map(|memory| memory.id.clone()).collect::<Vec<_>>();
+        let citations = self.source_citations(&ids)?;
         for memory in memories {
-            let rows = connection.execute(
-                &mut statement,
-                vec![("memory_id", memory.id.clone().into())],
-            )?;
-            let mut sources = Vec::new();
-            for row in rows {
-                let platform_id = string_value(&row[3])?;
-                let source_id = if platform_id.is_empty() {
-                    string_value(&row[4])?
-                } else {
-                    platform_id
-                };
-                sources.push(format!(
-                    "{}; {}; {}; {}",
-                    string_value(&row[0])?,
-                    string_value(&row[1])?,
-                    int64_value(&row[2])?,
-                    source_id
-                ));
-            }
-            memory.citation = sources.join(" | ");
+            memory.citation = citations
+                .get(&memory.id)
+                .into_iter()
+                .flatten()
+                .map(SourceCitation::compact)
+                .collect::<Vec<_>>()
+                .join(" | ");
         }
         Ok(())
     }

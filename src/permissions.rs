@@ -346,6 +346,7 @@ mod tests {
         assert!(!config.principals.contains_key("telegram:user:100000001"));
         assert!(config.guest_profiles["creative"].contains(&"web_search".to_string()));
         assert!(config.guest_profiles["creative"].contains(&"video_stabilize".to_string()));
+        assert!(config.guest_profiles["creative"].contains(&"memory_inspect".to_string()));
         assert_eq!(config.resolve(AccessLevel::AdapsisOnly, "creative", "AnyModule"), PermissionLevel::None);
         let bad = include_str!("../config/guest-creative.toml").replace("\"web_search\"", "\"shell_exec\"");
         std::fs::write(file.path(), bad).unwrap();

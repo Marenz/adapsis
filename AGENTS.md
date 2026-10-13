@@ -458,6 +458,19 @@ schema since day one and was never set:
   something learned about FamilyUser. A builtin reads context + principal off
   `coroutine::TurnIdentity` and fails closed outside a conversation. **Do not add an
   argument that names a context or a principal to either one.**
+- **`memory_inspect([query])` is the user-facing, turn-bound inspector.** Its structured
+  core is `memory_graph/inspect.rs`; conversational rendering is separate so another
+  transport can serialize `Inspection` later without accepting identity arguments.
+  Zero/empty query shows newest-preserved canonical assertions oldest-first plus recent
+  extracted records. A non-empty query resolves an exact id first, then topic search;
+  embedding and similarity-query failures have distinct truthful lexical-only labels. A
+  global memory's private `ORIGINATED_IN` context is redacted to `global` in the structured
+  result, not merely hidden by the renderer. The shared context-authorized predicate
+  requires both membership in every governing group and governance by
+  `access:<current-context>` or `access:global`, even for the administrator. Do not
+  replace it with a broader principal-only recall query or expose paths, embeddings or
+  Cypher in the renderer. Output is capped at 12k characters, content at 2k, canonical
+  rows at 40, extracted rows at 10, citations at 3 and lexical candidates at 200.
 - **Forget is a status change**, not a delete — provenance survives. "Not yours" and "does
   not exist" return the same message on purpose; distinguishing them turns `memory_forget`
   into a probe for other conversations' memory ids.
