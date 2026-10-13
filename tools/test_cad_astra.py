@@ -1,4 +1,5 @@
-import io,json,unittest
+import base64,io,json,tempfile,unittest
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 import cad_astra
@@ -7,12 +8,42 @@ class AstraRoutingTests(unittest.TestCase):
     def test_revision_keeps_brief_source_and_actual_failure(self):
         response={'model':cad_astra.CAD_MODEL,'choices':[{'finish_reason':'stop','message':{'content':'x=2'}}]}
         with patch('cad_astra.urlopen',return_value=io.BytesIO(json.dumps(response).encode())) as call:
-            cad_astra.generate('rack','20 ring pegs','PLA','x=1','rack-left: 11 components')
+            cad_astra.generate('rack','20 ring pegs','PLA',previous_source='x=1',
+                failure='rack-left: 11 components')
         payload=json.loads(call.call_args.args[0].data)
         self.assertEqual(payload['model'],cad_astra.CAD_MODEL)
         self.assertIn('20 ring pegs',payload['messages'][1]['content'])
         self.assertEqual(payload['messages'][2],{'role':'assistant','content':'x=1'})
         self.assertIn('11 components',payload['messages'][3]['content'])
+
+    def test_reference_images_are_sent_as_data_urls(self):
+        response={'model':cad_astra.CAD_MODEL,'choices':[{'finish_reason':'stop','message':{'content':'x=2'}}]}
+        image=b'\x89PNG\r\n\x1a\nreference pixels'
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'reference';path.write_bytes(image)
+            with patch('cad_astra.urlopen',return_value=io.BytesIO(json.dumps(response).encode())) as call:
+                cad_astra.generate('rack','match the reference','PLA',
+                    references=[{'mime':'image/png','path':str(path)}])
+        payload=json.loads(call.call_args.args[0].data)
+        content=payload['messages'][1]['content']
+        self.assertEqual(content[0]['type'],'text')
+        self.assertIn('match the reference',content[0]['text'])
+        self.assertEqual(content[1],{'type':'image_url','image_url':{
+            'url':'data:image/png;base64,'+base64.b64encode(image).decode('ascii')}})
+
+    def test_revision_turn_keeps_the_exact_reference_images(self):
+        response={'model':cad_astra.CAD_MODEL,'choices':[{'finish_reason':'stop','message':{'content':'x=2'}}]}
+        image=b'\xff\xd8\xffprivate reference'
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'reference';path.write_bytes(image)
+            references=[{'mime':'image/jpeg','path':str(path)}]
+            with patch('cad_astra.urlopen',return_value=io.BytesIO(json.dumps(response).encode())) as call:
+                cad_astra.generate('rack','match it','PLA',references=references,
+                    previous_source='x=1',failure='bad mesh')
+        payload=json.loads(call.call_args.args[0].data)
+        expected='data:image/jpeg;base64,'+base64.b64encode(image).decode('ascii')
+        self.assertEqual(payload['messages'][1]['content'][1]['image_url']['url'],expected)
+        self.assertEqual(payload['messages'][3]['content'][1]['image_url']['url'],expected)
 
     def test_pins_astra_and_high_effort(self):
         response={'model':'chatgpt/gpt-6-astra','id':'test','choices':[{'finish_reason':'stop','message':{'content':'x = 1'}}]}

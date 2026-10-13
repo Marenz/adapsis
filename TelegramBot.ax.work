@@ -1,5 +1,5 @@
 +module TelegramBot
-+doc "Telegram bot: webhook OR long-poll intake, photo understanding, voice transcription, and LLM replies. Three-tier access: admins (admin_user_ids) full, allow-listed users (allowed_user_ids from allowed_path) sandboxed, everyone else ignored. Supports group chats and per-user sandboxing."
++doc "Telegram bot: webhook OR long-poll intake, photo understanding, bounded video-tool intake, voice transcription, and LLM replies. Three-tier access: admins (admin_user_ids) full, allow-listed users (allowed_user_ids from allowed_path) sandboxed, everyone else ignored. Supports group chats and per-user sandboxing."
 +shared telegram_token:String = ""
 +shared token_path:String = "/home/marenz/.telegram-bot-token"
 +shared allowed_path:String = "/home/marenz/.telegram-bot-users"
@@ -159,7 +159,7 @@
     +return concat("user sent a sticker ", json_get(payload, "message.sticker.emoji"))
   +let video:String = json_get(payload, "message.video.file_id")
   +if video!=""
-    +return "user sent a video which I cannot watch"
+    +return "user sent a video"
   +let video_note:String = json_get(payload, "message.video_note.file_id")
   +if video_note!=""
     +return "user sent a video note which I cannot watch"
@@ -183,7 +183,7 @@
 
 +test describe_update_kind
   +with payload="{\"message\":{\"sticker\":{\"file_id\":\"s\",\"emoji\":\"x\"}}}" -> expect "user sent a sticker x"
-  +with payload="{\"message\":{\"video\":{\"file_id\":\"v\"}}}" -> expect "user sent a video which I cannot watch"
+  +with payload="{\"message\":{\"video\":{\"file_id\":\"v\"}}}" -> expect "user sent a video"
   +with payload="{\"message\":{\"document\":{\"file_id\":\"d\",\"file_name\":\"notes.pdf\"}}}" -> expect "user sent a file (notes.pdf) which I cannot read"
   +with payload="{\"message\":{\"text\":\"hello\"}}" -> expect ""
   +with payload="{\"message\":{}}" -> expect ""
@@ -203,15 +203,33 @@
   +let message_id:String = to_string(json_get(payload, "message.message_id"))
   +let attachment_ref:String = extract_image_file_id(payload)
   +if attachment_ref==""
+    +set attachment_ref = extract_video_file_id(payload)
+  +if attachment_ref==""
     +set attachment_ref = json_get(payload, "message.voice.file_id")
+  +let attachment_name:String = json_get(payload, "message.video.file_name")
+  +if attachment_name==""
+    +set attachment_name = json_get(payload, "message.document.file_name")
+  +let attachment_mime:String = json_get(payload, "message.video.mime_type")
+  +if attachment_mime==""
+    +set attachment_mime = json_get(payload, "message.document.mime_type")
+  +let attachment_duration:String = ""
+  +if json_get(payload, "message.video.duration")!=""
+    +set attachment_duration = to_string(json_get(payload, "message.video.duration"))
+  +let attachment_size:String = ""
+  +if json_get(payload, "message.video.file_size")!=""
+    +set attachment_size = to_string(json_get(payload, "message.video.file_size"))
+  +if attachment_size==""
+    +if json_get(payload, "message.document.file_size")!=""
+      +set attachment_size = to_string(json_get(payload, "message.document.file_size"))
   +let speaker_name:String = extract_sender_name(payload)
   +let speaker_id:String = speaker_principal(payload)
   +let created_at_ms:Int = to_int(to_string(json_get(payload, "message.date")))*1000
-  +return concat("{\"message_id\":\"", json_escape(message_id), "\",\"speaker_id\":\"", json_escape(speaker_id), "\",\"speaker_name\":\"", json_escape(speaker_name), "\",\"created_at_ms\":", to_string(created_at_ms), ",\"attachment_ref\":\"", json_escape(attachment_ref), "\"}")
-+doc "Preserve Telegram message identity, timestamp, speaker principal and display name for Ladybug provenance. speaker_id is what the runtime resolves the principal from."
+  +return concat("{\"message_id\":\"", json_escape(message_id), "\",\"speaker_id\":\"", json_escape(speaker_id), "\",\"speaker_name\":\"", json_escape(speaker_name), "\",\"created_at_ms\":", to_string(created_at_ms), ",\"attachment_ref\":\"", json_escape(attachment_ref), "\",\"attachment_name\":\"", json_escape(attachment_name), "\",\"attachment_mime\":\"", json_escape(attachment_mime), "\",\"attachment_duration_seconds\":\"", json_escape(attachment_duration), "\",\"attachment_size_bytes\":\"", json_escape(attachment_size), "\"}")
++doc "Preserve Telegram message identity, timestamp, speaker principal/display name and attachment file id/name/MIME/duration/size for Ladybug provenance. speaker_id is what the runtime resolves the principal from."
 
 +test source_metadata
-  +with payload="{\"message\":{\"message_id\":42,\"date\":1700000000,\"from\":{\"id\":456,\"first_name\":\"Kata\",\"last_name\":\"Example\"}}}" -> expect "{\"message_id\":\"42\",\"speaker_id\":\"telegram:user:456\",\"speaker_name\":\"Kata Example\",\"created_at_ms\":1700000000000,\"attachment_ref\":\"\"}"
+  +with payload="{\"message\":{\"message_id\":42,\"date\":1700000000,\"from\":{\"id\":456,\"first_name\":\"Kata\",\"last_name\":\"Example\"}}}" -> expect "{\"message_id\":\"42\",\"speaker_id\":\"telegram:user:456\",\"speaker_name\":\"Kata Example\",\"created_at_ms\":1700000000000,\"attachment_ref\":\"\",\"attachment_name\":\"\",\"attachment_mime\":\"\",\"attachment_duration_seconds\":\"\",\"attachment_size_bytes\":\"\"}"
+  +with payload="{\"message\":{\"message_id\":7,\"date\":1700000000,\"from\":{\"id\":100000101},\"video\":{\"file_id\":\"vid-1\",\"file_name\":\"phone.mp4\",\"mime_type\":\"video/mp4\",\"duration\":12,\"file_size\":3456}}}" -> expect "{\"message_id\":\"7\",\"speaker_id\":\"telegram:user:100000101\",\"speaker_name\":\"\",\"created_at_ms\":1700000000000,\"attachment_ref\":\"vid-1\",\"attachment_name\":\"phone.mp4\",\"attachment_mime\":\"video/mp4\",\"attachment_duration_seconds\":\"12\",\"attachment_size_bytes\":\"3456\"}"
 
 +fn process_update (payload:String)->String [io,async]
   +let text:String = extract_text(payload)
@@ -222,6 +240,7 @@
   +let sender_name:String = extract_sender_name(payload)
   +let voice_file_id:String = json_get(payload, "message.voice.file_id")
   +let photo_file_id:String = extract_image_file_id(payload)
+  +let video_file_id:String = extract_video_file_id(payload)
   +if chat_id==0
     +return "no chat_id"
   +let admin:Bool = is_admin(user_id)
@@ -231,21 +250,47 @@
       +return concat("ignored: unauthorized user ", to_string(user_id))
   +if photo_file_id!=""
     +await file_path:String = telegram_file_path(photo_file_id)
+    +if starts_with(file_path, "ERROR: ")
+      +await _:String = send_message(chat_id, telegram_file_error_message(file_path, "photo"))
+      +return "photo download failed"
     +if file_path==""
       +await _:String = send_message(chat_id, "I could not download that photo. Please try sending it again.")
       +return "photo download failed"
     +let download_url:String = concat("https://api.telegram.org/file/bot", telegram_token, "/", file_path)
     +await photo:Attachment = http_get_binary(download_url)
     +if chat_type=="group"
-      +await _:String = handle_group_photo(chat_id, user_id, sender_name, text, admin, photo, metadata)
+      +await _:String = handle_group_attachment(chat_id, user_id, sender_name, text, admin, photo, metadata)
       +return "ok"
     +if chat_type=="supergroup"
-      +await _:String = handle_group_photo(chat_id, user_id, sender_name, text, admin, photo, metadata)
+      +await _:String = handle_group_attachment(chat_id, user_id, sender_name, text, admin, photo, metadata)
       +return "ok"
     +if admin
-      +await _:String = handle_admin_dm_photo(chat_id, user_id, text, photo, metadata)
+      +await _:String = handle_admin_dm_attachment(chat_id, user_id, text, photo, metadata)
       +return "ok"
-    +await _:String = handle_user_dm_photo(chat_id, user_id, text, photo, metadata)
+    +await _:String = handle_user_dm_attachment(chat_id, user_id, text, photo, metadata)
+    +return "ok"
+  +if video_file_id!=""
+    +await file_path:String = telegram_file_path(video_file_id)
+    +if starts_with(file_path, "ERROR: ")
+      +await _:String = send_message(chat_id, telegram_file_error_message(file_path, "video"))
+      +return "video download failed"
+    +if file_path==""
+      +await _:String = send_message(chat_id, "I could not download that video. Please send it again as a video or video document.")
+      +return "video download failed"
+    +let download_url:String = concat("https://api.telegram.org/file/bot", telegram_token, "/", file_path)
+    +await video:Attachment = http_get_binary(download_url)
+    +if text==""
+      +set text = "[user sent a video; the original is available to video_stabilize()]"
+    +if chat_type=="group"
+      +await _:String = handle_group_attachment(chat_id, user_id, sender_name, text, admin, video, metadata)
+      +return "ok"
+    +if chat_type=="supergroup"
+      +await _:String = handle_group_attachment(chat_id, user_id, sender_name, text, admin, video, metadata)
+      +return "ok"
+    +if admin
+      +await _:String = handle_admin_dm_attachment(chat_id, user_id, text, video, metadata)
+      +return "ok"
+    +await _:String = handle_user_dm_attachment(chat_id, user_id, text, video, metadata)
     +return "ok"
   +if text==""
     +if voice_file_id!=""
@@ -287,17 +332,17 @@
   +return "ok"
 +doc "Handle group/supergroup message. All messages share telegram:group:<chat_id> context, so the sender prefix carries both the stable numeric id and the display name — otherwise the model cannot tell who is speaking except by guessing from history. Non-admin senders get restricted permissions."
 
-+fn handle_group_photo (chat_id:Int, user_id:Int, sender_name:String, text:String, admin:Bool, photo:Attachment, metadata:String)->String [io,async]
++fn handle_group_attachment (chat_id:Int, user_id:Int, sender_name:String, text:String, admin:Bool, attachment:Attachment, metadata:String)->String [io,async]
   +let ctx:String = concat("telegram:group:", to_string(chat_id))
   +let sender:String = format_sender(user_id, sender_name, text)
   +let perm:String = ""
   +if admin==false
     +set perm = sandbox_perm_model
-  +await reply:String = llm_takeover(ctx, sender, "TelegramBot.send_reply", to_string(chat_id), perm, photo, metadata)
+  +await reply:String = llm_takeover(ctx, sender, "TelegramBot.send_reply", to_string(chat_id), perm, attachment, metadata)
   +if reply!=""
     +await _:String = send_message(chat_id, reply)
   +return "ok"
-+doc "Handle a group photo with the same shared context, sender prefix and permissions as text."
++doc "Handle a group photo or video with the same shared context, sender prefix and permissions as text."
 
 +fn handle_admin_dm (chat_id:Int, user_id:Int, text:String, metadata:String)->String [io,async]
   +let ctx:String = concat("telegram:", to_string(user_id))
@@ -306,9 +351,9 @@
     +await _:String = send_message(chat_id, reply)
   +return "ok"
 
-+fn handle_admin_dm_photo (chat_id:Int, user_id:Int, text:String, photo:Attachment, metadata:String)->String [io,async]
++fn handle_admin_dm_attachment (chat_id:Int, user_id:Int, text:String, attachment:Attachment, metadata:String)->String [io,async]
   +let ctx:String = concat("telegram:", to_string(user_id))
-  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), "", photo, metadata)
+  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), "", attachment, metadata)
   +if reply!=""
     +await _:String = send_message(chat_id, reply)
   +return "ok"
@@ -321,22 +366,46 @@
   +return "ok"
 +doc "Handle DM from non-admin user. Sandboxed with restricted permission model."
 
-+fn handle_user_dm_photo (chat_id:Int, user_id:Int, text:String, photo:Attachment, metadata:String)->String [io,async]
++fn handle_user_dm_attachment (chat_id:Int, user_id:Int, text:String, attachment:Attachment, metadata:String)->String [io,async]
   +let ctx:String = concat("telegram:user:", to_string(user_id))
-  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), sandbox_perm_model, photo, metadata)
+  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), sandbox_perm_model, attachment, metadata)
   +if reply!=""
     +await _:String = send_message(chat_id, reply)
   +return "ok"
-+doc "Handle a photo DM from a non-admin user with restricted permissions."
++doc "Handle a photo or video DM from a non-admin user with restricted permissions."
 
 +fn telegram_file_path (file_id:String)->String [io,async]
   +let file_url:String = concat("https://api.telegram.org/bot", telegram_token, "/getFile?file_id=", file_id)
   +match http_get(file_url)
   +case Ok(file_info)
-    +return json_get(file_info, "result.file_path")
+    +return telegram_file_path_response(file_info)
   +case Err(e)
-    +return ""
-+doc "Resolve a Telegram file ID to its downloadable file path."
+    +return concat("ERROR: ", e)
++doc "Resolve a Telegram file ID to its downloadable path, preserving Telegram's actionable error text for the caller. Bot downloads are limited to 20 MB."
+
++fn telegram_file_path_response (file_info:String)->String
+  +let file_path:String = json_get(file_info, "result.file_path")
+  +if file_path!=""
+    +return file_path
+  +let description:String = json_get(file_info, "description")
+  +if description!=""
+    +return concat("ERROR: ", description)
+  +return "ERROR: Telegram getFile returned no file path"
++doc "Extract a getFile path or preserve Telegram's JSON error description when HTTP 400 bodies are returned as ordinary response text."
+
++test telegram_file_path_response
+  +with file_info="{\"ok\":true,\"result\":{\"file_path\":\"voice/file_42.oga\"}}" -> expect "voice/file_42.oga"
+  +with file_info="{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: file is too big\",\"result\":{\"file_path\":\"\"}}" -> expect "ERROR: Bad Request: file is too big"
+
++fn telegram_file_error_message (error:String, kind:String)->String
+  +if contains(error, "file is too big")
+    +return concat("Telegram bots can only download files up to 20 MB. Please send a smaller ", concat(kind, "."))
+  +return concat("I could not download that ", concat(kind, ". Please send it again."))
++doc "Turn Telegram getFile failures into user-facing guidance, including the platform's 20 MB bot-download cap."
+
++test telegram_file_error_message
+  +with error="ERROR: HTTP 400 Bad Request: {\"description\":\"Bad Request: file is too big\"}" kind="video" -> expect "Telegram bots can only download files up to 20 MB. Please send a smaller video."
+  +with error="ERROR: timeout" kind="photo" -> expect "I could not download that photo. Please send it again."
 
 +fn transcribe_voice (file_id:String)->String [io,async]
   +let file_url:String = concat("https://api.telegram.org/bot", telegram_token, "/getFile?file_id=", file_id)
@@ -347,13 +416,28 @@
       +return "[voice message - could not get file]"
     +let download_url:String = concat("https://api.telegram.org/file/bot", telegram_token, "/", file_path)
     +await audio:Attachment = http_get_binary(download_url)
-    +await result:String = http_upload("http://127.0.0.1:8090/transcribe", audio, "file", "")
-    +let transcript:String = json_get(result, "text")
+    +match http_upload("http://127.0.0.1:8090/transcribe", audio, "file", "")
+    +case Ok(result)
+      +return transcription_upload_response(Ok(result))
+    +case Err(e)
+      +return "[voice message - transcription failed]"
+  +case Err(e)
+    +return concat("[voice message - getFile failed: ", e, "]")
+
++fn transcription_upload_response (response:Result<String>)->String
+  +match response
+  +case Ok(body)
+    +let transcript:String = json_get(body, "text")
     +if transcript==""
       +return "[voice message - transcription failed]"
     +return transcript
   +case Err(e)
-    +return concat("[voice message - getFile failed: ", e, "]")
+    +return "[voice message - transcription failed]"
++doc "Extract a transcript from a successful ASR response while preserving the voice placeholder for HTTP/transport failures."
+
++test transcription_upload_response
+  +with response=Ok("{\"text\":\"hello from ASR\"}") -> expect "hello from ASR"
+  +with response=Err("HTTP upload failed with 503 Service Unavailable") -> expect "[voice message - transcription failed]"
 
 +fn send_message (chat_id:Int, text:String)->String [io,async]
   +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendMessage")
@@ -368,20 +452,26 @@
   +return resp
 +doc "Send a text reply given chat_id as string (callback for llm_takeover)"
 
-+fn send_reply_with_attachment (chat_id_str:String, text:String, attachment:Attachment)->String [io,async]
++fn send_reply_with_attachment (chat_id_str:String, text:String, attachment:Attachment)->Result<String> [io,async,fail]
   +let chat_id:Int = to_int(chat_id_str)
   +await _:String = send_message(chat_id, text)
   +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendDocument")
   +let extra:String = concat("chat_id=", to_string(chat_id))
-  +await resp:String = http_upload(url, attachment, "document", extra)
-  +return resp
+  +match http_upload(url, attachment, "document", extra)
+  +case Ok(resp)
+    +return resp
+  +case Err(e)
+    +check uploaded false ~err_attachment_delivery
 +doc "Send a text reply with a file attachment via sendDocument (works for images, audio, pdfs — callback for llm_takeover/conversation_notify)"
 
 +fn send_audio_file (chat_id:Int, file_path:String, caption:String)->String [io,async]
   +let url:String = concat("https://api.telegram.org/bot", telegram_token, "/sendDocument")
   +let extra:String = concat("chat_id=", to_string(chat_id), "&caption=", caption)
-  +await resp:String = http_upload(url, file_path, "document", extra)
-  +return resp
+  +match http_upload(url, file_path, "document", extra)
+  +case Ok(resp)
+    +return resp
+  +case Err(e)
+    +return concat("ERROR: ", e)
 +doc "Upload a local audio file to a Telegram chat"
 
 +fn extract_chat_id (payload:String)->Int
@@ -446,6 +536,22 @@
   +with payload="{\"message\":{\"document\":{\"file_id\":\"pdf\",\"mime_type\":\"application/pdf\"}}}" -> expect ""
   +with payload="{\"message\":{}}" -> expect ""
 
++fn extract_video_file_id (payload:String)->String
+  +let file_id:String = json_get(payload, "message.video.file_id")
+  +if file_id!=""
+    +return file_id
+  +let mime:String = json_get(payload, "message.document.mime_type")
+  +if starts_with(mime, "video/")
+    +return json_get(payload, "message.document.file_id")
+  +return ""
++doc "Extract a video file ID from Telegram's message.video object or a document whose MIME type starts with video/."
+
++test extract_video_file_id
+  +with payload="{\"message\":{\"video\":{\"file_id\":\"phone\",\"mime_type\":\"video/mp4\"}}}" -> expect "phone"
+  +with payload="{\"message\":{\"document\":{\"file_id\":\"doc\",\"mime_type\":\"video/quicktime\"}}}" -> expect "doc"
+  +with payload="{\"message\":{\"document\":{\"file_id\":\"pdf\",\"mime_type\":\"application/pdf\"}}}" -> expect ""
+  +with payload="{\"message\":{}}" -> expect ""
+
 +fn extract_reply (json:String)->String
   +let val:String = json_get(json, "reply")
   +return val
@@ -465,4 +571,3 @@
   +with user_id=999 ids="100000001,999" -> expect true
   +with user_id=99 ids="100000001,999" -> expect false
   +with user_id=181521 ids="100000001" -> expect false
-

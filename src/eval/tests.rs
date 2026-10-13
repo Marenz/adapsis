@@ -3225,6 +3225,61 @@ fn struct_create_and_access() {
 }
 
 #[test]
+fn struct_literal_in_let_carries_declared_type_name() {
+    // #53: `+let p:Point = {..}` must produce a `Point` value, not an anonymous
+    // struct. The parser only sees `{..}`, so the name comes from the `+let`
+    // annotation and must survive parser → validator → evaluation.
+    let source = "\
++type Point = x:Int, y:Int
+
++fn make_point ()->Point
+  +let p:Point = {x: 10, y: 20}
+  +return p
+";
+    let result = eval_fn_result(source, "make_point", "");
+    assert!(
+        result.contains("Point{"),
+        "expected a named struct value, got {result}"
+    );
+    // The fields themselves are unchanged.
+    assert!(result.contains("x: 10"), "expected x: 10 in {result}");
+    assert!(result.contains("y: 20"), "expected y: 20 in {result}");
+}
+
+#[test]
+fn tiered_eval_preserves_struct_name_via_vm() {
+    // This is the normal daemon entry path: JIT gate, then VM, then tree-walker.
+    // JIT cannot reify a Struct Value and must decline; the eligible VM path
+    // must carry the interned type name instead of returning `{..}` (#53).
+    let source = "\
++type Point = x:Int, y:Int
+
++fn make_point ()->Point
+  +let p:Point = {x: 10, y: 20}
+  +return p
+";
+    let program = build_program(source);
+    let input = parser::Expr::StructLiteral(vec![]);
+    let func = program.get_function("make_point").unwrap();
+
+    // Prove the middle tier is eligible and independently preserves identity.
+    intern::set_display_interner(&program.shared_interner);
+    let vm_result = try_vm_execute(&program, func, &input).expect("VM should execute");
+    assert!(
+        vm_result.contains("Point{"),
+        "VM must preserve the struct name, got: {vm_result}"
+    );
+
+    let (result, used_jit) = eval_compiled_or_interpreted(&program, "make_point", &input)
+        .expect("tiered evaluation should succeed");
+    assert!(!used_jit, "struct-valued functions must not enter scalar JIT ABI");
+    assert!(
+        result.contains("Point{"),
+        "tiered evaluation must preserve the struct name, got: {result}"
+    );
+}
+
+#[test]
 fn struct_field_access_in_expression() {
     let source = "\
 +type Rect = width:Int, height:Int

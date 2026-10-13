@@ -858,6 +858,40 @@ async fn execute_code_agent_spawned_flag() {
     assert_eq!(res.spawned_agent_names, vec!["test-agent"]);
 }
 
+#[tokio::test]
+async fn malformed_watch_argument_fails_loudly_and_does_not_start() {
+    // #48: a `!watch` whose argument string cannot be parsed used to spawn a
+    // loop that broke on its first tick with `Err(_) => break` — no reply, no
+    // log line. It must now be rejected at setup with the parse error surfaced.
+    let (config, _io_rx) = test_config_with_io();
+    let mut session = config.snapshot_working_set().await;
+    // Unterminated string literal — `parse_test_input` cannot parse it.
+    let res = execute_code(
+        "!watch foo name=\"unterminated 60000",
+        &config,
+        &mut session,
+        None,
+    )
+    .await;
+    assert!(res.has_errors, "malformed watch must report an error");
+    let msg = res
+        .mutation_results
+        .iter()
+        .find(|r| !r.success)
+        .map(|r| r.message.clone())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("watch 'foo'") && msg.contains("cannot parse arguments"),
+        "error must name the watcher and the bad arguments, got: {msg}"
+    );
+    assert!(
+        !res.mutation_results
+            .iter()
+            .any(|r| r.success && r.message.contains("Watching")),
+        "the watcher must not be reported as started"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Integration tests: full mutate → test → eval pipeline through execute_code
 // ═══════════════════════════════════════════════════════════════════════
@@ -1579,6 +1613,31 @@ fn strip_sender_prefix_cleans_stored_content() {
     assert_eq!(strip_sender_prefix("hallo"), "hallo");
     // A bracket that isn't a sender prefix must survive intact.
     assert_eq!(strip_sender_prefix("[user:oops no close"), "[user:oops no close");
+}
+
+#[test]
+fn attachment_platform_ref_preserves_video_metadata_with_safe_fallbacks() {
+    use super::llm_handlers::attachment_platform_ref;
+
+    let attachment = crate::attachment::Attachment::from_bytes(
+        vec![1, 2, 3], "application/octet-stream", "download.mp4",
+    ).unwrap();
+    let metadata = r#"{"attachment_ref":"tg-file","attachment_name":"phone.mp4","attachment_mime":"video/mp4","attachment_duration_seconds":"12","attachment_size_bytes":"3456"}"#;
+    let stored: serde_json::Value = serde_json::from_str(
+        &attachment_platform_ref(Some(metadata), &attachment),
+    ).unwrap();
+    assert_eq!(stored["platform_ref"], "tg-file");
+    assert_eq!(stored["name"], "phone.mp4");
+    assert_eq!(stored["mime_type"], "video/mp4");
+    assert_eq!(stored["duration_seconds"], "12");
+    assert_eq!(stored["size_bytes"], 3456);
+
+    let fallback: serde_json::Value = serde_json::from_str(
+        &attachment_platform_ref(None, &attachment),
+    ).unwrap();
+    assert_eq!(fallback["name"], "download.mp4");
+    assert_eq!(fallback["mime_type"], "application/octet-stream");
+    assert_eq!(fallback["size_bytes"], 3);
 }
 
 /// Test: execute_code rejects +module on core modules for a restricted model.

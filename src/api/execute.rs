@@ -623,9 +623,26 @@ pub async fn execute_code(
                         result.push_ok(response);
                     }
                     crate::parser::Operation::Watch { function_name, args, interval_ms } => {
+                        // Parse the argument expression once, before starting the loop.
+                        // A malformed argument must surface an error and refuse to start
+                        // the watcher, rather than spawning a loop that dies silently on
+                        // its first tick with `Err(_) => break` (#48).
+                        let input_expr = if args.trim().is_empty() {
+                            crate::parser::Expr::StructLiteral(vec![])
+                        } else {
+                            match crate::parser::parse_test_input(0, args) {
+                                Ok(expr) => expr,
+                                Err(e) => {
+                                    result.push_err(format!(
+                                        "watch '{function_name}' not started: cannot parse arguments `{args}`: {e}"
+                                    ));
+                                    continue;
+                                }
+                            }
+                        };
+
                         eprintln!("[execute_code:watch] {function_name}({args}) every {interval_ms}ms");
                         let fn_name = function_name.clone();
-                        let fn_args = args.clone();
                         let interval = *interval_ms;
                         let watch_program = config.program.clone();
                         let watch_meta = config.meta.clone();
@@ -639,14 +656,6 @@ pub async fn execute_code(
                                 let result = {
                                     let program = watch_program.read().await;
                                     let meta = watch_meta.lock().unwrap();
-                                    let input_expr = if fn_args.trim().is_empty() {
-                                        crate::parser::Expr::StructLiteral(vec![])
-                                    } else {
-                                        match crate::parser::parse_test_input(0, &fn_args) {
-                                            Ok(expr) => expr,
-                                            Err(_) => break,
-                                        }
-                                    };
                                     match crate::eval::eval_compiled_or_interpreted_cached(
                                         &program, &fn_name, &input_expr,
                                         Some(&watch_jit_cache), meta.revision,

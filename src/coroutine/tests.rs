@@ -3147,6 +3147,103 @@ async fn source_list_io_request_returns_formatted_listing() {
     assert!(res.is_err(), "bare runtime SourceList should error, got: {res:?}");
 }
 
+async fn rejecting_upload_server(body: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+    format!("http://{address}/upload")
+}
+
+#[tokio::test]
+async fn multipart_upload_variants_reject_non_success_status_with_bounded_body() {
+    let oversized_error = format!("telegram rejected upload: {}", "x".repeat(70 * 1024));
+    let url = rejecting_upload_server(oversized_error).await;
+    let (mut runtime, _io_rx) = Runtime::new();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    runtime
+        .handle_io(IoRequest::HttpUploadBytes {
+            url,
+            bytes: b"payload".to_vec(),
+            file_name: "video.mp4".into(),
+            mime_type: "video/mp4".into(),
+            file_field: "document".into(),
+            extra_fields: vec![],
+            reply: reply_tx,
+        })
+        .await;
+    let error = reply_rx.await.unwrap().unwrap_err().to_string();
+    assert!(error.contains("413 Payload Too Large"), "{error}");
+    assert!(error.contains("telegram rejected upload"), "{error}");
+    assert!(error.contains("response body truncated"), "{error}");
+    assert!(error.len() < 66 * 1024, "error body was not bounded");
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), b"payload").unwrap();
+    let url = rejecting_upload_server("document is too large".into()).await;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    runtime
+        .handle_io(IoRequest::HttpUpload {
+            url,
+            file_path: file.path().display().to_string(),
+            file_field: "document".into(),
+            extra_fields: vec![],
+            reply: reply_tx,
+        })
+        .await;
+    let error = reply_rx.await.unwrap().unwrap_err().to_string();
+    assert!(error.contains("413 Payload Too Large"), "{error}");
+    assert!(error.contains("document is too large"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multipart_non_success_reaches_adapsis_as_catchable_err_value() -> anyhow::Result<()> {
+    let url = rejecting_upload_server("telegram document too large".into()).await;
+    let (runtime, mut io_rx) = Runtime::new();
+    let handle = CoroutineHandle::new(runtime.io_sender());
+    let io_task = tokio::spawn(async move {
+        let request = io_rx.recv().await.expect("upload request");
+        runtime.handle_io(request).await;
+    });
+    let attachment = crate::attachment::Attachment::from_bytes(
+        b"payload".to_vec(),
+        "video/mp4",
+        "video.mp4",
+    )?;
+    let value = tokio::task::spawn_blocking(move || {
+        handle.execute_await(
+            "http_upload",
+            &[
+                Value::string(url),
+                Value::Attachment(attachment),
+                Value::string("document"),
+                Value::string("chat_id=1"),
+            ],
+        )
+    })
+    .await??;
+    io_task.await?;
+    match value {
+        Value::Err(error) => {
+            assert!(error.contains("413 Payload Too Large"), "{error}");
+            assert!(error.contains("telegram document too large"), "{error}");
+        }
+        other => panic!("expected catchable Err, got {other:?}"),
+    }
+    Ok(())
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // Issue #7: mock/stub pattern matching — substring (default), glob, exact
 // ═════════════════════════════════════════════════════════════════════

@@ -316,7 +316,8 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
 - `Value::Attachment` — binary data type (audio, images, files)
 - `AttachmentData::Memory` (≤10MB in RAM) / `AttachmentData::File` (>10MB on disk)
 - `http_post_binary(url, body)` → returns `Attachment` from HTTP response
-- `http_upload(url, attachment, field, extra)` — multipart upload from Attachment
+- `http_upload(url, attachment, field, extra)` — multipart upload from Attachment;
+  returns `Result<String>`, so callers must `+match` Ok/Err
 - `conversation_notify(context, message, attachment)` — delivers to conversation with file
 
 ## Per-Context Identity (issue #41)
@@ -525,7 +526,7 @@ schema since day one and was never set:
 
 ## Telegram Bot (TelegramBot.ax)
 
-- Native `cad_prepare(title, design_brief[, PLA|PETG])` is a turn-bound
+- Native `cad_prepare(title, design_brief[, PLA|PETG[, use_recent_images]])` is a turn-bound
   prepare-only guest capability. `src/capabilities/cad.rs` launches the trusted
   runner with a design brief. `tools/cad_astra.py` pins CAD authoring/revisions
   to `chatgpt/gpt-6-astra` with high reasoning, independently of the chat model.
@@ -539,6 +540,19 @@ schema since day one and was never set:
   immediately rather than being mislabeled as geometry problems. Job request.json
   preserves the brief for operator recovery. Never weaken mesh checks to make a
   failed generation appear successful.
+  The brief is sent off-host to the external cloud author. Reference images are
+  explicit opt-in only: the final Bool defaults false and consent must name that
+  up to N images will also be sent to `chatgpt/gpt-6-astra` off-host.
+  When true, `Request::Cad` carries the server-bound turn principal/context and
+  dispatch queries Ladybug for at most three recent readable user images from
+  that exact context, with a 20MB total budget. Callers never supply paths,
+  attachment ids, principals or contexts. Rust sends bounded bytes only through
+  trusted runner stdin; private job metadata records hash/MIME/size, and neither
+  sandbox output nor public artifacts contain source references. Astra receives
+  the same image data URLs on initial and geometry-repair turns. Their private
+  bytes are deleted when authoring succeeds or fails; request metadata retains
+  only SHA-256/MIME/size. Start/result notifications state the external author and
+  reference count and must not imply use when it is zero.
   `src/capabilities/cad.rs` launches the trusted
   `tools/cad_prepare.py` runner; generated code runs under bubblewrap with no
   network/home/credentials, read-only CAD environment and isolated job writes.
@@ -553,6 +567,43 @@ schema since day one and was never set:
   sandbox/ subdirectory; trusted slicing/manifest/log outputs stay outside its
   writable bind. Symlink outputs/parents are rejected before host processing.
   Job folders ~/Projects/kronk-designs; public-only assets /srv/www/cat-bowl/kronk-designs.
+- **The CAD sandbox is process-capped by a transient user systemd service (#50).**
+  `tools/cad_prepare.py` `sandbox_command()` wraps the `prlimit`+`bwrap` guest in
+  `systemd-run --user --wait --collect --pipe` with a unique
+  `adapsis-cad-sandbox-<uuid>` unit, `TasksMax=64` and
+  `KillMode=control-group`. Do NOT replace this with `prlimit --nproc`:
+  `RLIMIT_NPROC` is counted per user, so it would starve the adapsis service's own
+  forks. A service (not scope) gets a private cgroup, so the cap cannot touch the
+  shared user slice. Only the bwrap guest is inside it — font-cache warmup and
+  trusted slicing stay outside. `RuntimeMaxSec` is a hard backstop just above the
+  300 s Python timeout; the Python timeout fires first and `_teardown_unit()`
+  SIGKILLs the whole control group, so a `TimeoutExpired`/launch failure never
+  leaves a forking guest running. A user-manager probe runs before paid Astra
+  generation. Missing managers plus later systemd connection/start failures are
+  `SandboxUnavailable` (fail-fast, not retried as geometry failures) —
+  never silently run uncapped. `env -i PATH=...` inside the unit is load-bearing:
+  systemd starts the service with the **user manager's** environment (API keys
+  included), so the old PATH-only client env no longer protects `/proc/1/environ`;
+  only the `env -i` layer does, and systemd-run's own status lines are stripped as
+  runner noise so a signal death still reads `terminated by signal N`.
+- **Assembled review data contract (#51).** A multipart job may also emit
+  `/job/output/assembly.json` as pure JSON data so the review page can show the
+  assembled object, not only separated print parts. Trusted `validate_assembly`
+  (`tools/cad_prepare.py`) strict-validates it before it can reach a report:
+  whitelisted top-level fields (`units`=`"mm"`, `envelope_mm`, `instances`), each
+  instance exactly `{part, transform}`, `part` must exactly name an exported STL,
+  1–`ASSEMBLY_MAX_INSTANCES` (64) instances, `envelope_mm` three positive finite
+  dims ≤ `ASSEMBLY_MAX_DIM_MM` (1200), and each `transform` a finite row-major 4x4
+  affine matrix whose 3x3 part is orthonormal with |det|=1 (rotation/reflection
+  only — no scale/shear). The assembled bounding box computed from the real
+  meshes must fit the declared envelope within `ASSEMBLY_TOLERANCE_MM`. Rejected
+  values are never echoed back; only numbers and already-checked filenames are
+  stored in the report/`manifest.json` — never guest SVG/HTML/JS. Absent or invalid
+  data is **not** a geometry failure and never triggers an Astra revision: it
+  degrades to print-parts-only with a visible reason. `tools/cad_preview.html`
+  offers Assembled and Print parts views built from the same hash-checked STLs
+  offered for download; `publish()` still copies only allowlisted part files,
+  optional STEP, the 3MF, `manifest.json` and the trusted `index.html`.
 - **Native guest tools (creative profile):** `[principals]` maps server-observed
   speaker IDs to permission profiles, taking precedence over the intake module's
   generic non-admin profile. `[guest_profiles]` explicitly lists native tools;
@@ -561,6 +612,18 @@ schema since day one and was never set:
   `!eval tool(literals)` calls. Module calls, nested calls, tests, mutations,
   shell/raw HTTP/file IO and agents are not guest tools. The coroutine IO boundary
   independently enforces the same list. Identity text never grants a capability.
+- **Creative deployment gate:** before restarting a node that grants GuestUser the
+  creative profile, verify both deployment inputs match the reviewed tree:
+  `python3 tools/check_guest_creative_config.py config/guest-creative.toml
+  ~/.config/adapsis/permissions.toml` and
+  `cmp contexts/telegram_user_100000101.md ~/.config/adapsis/contexts/telegram_user_100000101.md`.
+  The TOML checker requires the reviewed fragment's `principals`,
+  `guest_profiles` and `model.creative` entries to match while deliberately
+  preserving unrelated live tables and keys. A mismatch blocks deployment: the
+  permission file decides which native tools execute, while the context file
+  carries the consent and privacy instructions.
+  After restart, confirm the service's `--permissions-file` points at that exact
+  permissions file before sending a live test message.
 - `src/coroutine/scoped.rs` implements turn-bound argument checks and requests;
   `src/capabilities{,/music,/web}.rs` handles host IO. `music_generate` always
   delivers to the bound turn context, accepts 10–120 seconds, and allows one
@@ -605,6 +668,34 @@ schema since day one and was never set:
   outbound LLM image parts; MIME-only filters silently discard real photos.
   Tests: `cargo test --release conversation_view` and
   `cargo test --release saved_images_are_recovered_only_for_authorized_context`.
+- **Video input and stabilization (#52):** `process_update` also accepts
+  `message.video` and video-MIME documents, downloads the original as an
+  Attachment, and passes it plus Telegram file id/name/MIME/duration/size
+  metadata through `llm_takeover`. `video_stabilize()` is a zero-argument,
+  turn-bound native guest tool: Rust resolves the latest user video through a
+  Ladybug read-membership check for the exact principal/context, so the caller
+  cannot name a host path, source conversation or destination. The trusted
+  pipeline in `src/capabilities/video.rs` permits one job at a time; defaults to
+  absolute `/usr/bin/ffprobe` and `/usr/bin/ffmpeg` (absolute overrides:
+  `ADAPSIS_FFPROBE`/`ADAPSIS_FFMPEG`); and limits input to Telegram's 20 MB bot
+  download cap/120 s, output to 49 MB below Telegram's 50 MB delivery cap, two
+  encoder threads and 15 minutes. It runs libvidstab detect then
+  transform without a shell, probes ffmpeg with fixed arguments to prefer
+  `libopenh264` and falls back to built-in `mpeg4`, derives video bitrate from
+  duration/output budget, retains audio as AAC when present, checks the
+  output with ffprobe, cleans isolated failure/job files, and copies success to
+  `~/.local/share/adapsis/video-output/` before asynchronous bound delivery.
+  This is a conventional transform of original frames, never generative frame
+  replacement. `ADAPSIS_VIDEO_OUTPUT_DIR` is a test/operator override; durable
+  successful outputs remain until the platform callback completes. If attachment
+  delivery fails, the capability makes one bound text-only fallback attempt,
+  then removes the output regardless of either result; it never recursively
+  retries. `conversation_notify` enqueueing alone is not delivery success: it
+  observes the callback task's terminal registry state with a 135-second bound
+  (above the 120-second upload timeout). Spawned-task terminal entries are
+  load-bearing for that acknowledgement and must not be pruned without replacing
+  the channel. A context with no callback still keeps the appended message and
+  returns a truthful stored-but-not-delivered result for startup/Wolfi callers.
 - **Multi-admin**: `admin_user_ids` shared var, comma-separated (e.g. `"100000001,456789"`)
 - **Group chats**: messages in group/supergroup → `telegram:group:<chat_id>` context (shared by all senders)
 - **Admin DMs**: `telegram:<user_id>` context with full LLM access

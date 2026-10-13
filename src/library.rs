@@ -105,6 +105,7 @@ impl LibraryState {
         for le in errs.iter() {
             out.push_str(&format!("  {}: {}\n", le.module_name, le.error));
         }
+        out.push_str("Fix the named persisted .ax file, then call library_reload(\"ModuleName\") to retry it.\n");
         Some(out)
     }
 }
@@ -436,7 +437,21 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
         }
     };
 
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+    load_module_files(program, &dir, &mut state);
+
+    if !state.loaded_modules.is_empty() {
+        eprintln!(
+            "[library] auto-loaded {} module(s) from {}",
+            state.loaded_modules.len(),
+            dir.display()
+        );
+    }
+
+    state
+}
+
+fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut LibraryState) {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -446,7 +461,7 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
             let msg = format!("could not read library dir {}: {e}", dir.display());
             eprintln!("[library] warning: {msg}");
             state.record_error(msg);
-            return state;
+            return;
         }
     };
 
@@ -491,15 +506,6 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
         }
     }
 
-    if !state.loaded_modules.is_empty() {
-        eprintln!(
-            "[library] auto-loaded {} module(s) from {}",
-            state.loaded_modules.len(),
-            dir.display()
-        );
-    }
-
-    state
 }
 
 /// Parse and apply a single module source string into the program.
@@ -1034,6 +1040,45 @@ mod tests {
     }
 
     #[test]
+    fn struct_literal_in_let_module_source_roundtrips() {
+        // #53 propagates the declared struct name into the AST. Module source
+        // persistence must stay parseable: the reconstructed `+let` keeps the
+        // anonymous `{..}` literal and the type annotation re-supplies the name.
+        let source = "\
++module GeoMod
++type Point = x:Int, y:Int
++fn origin ()->Point
+  +let p:Point = {x: 0, y: 0}
+  +return p
++end
++";
+        let mut program = ast::Program::default();
+        let ops = parser::parse(source).unwrap();
+        for op in &ops {
+            validator::apply_and_validate(&mut program, op).unwrap();
+        }
+        let module = program
+            .modules
+            .iter()
+            .find(|m| m.name == "GeoMod")
+            .unwrap();
+        let reconstructed = reconstruct_module_source(module);
+        assert!(
+            reconstructed.contains("+let p:Point = {x: 0, y: 0}"),
+            "literal must reconstruct anonymously, got:\n{reconstructed}"
+        );
+
+        // Must parse and re-validate cleanly into a fresh program.
+        let mut program2 = ast::Program::default();
+        let ops2 = parser::parse(&reconstructed)
+            .unwrap_or_else(|e| panic!("reconstructed source did not parse: {e}\n{reconstructed}"));
+        for op in &ops2 {
+            validator::apply_and_validate(&mut program2, op).unwrap();
+        }
+        assert_eq!(program2.modules[0].functions[0].name, "origin");
+    }
+
+    #[test]
     fn test_persist_and_load_module() {
         let tmp = tempfile::tempdir().unwrap();
         let lib_dir = tmp.path().join("modules");
@@ -1336,6 +1381,25 @@ mod tests {
             err.contains("no +module declaration"),
             "error should mention missing module declaration: {err}"
         );
+    }
+
+    #[test]
+    fn invalid_persisted_module_surfaces_its_name_and_actionable_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("BrokenMigration.ax"),
+            "+module BrokenMigration\n+fn missing_return_type ()\n  +return 1\n",
+        )
+        .unwrap();
+        let mut program = ast::Program::default();
+        let mut state = LibraryState::new();
+        load_module_files(&mut program, tmp.path(), &mut state);
+
+        assert!(program.modules.iter().all(|module| module.name != "BrokenMigration"));
+        let error = state.format_load_errors().expect("named load error");
+        assert!(error.contains("BrokenMigration"), "{error}");
+        assert!(error.contains("line 2") && error.contains("expected `->`"), "{error}");
+        assert!(error.contains("library_reload") || error.contains("Fix"), "{error}");
     }
 
     #[test]

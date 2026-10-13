@@ -20,6 +20,39 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::eval::Value;
 
+const MAX_HTTP_UPLOAD_RESPONSE_BYTES: usize = 64 * 1024;
+
+async fn bounded_upload_response(response: reqwest::Response) -> Result<String> {
+    use futures::StreamExt;
+
+    let status = response.status();
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let remaining = MAX_HTTP_UPLOAD_RESPONSE_BYTES.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+        if body.len() == MAX_HTTP_UPLOAD_RESPONSE_BYTES {
+            truncated = stream.next().await.is_some();
+            break;
+        }
+    }
+    let mut body = String::from_utf8_lossy(&body).into_owned();
+    if truncated {
+        body.push_str(" [response body truncated]");
+    }
+    if !status.is_success() {
+        bail!("HTTP upload failed with {status}: {body}");
+    }
+    Ok(body)
+}
+
 pub mod shell_policy;
 pub mod scoped;
 mod matching;
@@ -94,6 +127,10 @@ pub struct TaskInfo {
 }
 
 /// Shared task registry — tracks all spawned tasks.
+///
+/// Terminal entries are load-bearing: `conversation_notify` observes the
+/// callback's Completed/Failed state after Spawn has returned its task id. Do
+/// not prune terminal entries without replacing that acknowledgement channel.
 pub type TaskRegistry = Arc<std::sync::Mutex<HashMap<TaskId, TaskInfo>>>;
 
 /// Inspectable snapshot of a running task's interpreter state.
@@ -691,12 +728,7 @@ impl Runtime {
                         form = form.text(key, value);
                     }
                     match client.post(&url).multipart(form).send().await {
-                        Ok(resp) => {
-                            match resp.text().await {
-                                Ok(body) => { let _ = reply.send(Ok(body)); }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
-                            }
-                        }
+                        Ok(resp) => { let _ = reply.send(bounded_upload_response(resp).await); }
                         Err(e) => { let _ = reply.send(Err(e.into())); }
                     }
                 });
@@ -717,12 +749,7 @@ impl Runtime {
                         form = form.text(key, value);
                     }
                     match client.post(&url).multipart(form).send().await {
-                        Ok(resp) => {
-                            match resp.text().await {
-                                Ok(body) => { let _ = reply.send(Ok(body)); }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
-                            }
-                        }
+                        Ok(resp) => { let _ = reply.send(bounded_upload_response(resp).await); }
                         Err(e) => { let _ = reply.send(Err(e.into())); }
                     }
                 });
@@ -2624,11 +2651,17 @@ impl CoroutineHandle {
                             WaitReason::HttpPost(url.clone()),
                             IoRequest::HttpUpload { url, file_path, file_field, extra_fields, reply: tx },
                             rx,
-                        )?;
-                        return Ok(Value::string(result));
+                        );
+                        return Ok(match result {
+                            Ok(body) => Value::Ok(Box::new(Value::string(body))),
+                            Err(error) => Value::Err(format!("{error}")),
+                        });
                     }
                     Some(Value::Attachment(att)) => {
-                        let bytes = att.bytes().map_err(|e| anyhow::anyhow!("attachment read error: {e}"))?;
+                        let bytes = match att.bytes() {
+                            Ok(bytes) => bytes,
+                            Err(error) => return Ok(Value::Err(format!("attachment read error: {error}"))),
+                        };
                         let name = att.name.clone();
                         let mime = att.mime_type.clone();
                         let (tx, rx) = oneshot::channel();
@@ -2636,8 +2669,11 @@ impl CoroutineHandle {
                             WaitReason::HttpPost(url.clone()),
                             IoRequest::HttpUploadBytes { url, bytes, file_name: name, mime_type: mime, file_field, extra_fields, reply: tx },
                             rx,
-                        )?;
-                        return Ok(Value::string(result));
+                        );
+                        return Ok(match result {
+                            Ok(body) => Value::Ok(Box::new(Value::string(body))),
+                            Err(error) => Value::Err(format!("{error}")),
+                        });
                     }
                     _ => bail!("http_upload: second arg must be a file path (String) or Attachment"),
                 }

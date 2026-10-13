@@ -138,7 +138,12 @@ fn is_compilable_type(ty: &ast::Type) -> bool {
         | ast::Type::Bool
         | ast::Type::Byte
         | ast::Type::String => true,
-        ast::Type::Struct(_) => true,
+        // The JIT flattens struct fields internally, but its public call path can
+        // only reify scalar/String returns. Sending a Struct through call_i64()
+        // silently returns one field and loses the type identity, so struct-
+        // typed functions must use the VM/tree-walker until the JIT has a
+        // Value-returning ABI (#53).
+        ast::Type::Struct(_) => false,
         ast::Type::Result(inner) => is_compilable_type(inner),
         _ => false,
     }
@@ -1381,6 +1386,26 @@ mod tests {
     }
 
     #[test]
+    fn not_compilable_struct_return_uses_value_capable_tier() {
+        let func = make_fn(
+            "make_point",
+            vec![],
+            ast::Type::Struct("Point".to_string()),
+            vec![],
+            vec![make_stmt(ast::StatementKind::Return {
+                value: ast::Expr::StructInit {
+                    ty: "Point".to_string(),
+                    fields: vec![],
+                },
+            })],
+        );
+        assert!(
+            !is_compilable_function(&func),
+            "the scalar JIT ABI cannot reify named Struct values"
+        );
+    }
+
+    #[test]
     fn not_compilable_option_param() {
         let func = make_fn(
             "unwrap",
@@ -1459,7 +1484,6 @@ mod tests {
         assert!(is_compilable_type(&ast::Type::Bool));
         assert!(is_compilable_type(&ast::Type::Byte));
         assert!(is_compilable_type(&ast::Type::String));
-        assert!(is_compilable_type(&ast::Type::Struct("Point".to_string())));
         assert!(is_compilable_type(&ast::Type::Result(Box::new(
             ast::Type::Int
         ))));
@@ -1482,6 +1506,9 @@ mod tests {
         ))));
         assert!(!is_compilable_type(&ast::Type::TaggedUnion(
             "Color".to_string()
+        )));
+        assert!(!is_compilable_type(&ast::Type::Struct(
+            "Point".to_string()
         )));
     }
 

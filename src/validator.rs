@@ -31,6 +31,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
             let mut converted = convert_function(fn_decl)?;
             // Resolve union type references: Struct(name) → TaggedUnion(name) where appropriate
             resolve_union_types_in_function(&mut converted, program);
+            validate_function_struct_literals(program, &converted, None)?;
             validate_function_effects(program, &converted, None)?;
             // Check for builtin name collision
             if is_builtin_name(&converted.name) {
@@ -262,6 +263,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                     }
                     resolve_union_types_in_stmts(&mut converted.body, &union_names);
                 }
+                validate_function_struct_literals(program, &converted, Some(&decl.name))?;
                 validate_function_effects(program, &converted, Some(&decl.name))?;
                 // Now mutably access module to add/replace function
                 let m = &mut program.modules[mod_idx];
@@ -314,6 +316,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             // (duplicate arm removed — Test already handled above)
             parser::Operation::Startup(fd) => {
                 let converted = convert_function(fd)?;
+                validate_function_struct_literals(program, &converted, Some(&decl.name))?;
                 // Validate that startup declares [io,async] effects
                 if !converted.effects.contains(&ast::Effect::Io) || !converted.effects.contains(&ast::Effect::Async) {
                     bail!(
@@ -333,6 +336,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
             }
             parser::Operation::Shutdown(fd) => {
                 let converted = convert_function(fd)?;
+                validate_function_struct_literals(program, &converted, Some(&decl.name))?;
                 // Validate that shutdown declares [io,async] effects
                 if !converted.effects.contains(&ast::Effect::Io) || !converted.effects.contains(&ast::Effect::Async) {
                     bail!(
@@ -447,6 +451,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 func.body = new_body;
                 (func.clone(), func.body.len())
             };
+            validate_function_struct_literals(program, &func_snapshot, None)?;
             validate_function_effects(program, &func_snapshot, None)?;
             Ok(format!(
                 "replaced entire body of `{fn_name}` ({} statements)",
@@ -466,6 +471,9 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                     .map(|f| std::sync::Arc::make_mut(f))
                     .ok_or_else(|| anyhow!("function `{fn_name}` not found for replace"))?;
                 replace_statement(&mut func.body, stmt_id, &replace.body)?;
+                let func_snapshot = func.clone();
+                validate_function_struct_literals(program, &func_snapshot, None)?;
+                validate_function_effects(program, &func_snapshot, None)?;
                 Ok(format!("replaced `{}`", replace.target))
             } else {
                 // Module.function — replace entire body
@@ -494,6 +502,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                     func.body = new_body;
                     (func.clone(), func.body.len())
                 };
+                validate_function_struct_literals(program, &func_snapshot, Some(mod_name))?;
                 validate_function_effects(program, &func_snapshot, Some(mod_name))?;
                 Ok(format!(
                     "replaced entire body of `{mod_name}.{fn_name}` ({} statements)",
@@ -521,6 +530,7 @@ fn apply_replace(program: &mut ast::Program, replace: &parser::ReplaceMutation) 
                 replace_statement(&mut func.body, stmt_id, &replace.body)?;
                 func.clone()
             };
+            validate_function_struct_literals(program, &func_snapshot, Some(mod_name))?;
             validate_function_effects(program, &func_snapshot, Some(mod_name))?;
             Ok(format!("replaced `{}`", replace.target))
         }
@@ -736,6 +746,188 @@ fn collect_expr_effect_requirements(
     }
 }
 
+/// Reject typed struct literals whose fields do not exactly match the declared
+/// struct. The type annotation gives an anonymous `{..}` literal its identity,
+/// but must never be treated as permission to skip structural validation (#53).
+fn validate_function_struct_literals(
+    program: &ast::Program,
+    function: &ast::FunctionDecl,
+    current_module: Option<&str>,
+) -> Result<()> {
+    let function_name = current_module
+        .map(|module| format!("{module}.{}", function.name))
+        .unwrap_or_else(|| function.name.clone());
+    validate_struct_literals_in_stmts(
+        program,
+        &function.body,
+        current_module,
+        &function_name,
+    )
+}
+
+fn validate_struct_literals_in_stmts(
+    program: &ast::Program,
+    stmts: &[ast::Statement],
+    current_module: Option<&str>,
+    function_name: &str,
+) -> Result<()> {
+    for stmt in stmts {
+        match &stmt.kind {
+            ast::StatementKind::Let {
+                name,
+                ty: ast::Type::Struct(type_name),
+                value: ast::Expr::StructInit { fields, .. },
+            } => {
+                if let Some(expected) = struct_field_names(program, current_module, type_name) {
+                    validate_struct_literal_fields(
+                        function_name,
+                        &stmt.id,
+                        name,
+                        type_name,
+                        &expected,
+                        fields,
+                    )?;
+                }
+            }
+            ast::StatementKind::Branch {
+                then_body,
+                else_body,
+                ..
+            } => {
+                validate_struct_literals_in_stmts(
+                    program,
+                    then_body,
+                    current_module,
+                    function_name,
+                )?;
+                validate_struct_literals_in_stmts(
+                    program,
+                    else_body,
+                    current_module,
+                    function_name,
+                )?;
+            }
+            ast::StatementKind::While { body, .. }
+            | ast::StatementKind::Each { body, .. } => {
+                validate_struct_literals_in_stmts(
+                    program,
+                    body,
+                    current_module,
+                    function_name,
+                )?;
+            }
+            ast::StatementKind::Match { arms, .. } => {
+                for arm in arms {
+                    validate_struct_literals_in_stmts(
+                        program,
+                        &arm.body,
+                        current_module,
+                        function_name,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_struct_literal_fields(
+    function_name: &str,
+    statement_id: &str,
+    binding_name: &str,
+    type_name: &str,
+    expected: &[String],
+    fields: &[ast::StructFieldValue],
+) -> Result<()> {
+    let expected_set: HashSet<&str> = expected.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    let mut duplicate_seen = HashSet::new();
+    let mut duplicates = Vec::new();
+    let mut unknown_seen = HashSet::new();
+    let mut unknown = Vec::new();
+
+    for field in fields {
+        if !seen.insert(field.name.as_str()) && duplicate_seen.insert(field.name.as_str()) {
+            duplicates.push(field.name.as_str());
+        }
+        if !expected_set.contains(field.name.as_str()) && unknown_seen.insert(field.name.as_str()) {
+            unknown.push(field.name.as_str());
+        }
+    }
+
+    let missing: Vec<&str> = expected
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !seen.contains(name))
+        .collect();
+    if duplicates.is_empty() && unknown.is_empty() && missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut problems = Vec::new();
+    if !duplicates.is_empty() {
+        problems.push(format!("duplicate field(s): {}", duplicates.join(", ")));
+    }
+    if !unknown.is_empty() {
+        problems.push(format!("unknown field(s): {}", unknown.join(", ")));
+    }
+    if !missing.is_empty() {
+        problems.push(format!("missing field(s): {}", missing.join(", ")));
+    }
+    bail!(
+        "function `{function_name}` statement `{statement_id}`: +let `{binding_name}:{type_name}` has invalid struct literal ({}) — expected exactly: {{{}}}",
+        problems.join("; "),
+        expected.join(", ")
+    )
+}
+
+fn struct_field_names(
+    program: &ast::Program,
+    current_module: Option<&str>,
+    type_name: &str,
+) -> Option<Vec<String>> {
+    if let Some(module_name) = current_module {
+        if let Some(module) = program.modules.iter().find(|m| m.name == module_name) {
+            if let Some(fields) = struct_field_names_in_module(module, type_name) {
+                return Some(fields);
+            }
+        }
+    }
+    if let Some(fields) = struct_field_names_in_types(&program.types, type_name) {
+        return Some(fields);
+    }
+    program
+        .modules
+        .iter()
+        .find_map(|module| struct_field_names_in_module(module, type_name))
+}
+
+fn struct_field_names_in_module(module: &ast::Module, type_name: &str) -> Option<Vec<String>> {
+    struct_field_names_in_types(&module.types, type_name).or_else(|| {
+        module
+            .modules
+            .iter()
+            .find_map(|child| struct_field_names_in_module(child, type_name))
+    })
+}
+
+fn struct_field_names_in_types(
+    types: &[ast::TypeDecl],
+    type_name: &str,
+) -> Option<Vec<String>> {
+    types.iter().find_map(|decl| match decl {
+        ast::TypeDecl::Struct(struct_decl) if struct_decl.name == type_name => Some(
+            struct_decl
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect(),
+        ),
+        _ => None,
+    })
+}
+
 
 // --- Conversion from parser types to AST types ---
 
@@ -823,13 +1015,39 @@ fn convert_function(decl: &parser::FunctionDecl) -> Result<ast::FunctionDecl> {
     })
 }
 
+/// Fill in the declared struct type name on an anonymous struct literal.
+///
+/// The parser sees only the braces of `{x: 1, y: 2}`, so `convert_expr` leaves
+/// `StructInit.ty` empty. For `+let p:Point = {x: 1, y: 2}` the declared type is
+/// known, and carrying it lets the runtime value (and type checks) see a `Point`
+/// rather than an anonymous struct — previously the name was lost, so `p` was an
+/// unnamed `StructInit` (#53).
+///
+/// Only an empty name is filled: an initializer that already names its type is
+/// never overwritten, and the literal's fields are left exactly as written, so a
+/// field mismatch is not masked by the annotation.
+fn propagate_declared_struct_type(ty: &ast::Type, value: &mut ast::Expr) {
+    if let ast::Type::Struct(type_name) = ty {
+        if let ast::Expr::StructInit { ty: init_ty, .. } = value {
+            if init_ty.is_empty() {
+                *init_ty = type_name.clone();
+            }
+        }
+    }
+}
+
 pub fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
     let kind = match op {
-        parser::Operation::Let(decl) => ast::StatementKind::Let {
-            name: decl.name.clone(),
-            ty: convert_type(&decl.ty)?,
-            value: convert_expr(&decl.expr)?,
-        },
+        parser::Operation::Let(decl) => {
+            let ty = convert_type(&decl.ty)?;
+            let mut value = convert_expr(&decl.expr)?;
+            propagate_declared_struct_type(&ty, &mut value);
+            ast::StatementKind::Let {
+                name: decl.name.clone(),
+                ty,
+                value,
+            }
+        }
         parser::Operation::Set(decl) => ast::StatementKind::Set {
             name: decl.name.clone(),
             value: convert_expr(&decl.expr)?,
@@ -2922,5 +3140,169 @@ mod tests {
         let func = program.get_function("Calc.add").unwrap();
         assert_eq!(func.tests.len(), 1, "tests should survive function replacement");
         assert!(func.tests[0].passed, "preserved test should still be marked passed");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // #53 — declared struct type propagation into anonymous struct literals
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// A `+let p:Point = {x: 1, y: 2}` must carry `Point` through the real
+    /// parser → validator path (not a hand-built parser op), and the type
+    /// checker must then see the declared type instead of an anonymous struct.
+    #[test]
+    fn let_struct_literal_gets_declared_type_end_to_end() {
+        let mut program = ast::Program::default();
+        let type_ops = parser::parse("+type Point = x:Int, y:Int").unwrap();
+        apply_and_validate(&mut program, &type_ops[0]).unwrap();
+        let fn_ops = parser::parse(
+            "+fn make_point (n:Int)->Point\n  +let p:Point = {x: n, y: 2}\n  +return p\n+end",
+        )
+        .unwrap();
+        apply_and_validate(&mut program, &fn_ops[0]).unwrap();
+
+        let func = program.get_function("make_point").unwrap();
+        match &func.body[0].kind {
+            ast::StatementKind::Let { value, .. } => match value {
+                ast::Expr::StructInit { ty, fields } => {
+                    assert_eq!(ty, "Point", "declared struct name must be propagated");
+                    assert_eq!(fields.len(), 2);
+                }
+                other => panic!("expected StructInit, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+
+        // The type checker now resolves the literal to the declared struct type,
+        // so a `Point`-returning function is not silently untyped.
+        let table = crate::typeck::build_symbol_table(&program);
+        let errors = crate::typeck::check_function(&table, func);
+        assert!(errors.is_empty(), "unexpected type errors: {errors:?}");
+    }
+
+    /// The same shape inside a `+case` body must be converted with the type,
+    /// exercising the recursive statement conversion path.
+    #[test]
+    fn let_struct_literal_in_case_body_gets_declared_type() {
+        let mut program = ast::Program::default();
+        for source in [
+            "+type Cfg = host:String, port:Int",
+            "+type Mode = Dev | Prod",
+        ] {
+            let ops = parser::parse(source).unwrap();
+            apply_and_validate(&mut program, &ops[0]).unwrap();
+        }
+        let fn_ops = parser::parse(
+            "+fn get_config (mode:Mode)->Cfg\n\
+             \x20 +match mode\n\
+             \x20 +case Dev\n\
+             \x20   +let cfg:Cfg = {host: \"localhost\", port: 8080}\n\
+             \x20   +return cfg\n\
+             \x20 +case Prod\n\
+             \x20   +let cfg:Cfg = {host: \"prod.example.com\", port: 443}\n\
+             \x20   +return cfg\n\
+             \x20 +end\n\
+             +end",
+        )
+        .unwrap();
+        apply_and_validate(&mut program, &fn_ops[0]).unwrap();
+
+        let func = program.get_function("get_config").unwrap();
+        let match_stmt = match &func.body[0].kind {
+            ast::StatementKind::Match { arms, .. } => arms,
+            other => panic!("expected Match, got {other:?}"),
+        };
+        for arm in match_stmt {
+            match &arm.body[0].kind {
+                ast::StatementKind::Let { value, .. } => match value {
+                    ast::Expr::StructInit { ty, .. } => {
+                        assert_eq!(ty, "Cfg", "struct literal in +case must be named");
+                    }
+                    other => panic!("expected StructInit in case body, got {other:?}"),
+                },
+                other => panic!("expected Let in case body, got {other:?}"),
+            }
+        }
+    }
+
+    /// An initializer that already names its struct is never overwritten.
+    #[test]
+    fn declared_struct_type_does_not_overwrite_explicit_name() {
+        let mut value = ast::Expr::StructInit {
+            ty: "Other".to_string(),
+            fields: vec![ast::StructFieldValue {
+                name: "x".to_string(),
+                value: ast::Expr::Literal(ast::Literal::Int(1)),
+            }],
+        };
+        propagate_declared_struct_type(&ast::Type::Struct("Point".to_string()), &mut value);
+        match value {
+            ast::Expr::StructInit { ty, .. } => assert_eq!(ty, "Other"),
+            other => panic!("expected StructInit, got {other:?}"),
+        }
+    }
+
+    fn invalid_point_literal_error(fields: &str) -> String {
+        let mut program = ast::Program::default();
+        let type_ops = parser::parse("+type Point = x:Int, y:Int").unwrap();
+        apply_and_validate(&mut program, &type_ops[0]).unwrap();
+        let source = format!(
+            "+fn bad_point (n:Int)->Point\n  +let p:Point = {{{fields}}}\n  +return p\n+end"
+        );
+        let fn_ops = parser::parse(&source).unwrap();
+        apply_and_validate(&mut program, &fn_ops[0])
+            .expect_err("invalid typed struct literal must be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn typed_struct_literal_rejects_missing_field() {
+        let error = invalid_point_literal_error("x: n");
+        assert!(error.contains("function `bad_point`"), "got: {error}");
+        assert!(error.contains("+let `p:Point`"), "got: {error}");
+        assert!(error.contains("missing field(s): y"), "got: {error}");
+        assert!(error.contains("expected exactly: {x, y}"), "got: {error}");
+    }
+
+    #[test]
+    fn typed_struct_literal_rejects_unknown_field() {
+        let error = invalid_point_literal_error("x: n, y: 2, z: 9");
+        assert!(error.contains("unknown field(s): z"), "got: {error}");
+        assert!(!error.contains("missing field"), "got: {error}");
+    }
+
+    #[test]
+    fn typed_struct_literal_rejects_duplicate_field() {
+        let error = invalid_point_literal_error("x: n, x: 2, y: 3");
+        assert!(error.contains("duplicate field(s): x"), "got: {error}");
+        assert!(!error.contains("missing field"), "got: {error}");
+    }
+
+    #[test]
+    fn typed_struct_literal_validation_reaches_case_bodies() {
+        let mut program = ast::Program::default();
+        for source in [
+            "+type Point = x:Int, y:Int",
+            "+type Mode = Make | Skip",
+        ] {
+            let ops = parser::parse(source).unwrap();
+            apply_and_validate(&mut program, &ops[0]).unwrap();
+        }
+        let source = "\
++fn from_mode (mode:Mode)->Point
+  +match mode
+  +case Make
+    +let p:Point = {x: 1, bad: 2}
+    +return p
+  +case Skip
+    +let p:Point = {x: 0, y: 0}
+    +return p
+  +end
++end";
+        let ops = parser::parse(source).unwrap();
+        let error = apply_and_validate(&mut program, &ops[0])
+            .expect_err("nested invalid literal must be rejected")
+            .to_string();
+        assert!(error.contains("unknown field(s): bad"), "got: {error}");
+        assert!(error.contains("missing field(s): y"), "got: {error}");
     }
 }

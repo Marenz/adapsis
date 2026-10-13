@@ -28,6 +28,67 @@ pub enum AttachmentData {
 }
 
 impl Attachment {
+    fn header(&self) -> Option<([u8; 12], usize)> {
+        let mut header = [0_u8; 12];
+        let size = match &self.data {
+            AttachmentData::Memory(bytes) => {
+                let size = bytes.len().min(header.len());
+                header[..size].copy_from_slice(&bytes[..size]);
+                size
+            }
+            AttachmentData::File(path) => {
+                use std::io::Read;
+
+                let mut file = std::fs::File::open(path).ok()?;
+                let size = file.metadata().ok()?.len().min(header.len() as u64) as usize;
+                file.read_exact(&mut header[..size]).ok()?;
+                size
+            }
+        };
+        Some((header, size))
+    }
+
+    /// Recognize a video by MIME type, extension, or magic header.
+    ///
+    /// Telegram serves videos as `video/*`, or sometimes as
+    /// `application/octet-stream` with no usable filename, so — exactly like
+    /// [`Self::image_mime`] — the MIME and extension are only a first pass and
+    /// the container header is the authoritative fallback. The one MIME filter
+    /// that would silently discard a real video is the bare `video/*` prefix
+    /// test; keep magic-header recognition so a `message.document` that lost its
+    /// MIME still reaches the stabilization pipeline.
+    pub fn video_mime(&self) -> Option<&str> {
+        let mime = self.mime_type.split(';').next().unwrap_or("").trim();
+        if mime.starts_with("video/") {
+            return Some(mime);
+        }
+        match self.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+            "mp4" => return Some("video/mp4"),
+            "m4v" => return Some("video/x-m4v"),
+            "mov" => return Some("video/quicktime"),
+            "webm" => return Some("video/webm"),
+            "mkv" => return Some("video/x-matroska"),
+            "avi" => return Some("video/x-msvideo"),
+            "mpeg" | "mpg" => return Some("video/mpeg"),
+            "3gp" | "3g2" => return Some("video/3gpp"),
+            _ => {}
+        }
+        let (header, size) = self.header()?;
+        let header = &header[..size];
+        // ISO Base Media File Format (mp4/mov/m4v/3gp): `....ftyp` at bytes 4..8.
+        if size >= 8 && &header[4..8] == b"ftyp" {
+            Some("video/mp4")
+        // EBML/Matroska/WebM magic.
+        } else if header.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+            Some("video/webm")
+        // RIFF AVI.
+        } else if size == 12 && &header[..4] == b"RIFF" && &header[8..] == b"AVI " {
+            Some("video/x-msvideo")
+        } else {
+            None
+        }
+    }
+
     /// Telegram file downloads may be application/octet-stream. Use the same
     /// image recognition for context budgets, durable recovery and LLM payloads.
     pub fn image_mime(&self) -> Option<&str> {
@@ -40,14 +101,7 @@ impl Attachment {
             "webp" => return Some("image/webp"),
             _ => {},
         }
-        let mut header=[0u8;12];
-        let size=match &self.data {
-            AttachmentData::Memory(bytes) => {let n=bytes.len().min(12);header[..n].copy_from_slice(&bytes[..n]);n},
-            AttachmentData::File(path) => {
-                use std::io::Read;
-                std::fs::File::open(path).ok()?.read(&mut header).ok()?
-            }
-        };
+        let (header,size)=self.header()?;
         let header=&header[..size];
         if header.starts_with(b"\xff\xd8\xff") {Some("image/jpeg")}
         else if header.starts_with(b"\x89PNG\r\n\x1a\n") {Some("image/png")}
@@ -129,6 +183,11 @@ impl Attachment {
             Some("gif") => "image/gif",
             Some("pdf") => "application/pdf",
             Some("json") => "application/json",
+            Some("mp4") => "video/mp4",
+            Some("mov") => "video/quicktime",
+            Some("webm") => "video/webm",
+            Some("mkv") => "video/x-matroska",
+            Some("avi") => "video/x-msvideo",
             _ => "application/octet-stream",
         }
     }
@@ -189,9 +248,61 @@ mod tests {
     }
 
     #[test]
+    fn image_mime_recognizes_generic_octet_stream_by_magic() {
+        let jpeg = Attachment::from_bytes(
+            vec![0xff, 0xd8, 0xff, 0xe0, 0x00], "application/octet-stream", "telegram-file"
+        ).unwrap();
+        assert_eq!(jpeg.image_mime(), Some("image/jpeg"));
+        let not_image = Attachment::from_bytes(
+            b"plain text".to_vec(), "application/octet-stream", "telegram-file"
+        ).unwrap();
+        assert_eq!(not_image.image_mime(), None);
+    }
+
+    #[test]
     fn from_file() {
         let att = Attachment::from_file(PathBuf::from("/tmp/test.wav"), "audio/wav", "test.wav");
         assert!(matches!(att.data, AttachmentData::File(_)));
         assert_eq!(att.mime_type, "audio/wav");
+    }
+
+    #[test]
+    fn video_mime_recognizes_mime_extension_and_magic() {
+        // MIME prefix wins.
+        assert_eq!(Attachment::from_bytes(vec![0; 4], "video/mp4", "x").unwrap().video_mime(), Some("video/mp4"));
+        // Extension on an octet-stream download.
+        assert_eq!(Attachment::from_bytes(vec![0; 4], "application/octet-stream", "clip.mov").unwrap().video_mime(), Some("video/quicktime"));
+        assert_eq!(Attachment::from_bytes(vec![0; 4], "application/octet-stream", "clip.webm").unwrap().video_mime(), Some("video/webm"));
+        // Magic header with no MIME and a useless name.
+        let ftyp = Attachment::from_bytes(b"\x00\x00\x00\x18ftypisom".to_vec(), "application/octet-stream", "opaque-hash").unwrap();
+        assert_eq!(ftyp.video_mime(), Some("video/mp4"));
+        let webm = Attachment::from_bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x00, 0x00, 0x00, 0x00], "application/octet-stream", "opaque-hash").unwrap();
+        assert_eq!(webm.video_mime(), Some("video/webm"));
+        let avi = Attachment::from_bytes(b"RIFF\x00\x00\x00\x00AVI ".to_vec(), "application/octet-stream", "opaque-hash").unwrap();
+        assert_eq!(avi.video_mime(), Some("video/x-msvideo"));
+        // Not a video.
+        assert_eq!(Attachment::from_bytes(vec![0xff, 0xd8, 0xff], "application/octet-stream", "x").unwrap().video_mime(), None);
+        assert_eq!(Attachment::from_bytes(vec![1, 2, 3], "application/octet-stream", "x").unwrap().video_mime(), None);
+    }
+
+    #[test]
+    fn file_backed_magic_headers_are_read_completely() {
+        let png = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(png.path(), b"\x89PNG\r\n\x1a\n").unwrap();
+        let image = Attachment::from_file(
+            png.path().to_path_buf(),
+            "application/octet-stream",
+            "opaque",
+        );
+        assert_eq!(image.image_mime(), Some("image/png"));
+
+        let avi = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(avi.path(), b"RIFF\x00\x00\x00\x00AVI ").unwrap();
+        let video = Attachment::from_file(
+            avi.path().to_path_buf(),
+            "application/octet-stream",
+            "opaque",
+        );
+        assert_eq!(video.video_mime(), Some("video/x-msvideo"));
     }
 }

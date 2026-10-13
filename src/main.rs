@@ -30,6 +30,241 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+// Telegram upload callbacks have a 120-second HTTP timeout. Give the callback
+// evaluator time to unwind and publish its terminal task state without allowing
+// a wedged callback to retain semaphores and generated files forever.
+const CALLBACK_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(135);
+
+async fn await_spawned_callback(
+    receiver: tokio::sync::oneshot::Receiver<anyhow::Result<coroutine::TaskId>>,
+    registry: coroutine::TaskRegistry,
+) -> Result<String> {
+    await_spawned_callback_with_timeout(receiver, registry, CALLBACK_ACK_TIMEOUT).await
+}
+
+async fn await_spawned_callback_with_timeout(
+    receiver: tokio::sync::oneshot::Receiver<anyhow::Result<coroutine::TaskId>>,
+    registry: coroutine::TaskRegistry,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    tokio::time::timeout(timeout, async move {
+        let task_id = receiver
+            .await
+            .context("reply callback dispatch was cancelled")??;
+        loop {
+            let status = registry
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reply callback task registry is poisoned"))?
+                .get(&task_id)
+                .map(|task| task.status.clone())
+                .context("reply callback task disappeared from the registry")?;
+            match status {
+                coroutine::WaitReason::Completed(value) => return Ok(value),
+                coroutine::WaitReason::Failed(error) => {
+                    anyhow::bail!("reply callback failed: {error}")
+                }
+                _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("reply callback did not finish within {} seconds", timeout.as_secs()))?
+}
+
+async fn dispatch_conversation_callback(
+    sender: tokio::sync::mpsc::Sender<coroutine::IoRequest>,
+    registry: coroutine::TaskRegistry,
+    function_name: String,
+    args: Vec<eval::Value>,
+) -> Result<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(coroutine::IoRequest::Spawn {
+            function_name,
+            args,
+            reply: tx,
+        })
+        .await
+        .context("reply callback could not be queued")?;
+    await_spawned_callback(rx, registry).await
+}
+
+async fn dispatch_optional_conversation_callback(
+    sender: tokio::sync::mpsc::Sender<coroutine::IoRequest>,
+    registry: coroutine::TaskRegistry,
+    context: &str,
+    message: String,
+    attachment: Option<attachment::Attachment>,
+    callback_function: Option<String>,
+    callback_argument: Option<String>,
+) -> Result<String> {
+    let (Some(function_name), Some(argument)) = (callback_function, callback_argument) else {
+        return Ok(format!(
+            "stored in conversation `{context}` but not delivered: no reply callback is configured"
+        ));
+    };
+    let (function_name, args) = if let Some(attachment) = attachment {
+        let function_name = format!("{function_name}_with_attachment");
+        eprintln!("[conversation_notify:{context}] delivering with attachment via {function_name}({argument})");
+        (
+            function_name,
+            vec![
+                eval::Value::string(argument),
+                eval::Value::string(message),
+                eval::Value::Attachment(attachment),
+            ],
+        )
+    } else {
+        eprintln!("[conversation_notify:{context}] delivering text via {function_name}({argument})");
+        (
+            function_name,
+            vec![eval::Value::string(argument), eval::Value::string(message)],
+        )
+    };
+    dispatch_conversation_callback(sender, registry, function_name, args)
+        .await
+        .map(|_| "notified".to_string())
+}
+
+fn append_conversation_notification(
+    meta: &session::SharedMeta,
+    context: &str,
+    message: &str,
+    attachment: Option<&attachment::Attachment>,
+) -> (Option<String>, Option<String>) {
+    let mut meta_guard = meta.lock().unwrap();
+    let conversation = meta_guard.conversations.get_or_create(context);
+    let mut stored = session::ChatMessage {
+        role: "system".to_string(),
+        content: message.to_string(),
+        attachments: vec![],
+    };
+    if let Some(attachment) = attachment {
+        stored.attachments.push(attachment.clone());
+    }
+    conversation.messages.push(stored);
+    (conversation.reply_fn.clone(), conversation.reply_arg.clone())
+}
+
+async fn monitor_spawned_task(
+    task: tokio::task::JoinHandle<()>,
+    registry: coroutine::TaskRegistry,
+    task_id: coroutine::TaskId,
+    function_name: String,
+) {
+    if let Err(error) = task.await {
+        let detail = if error.is_panic() { "panicked" } else { "was cancelled" };
+        eprintln!("spawn {function_name} {detail}: {error}");
+        if let Ok(mut tasks) = registry.lock()
+            && let Some(info) = tasks.get_mut(&task_id)
+        {
+            info.status = coroutine::WaitReason::Failed(format!(
+                "spawned function `{function_name}` {detail}: {error}"
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod callback_delivery_tests {
+    use super::*;
+
+    fn task(status: coroutine::WaitReason) -> coroutine::TaskInfo {
+        coroutine::TaskInfo {
+            id: 1,
+            function_name: "TelegramBot.send_reply_with_attachment".into(),
+            status,
+            started_at: "now".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_acknowledgement_waits_for_terminal_success() {
+        let registry: coroutine::TaskRegistry = Default::default();
+        registry.lock().unwrap().insert(1, task(coroutine::WaitReason::Running));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(Ok(1)).unwrap();
+        let update = registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            update.lock().unwrap().get_mut(&1).unwrap().status =
+                coroutine::WaitReason::Completed("uploaded".into());
+        });
+        assert_eq!(await_spawned_callback(rx, registry).await.unwrap(), "uploaded");
+    }
+
+    #[tokio::test]
+    async fn callback_failure_is_not_reported_as_delivery_success() {
+        let registry: coroutine::TaskRegistry = Default::default();
+        registry.lock().unwrap().insert(
+            1,
+            task(coroutine::WaitReason::Failed("HTTP 413 Payload Too Large".into())),
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(Ok(1)).unwrap();
+        let error = await_spawned_callback(rx, registry).await.unwrap_err().to_string();
+        assert!(error.contains("413 Payload Too Large"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn callback_acknowledgement_times_out_if_task_never_finishes() {
+        let registry: coroutine::TaskRegistry = Default::default();
+        registry.lock().unwrap().insert(1, task(coroutine::WaitReason::Running));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(Ok(1)).unwrap();
+        let error = await_spawned_callback_with_timeout(
+            rx,
+            registry,
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("did not finish"), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicked_blocking_task_is_marked_failed() {
+        let registry: coroutine::TaskRegistry = Default::default();
+        registry.lock().unwrap().insert(1, task(coroutine::WaitReason::Running));
+        let blocking = tokio::task::spawn_blocking(|| panic!("callback panic"));
+        monitor_spawned_task(blocking, registry.clone(), 1, "callback".into()).await;
+        let status = registry.lock().unwrap().get(&1).unwrap().status.clone();
+        assert!(
+            matches!(status, coroutine::WaitReason::Failed(ref error) if error.contains("panicked")),
+            "got {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_callback_reports_durable_non_delivery_without_error() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let meta = std::sync::Arc::new(std::sync::Mutex::new(session::SessionMeta::new()));
+        let (callback_function, callback_argument) = append_conversation_notification(
+            &meta,
+            "startup-context",
+            "persisted",
+            None,
+        );
+        let result = dispatch_optional_conversation_callback(
+            sender,
+            Default::default(),
+            "startup-context",
+            "persisted".into(),
+            None,
+            callback_function,
+            callback_argument,
+        )
+        .await
+        .unwrap();
+        let guard = meta.lock().unwrap();
+        let conversation = guard.conversations.get("startup-context").unwrap();
+        assert_eq!(conversation.messages.last().unwrap().content, "persisted");
+        assert!(result.contains("stored in conversation"), "{result}");
+        assert!(result.contains("not delivered"), "{result}");
+    }
+}
+
 async fn snapshot_from_tiers(
     program: &std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
     meta: &crate::session::SharedMeta,
@@ -1042,8 +1277,10 @@ async fn main() -> Result<()> {
                             let prog = program_for_spawn.clone();
                             let sender = io_sender_for_spawn.clone();
                             let registry = task_registry_for_spawn.clone();
+                            let monitor_registry = registry.clone();
                             let snap_reg = snap_registry_for_spawn.clone();
-                            tokio::task::spawn_blocking(move || {
+                            let monitored_function = function_name.clone();
+                            let task = tokio::task::spawn_blocking(move || {
                                 let ctx = eval::EvalContext {
                                     runtime: None, meta: None, event_broadcast: None,
                                     program_snapshot: Some(std::sync::Arc::new(prog.clone())),
@@ -1089,6 +1326,12 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             });
+                            tokio::spawn(monitor_spawned_task(
+                                task,
+                                monitor_registry,
+                                task_id,
+                                monitored_function,
+                            ));
                         }
                         coroutine::IoRequest::SourceAdd {
                             module_name, source_type, interval_ms, alias, handler, reply,
@@ -1424,11 +1667,13 @@ async fn main() -> Result<()> {
 
                             let sender = io_sender_for_spawn.clone();
                             let registry = task_registry_for_spawn.clone();
+                            let monitor_registry = registry.clone();
                             let snap_reg = snap_registry_for_spawn2.clone();
                             let runtime_for_blocking = shared_runtime_for_spawn.clone();
                             let meta_for_blocking = shared_meta_for_spawn.clone();
                             let program_for_blocking = shared_program_for_spawn.clone();
-                            tokio::task::spawn_blocking(move || {
+                            let monitored_function = function_name.clone();
+                            let task = tokio::task::spawn_blocking(move || {
                                 let program = program_for_blocking.blocking_read().clone();
                                 let func_decl = match program.get_function(&function_name) {
                                     Some(f) => f.clone(),
@@ -1482,6 +1727,12 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             });
+                            tokio::spawn(monitor_spawned_task(
+                                task,
+                                monitor_registry,
+                                task_id,
+                                monitored_function,
+                            ));
                         }
                         coroutine::IoRequest::SourceAdd {
                             module_name, source_type, interval_ms, alias, handler, reply,
@@ -1739,63 +1990,30 @@ async fn main() -> Result<()> {
                         coroutine::IoRequest::ConversationNotify { context, message, attachment, reply } => {
                             let meta = shared_meta_for_spawn.clone();
                             let io_sender = io_sender_for_spawn.clone();
+                            let task_registry = task_registry_for_spawn.clone();
                             tokio::spawn(async move {
                                 // Push message with attachment to conversation
-                                let (cb_fn, cb_arg) = {
-                                    let mut meta_guard = meta.lock().unwrap();
-                                    let conv = meta_guard.conversations.get_or_create(&context);
-                                    let mut msg = crate::session::ChatMessage {
-                                        role: "system".to_string(),
-                                        content: message.clone(),
-                                        attachments: vec![],
-                                    };
-                                    if let Some(att) = attachment.clone() {
-                                        msg.attachments.push(att);
-                                    }
-                                    conv.messages.push(msg);
-                                    (conv.reply_fn.clone(), conv.reply_arg.clone())
-                                };
+                                let (cb_fn, cb_arg) = append_conversation_notification(
+                                    &meta,
+                                    &context,
+                                    &message,
+                                    attachment.as_ref(),
+                                );
 
-                                // Trigger reply callback with text, and attachment if present
-                                if let (Some(func_name), Some(arg)) = (cb_fn, cb_arg) {
-                                    if let Some(att) = attachment {
-                                        // Call <reply_fn>_with_attachment(arg, text, attachment)
-                                        let att_fn = format!("{func_name}_with_attachment");
-                                        eprintln!("[conversation_notify:{context}] delivering with attachment via {att_fn}({arg})");
-                                        let args = vec![
-                                            crate::eval::Value::string(arg),
-                                            crate::eval::Value::string(message),
-                                            crate::eval::Value::Attachment(att),
-                                        ];
-                                        let (tx, _rx) = tokio::sync::oneshot::channel();
-                                        match io_sender.try_send(crate::coroutine::IoRequest::Spawn {
-                                            function_name: att_fn.clone(),
-                                            args,
-                                            reply: tx,
-                                        }) {
-                                            Ok(()) => eprintln!("[conversation_notify:{context}] spawn dispatched {att_fn}"),
-                                            Err(e) => eprintln!("[conversation_notify:{context}] spawn send failed: {e}"),
-                                        }
-                                    } else {
-                                        // Text only
-                                        eprintln!("[conversation_notify:{context}] delivering text via {func_name}({arg})");
-                                        let args = vec![
-                                            crate::eval::Value::string(arg),
-                                            crate::eval::Value::string(message),
-                                        ];
-                                        let (tx, _rx) = tokio::sync::oneshot::channel();
-                                        match io_sender.try_send(crate::coroutine::IoRequest::Spawn {
-                                            function_name: func_name,
-                                            args,
-                                            reply: tx,
-                                        }) {
-                                            Ok(()) => eprintln!("[conversation_notify:{context}] spawn dispatched"),
-                                            Err(e) => eprintln!("[conversation_notify:{context}] spawn send failed: {e}"),
-                                        }
-                                    }
+                                let result = dispatch_optional_conversation_callback(
+                                    io_sender,
+                                    task_registry,
+                                    &context,
+                                    message,
+                                    attachment,
+                                    cb_fn,
+                                    cb_arg,
+                                )
+                                .await;
+                                if let Err(error) = &result {
+                                    eprintln!("[conversation_notify:{context}] delivery failed: {error:#}");
                                 }
-
-                                let _ = reply.send(Ok("notified".to_string()));
+                                let _ = reply.send(result);
                             });
                         }
                         _ => {

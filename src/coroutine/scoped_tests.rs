@@ -9,7 +9,7 @@ fn guest() -> TurnIdentity {
 fn scoped_tools_fail_closed_without_a_turn() {
     let (tx, _rx) = mpsc::channel(1);
     let handle = CoroutineHandle::new(tx);
-    for op in ["conversation_history", "music_generate", "cad_prepare", "web_search", "web_read"] {
+    for op in ["conversation_history", "music_generate", "cad_prepare", "video_stabilize", "web_search", "web_read"] {
         let error = handle.execute_await(op, &[]).unwrap_err().to_string();
         assert!(error.contains("no conversational turn"), "{op}: {error}");
     }
@@ -25,6 +25,7 @@ fn guest_blocks_raw_io_global_memory_and_foreign_destinations() {
     assert!(handle.execute_await("memory_remember", &[Value::string("note"), Value::string("global")]).is_err());
     assert!(handle.execute_await("music_generate", &[Value::string("song"), Value::Int(30), Value::string("lyrics"), Value::string("other-chat")]).is_err());
     assert!(handle.execute_await("music_generate", &[Value::string("song"), Value::Int(999)]).is_err());
+    assert!(handle.execute_await("video_stabilize", &[Value::string("/tmp/input.mp4")]).is_err());
     assert!(handle.execute_await("web_search", &[Value::Int(1)]).is_err());
     assert!(handle.execute_await("web_read", &[Value::string("")]).is_err());
 }
@@ -36,7 +37,9 @@ fn guest_code_is_checked_before_any_side_effects() {
     for code in [
         "!eval music_generate(\"piano\", 30, \"\")",
         "!eval cad_prepare(\"test part\", \"import build123d as b\", \"PLA\")",
+        "!eval cad_prepare(\"referenced part\", \"match the photo\", \"PETG\", true)",
         "!eval web_search(\"Rust\")\n!done",
+        "!eval video_stabilize()",
         "!eval memory_remember(\"I like jazz\")",
         // `+await`-prefixed forms must pass the same guest checks as the bare call.
         "!eval +await cad_prepare(\"test part\", \"Z=0\", \"PLA\")",
@@ -65,7 +68,7 @@ fn guest_code_is_checked_before_any_side_effects() {
     assert!(err.contains("permission denied"), "got: {err}");
     let err = scoped::validate_guest_code("!eval +await out:String = web_search(read_file(\"/etc/passwd\"))", &tools, &program)
         .unwrap_err().to_string();
-    assert!(err.contains("literal strings or numbers"), "got: {err}");
+    assert!(err.contains("literal strings, numbers or booleans"), "got: {err}");
 }
 
 #[test]
@@ -78,8 +81,9 @@ fn guest_parse_errors_are_wrapped_with_actionable_context() {
 
 #[test]
 fn guest_prompt_lists_only_granted_native_tools_with_call_signatures() {
-    let prompt = scoped::prompt(&["music_generate".into(), "web_search".into()]);
+    let prompt = scoped::prompt(&["music_generate".into(), "video_stabilize".into(), "web_search".into()]);
     assert!(prompt.contains("music_generate(description, duration_seconds[, lyrics])"));
+    assert!(prompt.contains("video_stabilize()"));
     assert!(prompt.contains("web_search(query)"));
     assert!(!prompt.contains("web_read(url)"));
     assert!(!prompt.contains("conversation_history("));
@@ -110,17 +114,47 @@ fn cad_is_bound_to_turn_and_cannot_accept_print_or_destination_arguments() {
     let handle = CoroutineHandle::new(tx).with_turn(Some(guest()));
     assert!(handle.execute_await("cad_prepare", &[Value::string("x"),Value::string("code"),Value::string("START")]).is_err());
     assert!(handle.execute_await("cad_prepare", &[Value::string("x"),Value::string("code"),Value::string("PLA"),Value::string("other-context")]).is_err());
+    assert!(handle.execute_await("cad_prepare", &[Value::string("x"),Value::string("code"),Value::string("PLA"),Value::Bool(true),Value::string("extra")]).is_err());
+    let worker = std::thread::spawn(move || {
+        for (expected_title, expected_material, expected_images) in
+                [("test", "PLA", false), ("referenced", "PETG", true)] {
+            match rx.blocking_recv().unwrap() {
+                IoRequest::Scoped { request: scoped::Request::Cad { principal, context, title,
+                        source, material, use_recent_images }, reply } => {
+                    assert_eq!(principal,"telegram:user:42"); assert_eq!(context,"telegram:user:42");
+                    assert_eq!(title,expected_title); assert_eq!(source,"python code");
+                    assert_eq!(material,expected_material); assert_eq!(use_recent_images,expected_images);
+                    reply.send(Ok("queued".into())).unwrap();
+                }
+                _ => panic!("wrong request"),
+            }
+        }
+    });
+    handle.execute_await("cad_prepare", &[Value::string("test"),Value::string("python code")]).unwrap();
+    handle.execute_await("cad_prepare", &[Value::string("referenced"),Value::string("python code"),
+        Value::string("PETG"),Value::Bool(true)]).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn video_stabilize_is_bound_to_turn_and_accepts_no_paths_or_destination() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let handle = CoroutineHandle::new(tx).with_turn(Some(guest()));
+    assert!(handle.execute_await("video_stabilize", &[Value::string("/tmp/input.mp4")]).is_err());
     let worker = std::thread::spawn(move || {
         match rx.blocking_recv().unwrap() {
-            IoRequest::Scoped { request: scoped::Request::Cad {context,title,source,material}, reply } => {
-                assert_eq!(context,"telegram:user:42"); assert_eq!(title,"test");
-                assert_eq!(source,"python code"); assert_eq!(material,"PLA");
+            IoRequest::Scoped {
+                request: scoped::Request::VideoStabilize { principal, context },
+                reply,
+            } => {
+                assert_eq!(principal, "telegram:user:42");
+                assert_eq!(context, "telegram:user:42");
                 reply.send(Ok("queued".into())).unwrap();
             }
             _ => panic!("wrong request"),
         }
     });
-    handle.execute_await("cad_prepare", &[Value::string("test"),Value::string("python code")]).unwrap();
+    assert_eq!(handle.execute_await("video_stabilize", &[]).unwrap().to_string(), "\"queued\"");
     worker.join().unwrap();
 }
 

@@ -102,6 +102,41 @@ pub(crate) fn takeover_principal(context: &str, source_metadata: Option<&str>) -
         .unwrap_or_else(|| context_principal(context))
 }
 
+/// Compact durable provenance for a binary attachment.
+///
+/// The graph schema predates Telegram video support and uses a `platform_ref`
+/// string rather than separate filename/duration/size columns. Store a JSON
+/// object there; ingestion creates one attachment occurrence node per message
+/// while retaining content-addressed bytes on disk, so repeated files keep the
+/// metadata supplied with each message.
+pub(crate) fn attachment_platform_ref(
+    source_metadata: Option<&str>,
+    attachment: &crate::attachment::Attachment,
+) -> String {
+    let metadata = source_metadata
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .unwrap_or_default();
+    let text = |key: &str| metadata.get(key).and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let name = match text("attachment_name") {
+        "" => attachment.name.as_str(),
+        value => value,
+    };
+    let mime = match text("attachment_mime") {
+        "" => attachment.mime_type.as_str(),
+        value => value,
+    };
+    let size = text("attachment_size_bytes").parse::<u64>()
+        .unwrap_or(attachment.len() as u64);
+    serde_json::json!({
+        "platform_ref": text("attachment_ref"),
+        "name": name,
+        "mime_type": mime,
+        "duration_seconds": text("attachment_duration_seconds"),
+        "size_bytes": size,
+    }).to_string()
+}
+
 /// Identity for a turn that carries no speaker metadata.
 ///
 /// A group context has no single speaker, so it resolves to a group-kind
@@ -1195,12 +1230,9 @@ pub async fn handle_llm_takeover(
     if let Some(source_attachment) = attachment.clone() {
         let graph = memory_graph.clone();
         let message_id = graph_message_id.clone();
-        let platform_ref = source_metadata
-            .as_deref()
-            .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
-            .and_then(|metadata| metadata.get("attachment_ref").and_then(|value| value.as_str()).map(str::to_string));
+        let platform_ref = attachment_platform_ref(source_metadata.as_deref(), &source_attachment);
         tokio::task::spawn_blocking(move || {
-            graph.ingest_attachment(&message_id, &source_attachment, platform_ref.as_deref())
+            graph.ingest_attachment(&message_id, &source_attachment, Some(&platform_ref))
         })
         .await
         .context("join Ladybug attachment write")??;

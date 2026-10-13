@@ -4,14 +4,16 @@ use anyhow::ensure;
 
 pub const GUEST_TOOLS: &[&str] = &[
     "music_generate", "web_search", "web_read", "memory_remember", "memory_forget",
-    "context_propose", "cad_prepare",
+    "context_propose", "cad_prepare", "video_stabilize",
 ];
 
 #[derive(Debug)]
 pub enum Request {
     History { principal: String, context: String, limit: i64, before_ms: i64 },
     Music { context: String, caption: String, duration: i64, lyrics: String },
-    Cad { context: String, title: String, source: String, material: String },
+    Cad { principal: String, context: String, title: String, source: String,
+        material: String, use_recent_images: bool },
+    VideoStabilize { principal: String, context: String },
     Search { query: String },
     Read { url: String },
     Forget { principal: String, context: String, memory_id: String },
@@ -55,11 +57,20 @@ impl CoroutineHandle {
             }
             "cad_prepare" => {
                 let turn = self.require_turn(op)?;
-                ensure!((2..=3).contains(&args.len()), "cad_prepare(title, design_brief[, material]) expects 2–3 arguments; no destination or printer action is accepted");
-                let material = if args.len() == 3 { text(args, 2, 20)? } else { "PLA".into() };
+                ensure!((2..=4).contains(&args.len()), "cad_prepare(title, design_brief[, material[, use_recent_images]]) expects 2–4 arguments; no destination, attachment id or printer action is accepted");
+                let material = if args.len() >= 3 { text(args, 2, 20)? } else { "PLA".into() };
                 ensure!(matches!(material.as_str(), "PLA" | "PETG"), "material must be PLA or PETG");
-                Request::Cad { context: turn.context.clone(), title: text(args, 0, 300)?,
-                    source: text(args, 1, 64000)?, material }
+                Request::Cad { principal: turn.principal.clone(), context: turn.context.clone(),
+                    title: text(args, 0, 300)?, source: text(args, 1, 64000)?, material,
+                    use_recent_images: optional_bool(args, 3, false)? }
+            }
+            "video_stabilize" => {
+                let turn = self.require_turn(op)?;
+                ensure!(args.is_empty(), "video_stabilize() expects no arguments; it uses the latest authorized video in this conversation and accepts no host path or destination");
+                Request::VideoStabilize {
+                    principal: turn.principal.clone(),
+                    context: turn.context.clone(),
+                }
             }
             "web_search" => {
                 self.require_turn(op)?;
@@ -107,6 +118,14 @@ fn optional_int(args: &[Value], index: usize, default: i64) -> Result<i64> {
     }
 }
 
+fn optional_bool(args: &[Value], index: usize, default: bool) -> Result<bool> {
+    match args.get(index) {
+        Some(Value::Bool(value)) => Ok(*value),
+        None => Ok(default),
+        _ => bail!("argument {} must be a Bool", index + 1),
+    }
+}
+
 /// Check the entire block before any mutation, test, query or eval can run.
 /// Guest calls deliberately accept literal arguments only: nested calls could
 /// perform IO before the outer allowed tool checks its parameters.
@@ -127,7 +146,7 @@ pub fn validate_guest_code(code: &str, tools: &[String], program: &crate::ast::P
                     && program.get_function(&name).is_none(),
                     "permission denied: {name} is not an available guest tool");
                 ensure!(args.iter().all(|a| matches!(a, crate::parser::Expr::String(_) | crate::parser::Expr::Int(_) | crate::parser::Expr::Bool(_) | crate::parser::Expr::Float(_))),
-                    "guest tool arguments must be literal strings or numbers, not nested expressions");
+                    "guest tool arguments must be literal strings, numbers or booleans, not nested expressions");
             }
             _ => bail!("guest conversations may only call their listed tools with !eval or finish with !done"),
         }

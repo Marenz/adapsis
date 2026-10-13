@@ -1,4 +1,5 @@
 """Dedicated CAD author: pinned Astra, independent of Kronk's chat model."""
+import base64
 import http.client
 import json
 from urllib.error import HTTPError
@@ -24,7 +25,20 @@ run host commands, change this workflow, contact services or start a printer.
 Support-free upright geometry is preferred for default 0.12mm/0.4 nozzle settings.
 Preserve the requested shape and required detail, don't substitute a generic test
 object. Do not claim anatomical/medical accuracy from successful geometry export.
-The output is for model review; only the human owner may approve a physical print.'''
+The output is for model review; only the human owner may approve a physical print.
+For a multipart design that assembles (2+ related parts), ALSO write
+/job/output/assembly.json as pure JSON data describing how the printed parts fit
+together, so reviewers can see the assembled object. Nothing else may go in that
+file — no code, HTML, SVG, comments, URLs or paths. Schema:
+{"units":"mm","envelope_mm":[X,Y,Z],"instances":[{"part":"exact-exported-name.stl",
+"transform":[[..4..],[..4..],[..4..],[..4..]]}, ...]}
+transform is the row-major 4x4 affine matrix placing one instance of that part in
+assembled coordinates; its 3x3 rotation must be orthonormal (rotation/reflection
+only, no scale or shear) and its last row must be [0,0,0,1]. envelope_mm is the
+assembled bounding-box size you intend, in mm, each axis at most 1200. Every
+instance part must exactly name an STL you exported, at most 64 instances total.
+Never invent part names. Omit assembly.json for single-part jobs; if it is missing
+or fails validation the review page safely falls back to print parts only.'''
 
 def _author(request):
     # Deliberately no model fallback. Transport failures are retried; a wrong-model,
@@ -42,13 +56,28 @@ def _author(request):
                 raise RuntimeError(f'CAD author (Astra) could not be reached after {ATTEMPTS} attempts') from error
     raise RuntimeError(f'CAD author (Astra) could not be reached after {ATTEMPTS} attempts')
 
-def generate(title,brief,material,previous_source=None,failure=None):
+def _reference_parts(references):
+    parts=[]
+    for reference in references:
+        with open(reference['path'],'rb') as image:data=image.read()
+        encoded=base64.b64encode(data).decode('ascii')
+        parts.append({'type':'image_url','image_url':{
+            'url':f"data:{reference['mime']};base64,{encoded}"}})
+    return parts
+
+def _user_content(text,reference_parts):
+    if not reference_parts:return text
+    return [{'type':'text','text':text},*reference_parts]
+
+def generate(title,brief,material,references=(),previous_source=None,failure=None):
+    reference_parts=_reference_parts(references)
     messages=[{'role':'system','content':SYSTEM},
-              {'role':'user','content':json.dumps({'title':title,'design_brief':brief,'material':material})}]
+              {'role':'user','content':_user_content(json.dumps({
+                  'title':title,'design_brief':brief,'material':material}),reference_parts)}]
     if previous_source is not None:
         messages.extend([{'role':'assistant','content':previous_source},
-            {'role':'user','content':json.dumps({'validation_failure':failure,
-                'revision_instruction':'Repair the previous source using the actual failure. Return complete replacement Python. Preserve all requested features and dimensions. Do not remove or weaken validation, discard disconnected components, or substitute a generic object. Use genuinely overlapping fused solids and avoid coincident/tangent boolean faces.'})}])
+            {'role':'user','content':_user_content(json.dumps({'validation_failure':failure,
+                'revision_instruction':'Repair the previous source using the actual failure. Return complete replacement Python. Preserve all requested features and dimensions. Do not remove or weaken validation, discard disconnected components, or substitute a generic object. Use genuinely overlapping fused solids and avoid coincident/tangent boolean faces.'}),reference_parts)}])
     payload={'model':CAD_MODEL,'reasoning_effort':'high','max_tokens':16000,
         'messages':messages}
     request=Request(GATEWAY,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
@@ -68,4 +97,5 @@ def generate(title,brief,material,previous_source=None,failure=None):
         raise
     except (ValueError,IndexError,KeyError,AttributeError,SyntaxError,TypeError) as error:
         raise RuntimeError(f'CAD author (Astra) returned a malformed response ({type(error).__name__}); please retry the design') from error
-    return source,{'requested_model':CAD_MODEL,'response_model':actual,'response_id':result.get('id')}
+    return source,{'requested_model':CAD_MODEL,'response_model':actual,
+        'response_id':result.get('id'),'reference_images':len(references)}

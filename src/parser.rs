@@ -2986,22 +2986,31 @@ fn split_once_required<'a>(
         .ok_or_else(|| anyhow!("line {}: expected `{}` in `{}`", line, needle, input))
 }
 
-/// Returns true when `input` has a `=` outside any double-quoted string literal.
+/// Returns true when `needle` appears in `input` outside any double-quoted
+/// string literal.
 ///
-/// A `=` inside quotes (`foo("Z=0")`) must never select key=value syntax, because
-/// it is a value character, not a key/value separator. This is the quote-aware
-/// replacement for the naive `input.contains('=')` the heuristic used to run.
-fn contains_unquoted_equals(input: &str) -> bool {
+/// A character inside quotes is a value character, not syntax: a `=` in
+/// `foo("Z=0")` must not select key=value syntax, and a comparison operator in
+/// `note="a==b"` must not reject it. One scanner backs every quote-aware check
+/// in `parse_test_input` — the `=` separator probe *and* the `==` / `>=` / `<=` /
+/// `!=` comparison guards — so the two kinds of check cannot drift apart the way
+/// the raw `input.contains(..)` guards did (#47).
+fn contains_unquoted(input: &str, needle: &str) -> bool {
+    debug_assert!(!needle.is_empty(), "needle must not be empty");
     let mut in_string = false;
-    let mut chars = input.chars();
-    while let Some(ch) = chars.next() {
+    let mut chars = input.char_indices();
+    while let Some((idx, ch)) = chars.next() {
         match ch {
             '\\' if in_string => {
                 // Skip the escaped character so `\"` / `\\` don't toggle in_string.
                 chars.next();
             }
             '"' => in_string = !in_string,
-            '=' if !in_string => return true,
+            _ if !in_string => {
+                if input[idx..].starts_with(needle) {
+                    return true;
+                }
+            }
             _ => {}
         }
     }
@@ -3021,18 +3030,20 @@ pub fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
     }
 
     // Detect key=value format: a `=` OUTSIDE quotes (the key/value separator) and
-    // doesn't start with { — but not a comparison like `x==5` or `x>=3`. A `=`
-    // inside a quoted string argument (e.g. `foo("Z=0")`) must NOT select this
-    // mode; such input is a normal positional expression, not key=value syntax.
+    // doesn't start with { — but not a comparison like `x==5` or `x>=3`. A `=` or
+    // a comparison operator inside a quoted string argument (e.g. `foo("Z=0")`,
+    // `note="a==b"`) must NOT select this mode; such input is a normal positional
+    // expression, not key=value syntax. Every check uses the same quote-aware
+    // scanner so they cannot disagree about what is inside a string (#47).
     if !input.starts_with('{')
         && !input.starts_with('"')
         && !input.starts_with('-')
         && !input.chars().next().unwrap_or(' ').is_ascii_digit()
-        && contains_unquoted_equals(input)
-        && !input.contains("==")
-        && !input.contains(">=")
-        && !input.contains("<=")
-        && !input.contains("!=")
+        && contains_unquoted(input, "=")
+        && !contains_unquoted(input, "==")
+        && !contains_unquoted(input, ">=")
+        && !contains_unquoted(input, "<=")
+        && !contains_unquoted(input, "!=")
     {
         // Parse as space-separated key=value pairs
         let mut fields = Vec::new();
@@ -5427,6 +5438,64 @@ mod tests {
             }
             other => panic!("expected StructLiteral, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_input_key_value_quoted_value_with_equality_operator() {
+        // #47: `==` inside a quoted value must not flip the input out of
+        // key=value mode. Previously the two positional values were silently
+        // parsed as a bare comparison (`{_0: ..., _1: ...}`).
+        let e = parse_test_input(0, r#"note="a==b" age=5"#).unwrap();
+        match e {
+            Expr::StructLiteral(fields) => {
+                assert_eq!(fields.len(), 2, "expected two named fields, got {fields:?}");
+                assert_eq!(fields[0].name, "note");
+                assert!(matches!(&fields[0].value, Expr::String(s) if s == "a==b"));
+                assert_eq!(fields[1].name, "age");
+                assert!(matches!(fields[1].value, Expr::Int(5)));
+            }
+            other => panic!("expected StructLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_input_key_value_quoted_value_with_comparison_operators() {
+        // #47: `>=` / `<=` / `!=` inside a quoted value used to hard-fail with
+        // `unexpected token in expression`.
+        for (input, expected) in [
+            (r#"e="x>=y""#, "x>=y"),
+            (r#"e="x<=y""#, "x<=y"),
+            (r#"e="x!=y""#, "x!=y"),
+        ] {
+            let e = parse_test_input(0, input)
+                .unwrap_or_else(|err| panic!("`{input}` should parse, got {err}"));
+            match e {
+                Expr::StructLiteral(fields) => {
+                    assert_eq!(fields.len(), 1, "`{input}` -> {fields:?}");
+                    assert_eq!(fields[0].name, "e");
+                    assert!(
+                        matches!(&fields[0].value, Expr::String(s) if s == expected),
+                        "`{input}` value should be {expected:?}"
+                    );
+                }
+                other => panic!("`{input}` expected StructLiteral, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_input_bare_comparison_is_not_key_value() {
+        // A genuine comparison that is not inside quotes must still be rejected
+        // as key=value syntax — it is an expression, not `x` = `=5`.
+        let e = parse_test_input(0, "x==5").unwrap();
+        assert!(
+            !matches!(&e, Expr::StructLiteral(fields) if fields.iter().any(|f| f.name == "x")),
+            "`x==5` must not parse as key=value: {e:?}"
+        );
+        assert!(
+            matches!(&e, Expr::Binary { op: BinaryOp::Eq, .. }),
+            "`x==5` should be an Eq comparison: {e:?}"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════

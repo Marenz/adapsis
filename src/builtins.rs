@@ -647,7 +647,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
                reply_fn(reply_arg, text) is called to deliver agent completion summaries. \
                Optional permission_model overrides which model's permissions are used for the program \
                summary shown to the LLM (e.g. \"gemma4s\" to restrict non-admin users to execute-only view). \
-                Pass \"\" to use the default (active model's permissions). An optional image Attachment is sent to vision-capable models with the user message. Optional JSON source metadata records message_id, speaker_name, and created_at_ms in Ladybug.",
+                 Pass \"\" to use the default (active model's permissions). An optional image Attachment is sent to vision-capable models with the user message; Telegram bot intake cannot download attachments larger than 20 MB. Optional JSON source metadata records message_id, speaker_name, and created_at_ms in Ladybug.",
         category: BuiltinCategory::Io,
     },
     Builtin {
@@ -660,8 +660,8 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "cad_prepare",
         aliases: &[],
-        short: "prepare a 3D print with Astra: cad_prepare(title, design_brief[, material])",
-        long: "Send a complete plain-language design brief, dimensions, constraints and revision requirements. The backend is pinned to chatgpt/gpt-6-astra for CAD authoring, independent of the conversation model; no fallback to another model. Astra writes the actual Python geometry; do not author CAD yourself in the conversation. Legacy draft Python is accepted as design input and re-authored by Astra. Generated code runs in an isolated no-network sandbox with build123d/trimesh/numpy, producing watertight STL/optional STEP in mm on Z=0. No host files, credentials or printer access. Title <=300 chars, brief <=64000 chars; optional material PLA (default) or PETG. Mesh checks, A1 slicing and a preview/files follow, with a separate owner print-approval request. Returns immediately; result/failure arrives in THIS chat. NEVER starts a print. Mesh checks do not certify anatomical accuracy or physical fit. Revisions are new jobs preserving previous files. Requires +await.",
+        short: "prepare a 3D print with Astra: cad_prepare(title, design_brief[, material[, use_recent_images]])",
+        long: "Send a complete plain-language design brief, dimensions, constraints and revision requirements. The backend sends the brief, and only when explicitly enabled up to three recent images (20MB total), off-host to the external cloud CAD author chatgpt/gpt-6-astra. This is independent of the conversation model and has no fallback. Astra writes the actual Python geometry; do not author CAD yourself in the conversation. Legacy draft Python is accepted as design input and re-authored by Astra. Generated code runs in an isolated no-network sandbox with build123d/trimesh/numpy, producing watertight STL/optional STEP in mm on Z=0. No host files, credentials or printer access. Title <=300 chars, brief <=64000 chars; optional material PLA (default) or PETG. The optional Bool use_recent_images defaults false. Pass true only after explicit consent to send up to three recent images off-host when the current request depends on images supplied in THIS conversation; the runtime selects the ACL-authorized images and the caller cannot name paths, attachment ids, another context or another principal. The start and result messages state the actual reference count and cloud disclosure. Mesh checks, A1 slicing and a preview/files follow, with a separate owner print-approval request. Returns immediately; result/failure arrives in THIS chat. NEVER starts a print. Mesh checks do not certify anatomical accuracy or physical fit. Revisions are new jobs preserving previous files. Requires +await.",
         category: BuiltinCategory::Io,
     },
     Builtin {
@@ -669,6 +669,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         aliases: &[],
         short: "make a song in THIS chat: music_generate(description, duration_seconds[, lyrics])",
         long: "Starts background music generation and returns immediately. The server binds delivery to the current conversation; no destination argument exists. Duration must be 10–120 seconds. Description gives genre, instruments, mood and vocal style; optional lyrics may contain verse/chorus tags, otherwise use an empty string for instrumental music. One job at a time. A result or failure notification arrives in this chat. Do not claim delivery just because generation started. Requires +await.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
+        name: "video_stabilize",
+        aliases: &[],
+        short: "stabilize the latest video in THIS chat: video_stabilize()",
+        long: "Starts bounded two-pass ffmpeg/libvidstab stabilization of the latest ACL-authorized user video in the current conversation. Takes no arguments: the server binds source lookup and delivery to the turn's principal/context, so no host path or destination can be supplied. Telegram bots can download at most 20 MB; videos are also limited to 120 seconds. Output is kept at or below 49 MB for Telegram's 50 MB delivery cap, with processing limited to 15 minutes. One job runs at a time. The result reports resolution, crop/zoom and audio handling and is an ordinary transform of the original, with no generated or replaced frames. Returns immediately; result/failure arrives in THIS chat. Requires +await.",
         category: BuiltinCategory::Io,
     },
     Builtin {
@@ -781,7 +788,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         short: "notify a conversation context: conversation_notify(context, message[, attachment]) -> String",
         long: "Pushes a message (with optional Attachment) to a conversation context and triggers \
                the reply callback. Use from +spawn background tasks to deliver results asynchronously. \
-               The conversation's reply_fn receives the text and attachment for platform-specific delivery. \
+               Success means the platform-specific reply callback completed; enqueueing alone is not delivery. \
                Example: +await _ = conversation_notify(\"telegram:100000001\", \"Your song is ready!\", audio_attachment)",
         category: BuiltinCategory::Io,
     },
@@ -831,12 +838,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "http_upload",
         aliases: &[],
-        short: "multipart file upload: http_upload(url, file_path, file_field, extra_fields) -> String",
-        long: "Uploads a local file via HTTP multipart/form-data POST. Returns the response body as a String. \
-               Takes `(url:String, file_path:String, file_field:String, extra_fields:String)`. \
-               file_field is the form field name for the file (e.g. \"audio\", \"document\", \"photo\"). \
-               extra_fields is optional, format: \"key1=val1&key2=val2\" for additional form fields. \
-               Example: http_upload(concat(\"https://api.telegram.org/bot\", token, \"/sendAudio\"), \"/tmp/song.wav\", \"audio\", concat(\"chat_id=\", to_string(chat_id)))",
+        short: "multipart file upload: http_upload(url, file_path, file_field, extra_fields) -> Result<String>",
+        long: "Uploads a local file or Attachment via HTTP multipart/form-data POST. Returns Ok(response body) for a 2xx response and catchable Err(error) for transport, file-read, timeout, or non-2xx failures. \
+                Takes `(url:String, file_path:String, file_field:String, extra_fields:String)`. \
+                file_field is the form field name for the file (e.g. \"audio\", \"document\", \"photo\"). \
+                extra_fields is optional, format: \"key1=val1&key2=val2\" for additional form fields. \
+                Match Ok/Err explicitly; do not bind the Result directly to a String. \
+                Example: +match http_upload(concat(\"https://api.telegram.org/bot\", token, \"/sendAudio\"), \"/tmp/song.wav\", \"audio\", concat(\"chat_id=\", to_string(chat_id)))",
         category: BuiltinCategory::Io,
     },
     Builtin {

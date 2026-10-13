@@ -107,9 +107,12 @@ pub enum Op {
     Dup,
 
     // ── Struct / composite construction ──────────────────────────────
-    /// Pop N values (one per field name), construct a struct.
-    /// Field names are interned IDs in declaration order; values are popped in reverse.
-    MakeStruct(Vec<InternedId>),
+    /// Pop N values (one per field name), construct a named struct.
+    /// The type and field names are interned IDs; values are popped in reverse.
+    MakeStruct {
+        type_id: InternedId,
+        field_ids: Vec<InternedId>,
+    },
     /// Pop a struct value, push the value of the named field (interned ID).
     GetField(InternedId),
     /// Pop N values, construct a list.
@@ -600,6 +603,7 @@ impl<'a> Compiler<'a> {
             }
 
             ast::Expr::StructInit { ty, fields } => {
+                let type_id = self.intern(ty);
                 let field_ids: Vec<InternedId> = fields
                     .iter()
                     .map(|f| self.interner.intern(&f.name))
@@ -607,8 +611,7 @@ impl<'a> Compiler<'a> {
                 for field in fields {
                     self.compile_expr(&field.value)?;
                 }
-                let _ = ty; // type name currently unused in bytecode
-                self.emit(Op::MakeStruct(field_ids));
+                self.emit(Op::MakeStruct { type_id, field_ids });
             }
         }
         Ok(())
@@ -1048,14 +1051,13 @@ fn run_loop(
             }
 
             // ── Struct / composite ───────────────────────────────────
-            Op::MakeStruct(field_ids) => {
-                let empty_id = crate::intern::intern_display("");
+            Op::MakeStruct { type_id, field_ids } => {
                 let mut fields: HashMap<InternedId, Value> = HashMap::new();
                 for id in field_ids.iter().rev() {
                     let val = pop_stack(&mut state.stack)?;
                     fields.insert(*id, val);
                 }
-                state.stack.push(Value::strct_interned(empty_id, fields));
+                state.stack.push(Value::strct_interned(*type_id, fields));
             }
             Op::GetField(field_id) => {
                 let field_id = *field_id;
@@ -1431,6 +1433,33 @@ mod tests {
             .iter()
             .any(|op| matches!(op, Op::GetField(f) if crate::intern::resolve_display(*f) == "x"));
         assert!(has_get_field, "should emit GetField for field \"x\"");
+    }
+
+    #[test]
+    fn struct_init_bytecode_and_value_preserve_type_name() {
+        let source = "\
++type Point = x:Int, y:Int
+
++fn make_point ()->Point
+  +let p:Point = {x: 10, y: 20}
+  +return p
+";
+        let program = build_program(source);
+        let func = program.get_function("make_point").unwrap();
+        let compiled = compile_function(func, &program).expect("compilation failed");
+        let point_id = compiled.interner.get("Point").expect("Point should be interned");
+        assert!(compiled.bytecode.iter().any(|op| {
+            matches!(op, Op::MakeStruct { type_id, .. } if *type_id == point_id)
+        }));
+
+        let value = execute(&compiled, vec![], &program).expect("execution failed");
+        match value {
+            VmResult::Done(Value::Struct(type_id, fields)) => {
+                assert_eq!(crate::intern::resolve_display(type_id), "Point");
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("expected named Point struct, got {other:?}"),
+        }
     }
 
     #[test]

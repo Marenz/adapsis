@@ -1,6 +1,17 @@
 //! Bounded original-message retrieval, without waiting for extracted memories.
 use super::*;
 
+const MAX_VIDEO_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const MAX_VIDEO_CANDIDATES: usize = 256;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
 impl MemoryGraph {
     /// Recover recent image references in THIS authorized context after session
     /// reload (session JSON intentionally does not contain binary attachments).
@@ -28,6 +39,51 @@ impl MemoryGraph {
         }
         images.reverse();
         Ok(images)
+    }
+
+    /// The latest authorized *video* in this context, for the stabilization tool.
+    ///
+    /// Videos are not vision parts, so they never reach the model the way photos
+    /// do; the turn-bound `video_stabilize` capability retrieves the newest user
+    /// video through this path instead. Read membership is checked exactly like
+    /// image recovery, and the result is the raw original bytes — never a path
+    /// the caller chose. Returns `None` when the principal cannot read the
+    /// context or no video has been supplied.
+    pub fn latest_authorized_video(&self, principal: &str, context: &str) -> Result<Option<(crate::attachment::Attachment, i64)>> {
+        let connection = Connection::new(&self.database)?;
+        let cutoff = now_ms().saturating_sub(MAX_VIDEO_AGE_MS);
+        // MIME metadata is not authoritative (Telegram can label media as
+        // octet-stream), so validate candidate bytes instead of filtering in
+        // Cypher. Keep the scan bounded but broad enough for a photo burst.
+        let query = format!(
+            "MATCH (:Principal {{id: $principal}})-[grant:MEMBER_OF]->(:AccessGroup)<-[:USES_ACCESS_GROUP]-(c:Context {{id: $context}})<-[:IN_CONTEXT]-(m:Message)-[:HAS_ATTACHMENT]->(a:Attachment) \
+             WHERE grant.can_read = true AND m.role = 'user' AND m.created_at_ms >= $cutoff \
+             RETURN a.storage_path, a.mime_type, a.platform_ref, m.created_at_ms ORDER BY m.created_at_ms DESC, m.id DESC LIMIT {MAX_VIDEO_CANDIDATES}"
+        );
+        let mut stmt = connection.prepare(&query)?;
+        let rows = connection.execute(&mut stmt, vec![("principal", principal.into()), ("context", context.into()), ("cutoff", cutoff.into())])?;
+        for row in rows {
+            let path = std::path::PathBuf::from(string_value(&row[0])?);
+            let Ok(metadata) = std::fs::metadata(&path) else { continue };
+            if metadata.len() == 0 { continue; }
+            let platform_ref = row.get(2).and_then(|value| string_value(value).ok())
+                .unwrap_or_default();
+            let name = serde_json::from_str::<serde_json::Value>(&platform_ref).ok()
+                .and_then(|value| value.get("name").and_then(|name| name.as_str()).map(str::to_string))
+                .filter(|name| !name.is_empty())
+                .and_then(|name| std::path::Path::new(&name).file_name().map(|name| name.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "video-reference".into());
+            let created_at_ms = int64_value(&row[3])?;
+            let attachment = crate::attachment::Attachment {
+                data: crate::attachment::AttachmentData::File(path),
+                mime_type: string_value(&row[1])?,
+                name,
+            };
+            if attachment.video_mime().is_some() {
+                return Ok(Some((attachment, created_at_ms)));
+            }
+        }
+        Ok(None)
     }
 
     pub fn conversation_history(&self, principal: &str, context: &str, limit: i64, before_ms: i64) -> Result<String> {
@@ -116,6 +172,40 @@ mod tests {
     }
 
     #[test]
+    fn recent_images_are_bounded_to_three_and_twenty_megabytes() -> Result<()> {
+        let graph=MemoryGraph::in_memory()?;
+        let mut files=Vec::new();
+        for index in 0..6 {
+            let message_id=format!("bounded-photo-{index}");
+            graph.ingest_message(&SourceMessage {
+                id:message_id.clone(),platform_message_id:Some(index.to_string()),
+                context_id:"bounded-dm".into(),context_kind:"telegram_dm".into(),
+                speaker_id:"guest_user".into(),speaker_name:"GuestUser".into(),role:"user".into(),
+                content:String::new(),created_at_ms:100+index,
+            },"admin")?;
+            let file=tempfile::NamedTempFile::new()?;
+            std::fs::write(file.path(),b"\x89PNG\r\n\x1a\nsmall")?;
+            if index==5 {
+                std::fs::OpenOptions::new().write(true).open(file.path())?
+                    .set_len(21*1024*1024)?;
+            }
+            let connection=Connection::new(&graph.database)?;
+            let mut stmt=connection.prepare("MATCH (m:Message {id: $message}) CREATE (a:Attachment {id: $attachment,storage_path:$path,mime_type:'application/octet-stream'}) CREATE (m)-[:HAS_ATTACHMENT]->(a)")?;
+            connection.execute(&mut stmt,vec![
+                ("message",message_id.into()),
+                ("attachment",format!("bounded-image-{index}").into()),
+                ("path",file.path().to_string_lossy().to_string().into()),
+            ])?;
+            files.push(file);
+        }
+        let images=graph.recent_image_attachments("guest_user","bounded-dm")?;
+        assert_eq!(images.len(),3);
+        assert!(images.iter().map(crate::attachment::Attachment::len).sum::<usize>()<=20*1024*1024);
+        assert!(images.iter().all(|image| image.image_mime()==Some("image/png")));
+        Ok(())
+    }
+
+    #[test]
     fn original_history_is_bounded_ordered_and_acl_filtered() -> Result<()> {
         let graph = MemoryGraph::in_memory()?;
         for (id, role, time) in [("one", "user", 100), ("two", "assistant", 200), ("three", "user", 300)] {
@@ -135,6 +225,141 @@ mod tests {
             let empty: serde_json::Value = serde_json::from_str(&graph.conversation_history(principal, context, 10, i64::MAX)?)?;
             assert_eq!(empty["messages"].as_array().unwrap().len(), 0);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn latest_authorized_video_is_acl_filtered_and_newest_first() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        let now = now_ms();
+        for (id, time) in [("v-old", now - 200), ("v-new", now - 100)] {
+            graph.ingest_message(&SourceMessage {
+                id: id.into(), platform_message_id: Some(id.into()), context_id: "guest_user-dm".into(),
+                context_kind: "telegram_dm".into(), speaker_id: "guest_user".into(), speaker_name: "GuestUser".into(),
+                role: "user".into(), content: String::new(), created_at_ms: time,
+            }, "admin")?;
+        }
+        let connection = Connection::new(&graph.database)?;
+        let link = |message: &str, path: &std::path::Path, name: &str| -> Result<()> {
+            let mut stmt = connection.prepare(
+                "MATCH (m:Message {id: $id}) CREATE (a:Attachment {id: $aid, storage_path: $path, mime_type: 'application/octet-stream', platform_ref: $platform_ref}) CREATE (m)-[:HAS_ATTACHMENT]->(a)")?;
+            connection.execute(&mut stmt, vec![
+                ("id", message.into()), ("aid", format!("a-{message}").into()),
+                ("path", path.to_string_lossy().to_string().into()),
+                ("platform_ref", serde_json::json!({"name": name}).to_string().into())])?;
+            Ok(())
+        };
+        let old = tempfile::NamedTempFile::new()?;
+        let new = tempfile::NamedTempFile::new()?;
+        // ISO-BMFF header so video_mime() recognizes them despite the octet-stream MIME.
+        std::fs::write(old.path(), b"\x00\x00\x00\x18ftypold1")?;
+        std::fs::write(new.path(), b"\x00\x00\x00\x18ftypnew2")?;
+        link("v-old", old.path(), "old.mp4")?;
+        link("v-new", new.path(), "phone-original.mp4")?;
+
+        // Both members read the *newest* video; an outsider or another context sees none.
+        let (video, created_at_ms) = graph.latest_authorized_video("guest_user", "guest_user-dm")?.unwrap();
+        assert_eq!(video.video_mime(), Some("video/mp4"));
+        assert_eq!(video.bytes()?, b"\x00\x00\x00\x18ftypnew2");
+        assert_eq!(video.name, "phone-original.mp4");
+        assert_eq!(created_at_ms, now - 100);
+        assert!(graph.latest_authorized_video("admin", "guest_user-dm")?.is_some());
+        assert!(graph.latest_authorized_video("outsider", "guest_user-dm")?.is_none());
+        assert!(graph.latest_authorized_video("guest_user", "other-dm")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_video_bytes_keep_metadata_for_each_message() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        let now = now_ms();
+        for (id, time) in [("same-old", now - 200), ("same-new", now - 100)] {
+            graph.ingest_message(&SourceMessage {
+                id: id.into(), platform_message_id: Some(id.into()), context_id: "guest_user-dm".into(),
+                context_kind: "telegram_dm".into(), speaker_id: "guest_user".into(), speaker_name: "GuestUser".into(),
+                role: "user".into(), content: String::new(), created_at_ms: time,
+            }, "admin")?;
+        }
+        let mut bytes = b"\x00\x00\x00\x18ftyp".to_vec();
+        bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+        let attachment = crate::attachment::Attachment::from_bytes(
+            bytes, "video/mp4", "download.mp4",
+        )?;
+        let old_ref = serde_json::json!({"name": "first-name.mp4"}).to_string();
+        let sha = graph.ingest_attachment("same-old", &attachment, Some(&old_ref))?;
+        let storage_path = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("adapsis/attachments").join(&sha);
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+        }
+        let _remove = Remove(storage_path);
+        let new_ref = serde_json::json!({"name": "latest-name.mp4"}).to_string();
+        graph.ingest_attachment("same-new", &attachment, Some(&new_ref))?;
+
+        let (video, _) = graph.latest_authorized_video("guest_user", "guest_user-dm")?.unwrap();
+        assert_eq!(video.name, "latest-name.mp4");
+        Ok(())
+    }
+
+    #[test]
+    fn newer_photo_burst_does_not_hide_recent_video() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        let now = now_ms();
+        graph.ingest_message(&SourceMessage {
+            id: "video".into(), platform_message_id: Some("video".into()),
+            context_id: "guest_user-dm".into(), context_kind: "telegram_dm".into(),
+            speaker_id: "guest_user".into(), speaker_name: "GuestUser".into(), role: "user".into(),
+            content: String::new(), created_at_ms: now - 100,
+        }, "admin")?;
+        let video = tempfile::NamedTempFile::new()?;
+        std::fs::write(video.path(), b"\x00\x00\x00\x18ftypvideo")?;
+        let photo = tempfile::NamedTempFile::new()?;
+        std::fs::write(photo.path(), b"\xff\xd8\xffphoto")?;
+        let connection = Connection::new(&graph.database)?;
+        let mut video_stmt = connection.prepare(
+            "MATCH (m:Message {id:'video'}) CREATE (a:Attachment {id:'video-attachment',storage_path:$path,mime_type:'application/octet-stream',platform_ref:'{}'}) CREATE (m)-[:HAS_ATTACHMENT]->(a)"
+        )?;
+        connection.execute(&mut video_stmt, vec![("path", video.path().to_string_lossy().to_string().into())])?;
+
+        for index in 0..20 {
+            let id = format!("photo-{index}");
+            graph.ingest_message(&SourceMessage {
+                id: id.clone(), platform_message_id: Some(id.clone()),
+                context_id: "guest_user-dm".into(), context_kind: "telegram_dm".into(),
+                speaker_id: "guest_user".into(), speaker_name: "GuestUser".into(), role: "user".into(),
+                content: String::new(), created_at_ms: now + index,
+            }, "admin")?;
+            let mut photo_stmt = connection.prepare(
+                "MATCH (m:Message {id: $id}) CREATE (a:Attachment {id: $attachment,storage_path:$path,mime_type:'image/jpeg',platform_ref:'{}'}) CREATE (m)-[:HAS_ATTACHMENT]->(a)"
+            )?;
+            connection.execute(&mut photo_stmt, vec![
+                ("id", id.clone().into()),
+                ("attachment", format!("attachment-{id}").into()),
+                ("path", photo.path().to_string_lossy().to_string().into()),
+            ])?;
+        }
+
+        let (selected, _) = graph.latest_authorized_video("guest_user", "guest_user-dm")?.unwrap();
+        assert_eq!(selected.bytes()?, b"\x00\x00\x00\x18ftypvideo");
+        Ok(())
+    }
+
+    #[test]
+    fn old_video_is_rejected_by_the_query_cutoff() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&SourceMessage {
+            id: "stale-video".into(), platform_message_id: Some("stale".into()),
+            context_id: "guest_user-dm".into(), context_kind: "telegram_dm".into(),
+            speaker_id: "guest_user".into(), speaker_name: "GuestUser".into(), role: "user".into(),
+            content: String::new(), created_at_ms: now_ms() - MAX_VIDEO_AGE_MS - 1,
+        }, "admin")?;
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"\x00\x00\x00\x18ftypstale")?;
+        let connection = Connection::new(&graph.database)?;
+        let mut stmt = connection.prepare("MATCH (m:Message {id:'stale-video'}) CREATE (a:Attachment {id:'stale-attachment',storage_path:$path,mime_type:'video/mp4',platform_ref:'{}'}) CREATE (m)-[:HAS_ATTACHMENT]->(a)")?;
+        connection.execute(&mut stmt, vec![("path", file.path().to_string_lossy().to_string().into())])?;
+        assert!(graph.latest_authorized_video("guest_user", "guest_user-dm")?.is_none());
         Ok(())
     }
 

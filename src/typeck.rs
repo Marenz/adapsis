@@ -1001,17 +1001,19 @@ pub fn reconstruct_expr(expr: &Expr) -> String {
             crate::ast::UnaryOp::Not => format!("NOT {}", reconstruct_expr(expr)),
             crate::ast::UnaryOp::Neg => format!("-{}", reconstruct_expr(expr)),
         },
-        Expr::StructInit { ty, fields } => {
+        Expr::StructInit { ty: _, fields } => {
+            // A struct literal is written `{..}` with no type prefix — the parser
+            // has no `Type{..}` initializer syntax, and the declared type comes
+            // from the surrounding `+let`/parameter annotation. Reconstructing
+            // `Point{..}` (the AST carries the propagated name, #53) would not
+            // re-parse, breaking `?source` and library persistence, so keep the
+            // literal anonymous and let the annotation supply the type again.
             let fs = fields
                 .iter()
                 .map(|f| format!("{}: {}", f.name, reconstruct_expr(&f.value)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            if ty.is_empty() {
-                format!("{{{fs}}}")
-            } else {
-                format!("{ty}{{{fs}}}")
-            }
+            format!("{{{fs}}}")
         }
     }
 }
@@ -1897,6 +1899,33 @@ mod tests {
             ],
         });
         assert_eq!(reconstruct_expr(&expr), r#"concat("hello", " world")"#);
+    }
+
+    #[test]
+    fn reconstructed_let_struct_literal_stays_anonymous_and_reparses() {
+        // #53 propagates the declared struct name into the AST's StructInit. The
+        // parser cannot read a `Point{..}` initializer, so source reconstruction
+        // must keep the literal anonymous — the `+let` annotation re-supplies the
+        // type on reparse. Otherwise `?source` and library persistence would emit
+        // unparseable code.
+        let source = "\
++type Point = x:Int, y:Int
+
++fn make_point ()->Point
+  +let p:Point = {x: 1, y: 2}
+  +return p
+";
+        let program = build_program(source);
+        let reconstructed = reconstruct_source(&program, "make_point");
+        assert!(
+            reconstructed.contains("+let p:Point = {x: 1, y: 2}"),
+            "literal must reconstruct as `{{..}}`, got:\n{reconstructed}"
+        );
+        let reparse = parser::parse(&reconstructed);
+        assert!(
+            reparse.is_ok(),
+            "reconstructed source must re-parse: {reparse:?}\n{reconstructed}"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════

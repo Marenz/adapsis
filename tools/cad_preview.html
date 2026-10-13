@@ -1,7 +1,179 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__TITLE__ · Kronk CAD</title><style>body{background:#151a25;color:#e8edf8;font:16px system-ui;margin:24px auto;max-width:1050px;padding:0 16px}#view{height:65vh;min-height:340px;background:#293449;border-radius:16px}canvas{width:100%;height:100%;display:block;touch-action:none}a{color:#c9b3ff}li{margin:10px 0}p{line-height:1.6}</style><script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js"}}</script></head><body><h1>__TITLE__</h1><p>Prepared by Kronk · actual exported model · rotate / zoom to inspect.</p><div id="view"></div><p id="status">Loading…</p><ul id="downloads"></ul><p><a href="prepared-a1.3mf" download>Prepared A1 3MF</a> · <a href="manifest.json">Report</a></p><p><strong>Printing requires Marenz’s approval.</strong> No print has been started. Geometry/slicer checks do not certify fit, supports, anatomical accuracy or suitability for body contact. Review the actual model and layer preview before printing.</p><script type="module">
-try{const THREE=await import('three');const {OrbitControls}=await import('https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/controls/OrbitControls.js');const {STLLoader}=await import('https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/loaders/STLLoader.js');
-const res=await fetch('manifest.json');if(!res.ok)throw Error('Manifest failed');const data=await res.json();const host=document.querySelector('#view'),scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(38,1,.1,10000);camera.up.set(0,0,1);const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setClearColor(0x293449);renderer.setPixelRatio(Math.min(devicePixelRatio,2));host.appendChild(renderer.domElement);const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;scene.add(new THREE.HemisphereLight(0xffffff,0x56516d,2));const light=new THREE.DirectionalLight(0xffffff,3);light.position.set(-100,-120,200);scene.add(light);const models=new THREE.Group();scene.add(models);let x=0;
-for(const p of data.parts){const geo=await new STLLoader().loadAsync(p.file);geo.computeBoundingBox();const centre=geo.boundingBox.getCenter(new THREE.Vector3());geo.translate(-centre.x,-centre.y,-geo.boundingBox.min.z);const mesh=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0x9eabd0,roughness:.6}));mesh.position.x=x+p.size_mm[0]/2;x+=p.size_mm[0]+15;models.add(mesh);const li=document.createElement('li'),a=document.createElement('a');a.href=p.file;a.download=p.file;a.textContent=p.file+' · '+p.size_mm.map(n=>n.toFixed(1)).join(' × ')+' mm';li.appendChild(a);document.querySelector('#downloads').appendChild(li)}
-const box=new THREE.Box3().setFromObject(models),centre=box.getCenter(new THREE.Vector3()),size=box.getSize(new THREE.Vector3());controls.target.copy(centre);let pending=false;function resize(){pending=false;renderer.setSize(host.clientWidth,host.clientHeight,false);camera.aspect=host.clientWidth/host.clientHeight;camera.updateProjectionMatrix()}new ResizeObserver(()=>{if(!pending){pending=true;requestAnimationFrame(resize)}}).observe(host);resize();const d=Math.max(size.x/camera.aspect,size.y,size.z)*2.3;camera.position.copy(centre).add(new THREE.Vector3(.35*d,-d,.7*d));controls.update();document.querySelector('#status').textContent=`Ready · ${data.material} · ${data.plates} plate(s) · ${data.minutes} min · ${data.grams} g · awaiting owner approval`;renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera)});
-}catch(e){document.querySelector('#status').textContent='Preview failed: '+e.message;console.error(e)}
-</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ · Kronk CAD</title>
+<style>
+:root{color-scheme:dark}
+body{background:#151a25;color:#e8edf8;font:16px system-ui;margin:24px auto;max-width:1050px;padding:0 16px}
+h1{font-size:1.4rem}
+.views{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.views button{background:#293449;color:#e8edf8;border:1px solid #3d4c68;border-radius:10px;padding:9px 16px;font:inherit;cursor:pointer}
+.views button[aria-pressed="true"]{background:#5b46a8;border-color:#8a6fe0}
+.views button:disabled{opacity:.45;cursor:not-allowed}
+#view{height:65vh;min-height:320px;background:#293449;border-radius:16px;overflow:hidden}
+#view canvas{width:100%;height:100%;display:block;touch-action:none}
+a{color:#c9b3ff}
+li{margin:10px 0}
+p{line-height:1.6}
+#assembly-note{color:#f2c98a}
+@media(max-width:600px){#view{height:55vh;min-height:260px}body{margin:16px auto}}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js"}}</script>
+</head>
+<body>
+<h1>__TITLE__</h1>
+<p>Prepared by Kronk · actual exported model · rotate / zoom to inspect.</p>
+<div class="views" role="group" aria-label="Model view">
+  <button id="btn-assembled" type="button" aria-pressed="false">Assembled</button>
+  <button id="btn-parts" type="button" aria-pressed="false">Print parts</button>
+</div>
+<div id="view"></div>
+<p id="status">Loading…</p>
+<p id="assembly-note"></p>
+<ul id="downloads"></ul>
+<p><a href="prepared-a1.3mf" download>Prepared A1 3MF</a> · <a href="manifest.json">Report</a></p>
+<p><strong>Printing requires Marenz’s approval.</strong> No print has been started. Geometry/slicer checks do not certify fit, supports, anatomical accuracy or suitability for body contact. Review the actual model and layer preview before printing.</p>
+<script type="module">
+try{
+  const THREE=await import('three');
+  const {OrbitControls}=await import('https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/controls/OrbitControls.js');
+  const {STLLoader}=await import('https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/loaders/STLLoader.js');
+
+  const res=await fetch('manifest.json');
+  if(!res.ok)throw Error('Manifest failed');
+  const data=await res.json();
+  if(!Array.isArray(data.parts)||!data.parts.length)throw Error('Manifest has no parts');
+
+  const host=document.querySelector('#view');
+  const scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x293449);
+  const camera=new THREE.PerspectiveCamera(38,1,.1,100000);
+  camera.up.set(0,0,1);
+  const renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setClearColor(0x293449);
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  host.appendChild(renderer.domElement);
+  const controls=new OrbitControls(camera,renderer.domElement);
+  controls.enableDamping=true;
+  scene.add(new THREE.HemisphereLight(0xffffff,0x56516d,2));
+  const light=new THREE.DirectionalLight(0xffffff,3);
+  light.position.set(-100,-120,200);
+  scene.add(light);
+
+  const partsGroup=new THREE.Group();
+  const assembledGroup=new THREE.Group();
+  partsGroup.visible=false;
+  assembledGroup.visible=false;
+  scene.add(partsGroup,assembledGroup);
+
+  const material=new THREE.MeshStandardMaterial({color:0x9eabd0,roughness:.6});
+  const loader=new STLLoader();
+  const geometries={};
+  async function geometryFor(file){
+    if(!geometries[file])geometries[file]=await loader.loadAsync(file);
+    return geometries[file];
+  }
+  const finiteNumber=value=>typeof value==='number'&&Number.isFinite(value);
+  const numericRow=row=>Array.isArray(row)&&row.length===4&&row.every(finiteNumber);
+  const validTransform=transform=>Array.isArray(transform)&&transform.length===4&&transform.every(numericRow);
+  const sizeOf=part=>Array.isArray(part.size_mm)&&part.size_mm.length===3&&part.size_mm.every(finiteNumber)?part.size_mm:[0,0,0];
+  const partFiles=new Set(data.parts.filter(part=>part&&typeof part.file==='string').map(part=>part.file));
+
+  let cursor=0;
+  for(const part of data.parts){
+    const source=await geometryFor(part.file);
+    source.computeBoundingBox();
+    const centre=source.boundingBox.getCenter(new THREE.Vector3());
+    const geometry=source.clone();
+    geometry.translate(-centre.x,-centre.y,-source.boundingBox.min.z);
+    const mesh=new THREE.Mesh(geometry,material);
+    mesh.position.x=cursor+sizeOf(part)[0]/2;
+    cursor+=sizeOf(part)[0]+15;
+    partsGroup.add(mesh);
+  }
+
+  const assembly=data.assembly||{};
+  const instances=assembly.available&&Array.isArray(assembly.instances)?assembly.instances:[];
+  for(const instance of instances){
+    if(!instance||typeof instance.part!=='string'||!partFiles.has(instance.part))continue;
+    const transform=instance.transform;
+    if(!validTransform(transform))continue;
+    const matrix=new THREE.Matrix4().set(
+      transform[0][0],transform[0][1],transform[0][2],transform[0][3],
+      transform[1][0],transform[1][1],transform[1][2],transform[1][3],
+      transform[2][0],transform[2][1],transform[2][2],transform[2][3],
+      transform[3][0],transform[3][1],transform[3][2],transform[3][3]);
+    const geometry=(await geometryFor(instance.part)).clone();
+    geometry.applyMatrix4(matrix);
+    assembledGroup.add(new THREE.Mesh(geometry,material));
+  }
+  const canAssemble=assembledGroup.children.length>0;
+
+  function frame(){
+    const active=assembledGroup.visible?assembledGroup:partsGroup;
+    const box=new THREE.Box3().setFromObject(active);
+    if(box.isEmpty())return;
+    const centre=box.getCenter(new THREE.Vector3()),size=box.getSize(new THREE.Vector3());
+    const radius=Math.max(size.length(),1);
+    controls.target.copy(centre);
+    camera.position.copy(centre).add(new THREE.Vector3(.35,-1,.7).normalize().multiplyScalar(radius*2.6));
+    camera.aspect=host.clientWidth/host.clientHeight||1;
+    camera.near=Math.max(radius/1000,.1);
+    camera.far=radius*100;
+    camera.updateProjectionMatrix();
+    controls.update();
+  }
+
+  const assembledButton=document.querySelector('#btn-assembled');
+  const partsButton=document.querySelector('#btn-parts');
+  function setView(mode){
+    if(mode==='assembled'&&!canAssemble)return;
+    partsGroup.visible=mode==='parts';
+    assembledGroup.visible=mode==='assembled';
+    assembledButton.setAttribute('aria-pressed',String(mode==='assembled'));
+    partsButton.setAttribute('aria-pressed',String(mode==='parts'));
+    frame();
+  }
+  assembledButton.disabled=!canAssemble;
+  assembledButton.addEventListener('click',()=>setView('assembled'));
+  partsButton.addEventListener('click',()=>setView('parts'));
+
+  const note=document.querySelector('#assembly-note');
+  if(canAssemble){
+    const size=(assembly.assembled_size_mm||[]).map(n=>Number(n).toFixed(1)).join(' × ');
+    note.textContent=`Assembled layout · ${instances.length} part instance(s)${size?` · ${size} mm`:''} · built from the same checked STL files offered for download.`;
+  }else{
+    note.textContent='Assembled view unavailable: '+(assembly.reason||'no validated assembly layout was supplied')+'.';
+  }
+
+  for(const part of data.parts){
+    const item=document.createElement('li'),link=document.createElement('a');
+    link.href=part.file;link.download=part.file;
+    link.textContent=part.file+' · '+sizeOf(part).map(n=>n.toFixed(1)).join(' × ')+' mm';
+    item.appendChild(link);
+    document.querySelector('#downloads').appendChild(item);
+  }
+
+  let pending=false;
+  function resize(){
+    pending=false;
+    renderer.setSize(host.clientWidth,host.clientHeight,false);
+    camera.aspect=host.clientWidth/host.clientHeight||1;
+    camera.updateProjectionMatrix();
+    frame();
+  }
+  new ResizeObserver(()=>{if(!pending){pending=true;requestAnimationFrame(resize)}}).observe(host);
+  resize();
+  setView(canAssemble?'assembled':'parts');
+
+  document.querySelector('#status').textContent=`Ready · ${data.material} · ${data.plates} plate(s) · ${data.minutes} min · ${data.grams} g · awaiting owner approval`;
+  renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera)});
+}catch(e){
+  document.querySelector('#status').textContent='Preview failed: '+e.message;
+  console.error(e);
+}
+</script>
+</body>
+</html>

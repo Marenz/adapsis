@@ -178,8 +178,12 @@ impl MemoryGraph {
     }
 
     #[cfg(test)]
-    fn in_memory() -> Result<Self> {
-        let database = Database::in_memory(SystemConfig::default())?;
+    pub(crate) fn in_memory() -> Result<Self> {
+        // Ladybug's default reserves a very large virtual mapping per database.
+        // Keep parallel tests bounded, matching the crate's own test configuration.
+        let database = Database::in_memory(
+            SystemConfig::default().max_db_size(16 * 1024 * 1024 * 1024),
+        )?;
         let graph = Self {
             database: Arc::new(database),
             write_lock: Arc::new(Mutex::new(())),
@@ -272,11 +276,16 @@ impl MemoryGraph {
         let connection = Connection::new(&self.database)?;
         connection.query("BEGIN TRANSACTION")?;
         let result = (|| {
+            // Metadata belongs to this message's attachment occurrence, while
+            // the bytes remain content-addressed and shared on disk. A sha-only
+            // node would retain the first sender's filename/platform metadata
+            // when identical bytes are sent again in another message.
+            let attachment_id = format!("attachment:{sha256}:{message_id}");
             execute(
                 &connection,
                 "MERGE (attachment:Attachment {id: $id}) ON CREATE SET attachment.sha256 = $sha256, attachment.mime_type = $mime_type, attachment.storage_path = $storage_path, attachment.platform_ref = $platform_ref, attachment.created_at_ms = $created_at_ms",
                 vec![
-                    ("id", format!("attachment:{sha256}").into()),
+                    ("id", attachment_id.clone().into()),
                     ("sha256", sha256.clone().into()),
                     ("mime_type", attachment.mime_type.clone().into()),
                     ("storage_path", storage_path.display().to_string().into()),
@@ -289,7 +298,7 @@ impl MemoryGraph {
                 "MATCH (message:Message {id: $message_id}), (attachment:Attachment {id: $attachment_id}) MERGE (message)-[:HAS_ATTACHMENT]->(attachment)",
                 vec![
                     ("message_id", message_id.into()),
-                    ("attachment_id", format!("attachment:{sha256}").into()),
+                    ("attachment_id", attachment_id.into()),
                 ],
             )
         })();
