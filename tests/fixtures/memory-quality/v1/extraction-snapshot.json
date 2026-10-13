@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "sanitized-extraction-snapshot-v1",
+  "fixture_id": "memory-quality-corpus-v1",
+  "provider_label": "offline-sanitized-provider-snapshot-v1",
+  "gold_fact_keys": [
+    "attachment-shape",
+    "language-preference",
+    "project-goal",
+    "travel-route"
+  ],
+  "candidates": [
+    {
+      "id": "candidate-attachment-wrong-color",
+      "content": "The synthetic handle is green.",
+      "matched_gold_key": null
+    },
+    {
+      "id": "candidate-language",
+      "content": "The synthetic user prefers German unless English is requested.",
+      "matched_gold_key": "language-preference"
+    },
+    {
+      "id": "candidate-project",
+      "content": "The invented shared project is a blue garden sensor.",
+      "matched_gold_key": "project-goal"
+    },
+    {
+      "id": "candidate-route",
+      "content": "The synthetic traveler prefers the riverside cycling route.",
+      "matched_gold_key": "travel-route"
+    }
+  ]
+}

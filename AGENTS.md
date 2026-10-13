@@ -50,9 +50,16 @@ When modifying the runtime (adding builtins, IO operations, commands, syntax cha
 ```bash
 cargo build --release
 cargo test --release                    # Rust unit tests
+# Deterministic offline Ladybug quality/ACL gate (JSON stdout, summary stderr)
+cargo run --release -- memory-eval
 # Adapsis tests: `adapsis test` exits non-zero on failure and prints "TEST SUMMARY: N passed, M failed"
 for f in examples/*.ax; do ./target/release/adapsis test "$f" >/dev/null 2>&1 || echo "FAILED: $f"; done
 ```
+
+**Formatting pitfall:** standalone `rustfmt src/main.rs` recursively formats every
+module declared by the crate root, creating repository-wide churn even when one
+filename was supplied. Never use it for scoped work. Format only leaf modules and
+verify `git diff --stat` immediately after formatting.
 
 ## Run AdapsisOS
 ```bash
@@ -534,6 +541,11 @@ schema since day one and was never set:
   in — see "Per-Context Identity" above.
 - Operations: `adapsis memory-migrate <session.json> [--database PATH]` is idempotent;
   `adapsis memory-stats [--database PATH] [--context CONTEXT]` reports graph/checkpoint state.
+- Quality gate: `adapsis memory-eval` loads only the versioned sanitized fixtures in
+  `tests/fixtures/memory-quality/`, builds an in-memory graph, emits stable JSON plus
+  a human summary, and fails on explicit thresholds (ACL leaks have zero tolerance).
+  Extraction uses a frozen provider snapshot and is scored separately from retrieval.
+  The baseline is manual-only; see the fixture README before adding a real regression.
 - On openSUSE, LibreSSL development symlinks can shadow OpenSSL 3. `build.rs` links
   Ladybug's prebuilt archive to exact `libssl.so.3`/`libcrypto.so.3` SONAMEs.
 

@@ -214,22 +214,6 @@ async fn persist_takeover_message(
     Ok(message_id)
 }
 
-/// How many canonical memories are injected per turn.
-///
-/// Canonical memories are unranked, so the only thing standing between an
-/// enthusiastic `memory_remember` habit and a prompt made entirely of notes is
-/// this bound. Newest survive truncation (see `canonical_for_context`) because a
-/// new assertion is usually a correction of an older one.
-const CANONICAL_MEMORY_LIMIT: usize = 40;
-
-/// Character ceiling for the injected canonical block.
-fn canonical_memory_char_budget() -> usize {
-    std::env::var("ADAPSIS_CANONICAL_MEMORY_CHARS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(8_000)
-}
-
 fn compaction_trigger_chars() -> usize {
     let context_tokens = std::env::var("ADAPSIS_CONTEXT_TOKENS")
         .ok()
@@ -1287,8 +1271,8 @@ pub async fn handle_llm_takeover(
         canonical_graph.canonical_for_context(
             &canonical_principal,
             &canonical_context,
-            CANONICAL_MEMORY_LIMIT,
-            canonical_memory_char_budget(),
+            crate::memory_graph::CANONICAL_MEMORY_LIMIT,
+            crate::memory_graph::canonical_memory_char_budget(),
         )
     })
     .await
@@ -1407,16 +1391,9 @@ pub async fn handle_llm_takeover(
     }
 
     if !recalled.is_empty() {
-        let recall = recalled
-            .iter()
-            .map(|memory| format!("- [{} | {}] {}", memory.id, memory.citation, memory.content))
-            .collect::<Vec<_>>()
-            .join("\n");
         messages.insert(
             usize::from(!messages.is_empty()),
-            crate::llm::ChatMessage::system(format!(
-                "Authorized long-term memory recall. Treat these as source-backed pointers and inspect provenance before relying on uncertain details:\n{recall}"
-            )),
+            crate::llm::ChatMessage::system(crate::memory_graph::render_recall_prompt(&recalled)),
         );
     }
 
@@ -1424,19 +1401,10 @@ pub async fn handle_llm_takeover(
     // asserted outright, and outrank both the ranked recall and the episode
     // summaries above, which are inferences.
     if !canonical.is_empty() {
-        let block = canonical
-            .iter()
-            .map(|memory| format!("- [{}] {}", memory.id, memory.content))
-            .collect::<Vec<_>>()
-            .join("\n");
         messages.insert(
             usize::from(!messages.is_empty()),
-            crate::llm::ChatMessage::system(format!(
-                "Things you were explicitly asked to remember. These are asserted facts and \
-                 standing instructions, not inferences — treat them as true and follow them \
-                 without being reminded. They are shown in full on every turn, so you never \
-                 need to search for them. If one is wrong or obsolete, call \
-                 memory_forget(\"<id>\") with the bracketed id and remember the correction:\n{block}"
+            crate::llm::ChatMessage::system(crate::memory_graph::render_canonical_prompt(
+                &canonical,
             )),
         );
     }

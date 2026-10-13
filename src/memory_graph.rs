@@ -9,11 +9,25 @@ use sha2::{Digest, Sha256};
 mod activity;
 mod history;
 pub mod inspect;
+pub mod quality;
 pub use activity::is_private_admin;
 pub use inspect::render_inspection;
 use inspect::SourceCitation;
 
 const SCHEMA_VERSION: i64 = 1;
+
+/// How many canonical memories are injected per turn.
+pub(crate) const CANONICAL_MEMORY_LIMIT: usize = 40;
+
+/// Default character ceiling for canonical memories selected for injection.
+pub(crate) const DEFAULT_CANONICAL_MEMORY_CHAR_BUDGET: usize = 8_000;
+
+pub(crate) fn canonical_memory_char_budget() -> usize {
+    std::env::var("ADAPSIS_CANONICAL_MEMORY_CHARS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_CANONICAL_MEMORY_CHAR_BUDGET)
+}
 
 /// The one access group every principal joins.
 ///
@@ -167,6 +181,43 @@ pub struct RecalledMemory {
     pub citation: String,
 }
 
+/// Render the exact ranked-recall system block injected into a conversation.
+///
+/// Keeping this beside the retrieval model lets offline quality evaluation
+/// measure real prompt cost rather than maintaining a look-alike formatter.
+pub fn render_recall_prompt(memories: &[RecalledMemory]) -> String {
+    if memories.is_empty() {
+        return String::new();
+    }
+    let recall = memories
+        .iter()
+        .map(|memory| format!("- [{} | {}] {}", memory.id, memory.citation, memory.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Authorized long-term memory recall. Treat these as source-backed pointers and inspect provenance before relying on uncertain details:\n{recall}"
+    )
+}
+
+/// Render the exact canonical-memory system block injected into a conversation.
+pub fn render_canonical_prompt(memories: &[RecalledMemory]) -> String {
+    if memories.is_empty() {
+        return String::new();
+    }
+    let block = memories
+        .iter()
+        .map(|memory| format!("- [{}] {}", memory.id, memory.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Things you were explicitly asked to remember. These are asserted facts and \
+         standing instructions, not inferences — treat them as true and follow them \
+         without being reminded. They are shown in full on every turn, so you never \
+         need to search for them. If one is wrong or obsolete, call \
+         memory_forget(\"<id>\") with the bracketed id and remember the correction:\n{block}"
+    )
+}
+
 impl MemoryGraph {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let database = Database::new(
@@ -200,10 +251,10 @@ impl MemoryGraph {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn in_memory() -> Result<Self> {
-        // Ladybug's default reserves a very large virtual mapping per database.
-        // Keep parallel tests bounded, matching the crate's own test configuration.
+        // Used by tests and the offline quality harness. Ladybug's default
+        // reserves a very large virtual mapping per database, so keep isolated
+        // evaluation graphs bounded like the crate's own tests.
         let database = Database::in_memory(
             SystemConfig::default().max_db_size(16 * 1024 * 1024 * 1024),
         )?;

@@ -860,6 +860,25 @@ enum Command {
         #[arg(long, env = "ADAPSIS_MEMORY_DB")]
         database: Option<std::path::PathBuf>,
     },
+
+    /// Run deterministic offline Ladybug retrieval/extraction quality gates
+    MemoryEval {
+        /// Versioned synthetic retrieval corpus
+        #[arg(long)]
+        fixture: Option<std::path::PathBuf>,
+
+        /// Versioned provider extraction snapshot
+        #[arg(long)]
+        extraction_snapshot: Option<std::path::PathBuf>,
+
+        /// Versioned expected metrics and CI thresholds
+        #[arg(long)]
+        baseline: Option<std::path::PathBuf>,
+
+        /// Also write the machine-readable JSON report to this explicit path
+        #[arg(long)]
+        report: Option<std::path::PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -877,6 +896,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::MemoryEval {
+            fixture,
+            extraction_snapshot,
+            baseline,
+            report,
+        } => {
+            memory_graph::quality::run_cli(
+                fixture.as_deref(),
+                extraction_snapshot.as_deref(),
+                baseline.as_deref(),
+                report.as_deref(),
+            )?;
+        }
         Command::MemoryRecover { database } => {
             let database = database.unwrap_or_else(|| {
                 dirs::config_dir()

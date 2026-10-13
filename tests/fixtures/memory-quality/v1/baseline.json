@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "baseline_id": "memory-quality-baseline-v1",
+  "fixture_id": "memory-quality-corpus-v1",
+  "extraction_snapshot_id": "sanitized-extraction-snapshot-v1",
+  "expected": {
+    "retrieval": {
+      "query_count": 12,
+      "returned_count": 14,
+      "true_positive_count": 13,
+      "false_positive_count": 1,
+      "false_negative_count": 0,
+      "precision": 0.928571,
+      "recall": 1.0,
+      "unauthorized_recall_count": 0,
+      "unsupported_citation_count": 0,
+      "stale_memory_count": 1,
+      "freshness_scored_count": 14,
+      "stale_memory_rate": 0.071429
+    },
+    "extraction": {
+      "gold_fact_count": 4,
+      "candidate_count": 4,
+      "supported_candidate_count": 3,
+      "recovered_gold_count": 3,
+      "precision": 0.75,
+      "recall": 0.75
+    },
+    "cost": {
+      "prompt_chars": 6010,
+      "canonical_prompt_chars": 5708,
+      "ranked_recall_prompt_chars": 302,
+      "output_chars": 7600,
+      "estimated_tokens": 3403,
+      "token_estimate_definition": "ceil((prompt_chars + output_chars) / 4 Unicode scalar values)"
+    }
+  },
+  "reference_latency": {
+    "unit": "microseconds",
+    "sample_count": 12,
+    "p50": 86565,
+    "p95": 219443,
+    "max": 219443
+  },
+  "thresholds": {
+    "min_retrieval_precision": 0.9,
+    "min_retrieval_recall": 0.95,
+    "max_unauthorized_recall_count": 0,
+    "max_unsupported_citation_count": 0,
+    "max_stale_memory_rate": 0.1,
+    "min_extraction_precision": 0.7,
+    "min_extraction_recall": 0.7,
+    "max_prompt_chars": 10000,
+    "max_output_chars": 12000,
+    "max_estimated_tokens": 5000,
+    "max_latency_p95_us": 2000000,
+    "max_latency_max_us": 5000000
+  }
+}
