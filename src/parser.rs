@@ -1715,7 +1715,68 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(rest) = text.strip_prefix("!eval") {
-            let rest = rest.trim();
+            let mut rest = rest.trim();
+
+            // `+await` is a line-start prefix for IO bindings
+            // (`+await name:Type = io_op(args)`). Inside `!eval` a model writes
+            // `!eval +await f(args)` (unbound) or `!eval +await name:Type = f(args)`
+            // (the full binding form prompt.rs documents), and both must mean the
+            // same Call as `!eval f(args)`. Strip `+await` here — but only on a
+            // word boundary, so a legitimate identifier like `awaitfoo` is never
+            // truncated — before the inline-expression attempt, so it never leaks
+            // into the expression parser (which rejects a leading `+`) or into the
+            // legacy `fn_name + args` path below.
+            let await_stripped = match rest.strip_prefix("+await") {
+                Some(after) if after.is_empty() || after.starts_with(char::is_whitespace) => {
+                    rest = after.trim();
+                    true
+                }
+                _ => false,
+            };
+
+            if await_stripped {
+                // `+await` with nothing after it is a mistake; name the fix.
+                if rest.is_empty() {
+                    bail!(
+                        "line {}: `!eval +await` needs a call (`!eval +await f(args)`) \
+                         or a binding (`!eval +await name:Type = f(args)`)",
+                        line.number
+                    );
+                }
+                // Binding forms: `name:Type = expr` (typed, the shape prompt.rs
+                // documents for IO calls) and the untyped shorthand `name = expr`.
+                // A top-level binding has no scope to bind into, so evaluate the
+                // RHS and return it as the inline expression. Note this is NOT
+                // literally the `!eval expr` path below: it skips the
+                // `is_function_ref` branch and the `named arguments are not
+                // supported` passthrough, and it discards `decl.name`/`decl.ty`
+                // (so `!eval +await out:Int = "a string"` yields the string). A
+                // bare call/identifier keeps its existing meaning, and a malformed
+                // binding still reports its parse error.
+                if let Some((_, after)) = take_ident(rest) {
+                    let after = after.trim_start();
+                    if after.starts_with(':') {
+                        let decl = parse_binding_decl(line.number, rest, false)?;
+                        self.index += 1;
+                        return Ok(Operation::Eval(EvalMutation {
+                            function_name: String::new(),
+                            input: Expr::StructLiteral(vec![]),
+                            inline_expr: Some(decl.expr),
+                        }));
+                    } else if after.starts_with('=') && !after.starts_with("==") {
+                        // Untyped shorthand: strip the name and the `=`, evaluate
+                        // the rest. `==` is a comparison, never a binding, so it
+                        // falls through to the ordinary expression path.
+                        let expr = parse_expr(line.number, after[1..].trim_start())?;
+                        self.index += 1;
+                        return Ok(Operation::Eval(EvalMutation {
+                            function_name: String::new(),
+                            input: Expr::StructLiteral(vec![]),
+                            inline_expr: Some(expr),
+                        }));
+                    }
+                }
+            }
 
             // First, try to parse the entire argument as an inline expression.
             // This handles cases like: !eval 1 + 2, !eval concat("a", "b"), !eval len("hello")
@@ -2925,6 +2986,28 @@ fn split_once_required<'a>(
         .ok_or_else(|| anyhow!("line {}: expected `{}` in `{}`", line, needle, input))
 }
 
+/// Returns true when `input` has a `=` outside any double-quoted string literal.
+///
+/// A `=` inside quotes (`foo("Z=0")`) must never select key=value syntax, because
+/// it is a value character, not a key/value separator. This is the quote-aware
+/// replacement for the naive `input.contains('=')` the heuristic used to run.
+fn contains_unquoted_equals(input: &str) -> bool {
+    let mut in_string = false;
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if in_string => {
+                // Skip the escaped character so `\"` / `\\` don't toggle in_string.
+                chars.next();
+            }
+            '"' => in_string = !in_string,
+            '=' if !in_string => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Parse test input — supports both `key=value` pairs and regular expressions.
 ///
 /// `key=value` format: `name="alice" age=25 active=true`
@@ -2937,13 +3020,15 @@ pub fn parse_test_input(line: usize, input: &str) -> Result<Expr> {
         return Ok(Expr::StructLiteral(vec![]));
     }
 
-    // Detect key=value format: first non-whitespace token contains '=' and doesn't start with {
-    // but is not a comparison like `x==5` or `x>=3`
+    // Detect key=value format: a `=` OUTSIDE quotes (the key/value separator) and
+    // doesn't start with { — but not a comparison like `x==5` or `x>=3`. A `=`
+    // inside a quoted string argument (e.g. `foo("Z=0")`) must NOT select this
+    // mode; such input is a normal positional expression, not key=value syntax.
     if !input.starts_with('{')
         && !input.starts_with('"')
         && !input.starts_with('-')
         && !input.chars().next().unwrap_or(' ').is_ascii_digit()
-        && input.contains('=')
+        && contains_unquoted_equals(input)
         && !input.contains("==")
         && !input.contains(">=")
         && !input.contains("<=")
@@ -4820,6 +4905,138 @@ mod tests {
         }
     }
 
+    // ── `!eval +await` and `=` inside quoted arguments (issue #45) ────────
+
+    fn assert_inline_call(op: Operation, callee: &str, args: &[&str]) {
+        match op {
+            Operation::Eval(ev) => match ev.inline_expr {
+                Some(Expr::Call { callee: c, args: a }) => {
+                    match *c {
+                        Expr::Ident(name) => assert_eq!(name, callee, "callee mismatch"),
+                        other => panic!("expected Ident callee, got {other:?}"),
+                    }
+                    assert_eq!(a.len(), args.len(), "arg count mismatch in {:?}", a);
+                    for (i, arg) in a.iter().enumerate() {
+                        assert!(
+                            matches!(arg, Expr::String(s) if s == args[i]),
+                            "arg {i} expected String({:?}), got {arg:?}",
+                            args[i]
+                        );
+                    }
+                }
+                other => panic!("expected inline Call, got {other:?}"),
+            },
+            other => panic!("expected Eval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_await_prefix_call_equals_plain_call() {
+        // `!eval +await f(args)` must be the same Call expression as `!eval f(args)`.
+        let awaited = parse_one(r#"!eval +await cad_prepare("a", "Z=0", "PLA")"#);
+        let plain = parse_one(r#"!eval cad_prepare("a", "Z=0", "PLA")"#);
+        assert_inline_call(awaited, "cad_prepare", &["a", "Z=0", "PLA"]);
+        assert_inline_call(plain, "cad_prepare", &["a", "Z=0", "PLA"]);
+    }
+
+    #[test]
+    fn eval_await_prefix_whitespace_variants() {
+        // The whitespace position is irrelevant once the `=` is treated as a
+        // string value, not a key/value separator; all five shapes parse to the
+        // same three-argument call.
+        for src in [
+            r#"!eval +await foo("a","Z=0","b")"#,
+            r#"!eval +await foo("a", "Z=0", "b")"#,
+            r#"!eval +await foo("a", "Z=0","b")"#,
+            r#"!eval +await foo("a","Z=0", "b")"#,
+            r#"!eval foo("a", "Z=0", "b")"#,
+        ] {
+            let op = parse_one(src);
+            assert_inline_call(op, "foo", &["a", "Z=0", "b"]);
+        }
+    }
+
+    #[test]
+    fn eval_await_prefix_with_equals_in_single_arg() {
+        let op = parse_one(r#"!eval +await cad_prepare("a", "Z=0 watertight", "PLA")"#);
+        assert_inline_call(op, "cad_prepare", &["a", "Z=0 watertight", "PLA"]);
+    }
+
+    #[test]
+    fn eval_await_prefix_does_not_truncate_identifier() {
+        // `+await` is stripped only on a word boundary, so an identifier that
+        // merely begins with `await` is left intact and stays a function
+        // reference — never a silent Call to a different function.
+        let op = parse_one(r#"!eval +awaitfoo("a","b")"#);
+        match op {
+            Operation::Eval(ev) => {
+                assert!(ev.inline_expr.is_none(), "must not become an inline Call");
+                assert_eq!(ev.function_name, r#"+awaitfoo("a","b")"#);
+            }
+            other => panic!("expected Eval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_identifier_starting_with_await_still_a_call() {
+        // An identifier that begins with `await` (no `+await` prefix) is
+        // untouched and still parses as a Call.
+        let op = parse_one(r#"!eval await_result("hi")"#);
+        assert_inline_call(op, "await_result", &["hi"]);
+    }
+
+    #[test]
+    fn eval_await_binding_form_evaluates_rhs() {
+        // The full binding form prompt.rs documents (`+await name:Type = expr`)
+        // evaluates the RHS; a top-level binding has no scope to bind into.
+        let op = parse_one(r#"!eval +await out:String = cad_prepare("a", "Z=0", "PLA")"#);
+        assert_inline_call(op, "cad_prepare", &["a", "Z=0", "PLA"]);
+    }
+
+    #[test]
+    fn eval_await_binding_form_malformed_errors() {
+        // A malformed binding is not silently swallowed; it reports its parse error.
+        assert!(parse(r#"!eval +await out:String ="#).is_err(), "missing RHS must error");
+        assert!(parse(r#"!eval +await out:String"#).is_err(), "missing `=` must error");
+    }
+
+    #[test]
+    fn eval_await_untyped_binding_evaluates_rhs() {
+        // Untyped shorthand `!eval +await name = expr` evaluates the RHS. This is
+        // the form a model most often writes when told `+await name:Type = io_op(...)`.
+        let op = parse_one(r#"!eval +await res = one(41)"#);
+        match op {
+            Operation::Eval(ev) => match ev.inline_expr {
+                Some(Expr::Call { callee, args }) => {
+                    assert!(matches!(*callee, Expr::Ident(ref n) if n == "one"));
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(args[0], Expr::Int(41)));
+                }
+                other => panic!("expected inline Call, got {other:?}"),
+            },
+            other => panic!("expected Eval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_await_double_equals_is_not_a_binding() {
+        // `==` is a comparison, never a binding: it must not be silently stripped.
+        let op = parse_one(r#"!eval +await x == 5"#);
+        match op {
+            Operation::Eval(ev) => match ev.inline_expr {
+                Some(Expr::Binary { op: BinaryOp::Eq, .. }) => {}
+                other => panic!("expected Binary Eq, got {other:?}"),
+            },
+            other => panic!("expected Eval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_await_alone_errors_with_guidance() {
+        let err = parse(r#"!eval +await"#).unwrap_err().to_string();
+        assert!(err.contains("`!eval +await` needs a call"), "got: {err}");
+    }
+
     #[test]
     fn mock_operation() {
         let op = parse_one(r#"!mock http_get "http://example.com" -> "hello""#);
@@ -5168,6 +5385,47 @@ mod tests {
         match e2 {
             Expr::StructLiteral(fields) => assert_eq!(fields.len(), 3, "x,y,z -> 3 fields, got {fields:?}"),
             other => panic!("expected 3-field StructLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_input_equals_in_quoted_arg_is_not_key_value() {
+        // A `=` inside a quoted literal must never select key=value mode.
+        let e = parse_test_input(0, r#"foo("a", "Z=0", "b")"#).unwrap();
+        match e {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Ident(ref n) if n == "foo"));
+                assert_eq!(args.len(), 3);
+                assert!(matches!(&args[1], Expr::String(s) if s == "Z=0"));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+
+        // Single `=`-bearing string argument.
+        let e2 = parse_test_input(0, r#"cad_prepare("Z=0")"#).unwrap();
+        match e2 {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Ident(ref n) if n == "cad_prepare"));
+                assert!(matches!(&args[0], Expr::String(s) if s == "Z=0"));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_input_key_value_quoted_value_with_equals_still_parses() {
+        // Genuine key=value where the separator `=` is outside quotes still works,
+        // even when a value itself contains an `=` (inside quotes).
+        let e = parse_test_input(0, r#"note="a=b" age=25"#).unwrap();
+        match e {
+            Expr::StructLiteral(fields) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "note");
+                assert!(matches!(&fields[0].value, Expr::String(s) if s == "a=b"));
+                assert_eq!(fields[1].name, "age");
+                assert!(matches!(fields[1].value, Expr::Int(25)));
+            }
+            other => panic!("expected StructLiteral, got {other:?}"),
         }
     }
 

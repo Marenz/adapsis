@@ -658,6 +658,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "cad_prepare",
+        aliases: &[],
+        short: "prepare a 3D print with Astra: cad_prepare(title, design_brief[, material])",
+        long: "Send a complete plain-language design brief, dimensions, constraints and revision requirements. The backend is pinned to chatgpt/gpt-6-astra for CAD authoring, independent of the conversation model; no fallback to another model. Astra writes the actual Python geometry; do not author CAD yourself in the conversation. Legacy draft Python is accepted as design input and re-authored by Astra. Generated code runs in an isolated no-network sandbox with build123d/trimesh/numpy, producing watertight STL/optional STEP in mm on Z=0. No host files, credentials or printer access. Title <=300 chars, brief <=64000 chars; optional material PLA (default) or PETG. Mesh checks, A1 slicing and a preview/files follow, with a separate owner print-approval request. Returns immediately; result/failure arrives in THIS chat. NEVER starts a print. Mesh checks do not certify anatomical accuracy or physical fit. Revisions are new jobs preserving previous files. Requires +await.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "music_generate",
         aliases: &[],
         short: "make a song in THIS chat: music_generate(description, duration_seconds[, lyrics])",

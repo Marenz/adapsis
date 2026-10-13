@@ -4,13 +4,14 @@ use anyhow::ensure;
 
 pub const GUEST_TOOLS: &[&str] = &[
     "music_generate", "web_search", "web_read", "memory_remember", "memory_forget",
-    "context_propose",
+    "context_propose", "cad_prepare",
 ];
 
 #[derive(Debug)]
 pub enum Request {
     History { principal: String, context: String, limit: i64, before_ms: i64 },
     Music { context: String, caption: String, duration: i64, lyrics: String },
+    Cad { context: String, title: String, source: String, material: String },
     Search { query: String },
     Read { url: String },
     Forget { principal: String, context: String, memory_id: String },
@@ -51,6 +52,14 @@ impl CoroutineHandle {
                     context: turn.context.clone(), caption: text(args, 0, 2000)?, duration,
                     lyrics: if args.len() == 3 { text_allow_empty(args, 2, 8000)? } else { String::new() },
                 }
+            }
+            "cad_prepare" => {
+                let turn = self.require_turn(op)?;
+                ensure!((2..=3).contains(&args.len()), "cad_prepare(title, design_brief[, material]) expects 2–3 arguments; no destination or printer action is accepted");
+                let material = if args.len() == 3 { text(args, 2, 20)? } else { "PLA".into() };
+                ensure!(matches!(material.as_str(), "PLA" | "PETG"), "material must be PLA or PETG");
+                Request::Cad { context: turn.context.clone(), title: text(args, 0, 300)?,
+                    source: text(args, 1, 64000)?, material }
             }
             "web_search" => {
                 self.require_turn(op)?;
@@ -102,7 +111,9 @@ fn optional_int(args: &[Value], index: usize, default: i64) -> Result<i64> {
 /// Guest calls deliberately accept literal arguments only: nested calls could
 /// perform IO before the outer allowed tool checks its parameters.
 pub fn validate_guest_code(code: &str, tools: &[String], program: &crate::ast::Program) -> Result<()> {
-    for op in crate::parser::parse(code)? {
+    let ops = crate::parser::parse(code)
+        .map_err(|e| anyhow::anyhow!("guest code did not parse: {e}"))?;
+    for op in ops {
         match op {
             crate::parser::Operation::Done => {},
             crate::parser::Operation::Eval(ev) => {

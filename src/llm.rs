@@ -152,18 +152,7 @@ impl ChatMessage {
         let content = content.into();
         let mut parts = vec![ChatContentPart::Text { text: content.clone() }];
         for attachment in attachments {
-            let extension = attachment.name.rsplit('.').next().unwrap_or_default();
-            let image_mime = if attachment.mime_type.starts_with("image/") {
-                attachment.mime_type.as_str()
-            } else {
-                match extension.to_ascii_lowercase().as_str() {
-                    "jpg" | "jpeg" => "image/jpeg",
-                    "png" => "image/png",
-                    "gif" => "image/gif",
-                    "webp" => "image/webp",
-                    _ => continue,
-                }
-            };
+            let Some(image_mime) = attachment.image_mime() else {continue};
             if let Ok(bytes) = attachment.bytes() {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
                 parts.push(ChatContentPart::ImageUrl {

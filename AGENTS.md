@@ -195,9 +195,14 @@ gateway resolves via `model_aliases` or `virtual_models`.
   must be added to **every** node's gateway that uses it (here and sleek each run
   their own gateway).
 - Current virtual models:
-  - `family-bot` (edox) → `deepseek-v4-flash` → `claude-sonnet-4-5` → `chatgpt/gpt-5.5`
-    (DeepSeek made primary 2026-07-06 to spare OpenAI quota — temporary, revert
-    when limits reset. Same reorder applied to the local gateway config on here.)
+  - `family-bot` (edox) → `chatgpt/gpt-5.6-sol` → `chatgpt/gpt-5.5`
+    (2026-10-08: both verified against edox's live gateway. Removed broken
+    Anthropic/DeepInfra/DeepSeek backups after a transient primary failure
+    surfaced the last provider's `402 Insufficient Balance` to FamilyUser.
+    Anthropic currently returns 401, so restoring an Anthropic backup needs
+    working authentication as well as a valid model ID. These two working
+    models share ChatGPT authentication/quota; this is model-level fallback,
+    not independent-provider redundancy. Other nodes were not changed.)
   - `dev-bot` (here, sleek) → `anthropic/claude-opus-5` → `chatgpt/gpt-5.6-sol`
     → `chatgpt/gpt-5.5` → `deepseek-v4-flash` → `deepinfra/zai-org/GLM-5.2`
     (2026-07-27: opus-5 promoted to primary, opus-4-8 dropped; both verified 200
@@ -519,6 +524,35 @@ schema since day one and was never set:
   Ladybug's prebuilt archive to exact `libssl.so.3`/`libcrypto.so.3` SONAMEs.
 
 ## Telegram Bot (TelegramBot.ax)
+
+- Native `cad_prepare(title, design_brief[, PLA|PETG])` is a turn-bound
+  prepare-only guest capability. `src/capabilities/cad.rs` launches the trusted
+  runner with a design brief. `tools/cad_astra.py` pins CAD authoring/revisions
+  to `chatgpt/gpt-6-astra` with high reasoning, independently of the chat model.
+  No model fallback: unavailable/wrong-model/truncated replies fail preparation.
+  Each job records cad-author.json and report.cad_model. Live Astra generation,
+  geometry validation and slicing have been verified end-to-end.
+  Geometry preparation allows up to three isolated checked attempts: actual
+  sandbox/mesh failures and the previous source go back to the same pinned
+  Astra author. Attempts keep private source/logs/failure.txt; only validated
+  geometry is promoted for slicing/publication. Author-service failures fail
+  immediately rather than being mislabeled as geometry problems. Job request.json
+  preserves the brief for operator recovery. Never weaken mesh checks to make a
+  failed generation appear successful.
+  `src/capabilities/cad.rs` launches the trusted
+  `tools/cad_prepare.py` runner; generated code runs under bubblewrap with no
+  network/home/credentials, read-only CAD environment and isolated job writes.
+  Mesh checks, official A1 slicing and allowlisted public previews follow. Results
+  return to the bound chat; admin gets a print-approval request. No printer
+  upload/start is implemented by this capability. Do not replace this boundary
+  with guest shell/admin permissions. Python backend tests:
+  `~/Projects/piercing-gauge/.venv/bin/python -m unittest discover -s tools -p test_cad_prepare.py`.
+  Requires bwrap/prlimit, existing CAD venv and extracted official Bambu profiles.
+  Profiles are stored durably at ~/.local/share/cad-pipeline/squashfs-root/resources/profiles/BBL;
+  override ADAPSIS_CAD_PROFILES if needed. Sandbox files live in each job's
+  sandbox/ subdirectory; trusted slicing/manifest/log outputs stay outside its
+  writable bind. Symlink outputs/parents are rejected before host processing.
+  Job folders ~/Projects/kronk-designs; public-only assets /srv/www/cat-bowl/kronk-designs.
 - **Native guest tools (creative profile):** `[principals]` maps server-observed
   speaker IDs to permission profiles, taking precedence over the intake module's
   generic non-admin profile. `[guest_profiles]` explicitly lists native tools;
@@ -560,6 +594,17 @@ schema since day one and was never set:
   and passes it as the optional sixth `llm_takeover` argument. Adapsis emits
   OpenAI `image_url` content using a base64 data URL; the gateway translates it
   for the selected provider.
+  Regression fixed: bounded conversation views previously dropped captionless
+  user messages AND cleared all attachments. `session/conversation_view.rs` now
+  retains up to3 recent images/20MB independently of the text budget. If a
+  restored conversation has no image parts, takeover reloads up to3 authorized
+  references from the Ladybug attachment store (read ACL and exact context).
+  Never infer "user supplied no photo" merely from empty text in session JSON.
+  Telegram may serve JPEGs as application/octet-stream. Attachment::image_mime
+  centralizes MIME/extension/magic-header recognition for budgets, recovery and
+  outbound LLM image parts; MIME-only filters silently discard real photos.
+  Tests: `cargo test --release conversation_view` and
+  `cargo test --release saved_images_are_recovered_only_for_authorized_context`.
 - **Multi-admin**: `admin_user_ids` shared var, comma-separated (e.g. `"100000001,456789"`)
 - **Group chats**: messages in group/supergroup → `telegram:group:<chat_id>` context (shared by all senders)
 - **Admin DMs**: `telegram:<user_id>` context with full LLM access

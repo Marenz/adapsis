@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::ast;
 use crate::parser;
 use crate::validator;
+mod conversation_view;
 
 /// Per-resource locked map of `+shared` variable values (issue #9, Tier 2).
 ///
@@ -898,54 +899,7 @@ impl Conversation {
         max_chars: usize,
         max_message_chars: usize,
     ) -> Vec<crate::llm::ChatMessage> {
-        if self.messages.is_empty() || max_messages == 0 {
-            return Vec::new();
-        }
-
-        let system = self.messages.first().filter(|message| message.role == "system");
-        // The system prompt is mandatory and may itself exceed the history budget.
-        let mut remaining_chars = max_chars;
-        let recent_limit = max_messages.saturating_sub(usize::from(system.is_some()));
-        let mut recent = Vec::new();
-
-        for message in self.messages.iter().rev() {
-            if system.is_some_and(|first| std::ptr::eq(first, message)) || recent.len() >= recent_limit {
-                continue;
-            }
-            let content = truncate_middle(&message.content, max_message_chars.min(remaining_chars));
-            let content_chars = content.chars().count();
-            if content_chars == 0 || content_chars > remaining_chars {
-                continue;
-            }
-            let mut bounded = message.clone();
-            bounded.content = content;
-            bounded.attachments.clear();
-            recent.push(bounded);
-            remaining_chars -= content_chars;
-        }
-        recent.reverse();
-
-        let omitted = self.messages.len().saturating_sub(recent.len() + usize::from(system.is_some()));
-        let mut bounded = Vec::with_capacity(recent.len() + 2);
-        if let Some(system) = system {
-            bounded.push(system.clone());
-        }
-        if omitted > 0 {
-            bounded.push(ChatMessage {
-                role: "user".to_string(),
-                content: format!(
-                    "[System: {omitted} older message(s) are omitted from this model context; the raw history is retained.]"
-                ),
-                attachments: Vec::new(),
-            });
-        }
-        bounded.extend(recent);
-
-        bounded.into_iter().map(|message| match message.role.as_str() {
-            "system" => crate::llm::ChatMessage::system(message.content),
-            "assistant" => crate::llm::ChatMessage::assistant(&message.content),
-            _ => crate::llm::ChatMessage::user_with_attachments(message.content, &message.attachments),
-        }).collect()
+        conversation_view::build(self, max_messages, max_chars, max_message_chars)
     }
 
     /// Trim conversation to at most `max` messages, preserving the system prompt.

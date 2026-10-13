@@ -2,6 +2,34 @@
 use super::*;
 
 impl MemoryGraph {
+    /// Recover recent image references in THIS authorized context after session
+    /// reload (session JSON intentionally does not contain binary attachments).
+    pub fn recent_image_attachments(&self, principal: &str, context: &str) -> Result<Vec<crate::attachment::Attachment>> {
+        let connection = Connection::new(&self.database)?;
+        let mut stmt = connection.prepare(
+            "MATCH (:Principal {id: $principal})-[grant:MEMBER_OF]->(:AccessGroup)<-[:USES_ACCESS_GROUP]-(c:Context {id: $context})<-[:IN_CONTEXT]-(m:Message)-[:HAS_ATTACHMENT]->(a:Attachment) \
+             WHERE grant.can_read = true AND m.role = 'user' \
+             RETURN a.storage_path, a.mime_type ORDER BY m.created_at_ms DESC LIMIT 12"
+        )?;
+        let rows = connection.execute(&mut stmt, vec![("principal",principal.into()),("context",context.into())])?;
+        let mut images=Vec::new();let mut budget=20*1024*1024u64;
+        for row in rows {
+            if images.len()==3 {break;}
+            let path=std::path::PathBuf::from(string_value(&row[0])?);
+            let Ok(metadata)=std::fs::metadata(&path) else {continue};
+            if metadata.len()==0 || metadata.len()>budget {continue;}
+            let attachment=crate::attachment::Attachment {
+                data: crate::attachment::AttachmentData::File(path),
+                mime_type: string_value(&row[1])?,name:"saved-reference".into(),
+            };
+            if attachment.image_mime().is_some() {
+                budget-=metadata.len();images.push(attachment);
+            }
+        }
+        images.reverse();
+        Ok(images)
+    }
+
     pub fn conversation_history(&self, principal: &str, context: &str, limit: i64, before_ms: i64) -> Result<String> {
         ensure!((1..=100).contains(&limit), "history limit must be between 1 and 100");
         let connection = Connection::new(&self.database)?;
@@ -62,6 +90,30 @@ impl MemoryGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_images_are_recovered_only_for_authorized_context() -> Result<()> {
+        let graph=MemoryGraph::in_memory()?;
+        graph.ingest_message(&SourceMessage {
+            id:"photo-message".into(),platform_message_id:Some("123".into()),
+            context_id:"guest_user-dm".into(),context_kind:"telegram_dm".into(),
+            speaker_id:"guest_user".into(),speaker_name:"GuestUser".into(),role:"user".into(),
+            content:String::new(),created_at_ms:100,
+        },"admin")?;
+        let file=tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(),[0xffu8,0xd8,0xff])?;
+        let connection=Connection::new(&graph.database)?;
+        let mut stmt=connection.prepare("MATCH (m:Message {id:'photo-message'}) CREATE (a:Attachment {id:'test-image',storage_path:$path,mime_type:'application/octet-stream'}) CREATE (m)-[:HAS_ATTACHMENT]->(a)")?;
+        connection.execute(&mut stmt,vec![("path",file.path().to_string_lossy().to_string().into())])?;
+        for principal in ["guest_user","admin"] {
+            let images=graph.recent_image_attachments(principal,"guest_user-dm")?;
+            assert_eq!(images.len(),1);assert_eq!(images[0].bytes()?,vec![0xff,0xd8,0xff]);
+            assert_eq!(images[0].image_mime(),Some("image/jpeg"));
+        }
+        assert!(graph.recent_image_attachments("outsider","guest_user-dm")?.is_empty());
+        assert!(graph.recent_image_attachments("guest_user","other-dm")?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn original_history_is_bounded_ordered_and_acl_filtered() -> Result<()> {

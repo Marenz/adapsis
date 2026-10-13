@@ -6,7 +6,7 @@
 # Native tool allowlist, enforced before parsing/executing a guest code block
 # and again at the IO boundary. This does not grant general module access.
 [guest_profiles]
-creative = ["music_generate", "web_search", "web_read", "memory_remember", "memory_forget", "context_propose"]
+creative = ["music_generate", "cad_prepare", "web_search", "web_read", "memory_remember", "memory_forget", "context_propose"]
 
 [model.creative]
 core = "none"

@@ -28,6 +28,34 @@ pub enum AttachmentData {
 }
 
 impl Attachment {
+    /// Telegram file downloads may be application/octet-stream. Use the same
+    /// image recognition for context budgets, durable recovery and LLM payloads.
+    pub fn image_mime(&self) -> Option<&str> {
+        let mime=self.mime_type.split(';').next().unwrap_or("").trim();
+        if mime.starts_with("image/") {return Some(mime);}
+        match self.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+            "jpg"|"jpeg" => return Some("image/jpeg"),
+            "png" => return Some("image/png"),
+            "gif" => return Some("image/gif"),
+            "webp" => return Some("image/webp"),
+            _ => {},
+        }
+        let mut header=[0u8;12];
+        let size=match &self.data {
+            AttachmentData::Memory(bytes) => {let n=bytes.len().min(12);header[..n].copy_from_slice(&bytes[..n]);n},
+            AttachmentData::File(path) => {
+                use std::io::Read;
+                std::fs::File::open(path).ok()?.read(&mut header).ok()?
+            }
+        };
+        let header=&header[..size];
+        if header.starts_with(b"\xff\xd8\xff") {Some("image/jpeg")}
+        else if header.starts_with(b"\x89PNG\r\n\x1a\n") {Some("image/png")}
+        else if header.starts_with(b"GIF87a")||header.starts_with(b"GIF89a") {Some("image/gif")}
+        else if size==12 && &header[..4]==b"RIFF" && &header[8..]==b"WEBP" {Some("image/webp")}
+        else {None}
+    }
+
     /// Create an attachment from raw bytes.
     /// If the data exceeds 10MB, writes to a temp file under
     /// `~/.local/share/adapsis/tmp/`.

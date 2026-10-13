@@ -1,5 +1,6 @@
 //! Host implementations of the scoped conversational tools.
 mod music;
+mod cad;
 mod web;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ pub async fn dispatch(
             Ok(if forgotten { "Memory forgotten." } else { "Nothing forgotten: no matching memory in this conversation." }.into())
         }
         Request::Music { context, caption, duration, lyrics } => music::start(context, caption, duration, lyrics, sender),
+        Request::Cad { context, title, source, material } => cad::start(context, title, source, material, sender),
         Request::Search { query } => web::search(&query).await,
         Request::Read { url } => web::read(&url).await,
     }
