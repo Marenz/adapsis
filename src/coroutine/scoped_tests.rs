@@ -9,7 +9,7 @@ fn guest() -> TurnIdentity {
 fn scoped_tools_fail_closed_without_a_turn() {
     let (tx, _rx) = mpsc::channel(1);
     let handle = CoroutineHandle::new(tx);
-    for op in ["conversation_history", "music_generate", "cad_prepare", "video_stabilize", "web_search", "web_read", "memory_inspect"] {
+    for op in ["conversation_history", "music_generate", "cad_prepare", "video_stabilize", "web_search", "web_read", "memory_inspect", "memory_correct"] {
         let error = handle.execute_await(op, &[]).unwrap_err().to_string();
         assert!(error.contains("no conversational turn"), "{op}: {error}");
     }
@@ -28,6 +28,9 @@ fn guest_blocks_raw_io_global_memory_and_foreign_destinations() {
     assert!(handle.execute_await("video_stabilize", &[Value::string("/tmp/input.mp4")]).is_err());
     assert!(handle.execute_await("web_search", &[Value::Int(1)]).is_err());
     assert!(handle.execute_await("web_read", &[Value::string("")]).is_err());
+    assert!(handle.execute_await("memory_correct", &[Value::string("memory:1"), Value::string("replacement"), Value::Int(1), Value::Int(2), Value::string("foreign-context")]).is_err());
+    assert!(handle.execute_await("memory_correct", &[Value::string("memory:1"), Value::string("replacement"), Value::string("not-a-date")]).is_err());
+    assert!(handle.execute_await("memory_correct", &[Value::string("memory:1"), Value::string("replacement"), Value::Int(2), Value::Int(1)]).is_err());
 }
 
 #[test]
@@ -43,6 +46,8 @@ fn guest_code_is_checked_before_any_side_effects() {
         "!eval memory_inspect()",
         "!eval memory_inspect(\"bicycle\")",
         "!eval memory_remember(\"I like jazz\")",
+        "!eval memory_correct(\"memory:old\", \"I like blues\")",
+        "!eval memory_correct(\"memory:old\", \"I liked blues then\", 1000, 2000)",
         // `+await`-prefixed forms must pass the same guest checks as the bare call.
         "!eval +await cad_prepare(\"test part\", \"Z=0\", \"PLA\")",
         "!eval +await out:String = cad_prepare(\"test part\", \"Z=0\", \"PLA\")",
@@ -182,6 +187,27 @@ fn guest_memory_inspection_is_bound_to_the_turn() {
         .execute_await("memory_inspect", &[Value::string("metric units")])
         .unwrap();
     assert_eq!(result.to_string(), "\"bounded inspection\"");
+    worker.join().unwrap();
+}
+
+#[test]
+fn memory_correction_is_scoped_to_turn_identity_and_authority() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let worker = std::thread::spawn(move || match rx.blocking_recv().unwrap() {
+        IoRequest::Scoped { request: scoped::Request::Correct { principal, context, may_write,
+                target_id, replacement, valid_from_ms, valid_until_ms }, reply } => {
+            assert_eq!(principal, "telegram:user:42"); assert_eq!(context, principal);
+            assert!(!may_write); assert_eq!(target_id, "memory:old");
+            assert_eq!(replacement, "replacement"); assert_eq!(valid_from_ms, Some(1000));
+            assert_eq!(valid_until_ms, Some(2000));
+            reply.send(Ok("corrected".into())).unwrap();
+        }
+        _ => panic!("wrong request"),
+    });
+    let result = CoroutineHandle::new(tx).with_turn(Some(guest())).execute_await(
+        "memory_correct", &[Value::string("memory:old"), Value::string("replacement"),
+            Value::Int(1000), Value::Int(2000)]).unwrap();
+    assert_eq!(result.to_string(), "\"corrected\"");
     worker.join().unwrap();
 }
 

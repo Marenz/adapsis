@@ -478,6 +478,23 @@ schema since day one and was never set:
   replace it with a broader principal-only recall query or expose paths, embeddings or
   Cypher in the renderer. Output is capped at 12k characters, content at 2k, canonical
   rows at 40, extracted rows at 10, citations at 3 and lexical candidates at 200.
+- **Memory correction/lifecycle (#57):** schema version 2 adds optional
+  `TemporalValidity` nodes plus `HAS_VALIDITY`; omitted bounds are absent, never
+  inferred. `Memory.status` is `active`, `superseded`, `disputed` or `forgotten`.
+  Only active records participate in canonical injection, ordinary inspection and
+  ranked recall; exact authorized inspection may show every state and ACL-filtered
+  `SUPERSEDES`/`CONTRADICTS` links. `memory_correct(old_id, replacement[,
+  valid_from_ms[, valid_until_ms]])` is turn-bound and inherits the target's exact
+  single-group governance. Context participants need Contribute membership; global
+  correction additionally requires a write-capable turn. Replacement IDs hash the
+  actor, inherited scope key (the context id for context records, `access:global` for
+  global records), target, whitespace-normalized content and validity, so exact retries
+  survive restart and a global retry from another authorized context cannot create a
+  false dispute. Competing successors are all disputed and
+  therefore unrecalled; correcting a disputed branch creates one active resolution
+  that supersedes the authorized contradiction cluster. A rollback is another new
+  correction, never status rewinding or deletion. Keep correction creation, edges and
+  status transitions in one Ladybug transaction under `MemoryGraph.write_lock`.
 - **Forget is a status change**, not a delete — provenance survives. "Not yours" and "does
   not exist" return the same message on purpose; distinguishing them turns `memory_forget`
   into a probe for other conversations' memory ids.
@@ -661,9 +678,11 @@ schema since day one and was never set:
   at most 30k content characters, chronological within each page; `before_ms` is
   exclusive (equal-timestamp rows may straddle pages). Assistant rows establish
   generation only, not successful delivery. Guests cannot invoke this tool.
-- Guest `memory_remember` accepts context scope only. Guest `memory_forget`
-  additionally requires an assertion by that principal governed solely by that
-  context, so global notes and other conversations cannot be changed.
+- Guest `memory_remember` accepts context scope only. Guest `memory_correct` is
+  turn-bound and can change only an authorized single-context record; its scoped IO
+  request independently preserves the bound principal/context and non-write authority.
+  Guest `memory_forget` additionally requires an assertion by that principal governed
+  solely by that context, so global notes and other conversations cannot be changed.
 - Public web tools use Bing RSS (`roxmltree`) and static HTML extraction
   (`scraper`), returning source URLs. Fetching verifies public IPs, pins DNS for
   the request, rechecks each redirect, disables ambient proxies, and caps response

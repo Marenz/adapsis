@@ -56,12 +56,13 @@ scalar values. The documented token estimate is
 provider tokenizer.
 
 The v1 baseline has 12 cases, including the two discriminating current-context
-authorization checks above. It intentionally records limitations that predate
-contradiction work in #57: one stale assertion is still returned (`1/14`, rate
-`0.071429`), and the adversarial semantic query returns one authorized but
-irrelevant group memory, giving retrieval precision `0.928571`. Extraction
-snapshot precision/recall are both `0.75`. Tighten these only when production
-behavior actually improves.
+authorization checks above. Its stale/current timezone pair is seeded through the
+production `correct_memory` transaction: the stale assertion remains available to
+authorized exact audit inspection but is excluded from ordinary inspection and
+canonical injection, so the stale-rate threshold is zero. The adversarial semantic
+query still returns one authorized but irrelevant group memory. Extraction snapshot
+precision/recall are both `0.75`; aggregate retrieval precision is `0.923077`.
+Tighten these only when production behavior actually improves.
 
 ## Adding A Sanitized Regression
 

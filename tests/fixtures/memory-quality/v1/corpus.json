@@ -300,7 +300,7 @@
       "embedding_key": null,
       "exact_memory_key": null,
       "limit": null,
-      "expected_memory_keys": ["global-language-preference", "timezone-current", "timezone-old"],
+      "expected_memory_keys": ["global-language-preference", "timezone-current"],
       "forbidden_memory_keys": []
     },
     {

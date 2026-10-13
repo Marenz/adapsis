@@ -200,19 +200,36 @@ fn telegram_payload_resolves_a_stable_principal() {
     // the actual Telegram group context; neither can be supplied by model code.
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let expected_principal = principal.clone();
-    let worker = std::thread::spawn(move || match rx.blocking_recv().unwrap() {
-        crate::coroutine::IoRequest::MemoryInspect {
-            context_id,
-            principal_id,
-            query,
-            reply,
-        } => {
-            assert_eq!(context_id, "telegram:group:-100000005");
-            assert_eq!(principal_id, expected_principal);
-            assert!(query.is_empty());
-            reply.send(Ok("inspection".into())).unwrap();
+    let worker = std::thread::spawn(move || {
+        match rx.blocking_recv().unwrap() {
+            crate::coroutine::IoRequest::MemoryInspect {
+                context_id, principal_id, query, reply,
+            } => {
+                assert_eq!(context_id, "telegram:group:-100000005");
+                assert_eq!(principal_id, expected_principal);
+                assert!(query.is_empty());
+                reply.send(Ok("inspection".into())).unwrap();
+            }
+            _ => panic!("unexpected inspection request"),
         }
-        _ => panic!("unexpected request"),
+        match rx.blocking_recv().unwrap() {
+            crate::coroutine::IoRequest::Scoped {
+                request: crate::coroutine::scoped::Request::Correct {
+                    principal, context, may_write, target_id, replacement,
+                    valid_from_ms, valid_until_ms,
+                },
+                reply,
+            } => {
+                assert_eq!(context, "telegram:group:-100000005");
+                assert_eq!(principal, expected_principal);
+                assert!(!may_write);
+                assert_eq!(target_id, "memory:old");
+                assert_eq!(replacement, "replacement");
+                assert_eq!((valid_from_ms, valid_until_ms), (None, None));
+                reply.send(Ok("correction".into())).unwrap();
+            }
+            _ => panic!("unexpected correction request"),
+        }
     });
     let handle = crate::coroutine::CoroutineHandle::new(tx).with_turn(Some(
         crate::coroutine::TurnIdentity {
@@ -223,6 +240,10 @@ fn telegram_payload_resolves_a_stable_principal() {
         },
     ));
     handle.execute_await("memory_inspect", &[]).unwrap();
+    handle.execute_await(
+        "memory_correct",
+        &[crate::eval::Value::string("memory:old"), crate::eval::Value::string("replacement")],
+    ).unwrap();
     worker.join().unwrap();
 }
 

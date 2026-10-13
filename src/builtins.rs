@@ -696,7 +696,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         name: "memory_inspect",
         aliases: &[],
         short: "inspect memories visible in THIS chat: memory_inspect([query]) -> String",
-        long: "Returns a bounded, conversational view of active memories authorized for the current speaker AND governed by the current context or the global group. Takes zero or one String: empty shows canonical assertions (newest retained, rendered oldest-first) plus recent extracted observations; a non-empty value resolves an exact memory id first, then performs topic search with truthful lexical fallback if embedding generation or similarity search is unavailable. Results separate asserted from inferred data and include copyable memory_forget ids, timestamps, safe scope/origin, confidence/provenance and up to three source citations. A global memory never reveals its private origin context. The context and principal are server-bound, never arguments; even administrators cannot widen this tool to another context. Missing and unauthorized ids are indistinguishable. Requires +await.",
+        long: "Returns a bounded, conversational view of memories authorized for the current speaker AND governed by the current context or the global group. Empty/topic searches show ACTIVE records only. An exact memory id can also show SUPERSEDED, DISPUTED or FORGOTTEN audit records, optional validity and ACL-filtered correction/contradiction links. Results separate asserted from inferred data and include copyable ids, timestamps, safe scope/origin, confidence/provenance and up to three source citations. A global memory never reveals its private origin context. The context and principal are server-bound, never arguments; even administrators cannot widen this tool to another context. Missing and unauthorized ids are indistinguishable. Requires +await.",
         category: BuiltinCategory::Io,
     },
     Builtin {
@@ -729,6 +729,13 @@ pub static IO_BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Io,
     },
     Builtin {
+        name: "memory_correct",
+        aliases: &[],
+        short: "correct a memory in THIS chat: memory_correct(old_id, replacement[, valid_from_ms[, valid_until_ms]]) -> String",
+        long: "Creates a new explicit canonical assertion that supersedes an authorized memory without changing its text or provenance. Context and speaker are bound to the turn and are not arguments. The replacement inherits the target's exact governance; context memory stays in this context, while global correction requires a write-capable turn. Optional validity uses explicit Unix-millisecond Int values only, with valid_from_ms <= valid_until_ms; omitted dates stay absent. Exact retries are idempotent. Competing corrections become DISPUTED and are excluded from recall; correcting a disputed branch creates an ACTIVE resolution and supersedes its authorized contradiction cluster. Missing and unauthorized ids are indistinguishable. Requires `+await`.",
+        category: BuiltinCategory::Io,
+    },
+    Builtin {
         name: "memory_forget",
         aliases: &[],
         short: "forget a specific memory: memory_forget(memory_id) -> String",
@@ -736,8 +743,8 @@ pub static IO_BUILTINS: &[Builtin] = &[
                node and its provenance survive — only its status changes — so a mistaken forget is \
                recoverable. You can only forget memories the current conversation is authorized to \
                contribute to; forgetting anything else reports that nothing was forgotten rather than \
-               confirming the id exists. To correct a canonical memory, forget it and remember the \
-               replacement. Requires `+await`.",
+               confirming the id exists. Use memory_correct for replacements; forgetting means \
+               withdrawing the record without a successor. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {

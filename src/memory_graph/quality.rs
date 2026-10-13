@@ -84,7 +84,7 @@ struct ExtractedMemoryFixture {
     freshness: Freshness,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum FixtureScope {
     Context,
@@ -622,6 +622,34 @@ fn validate_coverage(corpus: &CorpusFixture) -> Result<()> {
         "exact-denial coverage requires a denial edge"
     );
     ensure!(corpus.canonical_memories.iter().any(|memory| memory.freshness == Freshness::Stale && memory.correction_group.is_some()), "correction-stale coverage requires an annotated stale assertion");
+    let mut corrections = BTreeMap::<&str, Vec<&CanonicalMemoryFixture>>::new();
+    for memory in &corpus.canonical_memories {
+        if let Some(group) = memory.correction_group.as_deref() {
+            corrections.entry(group).or_default().push(memory);
+        }
+    }
+    for (group, memories) in corrections {
+        ensure!(memories.len() == 2,
+            "correction group {group} must contain exactly one stale target and one current replacement");
+        ensure!(
+            memories
+                .iter()
+                .filter(|memory| memory.freshness == Freshness::Stale)
+                .count()
+                == 1
+                && memories
+                    .iter()
+                    .filter(|memory| memory.freshness == Freshness::Current)
+                    .count()
+                    == 1,
+            "correction group {group} must contain one stale target and one current replacement"
+        );
+        ensure!(
+            memories[0].context_id == memories[1].context_id
+                && memories[0].scope == memories[1].scope,
+            "correction group {group} must keep the target context and scope"
+        );
+    }
     Ok(())
 }
 
@@ -743,7 +771,10 @@ fn seed_extracted_memories(corpus: &CorpusFixture, seeded: &mut SeededCorpus) ->
 }
 
 fn seed_canonical_memories(corpus: &CorpusFixture, seeded: &mut SeededCorpus) -> Result<()> {
-    for fixture in &corpus.canonical_memories {
+    let mut correction_targets = BTreeMap::new();
+    for fixture in corpus.canonical_memories.iter().filter(|memory| {
+        memory.correction_group.is_none() || memory.freshness != Freshness::Current
+    }) {
         let draft = CanonicalDraft {
             content: fixture.content.clone(),
             context_id: fixture.context_id.clone(),
@@ -756,6 +787,34 @@ fn seed_canonical_memories(corpus: &CorpusFixture, seeded: &mut SeededCorpus) ->
             created_at_ms: fixture.created_at_ms,
         };
         let id = seeded.graph.remember_canonical(&draft)?;
+        register_memory(seeded, &fixture.key, id.clone(), fixture.freshness);
+        if let Some(group) = fixture.correction_group.as_deref() {
+            correction_targets.insert(group, id);
+        }
+    }
+    for fixture in corpus.canonical_memories.iter().filter(|memory| {
+        memory.correction_group.is_some() && memory.freshness == Freshness::Current
+    }) {
+        let group = fixture.correction_group.as_deref().unwrap();
+        let target_id = correction_targets
+            .get(group)
+            .with_context(|| format!("correction group {group} has no seeded stale target"))?;
+        let id = seeded
+            .graph
+            .correct_memory(&CorrectionDraft {
+                target_id: target_id.clone(),
+                replacement: fixture.content.clone(),
+                context_id: fixture.context_id.clone(),
+                principal_id: fixture.principal_id.clone(),
+                may_write: true,
+                embedding: embedding(corpus, &fixture.embedding_key)?,
+                valid_from_ms: None,
+                valid_until_ms: None,
+                created_at_ms: fixture.created_at_ms,
+            })?
+            .with_context(|| {
+                format!("production correction was not authorized for group {group}")
+            })?;
         register_memory(seeded, &fixture.key, id, fixture.freshness);
     }
     Ok(())
@@ -1489,6 +1548,37 @@ mod tests {
             first.quality.cost.token_estimate_definition,
             TOKEN_ESTIMATE_DEFINITION
         );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_fixture_is_superseded_through_production_correction() -> Result<()> {
+        let (corpus, _, _) = fixtures();
+        let seeded = seed_corpus(&corpus)?;
+        let old = &seeded.id_by_key["timezone-old"];
+        let current = &seeded.id_by_key["timezone-current"];
+        let old_record =
+            seeded
+                .graph
+                .inspect("principal:traveler-a", "context:settings", old, None)?;
+        let current_record =
+            seeded
+                .graph
+                .inspect("principal:traveler-a", "context:settings", current, None)?;
+        assert_eq!(old_record.canonical[0].status, MemoryStatus::Superseded);
+        assert_eq!(current_record.canonical[0].status, MemoryStatus::Active);
+        assert_eq!(current_record.canonical[0].supersedes, [old.clone()]);
+        let general = seeded
+            .graph
+            .inspect("principal:traveler-a", "context:settings", "", None)?;
+        let general_ids = general
+            .canonical
+            .iter()
+            .chain(&general.extracted)
+            .map(|memory| &memory.id)
+            .collect::<BTreeSet<_>>();
+        assert!(!general_ids.contains(old));
+        assert!(general_ids.contains(current));
         Ok(())
     }
 

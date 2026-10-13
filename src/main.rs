@@ -1907,9 +1907,10 @@ async fn main() -> Result<()> {
                         }
                         coroutine::IoRequest::Scoped { request, reply } => {
                             let graph = memory_graph_for_spawn.clone();
+                            let embedder = memory_embedder_for_spawn.clone();
                             let sender = io_sender_for_spawn.clone();
                             tokio::spawn(async move {
-                                let _ = reply.send(crate::capabilities::dispatch(request, graph, sender).await);
+                                let _ = reply.send(crate::capabilities::dispatch(request, graph, embedder, sender).await);
                             });
                         }
                         coroutine::IoRequest::MemoryCypher { principal_id, query, reply } => {

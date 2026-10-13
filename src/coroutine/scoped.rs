@@ -3,7 +3,7 @@ use super::*;
 use anyhow::ensure;
 
 pub const GUEST_TOOLS: &[&str] = &[
-    "music_generate", "web_search", "web_read", "memory_inspect", "memory_remember", "memory_forget",
+    "music_generate", "web_search", "web_read", "memory_inspect", "memory_remember", "memory_correct", "memory_forget",
     "context_propose", "cad_prepare", "video_stabilize",
 ];
 
@@ -16,6 +16,8 @@ pub enum Request {
     VideoStabilize { principal: String, context: String },
     Search { query: String },
     Read { url: String },
+    Correct { principal: String, context: String, may_write: bool, target_id: String,
+        replacement: String, valid_from_ms: Option<i64>, valid_until_ms: Option<i64> },
     Forget { principal: String, context: String, memory_id: String },
 }
 
@@ -82,6 +84,20 @@ impl CoroutineHandle {
                 ensure!(args.len() == 1, "web_read(url) expects one argument");
                 Request::Read { url: text(args, 0, 4096)? }
             }
+            "memory_correct" => {
+                let turn = self.require_turn(op)?;
+                ensure!((2..=4).contains(&args.len()),
+                    "memory_correct(old_id, replacement[, valid_from_ms[, valid_until_ms]]) expects two to four arguments; context, speaker and authority are bound to this conversation");
+                let valid_from_ms = optional_int_value(args, 2, "valid_from_ms")?;
+                let valid_until_ms = optional_int_value(args, 3, "valid_until_ms")?;
+                if let (Some(from), Some(until)) = (valid_from_ms, valid_until_ms) {
+                    ensure!(from <= until,
+                        "memory_correct valid_from_ms ({from}) must be <= valid_until_ms ({until})");
+                }
+                Request::Correct { principal: turn.principal.clone(), context: turn.context.clone(),
+                    may_write: turn.may_write, target_id: text(args, 0, 200)?,
+                    replacement: text(args, 1, 16_000)?, valid_from_ms, valid_until_ms }
+            }
             "memory_forget" if self.turn.as_ref().is_some_and(|t| t.guest_tools.is_some()) => {
                 let turn = self.require_turn(op)?;
                 ensure!(args.len() == 1, "memory_forget(memory_id) expects one argument");
@@ -115,6 +131,14 @@ fn optional_int(args: &[Value], index: usize, default: i64) -> Result<i64> {
         Some(Value::Int(value)) => Ok(*value),
         None => Ok(default),
         _ => bail!("argument {} must be an Int", index + 1),
+    }
+}
+
+fn optional_int_value(args: &[Value], index: usize, name: &str) -> Result<Option<i64>> {
+    match args.get(index) {
+        Some(Value::Int(value)) => Ok(Some(*value)),
+        None => Ok(None),
+        _ => bail!("memory_correct {name} must be an Int in Unix milliseconds"),
     }
 }
 

@@ -9,12 +9,14 @@ use sha2::{Digest, Sha256};
 mod activity;
 mod history;
 pub mod inspect;
+mod lifecycle;
 pub mod quality;
 pub use activity::is_private_admin;
 pub use inspect::render_inspection;
+pub use lifecycle::{CorrectionDraft, MemoryStatus, TemporalValidity};
 use inspect::SourceCitation;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// How many canonical memories are injected per turn.
 pub(crate) const CANONICAL_MEMORY_LIMIT: usize = 40;
@@ -55,9 +57,17 @@ fn context_group_id(context_id: &str) -> String {
 /// clause additionally prevents an administrator's broad memberships from
 /// widening a conversational operation into unrelated contexts.
 fn context_authorized_memory_query(tail: &str) -> String {
+    context_authorized_memory_query_with_status("AND memory.status = 'active'", tail)
+}
+
+fn context_authorized_memory_query_any_status(tail: &str) -> String {
+    context_authorized_memory_query_with_status("", tail)
+}
+
+fn context_authorized_memory_query_with_status(status: &str, tail: &str) -> String {
     format!(
         "MATCH (principal:Principal {{id: $principal_id}})-[membership:MEMBER_OF]->(access_group:AccessGroup)<-[:GOVERNED_BY]-(memory:Memory) \
-         WHERE membership.can_read = true AND memory.status = 'active' \
+         WHERE membership.can_read = true {status} \
            AND NOT (memory)-[:DENIED_TO]->(principal) \
          WITH memory, count(DISTINCT access_group) AS accessible_groups \
          MATCH (memory)-[:GOVERNED_BY]->(required_group:AccessGroup) \
@@ -214,7 +224,8 @@ pub fn render_canonical_prompt(memories: &[RecalledMemory]) -> String {
          standing instructions, not inferences — treat them as true and follow them \
          without being reminded. They are shown in full on every turn, so you never \
          need to search for them. If one is wrong or obsolete, call \
-         memory_forget(\"<id>\") with the bracketed id and remember the correction:\n{block}"
+         memory_correct(\"<id>\", \"replacement\") with the bracketed id so the \
+         correction keeps an auditable history:\n{block}"
     )
 }
 
@@ -279,7 +290,8 @@ impl MemoryGraph {
              CREATE NODE TABLE IF NOT EXISTS Memory(id STRING, content STRING, memory_type STRING, canonical BOOL, status STRING, confidence DOUBLE, embedding FLOAT[384], created_at_ms INT64, PRIMARY KEY(id));
              CREATE NODE TABLE IF NOT EXISTS ExtractionRun(id STRING, model STRING, created_at_ms INT64, PRIMARY KEY(id));
              CREATE NODE TABLE IF NOT EXISTS Entity(id STRING, kind STRING, canonical_name STRING, aliases_json STRING, created_at_ms INT64, PRIMARY KEY(id));
-             CREATE NODE TABLE IF NOT EXISTS Attachment(id STRING, sha256 STRING, mime_type STRING, storage_path STRING, platform_ref STRING, created_at_ms INT64, PRIMARY KEY(id));
+              CREATE NODE TABLE IF NOT EXISTS Attachment(id STRING, sha256 STRING, mime_type STRING, storage_path STRING, platform_ref STRING, created_at_ms INT64, PRIMARY KEY(id));
+              CREATE NODE TABLE IF NOT EXISTS TemporalValidity(id STRING, valid_from_ms INT64, valid_until_ms INT64, PRIMARY KEY(id));
              CREATE REL TABLE IF NOT EXISTS USES_ACCESS_GROUP(FROM Context TO AccessGroup);
              CREATE REL TABLE IF NOT EXISTS MEMBER_OF(FROM Principal TO AccessGroup, can_read BOOL, can_contribute BOOL, can_manage BOOL, valid_from_ms INT64);
              CREATE REL TABLE IF NOT EXISTS IN_CONTEXT(FROM Message TO Context);
@@ -294,8 +306,9 @@ impl MemoryGraph {
              CREATE REL TABLE IF NOT EXISTS HAS_ATTACHMENT(FROM Message TO Attachment);
              CREATE REL TABLE IF NOT EXISTS SUPERSEDES(FROM Memory TO Memory);
              CREATE REL TABLE IF NOT EXISTS CONTRADICTS(FROM Memory TO Memory);
-             CREATE REL TABLE IF NOT EXISTS ASSERTED_BY(FROM Memory TO Principal);
-             CREATE REL TABLE IF NOT EXISTS DENIED_TO(FROM Memory TO Principal);",
+              CREATE REL TABLE IF NOT EXISTS ASSERTED_BY(FROM Memory TO Principal);
+              CREATE REL TABLE IF NOT EXISTS DENIED_TO(FROM Memory TO Principal);
+              CREATE REL TABLE IF NOT EXISTS HAS_VALIDITY(FROM Memory TO TemporalValidity);",
         )?;
         let mut statement = connection.prepare(
             "MERGE (version:SchemaVersion {version: $version}) RETURN version.version",
@@ -1209,12 +1222,12 @@ fn validate_authorized_cypher(query: &str) -> Result<()> {
     Ok(())
 }
 
-fn finish_transaction(connection: &Connection<'_>, result: Result<()>) -> Result<()> {
+fn finish_transaction<T>(connection: &Connection<'_>, result: Result<T>) -> Result<T> {
     match result {
-        Ok(()) => {
+        Ok(value) => {
             connection.query("COMMIT")?;
             connection.query("CHECKPOINT")?;
-            Ok(())
+            Ok(value)
         }
         Err(error) => {
             let _ = connection.query("ROLLBACK");

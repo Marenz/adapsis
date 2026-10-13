@@ -6,17 +6,17 @@
   "expected": {
     "retrieval": {
       "query_count": 12,
-      "returned_count": 14,
-      "true_positive_count": 13,
+      "returned_count": 13,
+      "true_positive_count": 12,
       "false_positive_count": 1,
       "false_negative_count": 0,
-      "precision": 0.928571,
+      "precision": 0.923077,
       "recall": 1.0,
       "unauthorized_recall_count": 0,
       "unsupported_citation_count": 0,
-      "stale_memory_count": 1,
-      "freshness_scored_count": 14,
-      "stale_memory_rate": 0.071429
+      "stale_memory_count": 0,
+      "freshness_scored_count": 13,
+      "stale_memory_rate": 0.0
     },
     "extraction": {
       "gold_fact_count": 4,
@@ -27,11 +27,11 @@
       "recall": 0.75
     },
     "cost": {
-      "prompt_chars": 6010,
-      "canonical_prompt_chars": 5708,
+      "prompt_chars": 6334,
+      "canonical_prompt_chars": 6032,
       "ranked_recall_prompt_chars": 302,
-      "output_chars": 7600,
-      "estimated_tokens": 3403,
+      "output_chars": 7928,
+      "estimated_tokens": 3566,
       "token_estimate_definition": "ceil((prompt_chars + output_chars) / 4 Unicode scalar values)"
     }
   },
@@ -47,7 +47,7 @@
     "min_retrieval_recall": 0.95,
     "max_unauthorized_recall_count": 0,
     "max_unsupported_citation_count": 0,
-    "max_stale_memory_rate": 0.1,
+    "max_stale_memory_rate": 0.0,
     "min_extraction_precision": 0.7,
     "min_extraction_recall": 0.7,
     "max_prompt_chars": 10000,

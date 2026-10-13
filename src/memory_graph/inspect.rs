@@ -44,11 +44,16 @@ pub struct InspectedMemory {
     pub canonical: bool,
     pub confidence: f64,
     pub created_at_ms: i64,
+    pub status: MemoryStatus,
+    pub validity: Option<TemporalValidity>,
     pub scopes: Vec<String>,
     pub origin_contexts: Vec<String>,
     pub asserted_by: Option<String>,
     pub extraction_model: Option<String>,
     pub citations: Vec<SourceCitation>,
+    pub supersedes: Vec<String>,
+    pub superseded_by: Vec<String>,
+    pub contradicts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +74,7 @@ struct Candidate {
     canonical: bool,
     confidence: f64,
     created_at_ms: i64,
+    status: MemoryStatus,
 }
 
 impl MemoryGraph {
@@ -91,7 +97,8 @@ impl MemoryGraph {
 
         if let Some(exact) = self.select_exact(principal_id, context_id, query)? {
             let canonical = exact.canonical;
-            let memory = self.enrich_candidates(vec![exact])?.remove(0);
+            let mut memory = self.enrich_candidates(vec![exact])?.remove(0);
+            self.enrich_exact_links(principal_id, context_id, &mut memory)?;
             return Ok(Inspection {
                 search: InspectionSearch::ExactId,
                 canonical: if canonical {
@@ -282,10 +289,10 @@ impl MemoryGraph {
         context_id: &str,
         memory_id: &str,
     ) -> Result<Option<Candidate>> {
-        let query = context_authorized_memory_query(
+        let query = context_authorized_memory_query_any_status(
             "AND memory.id = $memory_id
              RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms LIMIT 1",
+                    memory.confidence, memory.created_at_ms, memory.status LIMIT 1",
         );
         let connection = Connection::new(&self.database)?;
         let mut statement = connection.prepare(&query)?;
@@ -313,7 +320,7 @@ impl MemoryGraph {
         let query = context_authorized_memory_query(
             "AND memory.canonical = $canonical
              RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms
+                    memory.confidence, memory.created_at_ms, memory.status
              ORDER BY memory.created_at_ms DESC, memory.id DESC LIMIT $limit",
         );
         self.select_candidates(
@@ -335,7 +342,7 @@ impl MemoryGraph {
     ) -> Result<Vec<Candidate>> {
         let query = context_authorized_memory_query(
             "RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms
+                    memory.confidence, memory.created_at_ms, memory.status
              ORDER BY memory.created_at_ms DESC, memory.id DESC LIMIT $limit",
         );
         self.select_candidates(
@@ -357,7 +364,7 @@ impl MemoryGraph {
         let query = context_authorized_memory_query(
             "AND memory.canonical = $canonical
              RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms,
+                    memory.confidence, memory.created_at_ms, memory.status,
                     array_cosine_similarity(memory.embedding, $embedding) AS similarity
              ORDER BY similarity DESC, memory.created_at_ms DESC, memory.id ASC LIMIT $limit",
         );
@@ -417,6 +424,10 @@ impl MemoryGraph {
             "MATCH (memory:Memory {id: $memory_id})-[:EXTRACTED_BY]->(run:ExtractionRun)
              RETURN run.model ORDER BY run.created_at_ms DESC, run.id DESC LIMIT 1",
         )?;
+        let mut validity = connection.prepare(
+            "MATCH (memory:Memory {id: $memory_id})-[:HAS_VALIDITY]->(validity:TemporalValidity)
+             RETURN validity.valid_from_ms, validity.valid_until_ms LIMIT 1",
+        )?;
         candidates
             .into_iter()
             .map(|candidate| {
@@ -452,6 +463,11 @@ impl MemoryGraph {
                     .next()
                     .map(|row| string_value(&row[0]))
                     .transpose()?;
+                let validity = connection
+                    .execute(&mut validity, params())?
+                    .next()
+                    .map(|row| temporal_validity_from_row(&row))
+                    .transpose()?;
                 let mut memory_citations =
                     citations.get(&candidate.id).cloned().unwrap_or_default();
                 if globally_scoped {
@@ -466,14 +482,96 @@ impl MemoryGraph {
                     canonical: candidate.canonical,
                     confidence: candidate.confidence,
                     created_at_ms: candidate.created_at_ms,
+                    status: candidate.status,
+                    validity,
                     scopes,
                     origin_contexts,
                     asserted_by,
                     extraction_model,
                     citations: memory_citations,
+                    supersedes: Vec::new(),
+                    superseded_by: Vec::new(),
+                    contradicts: Vec::new(),
                 })
             })
             .collect()
+    }
+
+    fn enrich_exact_links(
+        &self,
+        principal_id: &str,
+        context_id: &str,
+        memory: &mut InspectedMemory,
+    ) -> Result<()> {
+        memory.supersedes = self.authorized_related_ids(
+            principal_id,
+            context_id,
+            &memory.id,
+            "MATCH (memory:Memory {id: $memory_id})-[:SUPERSEDES]->(related:Memory) RETURN related.id",
+        )?;
+        memory.superseded_by = self.authorized_related_ids(
+            principal_id,
+            context_id,
+            &memory.id,
+            "MATCH (related:Memory)-[:SUPERSEDES]->(memory:Memory {id: $memory_id}) RETURN related.id",
+        )?;
+        let mut contradictions = self.authorized_related_ids(
+            principal_id,
+            context_id,
+            &memory.id,
+            "MATCH (memory:Memory {id: $memory_id})-[:CONTRADICTS]->(related:Memory) RETURN related.id",
+        )?;
+        contradictions.extend(self.authorized_related_ids(
+            principal_id,
+            context_id,
+            &memory.id,
+            "MATCH (related:Memory)-[:CONTRADICTS]->(memory:Memory {id: $memory_id}) RETURN related.id",
+        )?);
+        contradictions.sort();
+        contradictions.dedup();
+        memory.contradicts = contradictions;
+        Ok(())
+    }
+
+    fn authorized_related_ids(
+        &self,
+        principal_id: &str,
+        context_id: &str,
+        memory_id: &str,
+        relation_query: &str,
+    ) -> Result<Vec<String>> {
+        let connection = Connection::new(&self.database)?;
+        let mut relation = connection.prepare(relation_query)?;
+        let related = connection
+            .execute(&mut relation, vec![("memory_id", memory_id.into())])?
+            .map(|row| string_value(&row[0]))
+            .collect::<Result<Vec<_>>>()?;
+        let query = context_authorized_memory_query_any_status(
+            "AND memory.id = $related_id RETURN count(memory)",
+        );
+        let mut authorized = connection.prepare(&query)?;
+        let mut result = Vec::new();
+        for related_id in related {
+            let visible = connection
+                .execute(
+                    &mut authorized,
+                    context_params(
+                        principal_id,
+                        context_id,
+                        vec![("related_id", related_id.clone().into())],
+                    ),
+                )?
+                .next()
+                .and_then(|row| row.first().and_then(|value| int64_value(value).ok()))
+                .unwrap_or(0)
+                > 0;
+            if visible {
+                result.push(related_id);
+            }
+        }
+        result.sort();
+        result.dedup();
+        Ok(result)
     }
 
     pub(crate) fn source_citations(
@@ -530,7 +628,7 @@ fn context_params<'a>(
 
 fn candidate_from_row(row: &[Value]) -> Result<Candidate> {
     ensure!(
-        row.len() >= 6,
+        row.len() >= 7,
         "unexpected Ladybug inspection row width: {}",
         row.len()
     );
@@ -541,6 +639,24 @@ fn candidate_from_row(row: &[Value]) -> Result<Candidate> {
         canonical: bool_value(&row[3])?,
         confidence: double_value(&row[4])?,
         created_at_ms: int64_value(&row[5])?,
+        status: MemoryStatus::parse(&string_value(&row[6])?)?,
+    })
+}
+
+fn optional_int64(value: &Value) -> Result<Option<i64>> {
+    match value {
+        Value::Null(_) => Ok(None),
+        Value::Int64(value) => Ok(Some(*value)),
+        other => Err(anyhow!(
+            "expected optional integer from Ladybug, got {other:?}"
+        )),
+    }
+}
+
+fn temporal_validity_from_row(row: &[Value]) -> Result<TemporalValidity> {
+    Ok(TemporalValidity {
+        valid_from_ms: optional_int64(&row[0])?,
+        valid_until_ms: optional_int64(&row[1])?,
     })
 }
 
@@ -582,7 +698,9 @@ pub fn render_inspection(inspection: &Inspection) -> String {
         InspectionSearch::General => output.push_str(
             "General view: newest canonical records were preserved and displayed oldest-first; extracted records are newest-first.\n",
         ),
-        InspectionSearch::ExactId => output.push_str("Exact active memory id lookup.\n"),
+        InspectionSearch::ExactId => output.push_str(
+            "Exact authorized memory id lookup, including audit-only lifecycle records.\n",
+        ),
         InspectionSearch::Semantic => output.push_str(
             "Topic results are ranked by semantic similarity with stable timestamp/id tie-breaking.\n",
         ),
@@ -603,7 +721,7 @@ pub fn render_inspection(inspection: &Inspection) -> String {
             output.push_str("No active memories are visible in this conversation.\n");
         } else {
             output.push_str(
-                "No active memory visible in this conversation matched the requested id or topic. An absent id and an unauthorized id are intentionally indistinguishable.\n",
+                "No memory visible in this conversation matched the requested id or topic. An absent id and an unauthorized id are intentionally indistinguishable.\n",
             );
         }
         return output;
@@ -637,7 +755,9 @@ pub fn render_inspection(inspection: &Inspection) -> String {
         false,
     );
     if exact {
-        output.push_str("The id above can be passed directly to memory_forget.\n");
+        output.push_str(
+            "The id above can be passed to memory_correct; active memories may also be passed to memory_forget.\n",
+        );
     } else {
         output.push_str("Displayed ids can be passed directly to memory_forget when the current conversation may change them.\n");
     }
@@ -706,13 +826,25 @@ fn render_memory(memory: &InspectedMemory) -> String {
     let scopes = clean_list(&memory.scopes);
     let origins = clean_list(&memory.origin_contexts);
     let mut output = format!(
-        "- [{}] created_at_ms={} type={} scope={} origin={}\n",
+        "- [{}] status={} created_at_ms={} type={} scope={} origin={}\n",
         clean_metadata(&memory.id, 200),
+        memory.status.as_str().to_ascii_uppercase(),
         memory.created_at_ms,
         kind,
         scopes,
         origins
     );
+    if let Some(validity) = &memory.validity {
+        output.push_str(&format!(
+            "  validity: valid_from_ms={} valid_until_ms={}\n",
+            validity
+                .valid_from_ms
+                .map_or_else(|| "absent".to_string(), |value| value.to_string()),
+            validity
+                .valid_until_ms
+                .map_or_else(|| "absent".to_string(), |value| value.to_string()),
+        ));
+    }
     if memory.canonical {
         output.push_str(&format!(
             "  asserted_by={}\n",
@@ -755,7 +887,16 @@ fn render_memory(memory: &InspectedMemory) -> String {
             clean_metadata(&citation.source_id, 160),
         ));
     }
+    append_relation(&mut output, "supersedes", &memory.supersedes);
+    append_relation(&mut output, "superseded_by", &memory.superseded_by);
+    append_relation(&mut output, "contradicts", &memory.contradicts);
     output
+}
+
+fn append_relation(output: &mut String, name: &str, ids: &[String]) {
+    if !ids.is_empty() {
+        output.push_str(&format!("  {name}: {}\n", clean_list(ids)));
+    }
 }
 
 fn clean_list(values: &[String]) -> String {
@@ -948,6 +1089,62 @@ mod tests {
         let unauthorized = render_inspection(&graph.inspect("speaker", "a", &foreign, None)?);
         let absent = render_inspection(&graph.inspect("speaker", "a", "memory:absent", None)?);
         assert_eq!(unauthorized, absent);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_audit_shows_lifecycle_but_filters_inaccessible_links() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&message("a", "a", "speaker", 1), "admin")?;
+        graph.ingest_message(&message("b", "b", "other", 2), "admin")?;
+        let old = graph.remember_canonical(&canonical("old", "a", "speaker", 10))?;
+        let current = graph
+            .correct_memory(&CorrectionDraft {
+                target_id: old.clone(),
+                replacement: "current".into(),
+                context_id: "a".into(),
+                principal_id: "speaker".into(),
+                may_write: false,
+                embedding: vec![0.5; 384],
+                valid_from_ms: Some(100),
+                valid_until_ms: None,
+                created_at_ms: 11,
+            })?
+            .unwrap();
+        let forgotten = graph.remember_canonical(&canonical("forgotten", "a", "speaker", 12))?;
+        assert!(graph.forget_memory("speaker", &forgotten)?);
+        let foreign = graph.remember_canonical(&canonical("foreign", "b", "other", 13))?;
+        let connection = Connection::new(&graph.database)?;
+        execute(
+            &connection,
+            "MATCH (current:Memory {id: $current}), (foreign:Memory {id: $foreign}) CREATE (current)-[:CONTRADICTS]->(foreign)",
+            vec![("current", current.clone().into()), ("foreign", foreign.into())],
+        )?;
+
+        let old_exact = graph.inspect("speaker", "a", &old, None)?;
+        assert_eq!(old_exact.canonical[0].status, MemoryStatus::Superseded);
+        assert_eq!(old_exact.canonical[0].superseded_by, [current.clone()]);
+        let current_exact = graph.inspect("speaker", "a", &current, None)?;
+        assert_eq!(current_exact.canonical[0].status, MemoryStatus::Active);
+        assert_eq!(current_exact.canonical[0].supersedes, [old.clone()]);
+        assert!(current_exact.canonical[0].contradicts.is_empty());
+        assert_eq!(
+            current_exact.canonical[0].validity,
+            Some(TemporalValidity {
+                valid_from_ms: Some(100),
+                valid_until_ms: None
+            })
+        );
+        let forgotten_exact = graph.inspect("speaker", "a", &forgotten, None)?;
+        assert_eq!(forgotten_exact.canonical[0].status, MemoryStatus::Forgotten);
+        let rendered = render_inspection(&forgotten_exact);
+        assert!(rendered.contains("status=FORGOTTEN"));
+
+        let general = graph.inspect("speaker", "a", "", None)?;
+        let visible = ids(&general);
+        assert!(visible.contains(&current));
+        assert!(!visible.contains(&old));
+        assert!(!visible.contains(&forgotten));
         Ok(())
     }
 
