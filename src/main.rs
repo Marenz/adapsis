@@ -1638,7 +1638,13 @@ async fn main() -> Result<()> {
             let io_sender_for_spawn = runtime.io_sender();
             let shared_runtime_for_spawn = shared_runtime.clone();
             let shared_meta_for_spawn = shared_meta.clone();
-             let shared_program_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
+            // Single Tier-1 program Arc (issue #9). The IO loop (spawn/timer/
+            // llm_takeover) and the HTTP API MUST share one program: a second
+            // Arc created later meant a Telegram/llm_takeover mutation landed in
+            // an orphan program the API queries and the autosave never saw, so
+            // the bot's own module changes silently vanished.
+            let tier1_program = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
+            let shared_program_for_spawn = tier1_program.clone();
              let source_registry: coroutine::SourceRegistry =
                  std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
              let llm_url_for_spawn = url.clone();
@@ -2313,8 +2319,10 @@ async fn main() -> Result<()> {
             *training_log_shared.write().unwrap() = train_log.clone();
             *ai_log_shared.write().unwrap() = ai_log.clone();
 
-            // Build the three independent tiers from the loaded session.
-            let tier1_program = std::sync::Arc::new(tokio::sync::RwLock::new(sess.program.clone()));
+            // Reuse the single Tier-1 program Arc created before the IO loop.
+            // Creating a second Arc here (from the now-stale `sess.program`)
+            // would fork the program: HTTP mutations, startup mutations and the
+            // Telegram/llm_takeover path would each see a different one.
 
             // Save-on-change: bounded channel with capacity 1.
             // Any code path calls try_send(()) when state changes; the background

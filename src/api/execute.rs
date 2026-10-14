@@ -248,11 +248,29 @@ pub struct AgentCompletionCallback {
 /// All mutations, tests, evals, queries, watches, agents, and `!opencode` are
 /// handled here.  SSE events are **not** sent — the caller is responsible for
 /// inspecting the returned `CodeExecutionResult` and emitting any events it needs.
+///
+/// No-baseline entry point: callers that have no conversational turn (direct
+/// mutation endpoints, tooling) retain the global `!done` test gate. Conversational
+/// turns must call [`execute_code_with_baseline`] with the turn's frozen program so
+/// completion is judged against changed functions only (#66).
+#[allow(dead_code)]
 pub async fn execute_code(
     code: &str,
     config: &AppConfig,
     session: &mut WorkingSet,
     agent_callback: Option<AgentCompletionCallback>,
+) -> CodeExecutionResult {
+    execute_code_with_baseline(code, config, session, agent_callback, None).await
+}
+
+/// Conversation completion owes tests for changed functions, not unrelated
+/// pre-existing debt. The immutable baseline is captured once for the whole turn.
+pub(super) async fn execute_code_with_baseline(
+    code: &str,
+    config: &AppConfig,
+    session: &mut WorkingSet,
+    agent_callback: Option<AgentCompletionCallback>,
+    completion_baseline: Option<&crate::ast::Program>,
 ) -> CodeExecutionResult {
     let mut result = CodeExecutionResult::new();
 
@@ -977,7 +995,12 @@ pub async fn execute_code(
                                 .flat_map(|m| {
                                     m.functions.iter().filter_map(|f| {
                                         let qname = format!("{}.{}", m.name, f.name);
-                                        if f.body.len() > 2 && !crate::session::is_function_tested(&session.program, &qname) {
+                                        let unchanged = completion_baseline.is_some_and(|base| {
+                                            base.modules.iter().find(|old| old.name == m.name)
+                                                .and_then(|old| old.functions.iter().find(|old| old.name == f.name))
+                                                .is_some_and(|old| std::sync::Arc::ptr_eq(old, f))
+                                        });
+                                        if !unchanged && f.body.len() > 2 && !crate::session::is_function_tested(&session.program, &qname) {
                                             Some(qname)
                                         } else {
                                             None

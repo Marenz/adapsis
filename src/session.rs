@@ -1312,7 +1312,7 @@ impl Session {
                 test_src.push_str(&format!(
                     "  +with {} -> expect {}\n",
                     ast::escape_test_input_linebreaks(&case.input),
-                    expect_str
+                    ast::escape_test_input_linebreaks(&expect_str)
                 ));
                 for ac in &case.after_checks {
                     test_src.push_str(&format!("  +after {} {} \"{}\"\n", ac.target, ac.matcher, ac.value));
@@ -2163,12 +2163,30 @@ pub fn format_expr_pub(expr: &parser::Expr) -> String {
     format_expr(expr)
 }
 
+/// Escape a string value so it can sit inside a quoted literal on a single line.
+/// Backslash and quote stay structural; newline/CR/tab would otherwise turn the
+/// one-line `+with ... -> expect ...` into a multi-line, unparseable module.
+fn escape_inline_literal(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 fn format_expr(expr: &parser::Expr) -> String {
     match expr {
         parser::Expr::Int(n) => n.to_string(),
         parser::Expr::Float(f) => format!("{f}"),
         parser::Expr::Bool(b) => b.to_string(),
-        parser::Expr::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        // Test inputs/expectations are written back as a SINGLE line, so a real
+        // newline/CR/tab inside a string value must be escaped here. Leaving them
+        // raw produced a module whose `+with`/`expect` line spanned lines, which
+        // failed to parse on reload — and library persistence (which re-parses
+        // the reconstructed source before renaming) then silently refused to
+        // save the whole module.
+        parser::Expr::String(s) => format!("\"{}\"", escape_inline_literal(s)),
         parser::Expr::Ident(id) => id.clone(),
         parser::Expr::FieldAccess { base, field } => {
             format!("{}.{}", format_expr(base), field)
@@ -2250,11 +2268,11 @@ fn reconstruct_expect(expected: &str, matcher: Option<&str>) -> String {
         Some("AnyErr") => "Err".to_string(),
         Some(s) => {
             if let Some(val) = s.strip_prefix("contains:") {
-                format!("contains(\"{}\")", val.replace('\\', "\\\\").replace('"', "\\\""))
+                format!("contains(\"{}\")", escape_inline_literal(val))
             } else if let Some(val) = s.strip_prefix("starts_with:") {
-                format!("starts_with(\"{}\")", val.replace('\\', "\\\\").replace('"', "\\\""))
+                format!("starts_with(\"{}\")", escape_inline_literal(val))
             } else if let Some(val) = s.strip_prefix("ErrContaining:") {
-                format!("Err(\"{}\")", val.replace('\\', "\\\\").replace('"', "\\\""))
+                format!("Err(\"{}\")", escape_inline_literal(val))
             } else {
                 expected.to_string()
             }
@@ -2285,6 +2303,45 @@ pub fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `+with` value containing a real newline must serialize to a single
+    /// parseable line. Before the fix, the `expect` side kept the raw newline and
+    /// the reconstructed module failed to parse, so library persistence silently
+    /// refused to write the whole module.
+    #[test]
+    fn multiline_test_values_round_trip_as_one_line() {
+        fn first_case(ops: &[parser::Operation]) -> Option<parser::TestCase> {
+            for op in ops {
+                match op {
+                    parser::Operation::Test(t) => return Some(t.cases[0].clone()),
+                    parser::Operation::Module(m) => {
+                        if let Some(c) = first_case(&m.body) {
+                            return Some(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        let seed = "+module T\n+fn f (s:String)->String\n  +return s\n+end\n\
+                    +test T.f\n  +with s=\"a\\nb\" -> expect \"a\\nb\"\n";
+        let ops = parser::parse(seed).expect("seed parses");
+        let case = first_case(&ops).expect("test case parsed");
+
+        let input = format_expr(&case.input);
+        let expected = format_expr(&case.expected);
+        assert!(!input.contains('\n'), "input kept a raw newline: {input:?}");
+        assert!(!expected.contains('\n'), "expected kept a raw newline: {expected:?}");
+
+        // The serialized form must re-parse to the same values.
+        let line = format!("+test T.f\n  +with {input} -> expect {expected}\n");
+        let reparsed = parser::parse(&line).expect("serialized test must parse");
+        let case2 = first_case(&reparsed).expect("reparsed case");
+        assert_eq!(format_expr(&case2.input), input);
+        assert_eq!(format_expr(&case2.expected), expected);
+    }
 
     fn test_function(name: &str) -> ast::FunctionDecl {
         ast::FunctionDecl {

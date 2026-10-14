@@ -359,27 +359,17 @@ fn reconstruct_function_source(func: &ast::FunctionDecl) -> String {
         out.push('\n');
         out.push_str(&format!("+test {}\n", func.name));
         for tc in &func.tests {
-            let expect_part = if let Some(ref m) = tc.matcher {
-                if m == "AnyOk" {
-                    "Ok".to_string()
-                } else if m == "AnyErr" {
-                    "Err".to_string()
-                } else if let Some(msg) = m.strip_prefix("ErrContaining:") {
-                    format!("Err(\"{}\")", msg)
-                } else if let Some(sub) = m.strip_prefix("contains:") {
-                    format!("contains(\"{}\")", sub)
-                } else if let Some(pre) = m.strip_prefix("starts_with:") {
-                    format!("starts_with(\"{}\")", pre)
-                } else {
-                    tc.expected.clone()
-                }
-            } else {
-                tc.expected.clone()
-            };
+            // Single source of truth for the `expect` form (matcher syntax or a
+            // literal), and line-escaped so the reconstructed `+with` line stays
+            // parseable even when a value contains a newline.
+            let expect_part = crate::session::reconstruct_expect_pub(
+                &tc.expected,
+                tc.matcher.as_deref(),
+            );
             out.push_str(&format!(
                 "  +with {} -> expect {}\n",
                 ast::escape_test_input_linebreaks(&tc.input),
-                expect_part
+                ast::escape_test_input_linebreaks(&expect_part)
             ));
             for ac in &tc.after_checks {
                 out.push_str(&format!(

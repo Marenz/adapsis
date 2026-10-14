@@ -12,7 +12,8 @@ use super::{
     AppConfig, AskRequest, AskResponse, MutationResult, TestCaseResult, WorkingSet,
 };
 use super::execute::{
-    build_plan_context, format_library_load_errors, AgentCompletionCallback, OperationResult,
+    build_plan_context, execute_code_with_baseline, format_library_load_errors,
+    AgentCompletionCallback, OperationResult,
 };
 use super::execute_code;
 
@@ -1498,6 +1499,13 @@ pub async fn handle_llm_takeover(
     let mut final_summary_pending = false;
     let mut iteration_budget = DEFAULT_TAKEOVER_ITERATION_BUDGET;
 
+    // Turn baseline for the `!done` test gate (#66): completion owes tests only
+    // for functions this turn created or replaced, not for pre-existing debt the
+    // model never touched (and may not even be allowed to read, e.g. `Wolfi`).
+    // Captured once, before any round, so the CoW identity check compares every
+    // round against the same immutable snapshot — never refresh it mid-turn.
+    let completion_baseline = program.read().await.clone();
+
     for iteration in 0..MAX_TAKEOVER_ITERATION_BUDGET {
         if iteration >= iteration_budget {
             break;
@@ -1608,7 +1616,7 @@ pub async fn handle_llm_takeover(
                     meta: meta.lock().unwrap().clone(),
                     sandbox: None,
                 };
-                execute_code(&code, &tmp_config, &mut session, agent_cb.clone()).await;
+                execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
                 // Write back mutations (per-function CoW merge, issue #9)
                 write_back_takeover_program(&program, &session).await;
                 if let Ok(mut rt) = runtime.write() {
@@ -1631,7 +1639,7 @@ pub async fn handle_llm_takeover(
             meta: meta.lock().unwrap().clone(),
             sandbox: None,
         };
-        let exec_result = execute_code(&code, &tmp_config, &mut session, agent_cb.clone()).await;
+        let exec_result = execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
 
         // Write back mutations to shared state (per-function CoW merge, issue #9)
         write_back_takeover_program(&program, &session).await;

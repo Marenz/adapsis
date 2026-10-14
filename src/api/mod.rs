@@ -27,6 +27,9 @@ use crate::typeck;
 use crate::validator;
 
 pub mod execute;
+// `execute_code` is the no-baseline entry retained for direct callers and the
+// test suite; production conversational turns use `execute_code_with_baseline`.
+#[allow(unused_imports)]
 pub use execute::{
     execute_code,
     format_tasks,
