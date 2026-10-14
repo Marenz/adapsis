@@ -352,63 +352,33 @@ fn diffing_identical_text_reports_no_change() {
     assert_eq!(diff, "  a\n  b");
 }
 
-// ── the shipped context files ────────────────────────────────────────────
+// ── per-context identity isolation ───────────────────────────────────────
 
-/// The four files that this change ships must actually compose. Removing the
-/// old prompt branch strands any context without a file, so a typo in a name
-/// here is a silent loss of identity in production.
+/// Identity files are local-only (`~/.config/adapsis/contexts/`, gitignored),
+/// so this builds its own fixtures rather than reading the developer's real
+/// personas. It preserves the shipped-file tests' intent: each context composes
+/// its own identity and never inherits another conversation's.
 #[test]
-fn the_shipped_context_files_compose_to_their_own_identity() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contexts");
-    let shipped = [
-        ("main", "AdapsisOS node on Marenz' main machine"),
-        ("telegram:100000001", "direct message channel"),
-        ("telegram:group:-100000005", "Chronica"),
-        ("telegram:user:100000102", "Karo"),
-    ];
+fn per_context_identity_files_compose_without_leaking_into_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    write_identity(dir.path(), "alpha", "You are Alpha, the alpha-chat assistant.");
+    write_identity(dir.path(), "beta", "You are Beta, the beta-chat assistant.");
 
-    for (context, marker) in shipped {
-        let identity = load_identity(Some(&dir), context).unwrap_or_else(|| {
-            panic!(
-                "no shipped identity file for '{context}' (expected {})",
-                identity_path(&dir, context).display()
-            )
-        });
+    for (context, mine, other) in [
+        ("alpha", "Alpha", "Beta"),
+        ("beta", "Beta", "Alpha"),
+    ] {
+        let composed = compose_from_dir(Some(dir.path()), &inputs(context, "telegram:user:1", ADMIN));
+        assert!(composed.contains(mine), "'{context}' lost its own identity");
         assert!(
-            identity.contains(marker),
-            "'{context}' does not look like its intended identity"
+            !composed.contains(other),
+            "'{context}' leaked the '{other}' identity"
         );
-
-        let composed = compose_from_dir(Some(&dir), &inputs(context, "telegram:user:1", ADMIN));
-        assert!(composed.contains(&identity), "'{context}' identity not composed in");
         assert!(composed.contains("<code>!done</code>"), "'{context}' lost the core");
         assert!(
             !composed.contains("has no identity file yet"),
             "'{context}' fell through to the bootstrap notice"
         );
-    }
-}
-
-/// Each shipped file belongs to exactly one conversation.
-#[test]
-fn the_shipped_context_files_do_not_leak_into_each_other() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contexts");
-    // A phrase that is distinctive to one file and absent from the others.
-    let markers = [
-        ("main", "This is the internal context"),
-        ("telegram:100000001", "shell into you when he is away"),
-        ("telegram:group:-100000005", "Chronica is a settlement game"),
-        ("telegram:user:100000102", "Karo"),
-    ];
-
-    for (context, _) in markers {
-        let composed = compose_from_dir(Some(&dir), &inputs(context, "telegram:user:1", ADMIN));
-        for (other, marker) in markers.iter().filter(|(c, _)| *c != context) {
-            assert!(
-                !composed.contains(marker),
-                "'{context}' leaked '{other}' identity text"
-            );
-        }
     }
 }
 
@@ -486,6 +456,10 @@ fn a_missing_notes_file_removes_the_marker_rather_than_showing_it() {
 #[ignore = "prints the composed prompt for eyeballing: cargo test show_composed -- --ignored --nocapture"]
 fn show_composed() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contexts");
+    if !dir.is_dir() {
+        // Identity files are local-only; nothing to show in a bare checkout.
+        return;
+    }
     println!(
         "{}",
         compose_from_dir(
