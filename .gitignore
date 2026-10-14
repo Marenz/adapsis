@@ -16,3 +16,5 @@ adapsis-stdout.log
 *-session*.json
 session.json
 training.jsonl
+# Personal per-context identity files are local-only (never committed).
+contexts/
