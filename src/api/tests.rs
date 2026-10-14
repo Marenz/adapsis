@@ -3,6 +3,9 @@ use super::execute::collect_opencode_tasks;
 use axum::response::IntoResponse;
 use tower::ServiceExt as _; // for .oneshot()
 
+#[path = "ask_completion_tests.rs"]
+mod ask_completion_tests;
+
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {
     let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
@@ -1517,6 +1520,24 @@ fn llm_takeover_requires_explicit_completion_for_prose_only_turns() {
             && takeover.contains("estimate.clamp(1, MAX_TAKEOVER_ITERATION_BUDGET)")
             && takeover.contains("requesting final summary after action limit"),
         "llm_takeover must retry prose-only responses with an explicit execute-or-finish correction"
+    );
+}
+
+#[test]
+fn llm_takeover_retries_one_empty_response_without_repeating_actions() {
+    let source = include_str!("llm_handlers.rs");
+    let takeover_start = source
+        .find("pub async fn handle_llm_takeover")
+        .expect("handle_llm_takeover not found");
+    let takeover = &source[takeover_start..];
+
+    assert!(
+        takeover.contains("let mut empty_response_retried = false")
+            && takeover.contains("if !empty_response_retried")
+            && takeover.contains("without repeating completed or irreversible actions")
+            && takeover.contains("retrying one empty response")
+            && takeover.contains("empty_response_retried = false"),
+        "llm_takeover must retry one transient empty response, then restore the retry allowance"
     );
 }
 

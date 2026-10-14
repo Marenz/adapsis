@@ -1,17 +1,16 @@
 //! Deterministic, network-free Ladybug memory quality evaluation.
+#![cfg_attr(not(test), allow(dead_code))]
+mod v2;
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 const FIXTURE_SCHEMA_VERSION: u32 = 1;
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const TOKEN_ESTIMATE_DEFINITION: &str =
     "ceil((prompt_chars + output_chars) / 4 Unicode scalar values)";
-const DEFAULT_FIXTURE: &str = "tests/fixtures/memory-quality/v1/corpus.json";
-const DEFAULT_SNAPSHOT: &str = "tests/fixtures/memory-quality/v1/extraction-snapshot.json";
-const DEFAULT_BASELINE: &str = "tests/fixtures/memory-quality/v1/baseline.json";
 const FIXTURE_ADMIN: &str = "principal:fixture-operator";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -320,41 +319,7 @@ pub fn run_cli(
     baseline: Option<&Path>,
     report_path: Option<&Path>,
 ) -> Result<()> {
-    let fixture = fixture
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repository_path(DEFAULT_FIXTURE));
-    let snapshot = snapshot
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repository_path(DEFAULT_SNAPSHOT));
-    let baseline = baseline
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repository_path(DEFAULT_BASELINE));
-    let report = evaluate_paths(&fixture, &snapshot, &baseline)?;
-    let json = report_json(&report)?;
-    println!("{json}");
-    if let Some(path) = report_path {
-        std::fs::write(path, format!("{json}\n"))
-            .with_context(|| format!("write memory quality report {}", path.display()))?;
-        eprintln!("machine report: {}", path.display());
-    }
-    print_human_summary(&report);
-    enforce_gate(&report)
-}
-
-fn repository_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
-}
-
-fn evaluate_paths(fixture: &Path, snapshot: &Path, baseline: &Path) -> Result<QualityReport> {
-    let corpus: CorpusFixture = read_json(fixture, "memory quality corpus")?;
-    let snapshot: ExtractionSnapshot = read_json(snapshot, "memory extraction snapshot")?;
-    let baseline: Baseline = read_json(baseline, "memory quality baseline")?;
-    evaluate(&corpus, &snapshot, &baseline)
-}
-
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {label} {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parse {label} {}", path.display()))
+    v2::run_cli(fixture, snapshot, baseline, report_path)
 }
 
 fn evaluate(
@@ -1334,39 +1299,6 @@ fn report_json(report: &QualityReport) -> Result<String> {
     serde_json::to_string_pretty(report).context("serialize memory quality report")
 }
 
-fn print_human_summary(report: &QualityReport) {
-    let status = if report.baseline_comparison.passed {
-        "PASS"
-    } else {
-        "FAIL"
-    };
-    eprintln!(
-        "memory quality {status}: retrieval p/r {:.3}/{:.3}, unauthorized {}, unsupported citations {}, stale {:.3}; extraction p/r {:.3}/{:.3}; chars prompt/output {}/{}, estimated tokens {}; latency us p50/p95/max {}/{}/{}",
-        report.quality.retrieval.precision,
-        report.quality.retrieval.recall,
-        report.quality.retrieval.unauthorized_recall_count,
-        report.quality.retrieval.unsupported_citation_count,
-        report.quality.retrieval.stale_memory_rate,
-        report.quality.extraction.precision,
-        report.quality.extraction.recall,
-        report.quality.cost.prompt_chars,
-        report.quality.cost.output_chars,
-        report.quality.cost.estimated_tokens,
-        report.latency.p50,
-        report.latency.p95,
-        report.latency.max,
-    );
-    if !report.baseline_comparison.exact_quality_match {
-        eprintln!(
-            "quality metrics differ from baseline {}; thresholds still decide the gate",
-            report.baseline_comparison.baseline_id
-        );
-    }
-    for violation in &report.baseline_comparison.violations {
-        eprintln!("violation: {violation}");
-    }
-}
-
 fn enforce_gate(report: &QualityReport) -> Result<()> {
     ensure!(
         report.baseline_comparison.passed,
@@ -1527,12 +1459,9 @@ mod tests {
                 .canonical_prompt_chars
                 .saturating_add(first.quality.cost.ranked_recall_prompt_chars)
         );
-        assert!(
-            first.baseline_comparison.passed,
-            "{:?}",
-            first.baseline_comparison.violations
-        );
-        assert!(first.baseline_comparison.exact_quality_match);
+        // v1 remains a historical, byte-preserved fixture. Prompt dedup changes
+        // its expected result set, so release gating moved to v2 rather than
+        // rewriting the old baseline to describe new behavior.
         first.latency = LatencyMetrics {
             unit: "microseconds".into(),
             sample_count: 0,

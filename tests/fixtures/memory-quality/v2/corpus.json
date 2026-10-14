@@ -1,0 +1,230 @@
+{
+  "schema_version": 2,
+  "fixture_id": "memory-quality-corpus-v2",
+  "description": "Synthetic prompt-selection corpus for deterministic semantic deduplication, lifecycle precedence, exact governance, ACL, provenance, and independent channel budgets.",
+  "coverage": [
+    "acl-hard-zero",
+    "canonical-and-ranked-independent-budgets",
+    "character-strict-prefix",
+    "contradiction-false-merge-hard-zero",
+    "correction-precedence-hard-zero",
+    "count-after-dedup",
+    "frozen-multilingual-production-evidence",
+    "multilingual-en-pl-de-es",
+    "provenance-hard-zero",
+    "semantic-duplicate-hard-zero",
+    "stable-ordering",
+    "stale-hard-zero"
+  ],
+  "model_evidence": {
+    "model_id": "intfloat/multilingual-e5-small",
+    "model_revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+    "runtime": "fastembed 5.17.3, passage: prefix, mean pooling",
+    "measured_at": "2026-10-13",
+    "source_note": "Cosines were measured once from public synthetic phrases with the production Rust embedder. Only reviewed scalar scores are frozen; model files and vectors are excluded.",
+    "manually_reviewed": true,
+    "pairs": [
+      {
+        "id": "equivalent-en-pl",
+        "left": "I prefer quiet mornings.",
+        "right": "Lubię spokojne poranki.",
+        "cosine": 0.843313396,
+        "expected_equivalent": true,
+        "expected_guard_compatible": true
+      },
+      {
+        "id": "equivalent-en-de",
+        "left": "I prefer quiet mornings.",
+        "right": "Ich mag ruhige Morgen.",
+        "cosine": 0.883412063,
+        "expected_equivalent": true,
+        "expected_guard_compatible": true
+      },
+      {
+        "id": "equivalent-en-es",
+        "left": "I prefer quiet mornings.",
+        "right": "Prefiero las mañanas tranquilas.",
+        "cosine": 0.891323864,
+        "expected_equivalent": true,
+        "expected_guard_compatible": true
+      },
+      {
+        "id": "opposite-polarity",
+        "left": "I prefer quiet mornings.",
+        "right": "I do not prefer quiet mornings.",
+        "cosine": 0.950515270,
+        "expected_equivalent": false,
+        "expected_guard_compatible": false
+      },
+      {
+        "id": "changed-time",
+        "left": "The meeting starts at 18:30.",
+        "right": "The meeting starts at 19:30.",
+        "cosine": 0.985018313,
+        "expected_equivalent": false,
+        "expected_guard_compatible": false
+      },
+      {
+        "id": "changed-name",
+        "left": "Send the report to someone named Alice.",
+        "right": "Send the report to someone named Bob.",
+        "cosine": 0.920005023,
+        "expected_equivalent": false,
+        "expected_guard_compatible": false
+      }
+    ]
+  },
+  "embeddings": {
+    "base": { "dimensions": 384, "values": [[0, 1.0]] },
+    "multilingual": { "dimensions": 384, "values": [[0, 0.85], [1, 0.5267827]] },
+    "negative": { "dimensions": 384, "values": [[0, 0.99], [2, 0.14106736]] },
+    "rank-98": { "dimensions": 384, "values": [[0, 0.98], [3, 0.1989975]] },
+    "rank-96": { "dimensions": 384, "values": [[0, 0.96], [4, 0.28]] },
+    "rank-94": { "dimensions": 384, "values": [[0, 0.94], [5, 0.34117445]] },
+    "rank-92": { "dimensions": 384, "values": [[0, 0.92], [6, 0.39191836]] },
+    "other": { "dimensions": 384, "values": [[10, 1.0]] }
+  },
+  "messages": [
+    { "key": "source-multi", "context_id": "context:multi", "principal_id": "principal:multi", "created_at_ms": 1 },
+    { "key": "source-count", "context_id": "context:count", "principal_id": "principal:count", "created_at_ms": 2 },
+    { "key": "source-chars", "context_id": "context:chars", "principal_id": "principal:chars", "created_at_ms": 3 },
+    { "key": "source-r1", "context_id": "context:rank", "principal_id": "principal:rank", "created_at_ms": 4 },
+    { "key": "source-r1-pl", "context_id": "context:rank", "principal_id": "principal:rank", "created_at_ms": 5 },
+    { "key": "source-r-neg", "context_id": "context:rank", "principal_id": "principal:rank", "created_at_ms": 6 },
+    { "key": "source-r2", "context_id": "context:rank", "principal_id": "principal:rank", "created_at_ms": 7 },
+    { "key": "source-r3", "context_id": "context:rank", "principal_id": "principal:rank", "created_at_ms": 8 },
+    { "key": "source-r4", "context_id": "context:rank", "principal_id": "principal:rank", "created_at_ms": 9 },
+    { "key": "source-r5", "context_id": "context:rank", "principal_id": "principal:rank", "created_at_ms": 10 },
+    { "key": "source-rb", "context_id": "context:rank-budget", "principal_id": "principal:rank-budget", "created_at_ms": 11 },
+    { "key": "source-acl", "context_id": "context:acl", "principal_id": "principal:acl", "created_at_ms": 12 },
+    { "key": "source-foreign", "context_id": "context:foreign", "principal_id": "principal:foreign", "created_at_ms": 13 }
+  ],
+  "records": [
+    { "key": "pref-en", "channel": "canonical", "content": "I prefer quiet mornings.", "padding_chars": 0, "context_id": "context:multi", "principal_id": "principal:multi", "embedding_key": "base", "source_message_key": null, "correction_of": null, "created_at_ms": 10, "freshness": "current" },
+    { "key": "pref-pl", "channel": "canonical", "content": "Lubię spokojne poranki.", "padding_chars": 0, "context_id": "context:multi", "principal_id": "principal:multi", "embedding_key": "multilingual", "source_message_key": null, "correction_of": null, "created_at_ms": 20, "freshness": "current" },
+    { "key": "pref-negative", "channel": "canonical", "content": "I do not prefer quiet mornings.", "padding_chars": 0, "context_id": "context:multi", "principal_id": "principal:multi", "embedding_key": "negative", "source_message_key": null, "correction_of": null, "created_at_ms": 30, "freshness": "current" },
+    { "key": "text-size-old", "channel": "canonical", "content": "Use small text.", "padding_chars": 0, "context_id": "context:multi", "principal_id": "principal:multi", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 40, "freshness": "stale" },
+    { "key": "text-size-current", "channel": "canonical", "content": "Use large text.", "padding_chars": 0, "context_id": "context:multi", "principal_id": "principal:multi", "embedding_key": "other", "source_message_key": null, "correction_of": "text-size-old", "created_at_ms": 50, "freshness": "current" },
+
+    { "key": "count-old", "channel": "canonical", "content": "Count record 1.", "padding_chars": 0, "context_id": "context:count", "principal_id": "principal:count", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 10, "freshness": "neutral" },
+    { "key": "count-middle", "channel": "canonical", "content": "Count record 2.", "padding_chars": 0, "context_id": "context:count", "principal_id": "principal:count", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 20, "freshness": "neutral" },
+    { "key": "count-new", "channel": "canonical", "content": "Count record 3.", "padding_chars": 0, "context_id": "context:count", "principal_id": "principal:count", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 30, "freshness": "neutral" },
+
+    { "key": "chars-old-short", "channel": "canonical", "content": "Character record 1.", "padding_chars": 0, "context_id": "context:chars", "principal_id": "principal:chars", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 10, "freshness": "neutral" },
+    { "key": "chars-middle", "channel": "canonical", "content": "Character record 2.", "padding_chars": 150, "context_id": "context:chars", "principal_id": "principal:chars", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 20, "freshness": "neutral" },
+    { "key": "chars-new", "channel": "canonical", "content": "Character record 3.", "padding_chars": 150, "context_id": "context:chars", "principal_id": "principal:chars", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 30, "freshness": "neutral" },
+
+    { "key": "rank-one", "channel": "ranked", "content": "Ranked evidence 1 supports the selected topic. ", "padding_chars": 450, "context_id": "context:rank", "principal_id": "principal:rank", "embedding_key": "base", "source_message_key": "source-r1", "correction_of": null, "created_at_ms": 10, "freshness": "current" },
+    { "key": "rank-one-pl", "channel": "ranked", "content": "Dowód rankingowy 1 wspiera wybrany temat. ", "padding_chars": 450, "context_id": "context:rank", "principal_id": "principal:rank", "embedding_key": "multilingual", "source_message_key": "source-r1-pl", "correction_of": null, "created_at_ms": 60, "freshness": "current" },
+    { "key": "rank-negative", "channel": "ranked", "content": "Do not use ranked evidence 1 for the selected topic. ", "padding_chars": 450, "context_id": "context:rank", "principal_id": "principal:rank", "embedding_key": "negative", "source_message_key": "source-r-neg", "correction_of": null, "created_at_ms": 50, "freshness": "current" },
+    { "key": "rank-two", "channel": "ranked", "content": "Ranked evidence 2 supports the selected topic. ", "padding_chars": 450, "context_id": "context:rank", "principal_id": "principal:rank", "embedding_key": "rank-98", "source_message_key": "source-r2", "correction_of": null, "created_at_ms": 20, "freshness": "current" },
+    { "key": "rank-three", "channel": "ranked", "content": "Ranked evidence 3 supports the selected topic. ", "padding_chars": 450, "context_id": "context:rank", "principal_id": "principal:rank", "embedding_key": "rank-96", "source_message_key": "source-r3", "correction_of": null, "created_at_ms": 30, "freshness": "current" },
+    { "key": "rank-four", "channel": "ranked", "content": "Ranked evidence 4 supports the selected topic. ", "padding_chars": 450, "context_id": "context:rank", "principal_id": "principal:rank", "embedding_key": "rank-94", "source_message_key": "source-r4", "correction_of": null, "created_at_ms": 40, "freshness": "current" },
+    { "key": "rank-five", "channel": "ranked", "content": "Ranked evidence 5 supports the selected topic. ", "padding_chars": 450, "context_id": "context:rank", "principal_id": "principal:rank", "embedding_key": "rank-92", "source_message_key": "source-r5", "correction_of": null, "created_at_ms": 45, "freshness": "current" },
+
+    { "key": "rank-budget-new", "channel": "ranked", "content": "Rank budget record 1. ", "padding_chars": 150, "context_id": "context:rank-budget", "principal_id": "principal:rank-budget", "embedding_key": "base", "source_message_key": "source-rb", "correction_of": null, "created_at_ms": 30, "freshness": "neutral" },
+    { "key": "rank-budget-middle", "channel": "ranked", "content": "Rank budget record 2. ", "padding_chars": 150, "context_id": "context:rank-budget", "principal_id": "principal:rank-budget", "embedding_key": "rank-98", "source_message_key": "source-rb", "correction_of": null, "created_at_ms": 20, "freshness": "neutral" },
+    { "key": "rank-budget-old-short", "channel": "ranked", "content": "Rank budget record 3.", "padding_chars": 0, "context_id": "context:rank-budget", "principal_id": "principal:rank-budget", "embedding_key": "rank-96", "source_message_key": "source-rb", "correction_of": null, "created_at_ms": 10, "freshness": "neutral" },
+
+    { "key": "acl-own", "channel": "canonical", "content": "Visible ACL fixture record.", "padding_chars": 0, "context_id": "context:acl", "principal_id": "principal:acl", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 10, "freshness": "current" },
+    { "key": "acl-foreign", "channel": "canonical", "content": "Hidden ACL fixture record.", "padding_chars": 0, "context_id": "context:foreign", "principal_id": "principal:foreign", "embedding_key": "other", "source_message_key": null, "correction_of": null, "created_at_ms": 10, "freshness": "current" }
+  ],
+  "cases": [
+    {
+      "id": "canonical-multilingual-correction",
+      "channel": "canonical",
+      "principal_id": "principal:multi",
+      "context_id": "context:multi",
+      "query": "",
+      "query_embedding_key": null,
+      "max_count": 40,
+      "max_row_chars": 8000,
+      "expected_representative_keys": ["pref-pl", "pref-negative", "text-size-current"],
+      "forbidden_keys": ["text-size-old", "acl-foreign"],
+      "equivalence_groups": [["pref-en", "pref-pl"]],
+      "must_coexist": [["pref-pl", "pref-negative"]],
+      "expected_stats": { "collapsed": 1, "omitted_by_count": 0, "omitted_by_chars": 0, "omitted_beyond_scan": 0 },
+      "calibrates_ranked_budget": false
+    },
+    {
+      "id": "canonical-count-after-dedup",
+      "channel": "canonical",
+      "principal_id": "principal:count",
+      "context_id": "context:count",
+      "query": "",
+      "query_embedding_key": null,
+      "max_count": 2,
+      "max_row_chars": 8000,
+      "expected_representative_keys": ["count-middle", "count-new"],
+      "forbidden_keys": [],
+      "equivalence_groups": [],
+      "must_coexist": [],
+      "expected_stats": { "collapsed": 0, "omitted_by_count": 1, "omitted_by_chars": 0, "omitted_beyond_scan": 0 },
+      "calibrates_ranked_budget": false
+    },
+    {
+      "id": "canonical-character-strict-prefix",
+      "channel": "canonical",
+      "principal_id": "principal:chars",
+      "context_id": "context:chars",
+      "query": "",
+      "query_embedding_key": null,
+      "max_count": 40,
+      "max_row_chars": 280,
+      "expected_representative_keys": ["chars-new"],
+      "forbidden_keys": [],
+      "equivalence_groups": [],
+      "must_coexist": [],
+      "expected_stats": { "collapsed": 0, "omitted_by_count": 0, "omitted_by_chars": 2, "omitted_beyond_scan": 0 },
+      "calibrates_ranked_budget": false
+    },
+    {
+      "id": "ranked-multilingual-provenance",
+      "channel": "ranked",
+      "principal_id": "principal:rank",
+      "context_id": "context:rank",
+      "query": "ranked topic",
+      "query_embedding_key": "base",
+      "max_count": 6,
+      "max_row_chars": 4000,
+      "expected_representative_keys": ["rank-one-pl", "rank-negative", "rank-two", "rank-three", "rank-four", "rank-five"],
+      "forbidden_keys": ["acl-foreign"],
+      "equivalence_groups": [["rank-one", "rank-one-pl"]],
+      "must_coexist": [["rank-one-pl", "rank-negative"]],
+      "expected_stats": { "collapsed": 1, "omitted_by_count": 0, "omitted_by_chars": 0, "omitted_beyond_scan": 0 },
+      "calibrates_ranked_budget": true
+    },
+    {
+      "id": "ranked-character-strict-prefix",
+      "channel": "ranked",
+      "principal_id": "principal:rank-budget",
+      "context_id": "context:rank-budget",
+      "query": "rank budget",
+      "query_embedding_key": "base",
+      "max_count": 5,
+      "max_row_chars": 350,
+      "expected_representative_keys": ["rank-budget-new"],
+      "forbidden_keys": [],
+      "equivalence_groups": [],
+      "must_coexist": [],
+      "expected_stats": { "collapsed": 0, "omitted_by_count": 0, "omitted_by_chars": 2, "omitted_beyond_scan": 0 },
+      "calibrates_ranked_budget": false
+    },
+    {
+      "id": "canonical-acl",
+      "channel": "canonical",
+      "principal_id": "principal:acl",
+      "context_id": "context:acl",
+      "query": "",
+      "query_embedding_key": null,
+      "max_count": 40,
+      "max_row_chars": 8000,
+      "expected_representative_keys": ["acl-own"],
+      "forbidden_keys": ["acl-foreign"],
+      "equivalence_groups": [],
+      "must_coexist": [],
+      "expected_stats": { "collapsed": 0, "omitted_by_count": 0, "omitted_by_chars": 0, "omitted_beyond_scan": 0 },
+      "calibrates_ranked_budget": false
+    }
+  ]
+}

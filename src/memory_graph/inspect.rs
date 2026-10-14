@@ -1,4 +1,8 @@
 //! Bounded, context-scoped memory inspection for conversational users.
+use super::prompt_budget::{
+    CANONICAL_SCAN_LIMIT, InspectionDedupRecord, RANKED_SCAN_MAX, float_array,
+    select_inspection_records, similarity_value, string_list,
+};
 use super::*;
 use std::collections::{HashMap, HashSet};
 
@@ -54,6 +58,7 @@ pub struct InspectedMemory {
     pub supersedes: Vec<String>,
     pub superseded_by: Vec<String>,
     pub contradicts: Vec<String>,
+    pub equivalent_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +69,8 @@ pub struct Inspection {
     pub canonical_total: usize,
     pub extracted_total: usize,
     pub candidate_scan_truncated: bool,
+    pub canonical_selection: PromptSelectionStats,
+    pub extracted_selection: PromptSelectionStats,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +82,9 @@ struct Candidate {
     confidence: f64,
     created_at_ms: i64,
     status: MemoryStatus,
+    embedding: Vec<f32>,
+    governance: Vec<String>,
+    score: f64,
 }
 
 impl MemoryGraph {
@@ -99,6 +109,9 @@ impl MemoryGraph {
             let canonical = exact.canonical;
             let mut memory = self.enrich_candidates(vec![exact])?.remove(0);
             self.enrich_exact_links(principal_id, context_id, &mut memory)?;
+            let (equivalent_ids, selection) =
+                self.exact_equivalent_ids(principal_id, context_id, &memory.id, canonical)?;
+            memory.equivalent_ids = equivalent_ids;
             return Ok(Inspection {
                 search: InspectionSearch::ExactId,
                 canonical: if canonical {
@@ -110,6 +123,16 @@ impl MemoryGraph {
                 canonical_total: usize::from(canonical),
                 extracted_total: usize::from(!canonical),
                 candidate_scan_truncated: false,
+                canonical_selection: if canonical {
+                    selection.clone()
+                } else {
+                    PromptSelectionStats::default()
+                },
+                extracted_selection: if canonical {
+                    PromptSelectionStats::default()
+                } else {
+                    selection
+                },
             });
         }
 
@@ -124,6 +147,8 @@ impl MemoryGraph {
                 canonical_total: 0,
                 extracted_total: 0,
                 candidate_scan_truncated: false,
+                canonical_selection: PromptSelectionStats::default(),
+                extracted_selection: PromptSelectionStats::default(),
             });
         }
 
@@ -143,13 +168,12 @@ impl MemoryGraph {
     fn inspect_general(&self, principal_id: &str, context_id: &str) -> Result<Inspection> {
         let canonical_total = self.authorized_count(principal_id, context_id, true)?;
         let extracted_total = self.authorized_count(principal_id, context_id, false)?;
-        let mut canonical = self.select_recent(principal_id, context_id, true, CANONICAL_LIMIT)?;
-        canonical.sort_by(|left, right| {
-            left.created_at_ms
-                .cmp(&right.created_at_ms)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        let extracted = self.select_recent(principal_id, context_id, false, EXTRACTED_LIMIT)?;
+        let canonical = self.select_recent(principal_id, context_id, true, CANONICAL_SCAN_LIMIT)?;
+        let extracted = self.select_recent(principal_id, context_id, false, RANKED_SCAN_MAX)?;
+        let (canonical, canonical_selection) =
+            deduplicate_candidates(canonical, canonical_total, CANONICAL_LIMIT, true, false);
+        let (extracted, extracted_selection) =
+            deduplicate_candidates(extracted, extracted_total, EXTRACTED_LIMIT, false, false);
         Ok(Inspection {
             search: InspectionSearch::General,
             canonical: self.enrich_candidates(canonical)?,
@@ -157,6 +181,8 @@ impl MemoryGraph {
             canonical_total,
             extracted_total,
             candidate_scan_truncated: false,
+            canonical_selection,
+            extracted_selection,
         })
     }
 
@@ -165,12 +191,33 @@ impl MemoryGraph {
         principal_id: &str,
         context_id: &str,
         embedding: &[f32],
-    ) -> Result<(Vec<Candidate>, Vec<Candidate>)> {
-        let canonical =
-            self.select_semantic(principal_id, context_id, true, embedding, CANONICAL_LIMIT)?;
+    ) -> Result<(
+        Vec<Candidate>,
+        Vec<Candidate>,
+        PromptSelectionStats,
+        PromptSelectionStats,
+    )> {
+        let canonical_total = self.authorized_count(principal_id, context_id, true)?;
+        let extracted_total = self.authorized_count(principal_id, context_id, false)?;
+        let canonical = self.select_semantic(
+            principal_id,
+            context_id,
+            true,
+            embedding,
+            CANONICAL_SCAN_LIMIT,
+        )?;
         let extracted =
-            self.select_semantic(principal_id, context_id, false, embedding, EXTRACTED_LIMIT)?;
-        Ok((canonical, extracted))
+            self.select_semantic(principal_id, context_id, false, embedding, RANKED_SCAN_MAX)?;
+        let (canonical, canonical_selection) =
+            deduplicate_candidates(canonical, canonical_total, CANONICAL_LIMIT, false, true);
+        let (extracted, extracted_selection) =
+            deduplicate_candidates(extracted, extracted_total, EXTRACTED_LIMIT, false, true);
+        Ok((
+            canonical,
+            extracted,
+            canonical_selection,
+            extracted_selection,
+        ))
     }
 
     fn inspect_lexical(
@@ -201,27 +248,39 @@ impl MemoryGraph {
                 .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let canonical_total = scored.iter().filter(|(_, memory)| memory.canonical).count();
-        let extracted_total = scored.len() - canonical_total;
+        let canonical_matches = scored.iter().filter(|(_, memory)| memory.canonical).count();
+        let extracted_matches = scored.len() - canonical_matches;
         let canonical = scored
             .iter()
             .filter(|(_, memory)| memory.canonical)
-            .take(CANONICAL_LIMIT)
-            .map(|(_, memory)| memory.clone())
+            .map(|(score, memory)| {
+                let mut memory = memory.clone();
+                memory.score = *score as f64;
+                memory
+            })
             .collect();
         let extracted = scored
             .iter()
             .filter(|(_, memory)| !memory.canonical)
-            .take(EXTRACTED_LIMIT)
-            .map(|(_, memory)| memory.clone())
+            .map(|(score, memory)| {
+                let mut memory = memory.clone();
+                memory.score = *score as f64;
+                memory
+            })
             .collect();
+        let (canonical, canonical_selection) =
+            deduplicate_candidates(canonical, canonical_matches, CANONICAL_LIMIT, false, true);
+        let (extracted, extracted_selection) =
+            deduplicate_candidates(extracted, extracted_matches, EXTRACTED_LIMIT, false, true);
         Ok(Inspection {
             search,
             canonical: self.enrich_candidates(canonical)?,
             extracted: self.enrich_candidates(extracted)?,
-            canonical_total,
-            extracted_total,
+            canonical_total: canonical_matches,
+            extracted_total: extracted_matches,
             candidate_scan_truncated: accessible_total > LEXICAL_SCAN_LIMIT,
+            canonical_selection,
+            extracted_selection,
         })
     }
 
@@ -230,15 +289,20 @@ impl MemoryGraph {
         principal_id: &str,
         context_id: &str,
         query: &str,
-        semantic: Result<(Vec<Candidate>, Vec<Candidate>)>,
+        semantic: Result<(
+            Vec<Candidate>,
+            Vec<Candidate>,
+            PromptSelectionStats,
+            PromptSelectionStats,
+        )>,
     ) -> Result<Inspection> {
         match semantic {
-            Ok((canonical, extracted)) => {
+            Ok((canonical, extracted, canonical_selection, extracted_selection)) => {
                 // Similarity has no honest universal threshold. These are the
                 // selected top results, not every memory in scope; reporting
                 // whole-scope counts would call unrelated records matches.
-                let canonical_total = canonical.len();
-                let extracted_total = extracted.len();
+                let canonical_total = canonical_selection.active_authorized_records;
+                let extracted_total = extracted_selection.active_authorized_records;
                 Ok(Inspection {
                     search: InspectionSearch::Semantic,
                     canonical: self.enrich_candidates(canonical)?,
@@ -246,14 +310,19 @@ impl MemoryGraph {
                     canonical_total,
                     extracted_total,
                     candidate_scan_truncated: false,
+                    canonical_selection,
+                    extracted_selection,
                 })
             }
-            Err(_) => self.inspect_lexical(
-                principal_id,
-                context_id,
-                query,
-                InspectionSearch::LexicalSimilarityFallback,
-            ),
+            Err(error) => {
+                eprintln!("memory inspection semantic search failed: {error:#}");
+                self.inspect_lexical(
+                    principal_id,
+                    context_id,
+                    query,
+                    InspectionSearch::LexicalSimilarityFallback,
+                )
+            }
         }
     }
 
@@ -292,7 +361,8 @@ impl MemoryGraph {
         let query = context_authorized_memory_query_any_status(
             "AND memory.id = $memory_id
              RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms, memory.status LIMIT 1",
+                     memory.confidence, memory.created_at_ms, memory.status,
+                     memory.embedding, group_ids LIMIT 1",
         );
         let connection = Connection::new(&self.database)?;
         let mut statement = connection.prepare(&query)?;
@@ -320,7 +390,8 @@ impl MemoryGraph {
         let query = context_authorized_memory_query(
             "AND memory.canonical = $canonical
              RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms, memory.status
+                     memory.confidence, memory.created_at_ms, memory.status,
+                     memory.embedding, group_ids
              ORDER BY memory.created_at_ms DESC, memory.id DESC LIMIT $limit",
         );
         self.select_candidates(
@@ -342,7 +413,8 @@ impl MemoryGraph {
     ) -> Result<Vec<Candidate>> {
         let query = context_authorized_memory_query(
             "RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms, memory.status
+                     memory.confidence, memory.created_at_ms, memory.status,
+                     memory.embedding, group_ids
              ORDER BY memory.created_at_ms DESC, memory.id DESC LIMIT $limit",
         );
         self.select_candidates(
@@ -364,8 +436,9 @@ impl MemoryGraph {
         let query = context_authorized_memory_query(
             "AND memory.canonical = $canonical
              RETURN memory.id, memory.content, memory.memory_type, memory.canonical,
-                    memory.confidence, memory.created_at_ms, memory.status,
-                    array_cosine_similarity(memory.embedding, $embedding) AS similarity
+                     memory.confidence, memory.created_at_ms, memory.status,
+                     memory.embedding, group_ids,
+                     array_cosine_similarity(memory.embedding, $embedding) AS similarity
              ORDER BY similarity DESC, memory.created_at_ms DESC, memory.id ASC LIMIT $limit",
         );
         self.select_candidates(
@@ -492,6 +565,7 @@ impl MemoryGraph {
                     supersedes: Vec::new(),
                     superseded_by: Vec::new(),
                     contradicts: Vec::new(),
+                    equivalent_ids: Vec::new(),
                 })
             })
             .collect()
@@ -628,7 +702,7 @@ fn context_params<'a>(
 
 fn candidate_from_row(row: &[Value]) -> Result<Candidate> {
     ensure!(
-        row.len() >= 7,
+        row.len() >= 9,
         "unexpected Ladybug inspection row width: {}",
         row.len()
     );
@@ -640,7 +714,44 @@ fn candidate_from_row(row: &[Value]) -> Result<Candidate> {
         confidence: double_value(&row[4])?,
         created_at_ms: int64_value(&row[5])?,
         status: MemoryStatus::parse(&string_value(&row[6])?)?,
+        embedding: float_array(&row[7])?,
+        governance: string_list(&row[8])?,
+        score: row.get(9).map(similarity_value).transpose()?.unwrap_or(0.0),
     })
+}
+
+fn deduplicate_candidates(
+    candidates: Vec<Candidate>,
+    total: usize,
+    max_count: usize,
+    canonical_order: bool,
+    ranked: bool,
+) -> (Vec<Candidate>, PromptSelectionStats) {
+    let records = candidates
+        .iter()
+        .map(|candidate| InspectionDedupRecord {
+            id: candidate.id.clone(),
+            content: candidate.content.clone(),
+            canonical: candidate.canonical,
+            confidence: candidate.confidence,
+            memory_type: candidate.memory_type.clone(),
+            embedding: candidate.embedding.clone(),
+            governance: candidate.governance.clone(),
+            created_at_ms: candidate.created_at_ms,
+            score: candidate.score,
+        })
+        .collect();
+    let selection = select_inspection_records(records, total, max_count, canonical_order, ranked);
+    let mut candidates_by_id = candidates
+        .into_iter()
+        .map(|candidate| (candidate.id.clone(), candidate))
+        .collect::<HashMap<_, _>>();
+    let selected = selection
+        .memories
+        .into_iter()
+        .filter_map(|memory| candidates_by_id.remove(&memory.id))
+        .collect();
+    (selected, selection.stats)
 }
 
 fn optional_int64(value: &Value) -> Result<Option<i64>> {
@@ -745,6 +856,7 @@ pub fn render_inspection(inspection: &Inspection) -> String {
         inspection.canonical_total,
         canonical_budget,
         inspection.search == InspectionSearch::General,
+        &inspection.canonical_selection,
     );
     append_section(
         &mut output,
@@ -753,6 +865,7 @@ pub fn render_inspection(inspection: &Inspection) -> String {
         inspection.extracted_total,
         extracted_budget,
         false,
+        &inspection.extracted_selection,
     );
     if exact {
         output.push_str(
@@ -775,6 +888,7 @@ fn append_section(
     total: usize,
     budget: usize,
     preserve_newest: bool,
+    stats: &PromptSelectionStats,
 ) {
     if memories.is_empty() {
         if total > 0 {
@@ -791,12 +905,35 @@ fn append_section(
         output.push_str(&rendered[index]);
     }
     let omitted = total.saturating_sub(chosen.len());
-    if omitted > 0 {
+    let omitted_by_chars = memories.len().saturating_sub(chosen.len());
+    if stats.equivalent_records_collapsed > 0 {
         output.push_str(&format!(
-            "[{omitted} {title_lower} omitted by count, relevance, or character bounds.]\n",
-            title_lower = title.to_lowercase()
+            "[{} equivalent {} collapsed into the displayed representatives.]\n",
+            stats.equivalent_records_collapsed,
+            title.to_lowercase(),
         ));
     }
+    if stats.omitted_by_count > 0 {
+        output.push_str(&format!(
+            "[{} {} omitted by representative count limit.]\n",
+            stats.omitted_by_count,
+            title.to_lowercase(),
+        ));
+    }
+    if omitted_by_chars > 0 {
+        output.push_str(&format!(
+            "[{omitted_by_chars} {} omitted by section character budget.]\n",
+            title.to_lowercase(),
+        ));
+    }
+    if stats.omitted_beyond_scan > 0 {
+        output.push_str(&format!(
+            "[{} active authorized {} were beyond the bounded candidate scan.]\n",
+            stats.omitted_beyond_scan,
+            title.to_lowercase(),
+        ));
+    }
+    debug_assert!(omitted >= omitted_by_chars);
 }
 
 fn choose_within_budget(rendered: &[String], budget: usize, preserve_newest: bool) -> Vec<usize> {
@@ -810,7 +947,7 @@ fn choose_within_budget(rendered: &[String], budget: usize, preserve_newest: boo
     for index in indices {
         let size = rendered[index].chars().count();
         if used + size > budget {
-            continue;
+            break;
         }
         used += size;
         chosen.push(index);
@@ -890,6 +1027,7 @@ fn render_memory(memory: &InspectedMemory) -> String {
     append_relation(&mut output, "supersedes", &memory.supersedes);
     append_relation(&mut output, "superseded_by", &memory.superseded_by);
     append_relation(&mut output, "contradicts", &memory.contradicts);
+    append_relation(&mut output, "equivalent_ids", &memory.equivalent_ids);
     output
 }
 
@@ -1093,6 +1231,35 @@ mod tests {
     }
 
     #[test]
+    fn inspection_reports_dedup_counts_and_only_authorized_equivalent_ids() -> Result<()> {
+        let graph = MemoryGraph::in_memory()?;
+        graph.ingest_message(&message("a", "a", "speaker", 1), "admin")?;
+        graph.ingest_message(&message("b", "b", "other", 2), "admin")?;
+        let older =
+            graph.remember_canonical(&canonical("Prefer quiet mornings.", "a", "speaker", 10))?;
+        let newer =
+            graph.remember_canonical(&canonical("Prefer quiet mornings!", "a", "speaker", 11))?;
+        let foreign =
+            graph.remember_canonical(&canonical("Prefer quiet mornings.", "b", "other", 12))?;
+
+        let general = graph.inspect("speaker", "a", "", None)?;
+        assert_eq!(general.canonical.len(), 1);
+        assert_eq!(general.canonical[0].id, newer);
+        assert_eq!(general.canonical_selection.equivalent_records_collapsed, 1);
+        let rendered = render_inspection(&general);
+        assert!(rendered.contains("1 equivalent explicit / canonical memories collapsed"));
+        assert!(!rendered.contains(&older));
+        assert!(!rendered.contains(&foreign));
+
+        let exact = graph.inspect("speaker", "a", &newer, None)?;
+        assert_eq!(exact.canonical[0].equivalent_ids, vec![older]);
+        let exact_rendered = render_inspection(&exact);
+        assert!(exact_rendered.contains("equivalent_ids"));
+        assert!(!exact_rendered.contains(&foreign));
+        Ok(())
+    }
+
+    #[test]
     fn exact_audit_shows_lifecycle_but_filters_inaccessible_links() -> Result<()> {
         let graph = MemoryGraph::in_memory()?;
         graph.ingest_message(&message("a", "a", "speaker", 1), "admin")?;
@@ -1249,15 +1416,13 @@ mod tests {
         assert_eq!(inspection.extracted.last().unwrap().content, "extracted-5");
         let semantic = graph.inspect("speaker", "ctx", "topic", Some(&vec![0.5; 384]))?;
         assert_eq!(semantic.canonical.len(), CANONICAL_LIMIT);
-        assert_eq!(
-            semantic.canonical_total, CANONICAL_LIMIT,
-            "semantic total described all in-scope memories as topic matches"
-        );
-        assert_eq!(semantic.extracted_total, EXTRACTED_LIMIT);
+        assert_eq!(semantic.canonical_total, 45);
+        assert_eq!(semantic.extracted_total, 15);
         let rendered = render_inspection(&inspection);
         assert!(rendered.chars().count() <= OUTPUT_CHAR_LIMIT);
         assert!(rendered.contains("characters omitted"));
-        assert!(rendered.contains("omitted by count, relevance, or character bounds"));
+        assert!(rendered.contains("omitted by representative count limit"));
+        assert!(rendered.contains("omitted by section character budget"));
         assert!(
             rendered.contains("canonical-44-"),
             "newest assertion was dropped"

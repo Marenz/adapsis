@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "snapshot_id": "sanitized-extraction-snapshot-v2",
+  "fixture_id": "memory-quality-corpus-v2",
+  "provider_label": "preserved synthetic extraction score from v1",
+  "precision": 0.75,
+  "recall": 0.75
+}

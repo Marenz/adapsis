@@ -55,6 +55,33 @@ scalar values. The documented token estimate is
 `ceil((prompt_chars + output_chars) / 4)`; it is a stable budgeting estimate, not a
 provider tokenizer.
 
+## Version 2 Prompt-Selection Gate
+
+`v1/` is preserved byte-for-byte as historical #56 evidence. Production prompt
+deduplication intentionally changes its returned sets, so the default `memory-eval`
+gate now reads `v2/` rather than rewriting the v1 baseline.
+
+The v2 corpus measures canonical and ranked channels independently, with each case
+declaring its own representative count and rendered-row character limits. Its report
+includes selected representatives plus collapsed, count, character and bounded-scan
+omission counts. Hard-zero gates cover semantic duplicates, correction-precedence
+violations, contradiction false merges, ACL leaks, unsupported citations, stale
+records and omission-accounting mismatches. Retrieval recall may not regress.
+
+The threshold sweep uses reviewed scalar cosine scores produced by the actual
+`intfloat/multilingual-e5-small` production path (FastEmbed 5.17.3, model revision
+`614241f622f53c4eeff9890bdc4f31cfecc418b3`, `passage:` prefix, mean pooling) on
+public synthetic EN/PL/DE/ES phrases. No vector or model/cache binary is checked in.
+The selected cosine `0.84` is the highest tested threshold with zero false merges
+and zero missed multilingual equivalents after compatibility guards. Higher values
+lose the EN/PL equivalent; high-scoring negative, changed-time and changed-name
+controls are retained separately by the guard.
+
+The ranked row-character sweep tests 512, 1024, 2048, 4000 and 6000 characters.
+The production default of 4000 is the smallest candidate preserving every expected
+ranked representative in the padded calibration case. Header/statistics text remains
+outside the row limit but is included in the reported full prompt cost.
+
 The v1 baseline has 12 cases, including the two discriminating current-context
 authorization checks above. Its stale/current timezone pair is seeded through the
 production `correct_memory` transaction: the stale assertion remains available to

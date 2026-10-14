@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "baseline_id": "memory-quality-baseline-v2",
+  "fixture_id": "memory-quality-corpus-v2",
+  "extraction_snapshot_id": "sanitized-extraction-snapshot-v2",
+  "thresholds": {
+    "min_retrieval_recall": 1.0,
+    "max_semantic_duplicate_count": 0,
+    "max_correction_precedence_violations": 0,
+    "max_contradiction_false_merge_count": 0,
+    "max_acl_leak_count": 0,
+    "max_unsupported_citation_count": 0,
+    "max_stale_memory_count": 0,
+    "max_omission_mismatch_count": 0,
+    "max_canonical_prompt_chars": 5000,
+    "max_ranked_prompt_chars": 6000,
+    "selected_semantic_cosine": 0.84,
+    "selected_ranked_row_chars": 4000
+  },
+  "cosine_candidates": [0.82, 0.84, 0.86, 0.88, 0.90, 0.92],
+  "ranked_row_char_candidates": [512, 1024, 2048, 4000, 6000]
+}

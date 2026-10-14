@@ -61,6 +61,13 @@ module declared by the crate root, creating repository-wide churn even when one
 filename was supplied. Never use it for scoped work. Format only leaf modules and
 verify `git diff --stat` immediately after formatting.
 
+**Delegated worktree scope:** create writer sessions with their session directory
+anchored to the actual worktree they will edit. A session scoped to the main checkout
+but instructed to write a sibling worktree triggers external-path permission prompts,
+and a manager's permission observer can miss those prompts. Put disposable model
+calibration and caches under `/tmp/opencode`; do not let tools create implicit caches
+in either checkout.
+
 ## Run AdapsisOS
 ```bash
 # Interactive with browser UI
@@ -402,6 +409,19 @@ replaces that branch with one composer.
   widening is not.
 
 ## Conversation System (llm_takeover)
+- `/api/ask` also requires explicit `<code>!done</code>` for
+  conversational completion. Prose/empty replies receive an execute-or-finish
+  correction within the existing iteration budget; exhaustion is reported as
+  incomplete (`has_errors`), including after successful operations. Completed
+  operations and their results stay in context and are never replayed by the
+  correction. Behavioral HTTP/mock-provider tests: `cargo test --release
+  ask_completion_tests`.
+- HTTP and streaming turns capture a single immutable program baseline at turn
+  start. Completion requires tests for new/replaced functions, not unchanged
+  pre-existing test debt (#66). `execute_code_with_baseline` checks CoW function
+  identity; never refresh that baseline between rounds or changes could escape
+  the gate. Standalone and mixed-operation `!done` use the same executor. Direct
+  mutation/evaluation callers without a turn baseline retain the global gate.
 - Per-context conversation history: `ConversationManager` in `SessionMeta`
 - `llm_takeover(context, message, reply_fn, reply_arg[, permission_model])` — conversational LLM with history
 - Iterative loop: call LLM → execute code inline → feed results back (max 10 rounds)
@@ -420,6 +440,10 @@ replaces that branch with one composer.
   `<iteration_budget>N</iteration_budget>`. Missing estimates default to 10; estimates
   are clamped to the hard safety ceiling of 50. Protocol-correction rounds may extend
   an exhausted estimate, but never beyond that ceiling.
+- A completely empty model response is retried once, with one replacement round when
+  needed. The correction explicitly resumes from the latest tool result and forbids
+  repeating completed or irreversible actions; two consecutive empty responses still
+  terminate the turn with the existing user-visible error.
 
 ## Ladybug Episodic Memory
 
@@ -440,15 +464,16 @@ schema since day one and was never set:
 | written by | compaction (`llm_handlers.rs`) | `memory_remember` builtin |
 | provenance | `DERIVED_FROM` messages, `EXTRACTED_BY` a run | `ASSERTED_BY` a principal |
 | confidence | model estimate | fixed 1.0 |
-| injected | top-5, ranked against the current message | **all of them, every turn, unranked** |
+| injected | up to 5 deduplicated representatives ranked against the current message | **all distinct assertions within hard caps, every turn, unranked** |
 
 - **The split is observation vs instruction.** Ranking is right for "the mobile header
   overflows" and wrong for "I prefer large text" — the latter must hold on a turn that
   mentions neither text nor size. So canonical memories bypass ranking entirely and are
   bounded by count (`CANONICAL_MEMORY_LIMIT` = 40) and characters
-  (`ADAPSIS_CANONICAL_MEMORY_CHARS`, default 8000) instead. Truncation drops the
-  **oldest**, because a new assertion is usually a correction of an old one; they are then
-  rendered oldest-first so the model reads them in the order they were asserted.
+  (`ADAPSIS_CANONICAL_MEMORY_CHARS`, default 8000) instead. Equivalent active records
+  with identical governance collapse to the newest representative before the limits apply.
+  Truncation drops the **oldest**, because a new assertion is usually a correction of an
+  old one; selected representatives are then rendered oldest-first.
 - **`recall_authorized*` filters `canonical = false`.** Otherwise a canonical memory would
   appear twice in the prompt — once injected verbatim, once occupying a ranked recall slot.
 - **`create_memory_node` is the only `CREATE (:Memory …)`.** `canonical` and `confidence`
@@ -539,8 +564,11 @@ schema since day one and was never set:
   stores the hash, MIME type, platform reference, storage path, and source-message edge.
 - `fastembed` runs `intfloat/multilingual-e5-small` in-process for German/English recall.
   Its cache is `~/.local/share/adapsis/.fastembed_cache`.
-- Automatic recall merges semantic vector ranking with lexical term matches and injects
-  compact source citations only after ACL filtering.
+- Automatic recall semantically ranks a bounded ACL-filtered candidate set, collapses
+  equivalent records only within the same channel and exact governance set, and injects
+  compact source citations. Polarity and changed literals prevent false merges; uncertain
+  pairs remain separate. Lexical search remains an inspection fallback, not a prompt-ranking
+  input.
 - Compaction is non-destructive: raw messages remain forever. The active conversation
   model creates immutable `Episode` summaries and source-backed index `Memory` nodes.
   Failed compaction leaves raw history pending and uses prior episodes plus recent turns.

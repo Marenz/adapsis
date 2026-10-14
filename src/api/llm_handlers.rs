@@ -15,7 +15,6 @@ use super::execute::{
     build_plan_context, execute_code_with_baseline, format_library_load_errors,
     AgentCompletionCallback, OperationResult,
 };
-use super::execute_code;
 
 use axum::extract::State;
 use axum::Json;
@@ -590,9 +589,11 @@ pub async fn ask(
     let mut all_test_results: Vec<TestCaseResult> = vec![];
     let mut all_code = String::new();
     let mut reply_text = String::new();
+    let mut turn_finished = false;
 
     // Build messages from conversation history
     let mut session = config.snapshot_working_set().await;
+    let completion_baseline = session.program.clone();
     let program_summary = {
         let model = config.llm_model.read().unwrap().clone();
         crate::validator::program_summary_for_model(
@@ -647,6 +648,8 @@ pub async fn ask(
                 eprintln!("[web:error] LLM: {e}");
                 tx.send(serde_json::json!({"type": "error", "message": format!("LLM error: {e}")})).await;
                 reply_text.push_str(&format!("\n\nLLM error: {e}"));
+                all_results.push(MutationResult { message: format!("LLM error: {e}"), success: false });
+                turn_finished = true;
                 break;
             }
         };
@@ -675,16 +678,13 @@ pub async fn ask(
         }
 
         // Check for !done or no code (AI is asking a question / responding with text)
-        if code.trim() == "!done" {
-            eprintln!("[web:done] model said !done at iteration {}", iteration + 1);
-            tx.send(serde_json::json!({"type": "done"})).await;
-            break;
-        }
-        if code.is_empty() {
-            // No code block = AI is responding with text only (question or explanation)
-            eprintln!("[web:text-only] no code block, stopping");
-            tx.send(serde_json::json!({"type": "done"})).await;
-            break;
+        if code.trim().is_empty() {
+            // A promise is not task completion. Corrections consume the existing
+            // budget and resume from results, never replaying executed operations.
+            messages.push(crate::llm::ChatMessage::user(
+                "Your response contained no Adapsis operations. Resume from the latest results without repeating completed operations. Execute the next necessary step, or finish your answer or clarification question with <code>!done</code>.".to_string()
+            ));
+            continue;
         }
 
         eprintln!("[web:code]\n{}", code.chars().take(200).collect::<String>());
@@ -694,7 +694,9 @@ pub async fn ask(
 
         // Execute code via shared execute_code() function
         let mut session = config.snapshot_working_set().await;
-        let exec_result = execute_code(&code, &config, &mut session, None).await;
+        let exec_result = super::execute::execute_code_with_baseline(
+            &code, &config, &mut session, None, Some(&completion_baseline),
+        ).await;
 
         // Send SSE events for results
         for r in &exec_result.mutation_results {
@@ -724,6 +726,11 @@ pub async fn ask(
         // Write mutations back to tiers after each iteration
         config.write_back_working_set(&session).await;
 
+        if exec_result.done_accepted && !exec_result.has_errors {
+            turn_finished = true;
+            break;
+        }
+
         // Build feedback for next iteration
         if iter_has_errors {
             // Show ALL results (successes too), not just errors — otherwise
@@ -749,6 +756,12 @@ pub async fn ask(
             );
             messages.push(crate::llm::ChatMessage::user(feedback));
         }
+    }
+
+    if !turn_finished {
+        let message = "Iteration limit reached without explicit !done; task completion is unconfirmed.";
+        all_results.push(MutationResult { message: message.into(), success: false });
+        reply_text.push_str(&format!("\n\n{message}"));
     }
 
     // Save conversation — write assistant reply directly into meta tier
@@ -851,6 +864,7 @@ pub async fn ask_stream(
         }; // All locks released before LLM call
 
         let max_iterations = config_clone.max_iterations;
+        let completion_baseline = config_clone.program.read().await.clone();
         let mut last_context = req.message.clone();
         // Loop-breaker: track consecutive identical error feedback so we can
         // tell the model it's stuck instead of burning the iteration budget.
@@ -931,7 +945,7 @@ pub async fn ask_stream(
                 // Push a user message so the conversation doesn't end on assistant
                 // (some models like MiMo require the last message to be from the user)
                 messages.push(crate::llm::ChatMessage::user(
-                    "Your response contained no Adapsis operations. Write code with +, !, or ? prefixes.".to_string()
+                    "Your response contained no Adapsis operations. Resume from the latest results without repeating completed operations. Execute the next necessary step, or finish your answer or clarification question with <code>!done</code>.".to_string()
                 ));
                 continue;
             }
@@ -945,7 +959,9 @@ pub async fn ask_stream(
 
             // Run everything through execute_code (mutations, tests, evals,
             // queries, watches, agents, plan, done, mock/stub, messages, etc.)
-            let exec_result = execute_code(&code, &config_clone, &mut session, None).await;
+            let exec_result = super::execute::execute_code_with_baseline(
+                &code, &config_clone, &mut session, None, Some(&completion_baseline),
+            ).await;
 
             // Emit SSE events from execution results
             for r in &exec_result.mutation_results {
@@ -994,7 +1010,11 @@ pub async fn ask_stream(
                         for m in &session.program.modules {
                             for f in &m.functions {
                                 let qname = format!("{}.{}", m.name, f.name);
-                                if f.body.len() > 2 && !crate::session::is_function_tested(&session.program, &qname) {
+                                let unchanged = completion_baseline.modules.iter()
+                                    .find(|old| old.name == m.name)
+                                    .and_then(|old| old.functions.iter().find(|old| old.name == f.name))
+                                    .is_some_and(|old| std::sync::Arc::ptr_eq(old, f));
+                                if !unchanged && f.body.len() > 2 && !crate::session::is_function_tested(&session.program, &qname) {
                                     fns.push(qname);
                                 }
                             }
@@ -1255,7 +1275,13 @@ pub async fn handle_llm_takeover(
     let recall_embedder = memory_embedder.clone();
     let recalled = tokio::task::spawn_blocking(move || {
         let embedding = recall_embedder.embed_query(&recall_query)?;
-        recall_graph.recall_authorized_hybrid(&recall_principal, &recall_query, &embedding, 5)
+        recall_graph.ranked_prompt_selection(
+            &recall_principal,
+            &recall_query,
+            &embedding,
+            5,
+            crate::memory_graph::ranked_memory_char_budget(),
+        )
     })
     .await
     .context("join Ladybug recall")??;
@@ -1269,7 +1295,7 @@ pub async fn handle_llm_takeover(
     let canonical_principal = speaker_id.clone();
     let canonical_context = context.clone();
     let canonical = tokio::task::spawn_blocking(move || {
-        canonical_graph.canonical_for_context(
+        canonical_graph.canonical_prompt_selection(
             &canonical_principal,
             &canonical_context,
             crate::memory_graph::CANONICAL_MEMORY_LIMIT,
@@ -1391,24 +1417,7 @@ pub async fn handle_llm_takeover(
         );
     }
 
-    if !recalled.is_empty() {
-        messages.insert(
-            usize::from(!messages.is_empty()),
-            crate::llm::ChatMessage::system(crate::memory_graph::render_recall_prompt(&recalled)),
-        );
-    }
-
-    // Inserted last, so it lands directly after the system prompt: these were
-    // asserted outright, and outrank both the ranked recall and the episode
-    // summaries above, which are inferences.
-    if !canonical.is_empty() {
-        messages.insert(
-            usize::from(!messages.is_empty()),
-            crate::llm::ChatMessage::system(crate::memory_graph::render_canonical_prompt(
-                &canonical,
-            )),
-        );
-    }
+    insert_memory_prompt_blocks(&mut messages, &recalled, &canonical);
 
     let activity_graph = memory_graph.clone();
     let activity_context = context.clone();
@@ -1498,6 +1507,7 @@ pub async fn handle_llm_takeover(
     let mut reply_text = String::new();
     let mut final_summary_pending = false;
     let mut iteration_budget = DEFAULT_TAKEOVER_ITERATION_BUDGET;
+    let mut empty_response_retried = false;
 
     // Turn baseline for the `!done` test gate (#66): completion owes tests only
     // for functions this turn created or replaced, not for pre-existing debt the
@@ -1536,11 +1546,22 @@ pub async fn handle_llm_takeover(
             let error = "model returned an empty response";
             eprintln!("[llm_takeover:{context}] {error}");
             write_log_file(&log_file, "llm-error", &format!("[{context}] {error}")).await;
+            if !empty_response_retried {
+                empty_response_retried = true;
+                let correction = "Your previous response was empty. Resume from the latest tool result without repeating completed or irreversible actions. Execute the next necessary operation, or end with <code>!done</code> if the task is complete.";
+                llm_messages.push(crate::llm::ChatMessage::user(correction.to_string()));
+                if iteration + 1 >= iteration_budget {
+                    iteration_budget = (iteration_budget + 1).min(MAX_TAKEOVER_ITERATION_BUDGET);
+                }
+                eprintln!("[llm_takeover:{context}] retrying one empty response");
+                continue;
+            }
             if reply_text.is_empty() {
                 reply_text = "Entschuldigung — das Modell hat gerade leer geantwortet. Die Nachricht und der vollständige Verlauf sind gespeichert; bitte versuch es noch einmal.".to_string();
             }
             break;
         }
+        empty_response_retried = false;
 
         persist_takeover_message(
             &memory_graph,
@@ -1721,4 +1742,79 @@ pub async fn handle_llm_takeover(
     }
 
     Ok(reply_text)
+}
+
+pub(super) fn insert_memory_prompt_blocks(
+    messages: &mut Vec<crate::llm::ChatMessage>,
+    recalled: &crate::memory_graph::PromptMemorySelection,
+    canonical: &crate::memory_graph::PromptMemorySelection,
+) {
+    if recalled.should_render() {
+        messages.insert(
+            usize::from(!messages.is_empty()),
+            crate::llm::ChatMessage::system(crate::memory_graph::render_recall_selection(recalled)),
+        );
+    }
+    // Inserted last, so canonical assertions land directly after the primary
+    // system prompt and outrank ranked recall and inferred episode summaries.
+    if canonical.should_render() {
+        messages.insert(
+            usize::from(!messages.is_empty()),
+            crate::llm::ChatMessage::system(crate::memory_graph::render_canonical_selection(
+                canonical,
+            )),
+        );
+    }
+}
+
+#[cfg(test)]
+mod prompt_block_tests {
+    use super::*;
+    use crate::llm::{ChatContent, ChatMessage, ChatRole};
+    use crate::memory_graph::{PromptMemorySelection, PromptSelectionStats, RecalledMemory};
+
+    fn selection(canonical: bool, content: &str) -> PromptMemorySelection {
+        PromptMemorySelection {
+            memories: vec![RecalledMemory {
+                id: format!("memory:{content}"),
+                content: content.into(),
+                memory_type: "fixture".into(),
+                canonical,
+                confidence: if canonical { 1.0 } else { 0.9 },
+                citation: if canonical {
+                    String::new()
+                } else {
+                    "ctx; speaker; 1; source".into()
+                },
+            }],
+            stats: PromptSelectionStats {
+                active_authorized_records: 1,
+                candidate_records_scanned: 1,
+                selected_representatives: 1,
+                selected_row_chars: 1,
+                max_count: 40,
+                max_row_chars: 8_000,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn memory_blocks_do_not_displace_the_newest_user_turn() {
+        let mut messages = vec![
+            ChatMessage::system("primary"),
+            ChatMessage::user("older"),
+            ChatMessage::user("newest"),
+        ];
+        insert_memory_prompt_blocks(
+            &mut messages,
+            &selection(false, "ranked"),
+            &selection(true, "canonical"),
+        );
+        assert!(matches!(messages[1].role, ChatRole::System));
+        assert!(matches!(messages[2].role, ChatRole::System));
+        assert!(
+            matches!(&messages.last().unwrap().content, ChatContent::Text(text) if text == "newest")
+        );
+    }
 }

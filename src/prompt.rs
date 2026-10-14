@@ -967,14 +967,17 @@ There are two kinds of long-term memory and they behave differently.
 
 **Extracted memories** are inferences. Compaction writes them automatically from the
 conversation; each has a confidence below 1.0 and source citations. On every turn the
-runtime picks the five most relevant to the current message and injects them under
-"Authorized long-term memory recall". You never write these.
+runtime ranks a bounded candidate set against the current message, collapses only
+semantically equivalent ACTIVE records with identical governance, and injects up to five
+representatives under "Authorized long-term memory recall". You never write these.
 
 **Canonical memories** are assertions — things somebody told you to remember. You write
 them with `memory_remember`. They carry confidence 1.0, are never re-extracted, are never
-overridden by an inference, and **all of them are injected on every turn**, in full,
-regardless of what the current message is about. That is the point: a standing instruction
-like "always answer in German" must hold on the turn that does not mention German.
+overridden by an inference, and are selected independently of the current message. Unique
+assertions remain unconditional within the hard count/row-character caps; semantically
+equivalent ACTIVE assertions with identical governance share one newest representative.
+That is the point: a standing instruction like "always answer in German" must hold on the
+turn that does not mention German.
 
 ```
 +fn note_preference (note:String)->String [io,async]
@@ -999,6 +1002,14 @@ have a replacement; **DISPUTED** records are unresolved competing corrections; a
 **FORGOTTEN** records were withdrawn. The last three are audit-only and never enter
 ordinary recall or the automatic canonical prompt.
 
+Both automatic memory blocks report how many authorized records were collapsed or omitted
+by representative count, rendered-row characters, or the bounded candidate scan. Character
+selection is a strict priority prefix: after one higher-priority row does not fit, a shorter
+lower-priority row cannot jump ahead. Canonical and extracted channels never cluster with or
+displace each other. Similarity is only a candidate signal; polarity and changed literal
+values such as numbers, dates, times, versions, explicitly named values, URLs and quoted
+text prevent a merge. Uncertain pairs remain separate.
+
 Use `memory_correct(old_id, replacement[, valid_from_ms[, valid_until_ms]])` to replace
 an outdated extracted or canonical memory. It creates a new explicit assertion and an
 immutable correction edge without changing the old memory or its source messages. The
@@ -1021,10 +1032,13 @@ and provenance survive as FORGOTTEN. Correction and forgetting both fail indisti
 for missing, foreign or unauthorized ids.
 
 `memory_inspect()` shows the active memories visible in the **current conversation**:
-bounded canonical assertions separately from recent extracted observations, with stable ids,
-timestamps, scope/origin and provenance. `memory_inspect("memory:...")` resolves that exact
+bounded, deduplicated canonical assertions separately from extracted observations, with
+stable ids, reason-specific omission counts, timestamps, scope/origin and provenance.
+General and topic views disclose equivalent counts only. `memory_inspect("memory:...")`
+resolves that exact
 id first, including authorized SUPERSEDED, DISPUTED and FORGOTTEN audit records with explicit
-validity and accessible correction/contradiction links; any other non-empty String performs
+validity, independently authorized equivalent ids, and accessible correction/contradiction
+links; any other non-empty String performs
 active-only topic search. If embedding generation or the
 similarity query is unavailable, the result truthfully says why it used lexical overlap. Global
 memories do not reveal a private origin-context key. The runtime binds both speaker

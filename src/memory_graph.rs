@@ -10,11 +10,13 @@ mod activity;
 mod history;
 pub mod inspect;
 mod lifecycle;
+mod prompt_budget;
 pub mod quality;
 pub use activity::is_private_admin;
 pub use inspect::render_inspection;
 pub use lifecycle::{CorrectionDraft, MemoryStatus, TemporalValidity};
 use inspect::SourceCitation;
+pub use prompt_budget::{PromptMemorySelection, PromptSelectionStats};
 
 const SCHEMA_VERSION: i64 = 2;
 
@@ -24,11 +26,21 @@ pub(crate) const CANONICAL_MEMORY_LIMIT: usize = 40;
 /// Default character ceiling for canonical memories selected for injection.
 pub(crate) const DEFAULT_CANONICAL_MEMORY_CHAR_BUDGET: usize = 8_000;
 
+/// Default rendered-row ceiling for query-ranked extracted memories.
+pub(crate) const DEFAULT_RANKED_MEMORY_CHAR_BUDGET: usize = 4_000;
+
 pub(crate) fn canonical_memory_char_budget() -> usize {
     std::env::var("ADAPSIS_CANONICAL_MEMORY_CHARS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_CANONICAL_MEMORY_CHAR_BUDGET)
+}
+
+pub(crate) fn ranked_memory_char_budget() -> usize {
+    std::env::var("ADAPSIS_RANKED_MEMORY_CHARS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_RANKED_MEMORY_CHAR_BUDGET)
 }
 
 /// The one access group every principal joins.
@@ -195,6 +207,7 @@ pub struct RecalledMemory {
 ///
 /// Keeping this beside the retrieval model lets offline quality evaluation
 /// measure real prompt cost rather than maintaining a look-alike formatter.
+#[allow(dead_code)]
 pub fn render_recall_prompt(memories: &[RecalledMemory]) -> String {
     if memories.is_empty() {
         return String::new();
@@ -209,7 +222,16 @@ pub fn render_recall_prompt(memories: &[RecalledMemory]) -> String {
     )
 }
 
+pub fn render_recall_selection(selection: &PromptMemorySelection) -> String {
+    render_selection(
+        "Authorized long-term memory recall. Treat these as source-backed pointers and inspect provenance before relying on uncertain details:",
+        selection,
+        render_recall_prompt_rows,
+    )
+}
+
 /// Render the exact canonical-memory system block injected into a conversation.
+#[allow(dead_code)]
 pub fn render_canonical_prompt(memories: &[RecalledMemory]) -> String {
     if memories.is_empty() {
         return String::new();
@@ -227,6 +249,58 @@ pub fn render_canonical_prompt(memories: &[RecalledMemory]) -> String {
          memory_correct(\"<id>\", \"replacement\") with the bracketed id so the \
          correction keeps an auditable history:\n{block}"
     )
+}
+
+pub fn render_canonical_selection(selection: &PromptMemorySelection) -> String {
+    render_selection(
+        "Things you were explicitly asked to remember. These are asserted facts and standing instructions, not inferences — treat them as true and follow them without being reminded. They are selected independently from inferred recall. If one is wrong or obsolete, call memory_correct(\"<id>\", \"replacement\") with the bracketed id so the correction keeps an auditable history:",
+        selection,
+        render_canonical_prompt_rows,
+    )
+}
+
+fn render_selection(
+    heading: &str,
+    selection: &PromptMemorySelection,
+    render_rows: fn(&[RecalledMemory]) -> String,
+) -> String {
+    if !selection.should_render() {
+        return String::new();
+    }
+    let stats = &selection.stats;
+    let summary = format!(
+        "Selection: {} representative(s) from {} active authorized record(s); {} equivalent record(s) collapsed; omitted {} by count, {} by row-character budget, {} beyond candidate scan; selected rows use {}/{} characters.",
+        stats.selected_representatives,
+        stats.active_authorized_records,
+        stats.equivalent_records_collapsed,
+        stats.omitted_by_count,
+        stats.omitted_by_chars,
+        stats.omitted_beyond_scan,
+        stats.selected_row_chars,
+        stats.max_row_chars,
+    );
+    let rows = render_rows(&selection.memories);
+    if rows.is_empty() {
+        format!("{heading}\n{summary}")
+    } else {
+        format!("{heading}\n{summary}\n{rows}")
+    }
+}
+
+fn render_recall_prompt_rows(memories: &[RecalledMemory]) -> String {
+    memories
+        .iter()
+        .map(|memory| format!("- [{} | {}] {}", memory.id, memory.citation, memory.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_canonical_prompt_rows(memories: &[RecalledMemory]) -> String {
+    memories
+        .iter()
+        .map(|memory| format!("- [{}] {}", memory.id, memory.content))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl MemoryGraph {
@@ -908,6 +982,7 @@ impl MemoryGraph {
     /// an instruction. "Remember I prefer large text" must not depend on today's
     /// message being lexically similar to it. Bounded by count and characters so
     /// an unbounded set cannot crowd out the conversation.
+    #[allow(dead_code)]
     pub fn canonical_for_context(
         &self,
         principal_id: &str,
@@ -968,6 +1043,7 @@ impl MemoryGraph {
     /// [`Self::canonical_for_context`] injects them unconditionally — leaving
     /// them in would spend top-5 recall slots re-stating text that is already in
     /// the prompt verbatim.
+    #[allow(dead_code)]
     pub fn recall_authorized(&self, principal_id: &str, limit: i64) -> Result<Vec<RecalledMemory>> {
         let connection = Connection::new(&self.database)?;
         let mut statement = connection.prepare(
@@ -1007,6 +1083,7 @@ impl MemoryGraph {
         Ok(memories)
     }
 
+    #[allow(dead_code)]
     pub fn recall_authorized_semantic(
         &self,
         principal_id: &str,
@@ -1053,6 +1130,7 @@ impl MemoryGraph {
         Ok(memories)
     }
 
+    #[allow(dead_code)]
     pub fn recall_authorized_hybrid(
         &self,
         principal_id: &str,
