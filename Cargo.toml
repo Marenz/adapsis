@@ -34,6 +34,9 @@ lbug = "0.18.3"
 uuid = { version = "1", features = ["v4"] }
 scraper = "0.24"
 roxmltree = "0.20"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

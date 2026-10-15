@@ -7,6 +7,7 @@ mod context_prompt;
 #[cfg(test)]
 mod bundled_modules_tests;
 mod compiler;
+mod client_sse;
 mod coroutine;
 mod eval;
 mod events;
@@ -24,6 +25,7 @@ mod server;
 mod session;
 mod shared_state;
 mod typeck;
+mod tui;
 mod validator;
 mod vm;
 
@@ -667,6 +669,13 @@ enum Command {
         /// Model name (used when auto-starting)
         #[arg(long, env = "FORGE_MODEL")]
         model: Option<String>,
+    },
+
+    /// Terminal UI client for a running AdapsisOS instance
+    Tui {
+        /// AdapsisOS API URL
+        #[arg(short, long, default_value = "http://127.0.0.1:3001")]
+        api: String,
     },
 
     /// Start AdapsisOS — HTTP API + browser UI + session persistence
@@ -1530,6 +1539,9 @@ async fn main() -> Result<()> {
             };
 
             repl::run_repl(&api_url).await?;
+        }
+        Command::Tui { api } => {
+            tui::run(&api).await?;
         }
         Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, access_level, permissions_file, admin_id, host } => {
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,

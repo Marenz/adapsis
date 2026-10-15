@@ -164,33 +164,21 @@ pub async fn run_repl(api_url: &str) -> Result<()> {
             {
                 Ok(resp) => {
                     let mut stream = resp.bytes_stream();
-                    let mut raw_buf: Vec<u8> = Vec::new();
-                    let mut buffer = String::new();
+                    let mut parser = crate::client_sse::SseParser::new();
 
                     use futures::StreamExt;
                     while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(bytes) => {
-                                // Buffer raw bytes so multi-byte UTF-8 chars
-                                // split across chunks are not corrupted.
-                                raw_buf.extend_from_slice(&bytes);
-                                let valid_up_to = match std::str::from_utf8(&raw_buf) {
-                                    Ok(_) => raw_buf.len(),
-                                    Err(e) => e.valid_up_to(),
+                                let payloads = match parser.feed(&bytes) {
+                                    Ok(payloads) => payloads,
+                                    Err(error) => {
+                                        eprintln!("  Stream error: {error}");
+                                        break;
+                                    }
                                 };
-                                if valid_up_to > 0 {
-                                    buffer.push_str(std::str::from_utf8(&raw_buf[..valid_up_to]).unwrap());
-                                    raw_buf.drain(..valid_up_to);
-                                }
-                                while let Some(newline) = buffer.find('\n') {
-                                    let line = buffer[..newline].to_string();
-                                    buffer = buffer[newline + 1..].to_string();
-
-                                    if !line.starts_with("data: ") { continue; }
-                                    let data = &line[6..];
-                                    if data.is_empty() { continue; }
-
-                                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                for data in payloads {
+                                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) {
                                         match event.get("type").and_then(|t| t.as_str()) {
                                             Some("iteration") => {
                                                 let n = event.get("n").and_then(|n| n.as_u64()).unwrap_or(0);
