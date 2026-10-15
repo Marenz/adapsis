@@ -356,9 +356,11 @@ replaces that branch with one composer.
      may write.** Handing the language spec to an execute-only conversation
      invites mutations the permission layer refuses, which reads as model
      incompetence.
-  4. Permission-filtered program summary.
-  5. The context's identity file.
-  6. `speaker_section` — last, for salience. States what THIS speaker may do.
+  4. The context's identity file. These first four layers form the stable system
+     prefix for a given context and write-authority class.
+  5. Permission-filtered program summary and current model, carried in the
+     user-role runtime tail so provider adapters cannot hoist it ahead of history.
+  6. `speaker_section` in that same runtime tail. States what THIS speaker may do.
 - **Identity files:** `~/.config/adapsis/contexts/<stem>.md`, tracked originals in
   `contexts/`. `<stem>` maps every character outside `[A-Za-z0-9_-]` to `_`
   (`telegram:group:-513…` → `telegram_group_-513….md`). Total sanitizing, not a
@@ -436,14 +438,35 @@ replaces that branch with one composer.
   iteration. This prevents promises such as "I'll inspect that next" from ending the
   turn without doing the work; final prose and clarification questions must include
   the hidden completion command.
-- The model estimates each takeover's action-round budget in its first response with
-  `<iteration_budget>N</iteration_budget>`. Missing estimates default to 10; estimates
-  are clamped to the hard safety ceiling of 50. Protocol-correction rounds may extend
-  an exhausted estimate, but never beyond that ceiling.
+- The model estimates each takeover's action-round budget in its first non-empty response
+  with `<iteration_budget>N</iteration_budget>`. Missing estimates default to 10; estimates
+  are clamped to the hard safety ceiling of 50 total generations, including a final summary
+  and any empty-response replacement. Protocol-correction rounds may extend an exhausted
+  estimate only while that shared generation budget remains.
 - A completely empty model response is retried once, with one replacement round when
-  needed. The correction explicitly resumes from the latest tool result and forbids
+  needed and the hard ceiling permits. The correction explicitly resumes from the
+  latest tool result and forbids
   repeating completed or irreversible actions; two consecutive empty responses still
   terminate the turn with the existing user-visible error.
+- **Provider-facing context is prefix-structured (`context_log::ContextLog`).** All three
+  conversation builders (`ask`, `ask_stream`, `llm_takeover`) send one stable system
+  prefix, append-only history, then one user-role multipart envelope containing the volatile
+  runtime tail and current speaker input in distinct content blocks. The tail must not use
+  `system`: the gateway's Anthropic and ChatGPT adapters hoist every system message ahead of
+  history. The first envelope block is runtime-injected; trusted runtime blocks end at the
+  final text block, which the runtime prefixes as untrusted speaker input. A speaker can copy
+  either marker only inside that final block and therefore cannot manufacture an authority
+  block even when Anthropic merges consecutive roles. `ContextLog` marks the stable prefix
+  and history end as explicit cache boundaries and moves the changing bounded-history
+  omission notice into the envelope.
+- `/api/ask` and `/api/ask-stream` serialize the `main` conversation, persist the user before
+  the provider call and one complete assistant turn afterward, and never hold a state lock
+  across generation. The next request must see the prior `user, assistant` pair exactly once.
+- Explicit breakpoints require llm-gateway's top-level `message.cache_control` passthrough
+  to Anthropic content blocks; older deployed gateways ignore that field and retain only
+  their last-three-message heuristic. Cache token counters are logged raw per context with
+  latency. Do not add cache reads to provider totals: ChatGPT counts reads inside
+  `prompt_tokens`, while the current Anthropic translation reports them separately.
 
 ## Ladybug Episodic Memory
 

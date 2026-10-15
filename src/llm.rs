@@ -80,7 +80,7 @@ impl std::fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
     System,
@@ -93,6 +93,11 @@ pub enum ChatRole {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: ChatContent,
+    /// A client-requested prompt-cache breakpoint (issue #68, stage 5), passed
+    /// through to providers that have an explicit prompt cache. `None` means
+    /// "no preference"; the gateway may still place its own heuristic markers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,18 +136,35 @@ pub struct ChatImageUrl {
 }
 
 impl ChatMessage {
-    pub fn system(content: impl Into<String>) -> Self {
+    fn new(role: ChatRole, content: ChatContent) -> Self {
         Self {
-            role: ChatRole::System,
-            content: ChatContent::Text(content.into()),
+            role,
+            content,
+            cache_control: None,
         }
     }
 
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(ChatRole::System, ChatContent::Text(content.into()))
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::User,
-            content: ChatContent::Text(content.into()),
-        }
+        Self::new(ChatRole::User, ChatContent::Text(content.into()))
+    }
+
+    pub(crate) fn user_parts(parts: Vec<ChatContentPart>) -> Self {
+        Self::new(ChatRole::User, ChatContent::Parts(parts))
+    }
+
+    /// Mark this message as an explicit prompt-cache breakpoint.
+    ///
+    /// A provider caches the request prefix *up to and including* a breakpoint,
+    /// so a message only benefits from caching if it is itself marked or sits
+    /// before a marked message. Used for the stable system prefix and the end of
+    /// the append-only history; never for per-turn volatile content (issue #68).
+    pub fn with_cache_breakpoint(mut self) -> Self {
+        self.cache_control = Some(serde_json::json!({"type": "ephemeral"}));
+        self
     }
 
     pub fn user_with_attachments(
@@ -165,21 +187,13 @@ impl ChatMessage {
         if parts.len() == 1 {
             Self::user(content)
         } else {
-            Self {
-                role: ChatRole::User,
-                content: ChatContent::Parts(parts),
-            }
+            Self::new(ChatRole::User, ChatContent::Parts(parts))
         }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::Assistant,
-            content: ChatContent::Text(content.into()),
-        }
+        Self::new(ChatRole::Assistant, ChatContent::Text(content.into()))
     }
-
-
 }
 
 /// Incremental chunk from the LLM streaming response.
@@ -198,13 +212,77 @@ pub struct LlmOutput {
     pub text: String,
     pub thinking: String,
     pub code: String,
-    /// Reserved for future telemetry — populated from API response but not yet consumed.
-    #[allow(dead_code)]
+    /// Token accounting from the API response, when the provider reports it.
+    pub usage: LlmUsage,
+}
+
+/// Token accounting for one LLM call.
+///
+/// Provider totals are kept exactly as reported. Anthropic excludes its separate
+/// cache counters from `prompt_tokens`; ChatGPT includes cached input in it. The
+/// optional fields preserve that distinction instead of double-counting one of
+/// the providers. Issue #68 makes these values observable so a prompt-ordering
+/// change can be told apart from noise instead of guessed at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LlmUsage {
     pub prompt_tokens: u64,
-    #[allow(dead_code)]
     pub completion_tokens: u64,
-    #[allow(dead_code)]
     pub total_tokens: u64,
+    /// Input tokens served from the provider's prompt cache (a hit).
+    pub cache_read_input_tokens: Option<u64>,
+    /// Input tokens written to the provider's prompt cache (a miss that primes it).
+    pub cache_creation_input_tokens: Option<u64>,
+}
+
+impl LlmUsage {
+    /// Total input represented by the gateway's provider-specific counters.
+    /// This normalizes the two known wire shapes without changing any raw field.
+    pub fn accounted_input_tokens(&self) -> u64 {
+        if let Some(created) = self.cache_creation_input_tokens {
+            self.prompt_tokens
+                .saturating_add(self.cache_read_input_tokens.unwrap_or(0))
+                .saturating_add(created)
+        } else {
+            self.prompt_tokens
+        }
+    }
+
+    /// Fraction of input tokens served from cache using the gateway's wire
+    /// convention. Anthropic includes the cache-creation field and needs all
+    /// three input counters summed; ChatGPT emits only cache-read and already
+    /// includes that value in `prompt_tokens`.
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        if !self.has_cache_report() {
+            return None;
+        }
+        let read = self.cache_read_input_tokens.unwrap_or(0);
+        let total = self.accounted_input_tokens();
+        (total > 0).then(|| read as f64 / total as f64)
+    }
+
+    /// Whether the provider reported any cache accounting at all.
+    pub fn has_cache_report(&self) -> bool {
+        self.cache_read_input_tokens.is_some() || self.cache_creation_input_tokens.is_some()
+    }
+
+    /// One-line summary for logs. Kept here so every call site prints it the
+    /// same way (the format drifted when each site built its own string).
+    pub fn summary(&self) -> String {
+        let ratio = match self.cache_hit_ratio() {
+            Some(r) => format!("{:.0}%", r * 100.0),
+            None => "n/a".to_string(),
+        };
+        format!(
+            "input={} provider_prompt={} cached_read={} cached_write={} hit={} output={} provider_total={}",
+            self.accounted_input_tokens(),
+            self.prompt_tokens,
+            self.cache_read_input_tokens.map_or_else(|| "n/a".to_string(), |v| v.to_string()),
+            self.cache_creation_input_tokens.map_or_else(|| "n/a".to_string(), |v| v.to_string()),
+            ratio,
+            self.completion_tokens,
+            self.total_tokens,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +375,7 @@ impl OpenAiBackend {
         let mut content_text = String::new();
         let mut in_thinking = false;
         let mut stdout = io::stdout();
+        let mut usage: Option<TokenUsage> = None;
 
         let chunk_timeout = Duration::from_secs(120);
         let mut response = response;
@@ -315,11 +394,18 @@ impl OpenAiBackend {
                 if data == "[DONE]" {
                     stdout.flush().ok();
                     println!();
-                    return Ok(build_output(thinking_text, content_text));
+                    let output = build_output_with_usage(thinking_text, content_text, usage);
+                    if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
+                        eprintln!("[llm:usage] {}", output.usage.summary());
+                    }
+                    return Ok(output);
                 }
 
                 let chunk: ChatCompletionChunk = serde_json::from_str(&data)
                     .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to parse SSE chunk: {error}; chunk={data}"))))?;
+                if chunk.usage.is_some() {
+                    usage = chunk.usage;
+                }
 
                 for choice in chunk.choices {
                     if let Some(reasoning) = choice.delta.reasoning_content {
@@ -351,7 +437,11 @@ impl OpenAiBackend {
         stdout.flush().ok();
         println!();
         eprintln!("[llm:done] {} chunks in {}ms, thinking={}chars content={}chars", chunk_count, stream_start.elapsed().as_millis(), thinking_text.len(), content_text.len());
-        Ok(build_output(thinking_text, content_text))
+        let output = build_output_with_usage(thinking_text, content_text, usage);
+        if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
+            eprintln!("[llm:usage] {}", output.usage.summary());
+        }
+        Ok(output)
     }
 
     /// Stream SSE chunks into an mpsc channel, sending `StreamChunk::Thinking`,
@@ -472,7 +562,11 @@ impl OpenAiBackend {
         let thinking = msg.reasoning_content.unwrap_or_default();
         let content = msg.content.unwrap_or_default();
 
-        Ok(build_output(thinking, content))
+        let output = build_output_with_usage(thinking, content, response.usage);
+        if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
+            eprintln!("[llm:usage] {}", output.usage.summary());
+        }
+        Ok(output)
     }
 }
 
@@ -708,6 +802,7 @@ async fn stream_sse_to_channel(
     let mut thinking_text = String::new();
     let mut content_text = String::new();
     let mut in_thinking = false;
+    let mut usage: Option<TokenUsage> = None;
 
     let chunk_timeout = Duration::from_secs(120);
     let stream_start = std::time::Instant::now();
@@ -731,7 +826,11 @@ async fn stream_sse_to_channel(
         let mut done = false;
         for data in parser.feed(&chunk) {
             if data == "[DONE]" {
-                let output = build_output(thinking_text.clone(), content_text.clone());
+                let output = build_output_with_usage(
+                    thinking_text.clone(),
+                    content_text.clone(),
+                    usage,
+                );
                 let _ = tx.send(StreamChunk::Done(output)).await;
                 done = true;
                 break;
@@ -741,6 +840,9 @@ async fn stream_sse_to_channel(
                 warn!("failed to parse SSE chunk: {data}");
                 continue;
             };
+            if parsed.usage.is_some() {
+                usage = parsed.usage;
+            }
 
             for choice in parsed.choices {
                 if let Some(reasoning) = choice.delta.reasoning_content {
@@ -782,7 +884,7 @@ async fn stream_sse_to_channel(
         thinking_text.len(),
         content_text.len()
     );
-    let output = build_output(thinking_text, content_text);
+    let output = build_output_with_usage(thinking_text, content_text, usage);
     let _ = tx.send(StreamChunk::Done(output)).await;
 }
 
@@ -942,6 +1044,9 @@ fn duration_from_millis(milliseconds: f64) -> Option<Duration> {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionChunk {
     choices: Vec<ChunkChoice>,
+    /// Present on the final chunk for providers that report it mid-stream.
+    #[serde(default)]
+    usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -958,15 +1063,17 @@ struct ChunkDelta {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ResponseChoice>,
-    /// Parsed from API response for future telemetry — not yet consumed.
-    #[allow(dead_code)]
     #[serde(default)]
     usage: Option<TokenUsage>,
 }
 
-/// Token usage stats from the API response — reserved for future telemetry.
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+/// Token usage as it arrives on the wire (OpenAI-shaped).
+///
+/// `cache_read_input_tokens` / `cache_creation_input_tokens` are Anthropic's
+/// names, passed through by llm-gateway for both streaming and non-streaming
+/// responses (the chatgpt path maps `input_tokens_details.cached_tokens` onto
+/// the read field). They are absent for providers without a prompt cache.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 struct TokenUsage {
     #[serde(default)]
     prompt_tokens: u64,
@@ -974,6 +1081,22 @@ struct TokenUsage {
     completion_tokens: u64,
     #[serde(default)]
     total_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+}
+
+impl From<TokenUsage> for LlmUsage {
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1091,10 +1214,19 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
         text: full_text,
         thinking,
         code,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
+        usage: LlmUsage::default(),
     }
+}
+
+/// [`build_output`] with the API's token accounting attached.
+fn build_output_with_usage(
+    thinking: String,
+    content: String,
+    usage: Option<TokenUsage>,
+) -> LlmOutput {
+    let mut output = build_output(thinking, content);
+    output.usage = usage.map(LlmUsage::from).unwrap_or_default();
+    output
 }
 
 fn extract_tag_contents(text: &str, tag: &str) -> Vec<String> {
@@ -1241,5 +1373,80 @@ mod tests {
             })
             .collect();
         assert_eq!(tasks, vec!["First task".to_string(), "Second task".to_string()]);
+    }
+
+    #[test]
+    fn token_usage_carries_cache_fields_from_the_wire() {
+        // llm-gateway (issue #68) forwards Anthropic's cache token counts as
+        // `cache_read_input_tokens` / `cache_creation_input_tokens`; the chatgpt
+        // path maps `input_tokens_details.cached_tokens` onto the read field.
+        let wire: TokenUsage = serde_json::from_str(
+            r#"{"prompt_tokens":120,"completion_tokens":40,"total_tokens":160,
+                "cache_read_input_tokens":9880,"cache_creation_input_tokens":0}"#,
+        )
+        .expect("usage should parse");
+        let usage = LlmUsage::from(wire);
+
+        assert_eq!(usage.prompt_tokens, 120);
+        assert_eq!(usage.cache_read_input_tokens, Some(9880));
+        assert_eq!(usage.accounted_input_tokens(), 10000);
+        assert_eq!(usage.cache_hit_ratio(), Some(0.988));
+        assert_eq!(usage.total_tokens, 160, "provider totals remain raw");
+    }
+
+    #[test]
+    fn token_usage_without_cache_report_is_not_read_as_a_total_miss() {
+        let wire: TokenUsage =
+            serde_json::from_str(r#"{"prompt_tokens":500,"completion_tokens":10,"total_tokens":510}"#)
+                .expect("usage should parse");
+        let usage = LlmUsage::from(wire);
+
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert!(!usage.has_cache_report());
+        assert_eq!(usage.prompt_tokens, 500);
+    }
+
+    #[test]
+    fn cache_hit_ratio_is_none_without_input_tokens() {
+        let usage = LlmUsage::default();
+        assert_eq!(usage.cache_hit_ratio(), None);
+        assert!(usage.summary().contains("hit=n/a"));
+    }
+
+    #[test]
+    fn anthropic_cache_creation_without_a_read_is_a_reported_miss() {
+        let usage = LlmUsage {
+            prompt_tokens: 100,
+            cache_creation_input_tokens: Some(900),
+            ..LlmUsage::default()
+        };
+
+        assert_eq!(usage.accounted_input_tokens(), 1000);
+        assert_eq!(usage.cache_hit_ratio(), Some(0.0));
+    }
+
+    #[test]
+    fn chatgpt_cache_ratio_does_not_double_count_cached_prompt_tokens() {
+        let wire: TokenUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010,
+                "cache_read_input_tokens":800}"#,
+        )
+        .expect("usage should parse");
+        let usage = LlmUsage::from(wire);
+
+        assert_eq!(usage.cache_hit_ratio(), Some(0.8));
+        assert_eq!(usage.accounted_input_tokens(), 1000);
+        assert_eq!(usage.total_tokens, 1010, "provider totals remain raw");
+    }
+
+    #[test]
+    fn legacy_chat_message_without_cache_control_still_deserializes() {
+        let message: ChatMessage = serde_json::from_str(
+            r#"{"role":"user","content":"hello"}"#,
+        )
+        .expect("legacy message should deserialize");
+
+        assert_eq!(message.role, ChatRole::User);
+        assert!(message.cache_control.is_none());
     }
 }

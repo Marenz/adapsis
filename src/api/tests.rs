@@ -1,6 +1,7 @@
 use super::*;
 use super::execute::collect_opencode_tasks;
 use axum::response::IntoResponse;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt as _; // for .oneshot()
 
 #[path = "ask_completion_tests.rs"]
@@ -37,6 +38,66 @@ fn test_config() -> AppConfig {
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
         turn: None,
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedLlm {
+    responses: std::sync::Arc<Vec<String>>,
+    requests: std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    next: std::sync::Arc<AtomicUsize>,
+}
+
+async fn scripted_llm_response(
+    State(state): State<ScriptedLlm>,
+    Json(request): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    state.requests.lock().await.push(request);
+    let index = state.next.fetch_add(1, Ordering::SeqCst);
+    let content = state.responses.get(index).cloned().unwrap_or_default();
+    let chunk = serde_json::json!({
+        "choices": [{"delta": {"content": content, "reasoning_content": null}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+    )
+}
+
+async fn start_scripted_llm(
+    responses: &[&str],
+) -> (
+    String,
+    std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let state = ScriptedLlm {
+        responses: std::sync::Arc::new(responses.iter().map(|s| s.to_string()).collect()),
+        requests: requests.clone(),
+        next: std::sync::Arc::new(AtomicUsize::new(0)),
+    };
+    let app = axum::Router::new()
+        .route("/v1/chat/completions", axum::routing::post(scripted_llm_response))
+        .with_state(state);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{address}"), requests, server)
+}
+
+fn request_message_text(message: &serde_json::Value) -> String {
+    match &message["content"] {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -1111,6 +1172,114 @@ fn test_router() -> (axum::Router, AppConfig) {
 }
 
 #[tokio::test]
+async fn ask_persists_ordered_turns_and_sends_them_on_the_next_request() {
+    let (url, requests, server) = start_scripted_llm(&[
+        "first reply<code>!done</code>",
+        "second reply<code>!done</code>",
+    ])
+    .await;
+    let mut config = test_config();
+    config.llm_url = url;
+    *config.llm_model.write().unwrap() = "scripted".to_string();
+    let router = router_with_llm(config.clone());
+
+    for message in ["first request", "second request"] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/ask")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"message": message}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+    }
+
+    let conversation = config.meta.lock().unwrap().conversations.get("main").unwrap().clone();
+    assert_eq!(
+        conversation.messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+        vec!["system", "user", "assistant", "user", "assistant"]
+    );
+    assert!(conversation.messages[1].content.contains("first request"));
+    assert!(conversation.messages[2].content.contains("first reply"));
+    assert!(conversation.messages[3].content.contains("second request"));
+    assert!(conversation.messages[4].content.contains("second reply"));
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    let second = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(second[1]["role"], "user");
+    assert!(request_message_text(&second[1]).contains("first request"));
+    assert_eq!(second[2]["role"], "assistant");
+    assert!(request_message_text(&second[2]).contains("first reply"));
+    assert_eq!(second.last().unwrap()["role"], "user");
+    assert!(request_message_text(second.last().unwrap()).contains("second request"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn ask_stream_persists_ordered_turns_and_sends_them_on_the_next_request() {
+    let (url, requests, server) = start_scripted_llm(&[
+        "first streamed reply<code>!done</code>",
+        "second streamed reply<code>!done</code>",
+    ])
+    .await;
+    let mut config = test_config();
+    config.llm_url = url;
+    *config.llm_model.write().unwrap() = "scripted".to_string();
+    let router = router_with_llm(config.clone());
+
+    for message in ["first streamed request", "second streamed request"] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/ask-stream")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"message": message}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("\"type\":\"end\""));
+    }
+
+    let conversation = config.meta.lock().unwrap().conversations.get("main").unwrap().clone();
+    assert_eq!(
+        conversation.messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+        vec!["system", "user", "assistant", "user", "assistant"]
+    );
+    assert!(conversation.messages[1].content.contains("first streamed request"));
+    assert!(conversation.messages[2].content.contains("first streamed reply"));
+    assert!(conversation.messages[3].content.contains("second streamed request"));
+    assert!(conversation.messages[4].content.contains("second streamed reply"));
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    let second = requests[1]["messages"].as_array().unwrap();
+    assert!(request_message_text(&second[1]).contains("first streamed request"));
+    assert!(request_message_text(&second[2]).contains("first streamed reply"));
+    assert!(request_message_text(second.last().unwrap()).contains("second streamed request"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn http_mutate_endpoint() {
     let (router, _config) = test_router();
     let body = serde_json::json!({"source": "+fn greet() -> String\n  +return \"hello\"\n+end"});
@@ -1524,21 +1693,98 @@ fn llm_takeover_requires_explicit_completion_for_prose_only_turns() {
 }
 
 #[test]
-fn llm_takeover_retries_one_empty_response_without_repeating_actions() {
-    let source = include_str!("llm_handlers.rs");
-    let takeover_start = source
-        .find("pub async fn handle_llm_takeover")
-        .expect("handle_llm_takeover not found");
-    let takeover = &source[takeover_start..];
+fn first_empty_takeover_response_retries_once() {
+    use super::llm_handlers::{EmptyResponseAction, EmptyResponseRetry};
 
-    assert!(
-        takeover.contains("let mut empty_response_retried = false")
-            && takeover.contains("if !empty_response_retried")
-            && takeover.contains("without repeating completed or irreversible actions")
-            && takeover.contains("retrying one empty response")
-            && takeover.contains("empty_response_retried = false"),
-        "llm_takeover must retry one transient empty response, then restore the retry allowance"
-    );
+    let mut retry = EmptyResponseRetry::default();
+    let EmptyResponseAction::Retry(correction) = retry.on_empty(true) else {
+        panic!("the first empty response must get one retry");
+    };
+    assert!(correction.contains("latest tool result"));
+    assert!(correction.contains("without repeating completed or irreversible actions"));
+    let EmptyResponseAction::Terminate(error) = retry.on_empty(true) else {
+        panic!("a second consecutive empty response must terminate");
+    };
+    assert!(error.contains("vollständige Verlauf sind gespeichert"));
+}
+
+#[test]
+fn non_empty_takeover_response_restores_empty_retry_allowance() {
+    use super::llm_handlers::{EmptyResponseAction, EmptyResponseRetry};
+
+    let mut retry = EmptyResponseRetry::default();
+    assert!(matches!(
+        retry.on_empty(true),
+        EmptyResponseAction::Retry(_)
+    ));
+    retry.on_non_empty();
+    assert!(matches!(
+        retry.on_empty(true),
+        EmptyResponseAction::Retry(_)
+    ));
+}
+
+#[test]
+fn exhausted_estimate_gets_one_replacement_round() {
+    use super::llm_handlers::{prepare_empty_replacement, EmptyResponseAction, EmptyResponseRetry, TakeoverCallBudget};
+
+    let mut retry = EmptyResponseRetry::default();
+    let mut estimate = 3;
+    let mut calls = TakeoverCallBudget::default();
+    for _ in 0..3 {
+        assert!(calls.reserve());
+    }
+    assert!(prepare_empty_replacement(2, &mut estimate, &calls));
+    assert_eq!(estimate, 4);
+    assert!(matches!(
+        retry.on_empty(true),
+        EmptyResponseAction::Retry(_)
+    ));
+    assert!(matches!(
+        retry.on_empty(true),
+        EmptyResponseAction::Terminate(_)
+    ));
+}
+
+#[test]
+fn empty_response_does_not_extend_hard_ceiling() {
+    use super::llm_handlers::{prepare_empty_replacement, EmptyResponseAction, EmptyResponseRetry, TakeoverCallBudget};
+
+    let mut retry = EmptyResponseRetry::default();
+    let mut estimate = 50;
+    let mut calls = TakeoverCallBudget::default();
+    for _ in 0..50 {
+        assert!(calls.reserve());
+    }
+    assert!(!prepare_empty_replacement(49, &mut estimate, &calls));
+    assert_eq!(estimate, 50);
+    assert!(matches!(
+        retry.on_empty(false),
+        EmptyResponseAction::Terminate(_)
+    ));
+}
+
+#[test]
+fn takeover_call_budget_includes_summary_and_summary_retry() {
+    use super::llm_handlers::TakeoverCallBudget;
+
+    let mut budget = TakeoverCallBudget::default();
+    for _ in 0..48 {
+        assert!(budget.reserve(), "action generation should fit");
+    }
+    assert!(budget.reserve(), "first summary generation should fit");
+    assert!(budget.reserve(), "one empty-summary replacement should fit");
+    assert!(!budget.reserve(), "no generation may exceed the shared hard limit");
+    assert_eq!(budget.used(), 50);
+}
+
+#[test]
+fn second_empty_response_replaces_stale_prose() {
+    use super::llm_handlers::{set_empty_response_error, EMPTY_RESPONSE_ERROR};
+
+    let mut reply = "stale promise from an earlier response".to_string();
+    set_empty_response_error(&mut reply, EMPTY_RESPONSE_ERROR);
+    assert_eq!(reply, EMPTY_RESPONSE_ERROR);
 }
 
 #[test]
@@ -1557,6 +1803,23 @@ fn llm_takeover_parses_model_iteration_budget() {
     assert_eq!(
         takeover_iteration_budget("<iteration_budget>many</iteration_budget>"),
         None
+    );
+}
+
+#[test]
+fn llm_takeover_uses_first_meaningful_response_for_iteration_budget() {
+    use super::llm_handlers::TakeoverIterationEstimate;
+
+    let mut estimate = TakeoverIterationEstimate::default();
+    assert_eq!(estimate.observe("", ""), None, "empty responses do not consume the estimate slot");
+    assert_eq!(
+        estimate.observe("<iteration_budget>7</iteration_budget>Working", "!eval Task.run"),
+        Some(Some(7))
+    );
+    assert_eq!(
+        estimate.observe("<iteration_budget>2</iteration_budget>Later", "!done"),
+        None,
+        "only the first meaningful response may set the estimate"
     );
 }
 

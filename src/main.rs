@@ -2,6 +2,7 @@ mod api;
 mod ast;
 mod attachment;
 mod builtins;
+mod context_log;
 mod context_prompt;
 #[cfg(test)]
 mod bundled_modules_tests;
