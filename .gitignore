@@ -18,3 +18,5 @@ session.json
 training.jsonl
 # Personal per-context identity files are local-only (never committed).
 contexts/
+.playwright-mcp/
+**/__pycache__/
