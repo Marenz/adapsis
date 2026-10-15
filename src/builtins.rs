@@ -840,13 +840,15 @@ pub static IO_BUILTINS: &[Builtin] = &[
     Builtin {
         name: "http_request",
         aliases: &[],
-        short: "Generic HTTP request: http_request(method, url, headers, body) -> String",
-        long: "Makes a generic HTTP request with the given method and returns the response body as a String. \
+        short: "Generic HTTP request: http_request(method, url, headers, body) -> Result<String>",
+        long: "Makes a generic HTTP request with the given method and returns Ok(response body) for a 2xx response. \
+               Transport, timeout, invalid input, non-2xx, and oversized-response failures return a catchable Err. \
                Takes `(method:String, url:String, headers:String, body:String)`. \
                method must be GET, POST, PUT, DELETE, or PATCH (case-insensitive). \
                headers is a newline-separated string of `Key: Value` pairs (pass \"\" for none). \
-               body is the request body string (pass \"\" for none). \
-               Example: http_request(\"PUT\", \"https://api.example.com/item/1\", \"Authorization: Bearer tok\\nContent-Type: application/json\", \"{\\\"name\\\":\\\"updated\\\"}\")",
+               body is ignored for GET; pass \"\" when there is no body. Responses are limited to 2 MiB, \
+               error bodies to 64 KiB, and the request times out after 30 seconds. Match Ok/Err explicitly. \
+               Example: +match http_request(\"PUT\", \"https://api.example.com/item/1\", \"Authorization: Bearer tok\\nContent-Type: application/json\", \"{\\\"name\\\":\\\"updated\\\"}\")",
         category: BuiltinCategory::Io,
     },
     Builtin {
@@ -2011,6 +2013,7 @@ mod tests {
         for name in &[
             "http_get",
             "http_post",
+            "http_request",
             "shell_exec",
             "file_read",
             "file_write",
@@ -2046,7 +2049,7 @@ mod tests {
     #[test]
     fn io_builtins_are_also_builtins() {
         // is_builtin should return true for IO builtins too
-        for name in &["http_get", "shell_exec", "llm_call"] {
+        for name in &["http_get", "http_request", "shell_exec", "llm_call"] {
             assert!(
                 is_builtin(name),
                 "IO builtin '{name}' should also return true for is_builtin"
@@ -2212,6 +2215,10 @@ mod tests {
         assert!(
             prompt.contains("http_get"),
             "prompt should mention http_get"
+        );
+        assert!(
+            prompt.contains("http_request"),
+            "prompt should mention http_request"
         );
         assert!(
             prompt.contains("?symbols"),

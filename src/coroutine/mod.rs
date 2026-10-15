@@ -55,6 +55,9 @@ async fn bounded_upload_response(response: reqwest::Response) -> Result<String> 
 
 pub mod shell_policy;
 pub mod scoped;
+mod http_policy;
+#[cfg(test)]
+mod http_policy_tests;
 mod matching;
 pub use matching::pattern_matches;
 #[cfg(test)]
@@ -262,8 +265,9 @@ pub enum IoRequest {
     HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
     /// HTTP POST that returns the response as a binary Attachment (for audio/image downloads).
     HttpPostBinary { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<crate::attachment::Attachment>> },
-    /// Generic HTTP request with arbitrary method/headers.
-    HttpRequest { method: String, url: String, headers: Vec<(String, String)>, body: String, reply: oneshot::Sender<Result<String>> },
+    /// Generic HTTP request whose method, URL, headers, and response are checked
+    /// by the coroutine HTTP policy before a result reaches Adapsis code.
+    HttpRequest { method: String, url: String, headers: String, body: String, reply: oneshot::Sender<Result<String>> },
     /// Multipart file upload: POST a file with optional extra form fields.
     HttpUpload { url: String, file_path: String, file_field: String, extra_fields: Vec<(String, String)>, reply: oneshot::Sender<Result<String>> },
     /// Multipart upload from in-memory bytes (for Attachment values).
@@ -812,34 +816,8 @@ impl Runtime {
             }
             IoRequest::HttpRequest { url, method, headers, body, reply } => {
                 tokio::spawn(async move {
-                    let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(30))
-                        .build()
-                        .unwrap_or_default();
-                    let req_method = match method.to_uppercase().as_str() {
-                        "GET" => reqwest::Method::GET,
-                        "POST" => reqwest::Method::POST,
-                        "PUT" => reqwest::Method::PUT,
-                        "DELETE" => reqwest::Method::DELETE,
-                        "PATCH" => reqwest::Method::PATCH,
-                        _ => reqwest::Method::GET,
-                    };
-                    let mut req = client.request(req_method, &url);
-                    for (key, value) in &headers {
-                        req = req.header(key.as_str(), value.as_str());
-                    }
-                    if !body.is_empty() {
-                        req = req.body(body);
-                    }
-                    match req.send().await {
-                        Ok(resp) => {
-                            match resp.text().await {
-                                Ok(text) => { let _ = reply.send(Ok(text)); }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
-                            }
-                        }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
-                    }
+                    let result = http_policy::perform(method, url, headers, body).await;
+                    let _ = reply.send(result);
                 });
             }
             IoRequest::LlmCall { model, system, prompt, reply } => {
@@ -2693,24 +2671,18 @@ impl CoroutineHandle {
             "http_request" => {
                 let method = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_request expects (method:String, url:String, headers:String, body:String)") };
                 let url = match args.get(1) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_request expects (method:String, url:String, headers:String, body:String)") };
-                let headers_str = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => String::new() };
-                let body = match args.get(3) { Some(Value::String(s)) => s.as_ref().clone(), _ => String::new() };
-                let headers: Vec<(String, String)> = headers_str.lines()
-                    .filter_map(|line| {
-                        let mut parts = line.splitn(2, ':');
-                        match (parts.next(), parts.next()) {
-                            (Some(k), Some(v)) => Some((k.trim().to_string(), v.trim().to_string())),
-                            _ => None,
-                        }
-                    })
-                    .collect();
+                let headers = match args.get(2) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_request expects (method:String, url:String, headers:String, body:String)") };
+                let body = match args.get(3) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("http_request expects (method:String, url:String, headers:String, body:String)") };
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(
                     WaitReason::HttpRequest(method.clone(), url.clone()),
                     IoRequest::HttpRequest { method, url, headers, body, reply: tx },
                     rx,
-                )?;
-                return Ok(Value::string(result));
+                );
+                return Ok(match result {
+                    Ok(response) => Value::Ok(Box::new(Value::string(response))),
+                    Err(error) => Value::Err(format!("{error}")),
+                });
             }
             "llm_call" => {
                 let system = match args.get(0) { Some(Value::String(s)) => s.as_ref().clone(), _ => bail!("llm_call expects (system:String, prompt:String[, model:String])") };

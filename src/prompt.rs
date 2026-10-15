@@ -15,7 +15,7 @@ You are NOT writing standalone scripts or programs. You are executing commands s
 
 Execute shell commands:     !eval shell_exec("ls -la /path")
 Read files:                 !eval read_file("/path/to/file")
-HTTP requests:              !eval http_get("url")
+HTTP requests:              !eval http_get("url") or !eval http_request("PATCH", "url", "Header: value", "body")
 Run Adapsis functions:      !eval ModuleName.function(args)
 Query module source:        ?source ModuleName
 List modules:               ?library
@@ -48,7 +48,7 @@ IMPORTANT: Do NOT use <tool_call>, <tool_result>, or any tool-use XML format.
 Do NOT output JSON tool calls. You are NOT in a tool-use environment.
 Use ONLY <code> blocks with Adapsis syntax. To run shell commands use: !eval shell_exec("command")
 To read files use: !eval read_file("/path/to/file")
-To make HTTP requests use: !eval http_get("url") or !eval http_post("url", "body")
+To make HTTP requests use: !eval http_get("url"), !eval http_post("url", "body"), or !eval http_request("PATCH", "url", "Header: value", "body")
 
 ## Adapsis Syntax
 
@@ -465,7 +465,11 @@ Do NOT reach for `!mock` here: a mock verifies the mock, not the endpoint. Mocks
 are for `+test`, where the assertion has to be deterministic.
 
 **Timeouts**: `!eval` has a 30-second timeout — if an evaluation takes longer, it is
-cancelled and returns an error. `http_get`/`http_post` also have a 30-second timeout.
+cancelled and returns an error. `http_get`/`http_post`/`http_request` also have a 30-second timeout.
+`http_request(method, url, headers, body)` supports GET/POST/PUT/DELETE/PATCH and
+newline-separated `Name: Value` headers. It returns `Result<String>`; always `+match`
+Ok/Err. Non-2xx and transport failures are actionable catchable errors, successful
+responses are capped at 2 MiB, and error bodies at 64 KiB.
 `http_upload` has a 120-second timeout and returns `Result<String>`; always `+match`
 its Ok/Err value so an upload failure remains catchable by the calling function.
 Do NOT use `!eval` or `http_get` for streaming endpoints (like SSE) — they will time out.
@@ -724,7 +728,7 @@ Use `!sandbox` to experiment safely without affecting the main program:
 ### End-to-end testing
 
 Unit tests verify individual functions. You MUST also verify the whole system works:
-- After registering routes, fetch them with http_get/http_post to verify they serve correctly
+- After registering routes, fetch them with http_get/http_post/http_request to verify they serve correctly
 - After spawning tasks, check ?tasks to verify they're running
 - After building any service, write an async function that exercises it end-to-end
 - Do NOT say !done until you have evidence the system actually works as a whole

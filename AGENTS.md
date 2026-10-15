@@ -333,6 +333,11 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
 - `http_upload(url, attachment, field, extra)` — multipart upload from Attachment;
   returns `Result<String>`, so callers must `+match` Ok/Err
 - `conversation_notify(context, message, attachment)` — delivers to conversation with file
+- `http_request(method, url, headers, body)` is the raw coroutine HTTP escape hatch for
+  GET/POST/PUT/DELETE/PATCH, including local/mesh services. Its method/header/URL policy
+  is enforced in the runtime IO loop, not only by the evaluator. It returns catchable
+  `Result<String>`, rejects non-HTTP(S) URLs and non-2xx responses, caps successful
+  bodies at 2 MiB and error bodies at 64 KiB, and has a 30-second timeout.
 
 ## Per-Context Identity (issue #41)
 

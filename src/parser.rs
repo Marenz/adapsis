@@ -5323,6 +5323,21 @@ mod tests {
         assert!(matches!(&ops[2], Operation::Test(_)));
     }
 
+    #[test]
+    fn typed_let_preserves_authored_type_and_anonymous_struct_literal() {
+        let ops = parse_ops(
+            "+fn make_point ()->Point\n  +let p:Point = {x: 1, y: 2}\n  +return p\n+end",
+        );
+        let Operation::Function(function) = &ops[0] else {
+            panic!("expected function, got {:?}", ops[0]);
+        };
+        let Operation::Let(binding) = &function.body[0] else {
+            panic!("expected +let, got {:?}", function.body[0]);
+        };
+        assert!(matches!(&binding.ty, TypeExpr::Named(name) if name == "Point"));
+        assert!(matches!(&binding.expr, Expr::StructLiteral(fields) if fields.len() == 2));
+    }
+
     // ── parse_test_input tests ───────────────────────────────────────────
 
     #[test]
