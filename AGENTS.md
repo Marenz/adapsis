@@ -3,6 +3,26 @@
 ## Overview
 Adapsis is an AI-native programming language and live agentic environment. Programs are built incrementally through validated mutations. The AI writes Adapsis code, gets immediate feedback, and iterates. The system can modify its own runtime via `!opencode`.
 
+## Development baseline (2026-10-25 cleanup)
+- Started on `work/issue-42` at `22d93d6`; the consolidated, sanitized upstream
+  baseline is `origin/master` at `6667139`. Continue on `work/native-tools`.
+- Old feature branches already have their functionality integrated upstream
+  (including memory lifecycle, creative tools, context caching and generic HTTP).
+  Do not merge pre-sanitization history back into the current branch.
+- Local recovery refs live under `refs/archive/2026-10-25/`: `heads/<old-branch>`,
+  `stashes/0`, `stashes/1`, `legacy-runtime-wip`, and `tui-fix`.
+  Inspect with `git for-each-ref refs/archive/2026-10-25/`; these are local-only,
+  not branches or tags to publish.
+- Retired experiments: Stratum prompt injection (superseded by Ladybug), legacy
+  HTTP/auth convenience variants (use guarded `http_request`), duplicate struct
+  propagation and old eval-comment edits. Recovery refs retain their originals.
+- Personal `contexts/` files remain ignored/local-only, including the latest
+  language-profile edit from the old issue-57 branch.
+- Next direction: native JSON-schema tools over the existing permission-checked
+  runtime, then a measured Python-subset frontend lowering to the existing AST.
+  Preserve test gating and explicit completion validation during the transition;
+  native tool schemas alone do not guarantee correct calls or task completion.
+
 ## Language Design Goals
 - **Optimized for LLM-driven construction**, not human typing
 - Every operation starts with `+`, `!`, or `?` — clear code vs prose distinction

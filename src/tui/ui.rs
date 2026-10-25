@@ -97,7 +97,11 @@ fn render_timeline(frame: &mut Frame<'_>, state: &mut AppState, area: Rect) {
                 .border_style(Style::default().fg(PANEL)),
         )
         .wrap(Wrap { trim: false });
-    let total_lines = timeline_line_count(state, inner_width as usize);
+    // Exact wrapped line count from ratatui's own word wrapper, minus the two
+    // border rows the paragraph reports. A hand-rolled estimate under-counts
+    // word-wrapped text, which shortened `bottom` and left the newest line
+    // (e.g. a just-submitted echo) below the viewport even in follow mode.
+    let total_lines = paragraph.line_count(inner_width).saturating_sub(2);
     let viewport_lines = area.height.saturating_sub(2) as usize;
     state.update_layout(total_lines, viewport_lines);
     let scroll = state.scroll_top.min(u16::MAX as usize) as u16;
@@ -117,29 +121,6 @@ fn timeline_text(state: &AppState) -> Text<'static> {
         lines.push(Line::raw(""));
     }
     Text::from(lines)
-}
-
-fn timeline_line_count(state: &AppState, width: usize) -> usize {
-    if state.timeline.is_empty() {
-        return 1;
-    }
-    state
-        .timeline
-        .iter()
-        .map(|entry| {
-            let live_width = if entry.live { 4 } else { 0 };
-            entry
-                .text
-                .split('\n')
-                .map(|line| {
-                    (10 + UnicodeWidthStr::width(line) + live_width)
-                        .max(1)
-                        .div_ceil(width.max(1))
-                })
-                .sum::<usize>()
-                + 1
-        })
-        .sum()
 }
 
 fn entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
@@ -365,5 +346,44 @@ mod tests {
             state.help_visible = true;
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         }
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn follow_keeps_the_latest_echo_visible_after_word_wrapping() {
+        let backend = TestBackend::new(40, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new("http://127.0.0.1:3002".to_string());
+
+        // Long word-wrapped turn before the echo. The old character-count
+        // estimate under-counted its wrapped height, so follow-mode scroll (and
+        // the just-submitted echo) ended up below the viewport.
+        let long = (0..60)
+            .map(|n| format!("w{n:07}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking(long)));
+        state.apply(ClientMessage::Stream(ServerEvent::Complete));
+
+        // Enter echoes the user message and resumes following the latest output.
+        state.begin_turn("ECHO-MARKER-12345".to_string());
+        assert!(state.follow);
+
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+
+        assert!(
+            buffer_text(&terminal).contains("ECHO-MARKER-12345"),
+            "the newest entry (the echo) must be visible in follow mode:\n{}",
+            buffer_text(&terminal)
+        );
     }
 }
