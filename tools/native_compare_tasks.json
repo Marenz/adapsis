@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "description": "Small tasks within both the Python subset and Adapsis, for measuring native-tools + Python-frontend vs legacy protocol. Each task specifies an exact module name, function signature, and hidden eval cases (Adapsis expression syntax for /api/eval input; string results include surrounding quotes in expected).",
+  "type_glossary": "Type names: Adapsis uses Int/String/Bool/List<T>; Python uses int/str/bool/list[T]. Use the syntax appropriate to your instructed language.",
+  "tasks": [
+    {
+      "id": "arith_add",
+      "module": "Arith",
+      "function": "Arith.add",
+      "signature": "add(a: int, b: int) -> int",
+      "base_task": "Implement a function in module `Arith` with signature `add(a: int, b: int) -> int` that returns the sum a + b.",
+      "hidden_cases": [
+        {"input": "a=2 b=3", "expected": "5"},
+        {"input": "a=-5 b=5", "expected": "0"},
+        {"input": "a=100 b=-50", "expected": "50"},
+        {"input": "a=0 b=0", "expected": "0"}
+      ]
+    },
+    {
+      "id": "classify_sign",
+      "module": "Classify",
+      "function": "Classify.sign",
+      "signature": "sign(x: int) -> int",
+      "base_task": "Implement a function in module `Classify` with signature `sign(x: int) -> int` that returns 1 if x > 0, 0 if x == 0, and -1 if x < 0. Use if/elif/else.",
+      "hidden_cases": [
+        {"input": "x=5", "expected": "1"},
+        {"input": "x=0", "expected": "0"},
+        {"input": "x=-3", "expected": "-1"},
+        {"input": "x=123456", "expected": "1"}
+      ]
+    },
+    {
+      "id": "sum_to",
+      "module": "Accum",
+      "function": "Accum.sum_to",
+      "signature": "sum_to(n: int) -> int",
+      "base_task": "Implement a function in module `Accum` with signature `sum_to(n: int) -> int` that returns the sum of all integers from 1 through n inclusive (for n < 1 the result is 0). Use a while loop.",
+      "hidden_cases": [
+        {"input": "n=5", "expected": "15"},
+        {"input": "n=1", "expected": "1"},
+        {"input": "n=10", "expected": "55"},
+        {"input": "n=0", "expected": "0"}
+      ]
+    },
+    {
+      "id": "sum_list",
+      "module": "ListSum",
+      "function": "ListSum.sum",
+      "signature": "sum(xs: list[int]) -> int",
+      "base_task": "Implement a function in module `ListSum` with signature `sum(xs: list[int]) -> int` that returns the sum of all elements in the list xs. Use a for loop over the list.",
+      "hidden_cases": [
+        {"input": "xs=list(1, 2, 3)", "expected": "6"},
+        {"input": "xs=list(10)", "expected": "10"},
+        {"input": "xs=list()", "expected": "0"},
+        {"input": "xs=list(7, -2, 5)", "expected": "10"}
+      ]
+    },
+    {
+      "id": "concat",
+      "module": "Concat",
+      "function": "Concat.combine",
+      "signature": "combine(a: str, b: str) -> str",
+      "base_task": "Implement a function in module `Concat` with signature `combine(a: str, b: str) -> str` that returns the string concatenation a + b.",
+      "hidden_cases": [
+        {"input": "a=\"foo\" b=\"bar\"", "expected": "\"foobar\""},
+        {"input": "a=\"\" b=\"x\"", "expected": "\"x\""},
+        {"input": "a=\"hello \" b=\"world\"", "expected": "\"hello world\""}
+      ]
+    },
+    {
+      "id": "cross_call",
+      "module": "Cross",
+      "function": "Cross.f",
+      "signature": "g(x: int) -> int and f(x: int) -> int",
+      "base_task": "Implement a module `Cross` with two functions: `g(x: int) -> int` that returns x * 2, and `f(x: int) -> int` that returns g(x) + 1. `f` must call `g`.",
+      "hidden_cases": [
+        {"input": "x=3", "expected": "7"},
+        {"input": "x=0", "expected": "1"},
+        {"input": "x=-2", "expected": "-3"},
+        {"input": "x=10", "expected": "21"}
+      ]
+    },
+    {
+      "id": "bool_xor",
+      "module": "Logic",
+      "function": "Logic.xor",
+      "signature": "xor(a: bool, b: bool) -> bool",
+      "base_task": "Implement a function in module `Logic` with signature `xor(a: bool, b: bool) -> bool` that returns true when exactly one of a or b is true, and false otherwise (exclusive-or). Use and/or/not on boolean values.",
+      "hidden_cases": [
+        {"input": "a=true b=true", "expected": "false"},
+        {"input": "a=true b=false", "expected": "true"},
+        {"input": "a=false b=true", "expected": "true"},
+        {"input": "a=false b=false", "expected": "false"}
+      ]
+    },
+    {
+      "id": "multi_steps",
+      "module": "Multi",
+      "function": "Multi.steps",
+      "signature": "steps(x: int) -> int",
+      "base_task": "Implement a function in module `Multi` with signature `steps(x: int) -> int` that computes the result in multiple named steps: first a = x + 1, then b = a * 2, then returns b - 3. Use at least three statements.",
+      "hidden_cases": [
+        {"input": "x=1", "expected": "1"},
+        {"input": "x=5", "expected": "9"},
+        {"input": "x=0", "expected": "-1"},
+        {"input": "x=10", "expected": "19"}
+      ]
+    }
+  ]
+}
