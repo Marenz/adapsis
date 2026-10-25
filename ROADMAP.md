@@ -10,13 +10,16 @@ finish workflow, with the existing AST/runtime authoritative and `.ax` retained.
 A standalone syntax demo or CPython `eval`/`exec` is not the stop gate.
 
 - Issue: https://github.com/Marenz/adapsis/issues/81.
-- Current phase: **working Python implementation; reviewed gates green**. Frontend
-  author is frozen/read-only; the main writer owns all production changes now.
-  Initial offline gates passed (1569 Rust unit tests plus 4 CLI subprocess tests,
-  2 ignored; Python-focused 38+4, native 70, parser helper 5). Supplied direct CLI
-  examples passed 2 basic and 7 control/list/Boolean assertions. These counts
-  predate review corrections. Final corrected counts and executable commands are
-  recorded below. Main implementation is frozen for manager handoff.
+- Current phase: **#81 stage complete; stop gate met.** Code is committed locally
+  as `61b3911` on `work/native-tools` (on top of native tools `8e10876`); the
+  checkout was clean after that commit. All final gates passed and both
+  independent reviews accepted. The release binary was built and tested locally
+  only: **not installed, deployed, pushed or restarted as a service**, and no
+  live-provider trials were run. Gateway fixes are separately committed as
+  `0f7d7ea` in `~/Projects/llm-gateway` and likewise not installed.
+- Historical progression: initial offline gates passed (1569 Rust unit tests plus
+  4 CLI subprocess tests, 2 ignored; Python-focused 38+4, native 70, parser helper
+  5) before review corrections; final corrected counts are recorded below.
 - Sole Adapsis integration/docs writer: `ses_e8d51b0b2ffe2YU2n1nfJe0WbS`.
   Manager/release authority: `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`.
 - Isolated frontend writer: `ses_e8d0359d6ffe9vFSOf5LDkQyNI`, worktree
@@ -41,9 +44,8 @@ A standalone syntax demo or CPython `eval`/`exec` is not the stop gate.
   complete tool history and explicit completion reporting. Unsupported Python
   semantics must fail with source locations, never silently approximate behavior.
 - No deployment, service changes or live model-effectiveness claims. Existing
-  main target is preserved; builds
-  are coordinated with the gateway writer, with no new target trees. Last disk
-  state: `/home` 32 GiB free, `/tmp` 15 GiB free. Preserve Claude quota above 90%.
+  main target was reused; builds were coordinated with the gateway writer, with
+  no new target trees. Last disk state: `/home` 31 GiB free, `/tmp` 15 GiB free.
 
 ### Python stage status
 - [x] Parser/lowering and subset contract approved
@@ -54,6 +56,7 @@ A standalone syntax demo or CPython `eval`/`exec` is not the stop gate.
 - [x] Review corrections: Python argument binding, async call fidelity and helper shadowing
 - [x] Single-function inspect→resubmit with permission-filtered runtime signatures
 - [x] Independent reviews and complete offline release gates
+- [x] Code committed locally (`61b3911`); local binary tested; not deployed
 
 ### Final Python acceptance evidence
 - `cargo test --release python_`: **52 unit + 5 CLI subprocess tests passed**.
@@ -86,7 +89,7 @@ A standalone syntax demo or CPython `eval`/`exec` is not the stop gate.
   Diagnostics themselves use actual source spans. Existing main target only;
   final free space remains about 31 GiB on `/home`, 15 GiB on `/tmp`.
 
-### Active review corrections / recovery
+### Review corrections (accepted; retained as design record)
 - Keep Python positional-vs-keyword call semantics: exact parameter count/names
   are checked at dispatch and in the isolated CLI test path. `_0`, `_1`, …
   parameter/keyword names are reserved to avoid ambiguity with legacy positional
@@ -309,9 +312,9 @@ mutation/`!done` protocol throughout migration.
 - Final build state: package version remains 0.1.0; `os --help` documents the
   HTTP-only flag. One release dead-code warning remains for the structural-only
   `validate_native_tool` API exercised by tests; production uses its authorized
-  counterpart. Only intended new files are intent-to-add for full diff visibility;
-  no staged content or commits. Disk remains 32 GiB free on `/home`, 9.5 GiB on
-  `/tmp` after sequential gates.
+  counterpart. At gate time new files were intent-to-add only; the manager later
+  committed the #78 slice as `8e10876`. Disk was 32 GiB free on `/home`, 9.5 GiB
+  on `/tmp` after those sequential gates.
 - Post-gate cleanup removed only the two disposable `/tmp` native worktree
   target caches after builds stopped, reclaiming 5.36 GiB of tmpfs. Current free
   space is 15 GiB on `/tmp` and 32 GiB on `/home`; the main target, screenshots
