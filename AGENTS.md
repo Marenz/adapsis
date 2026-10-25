@@ -18,10 +18,11 @@ Adapsis is an AI-native programming language and live agentic environment. Progr
   propagation and old eval-comment edits. Recovery refs retain their originals.
 - Personal `contexts/` files remain ignored/local-only, including the latest
   language-profile edit from the old issue-57 branch.
-- Next direction: native JSON-schema tools over the existing permission-checked
-  runtime, then a measured Python-subset frontend lowering to the existing AST.
-  Preserve test gating and explicit completion validation during the transition;
-  native tool schemas alone do not guarantee correct calls or task completion.
+- Native JSON-schema tools over the existing permission-checked runtime landed
+  in `8e10876`; the Python-subset frontend now lowers to the same AST and guarded
+  workflow. Live gateway certification and measured model effectiveness remain
+  separate gates. Preserve tests and explicit completion validation: native
+  schemas or familiar syntax alone do not guarantee correct calls or completion.
 
 ## Language Design Goals
 - **Optimized for LLM-driven construction**, not human typing
@@ -74,6 +75,10 @@ cargo test --release                    # Rust unit tests
 cargo run --release -- memory-eval
 # Adapsis tests: `adapsis test` exits non-zero on failure and prints "TEST SUMMARY: N passed, M failed"
 for f in examples/*.ax; do ./target/release/adapsis test "$f" >/dev/null 2>&1 || echo "FAILED: $f"; done
+# Provider-free Python frontend examples (production lowerer + isolated runtime)
+./target/release/adapsis test examples/python/basic.py --language python --module PyBasic --tests examples/python/test_basic.py
+./target/release/adapsis test examples/python/flow.py --language python --module PyFlow --tests examples/python/test_flow.py
+cargo test --release python_           # frontend/native/reload/CLI regressions
 ```
 
 **Formatting pitfall:** standalone `rustfmt src/main.rs` recursively formats every
@@ -127,6 +132,9 @@ src/
                    llm_handlers.rs (ask/ask_stream, llm_takeover), tests.rs
   ast.rs         — Core AST (Program, Module, Function, Statement, Expr, Type, Effect)
   parser.rs      — Line-oriented parser (+, !, ? prefixes, +end blocks)
+  python_frontend/ — RustPython-backed restricted Python parsing, checked lowering
+                   to canonical validated operations, and AST-based Python printing
+  python_cli.rs  — paired Python source/test files through the existing CLI test path
   validator.rs   — Parser→AST, mutations, !replace, !remove, !module merging
   eval/          — Tree-walking interpreter, builtins, test runner, +match on Result
   vm.rs          — Stack-based bytecode VM (tier 2, see Execution Tiers)
@@ -443,14 +451,19 @@ replaces that branch with one composer.
   arguments and permissions over the existing executor. The initial surface is
   inspect (symbols/source/deps/tasks/library), mutate (explicit module/function/
   type/doc/shared declarations), test (qualified function test blocks), evaluate
-  (qualified named functions), finish. Plans, agents and Python are deferred.
+  (qualified named functions), finish. Plans and agents are deferred. The native
+  prompt recommends the explicit Python frontend below; legacy non-native
+  conversations retain their Adapsis prompt.
   Source/deps inspection requires `Module.member` (bare module/function/type
   lookups are rejected); use symbols for module listings. Evaluate/test inputs,
-  exact expectations and shared defaults are literal-only. Only contains and
+  exact expectations and shared defaults are literal-only, including checked
+  recursive list constructors. List construction is refused if any user function
+  or union variant shadows `list`, even if authorized. Only contains and
   starts_with test matchers are supported; Result matchers and global +after
   assertions are deferred because the legacy expected-expression/diagnostic
-  paths can resolve or reveal hidden modules. New mutation bodies must qualify
-  every user-function call, including local calls; bare calls are limited to
+  paths can resolve or reveal hidden modules. Canonical/Adapsis mutation bodies
+  must qualify user-function calls, including local calls; Python local calls
+  are qualified by the frontend. Bare calls are limited to
   builtins, and direct unauthorized module references are rejected before apply.
   Pre-existing trusted function internals are not reinterpreted as a new
   transitive capability policy (#79). Task inspection lists only readable,
@@ -476,6 +489,48 @@ replaces that branch with one composer.
   quality. **Live gateway compatibility is blocked/unverified**: llm-gateway #2
   tracks tool-dropping virtual routes, call-id and terminal-status translation.
   Do not advertise live-provider usability until that separate gate passes.
+- **Python-subset frontend (#81):** exact `rustpython-parser = "=0.4.0"` parses
+  syntax without a Python interpreter. `src/python_frontend/` lowers a bounded
+  typed subset into `parser::Operation`, emits canonical `.ax`, and requires a
+  complete structural reparse match. Never interpolate Python text into commands
+  or add Python eval/exec/import execution. Native normalization lives in
+  `api/native_tools/frontend.rs`: Python mutation admission first checks the
+  complete supported syntax and collects direct references without looking up
+  runtime signatures. Only after pinned module Write/reference Execute checks
+  does dispatch supply an authority-filtered signature catalog to strict final
+  lowering. Earlier batch calls may create those functions. The canonical output
+  then traverses the existing native checks, executor, tests and CoW write-back.
+  This split keeps single-function Python inspect→resubmit repairs usable without
+  consulting hidden signatures or weakening the type rules.
+  Mutate/test require `language:"python"` plus one explicit `module`; evaluate
+  accepts `language:"python"` for literal argument syntax; source inspection
+  accepts `format:"python"`. Defaults remain Adapsis. Python inspection prints
+  supported AST regardless of origin using an authority-filtered signature
+  catalog; unauthorized signatures cannot change printer diagnostics. No origin
+  metadata, sidecars or persistence schema is added. Submitted functions replace
+  old Arcs as `.ax` does; unsubmitted functions retain identity. No inferred deletes.
+  `python_frontend/runtime_arguments.rs` enforces exact Python argument counts/
+  keyword sets and direct submitted call async/await semantics against same-source
+  and actual runtime signatures. `_0`, `_1`, … parameter/keyword names are reserved
+  to avoid the legacy positional-carrier ambiguity; `.ax` binding stays unchanged.
+  Python test/evaluate/inspection conservatively rejects current builtin-name
+  collisions in both `BUILTINS` and `IO_BUILTINS` (including aliases and user
+  union variants), so later `.ax` edits cannot intercept installed helpers.
+  Narrower helper-specific usability is deferred to #83; retain the broad safe
+  check. Tests remain data-only declarations.
+  Supported syntax/exclusions and runnable commands: `examples/python/README.md`.
+  New bindings/parameters/returns are annotated; imports, mutable collections,
+  dynamic calls and ambiguous numeric/truthiness behavior fail with source
+  locations. For targets cannot escape/reuse; len is list-only. Pure async calls
+  need await; synchronous calls cannot be awaited. IO await also needs the inert
+  io effect declaration. Awaiting Result-returning user functions is refused
+  until inherited runtime unwrapping is reconciled (#82); direct IO builtin
+  Result awaits remain supported and their actual wrapper is covered by an
+  in-memory IoRequest reply fixture. Trusted offline fixtures introduce no live
+  IO or Python mock installation. Numeric literals exclude i64::MIN because canonical
+  `.ax` parses its positive magnitude before unary minus; fail explicitly rather
+  than approximating it. `parser/test_values.rs` preserves quoted/escaped delimiters
+  and `->` inside literal test data, including nested list/record arguments.
 - `/api/ask` also requires explicit `<code>!done</code>` for
   conversational completion. Prose/empty replies receive an execute-or-finish
   correction within the existing iteration budget; exhaustion is reported as

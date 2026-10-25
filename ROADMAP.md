@@ -1,6 +1,207 @@
 # AdapsisOS Roadmap
 
-## Current execution — native tools first (#78)
+## Current execution — working Python frontend (#81)
+
+**User-approved stop gate (2026-10-25):** "your stop gate is the working python impl".
+Native HTTP tools #78 are committed as `8e10876` on `work/native-tools`; the
+checkout was clean before this design-stage recovery update. Build a working
+Python-subset frontend through the guarded inspect → mutate → test → evaluate →
+finish workflow, with the existing AST/runtime authoritative and `.ax` retained.
+A standalone syntax demo or CPython `eval`/`exec` is not the stop gate.
+
+- Issue: https://github.com/Marenz/adapsis/issues/81.
+- Current phase: **working Python implementation; reviewed gates green**. Frontend
+  author is frozen/read-only; the main writer owns all production changes now.
+  Initial offline gates passed (1569 Rust unit tests plus 4 CLI subprocess tests,
+  2 ignored; Python-focused 38+4, native 70, parser helper 5). Supplied direct CLI
+  examples passed 2 basic and 7 control/list/Boolean assertions. These counts
+  predate review corrections. Final corrected counts and executable commands are
+  recorded below. Main implementation is frozen for manager handoff.
+- Sole Adapsis integration/docs writer: `ses_e8d51b0b2ffe2YU2n1nfJe0WbS`.
+  Manager/release authority: `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`.
+- Isolated frontend writer: `ses_e8d0359d6ffe9vFSOf5LDkQyNI`, worktree
+  `/home/marenz/Projects/adapsis-python-frontend`, owning only new
+  `src/python_frontend/**` (lowering, canonical serialization and Python printer).
+  Its seven finalized files were imported; no duplicate target/cache was created.
+- Python reviewers (read-only): Astra critical integration/authority/CLI/
+  persistence `ses_e8d27edc9ffeFZJshutWc7PbXM`; DeepSeek Pro language semantics,
+  roundtrip and parser `ses_e8d279e0bffe6hI60QWbBO7jmg`. All corrections remain
+  under main-checkout sole-writer ownership. Both reviewers accepted all final
+  corrections, including the last printer/IO-registry/Result-await changes,
+  conditional on the final complete offline gates.
+- Parallel gateway compatibility writer: `ses_e8d51200cffe40osdeEbEWe0JC`, in
+  `~/Projects/llm-gateway`, branch `work/native-tool-compat`, baseline `98d7240`.
+  Gateway #2 and Python #81 are distinct workstreams; no shared source ownership.
+  Gateway fixes are now committed locally as `0f7d7ea` on that branch; 70 offline
+  tests, check and release build passed, with independent DeepSeek acceptance.
+  Its checkout is clean. It has not been installed/restarted or live-certified;
+  gateway #2 remains open and no gateway build is running.
+- Preserve #78's pinned authority, strict caller-authored-reference validation,
+  literal test/input policy, immutable turn completion baseline, CoW write-back,
+  complete tool history and explicit completion reporting. Unsupported Python
+  semantics must fail with source locations, never silently approximate behavior.
+- No deployment, service changes or live model-effectiveness claims. Existing
+  main target is preserved; builds
+  are coordinated with the gateway writer, with no new target trees. Last disk
+  state: `/home` 32 GiB free, `/tmp` 15 GiB free. Preserve Claude quota above 90%.
+
+### Python stage status
+- [x] Parser/lowering and subset contract approved
+- [x] Initial frontend implementation and main native integration
+- [x] Initial typed/control-flow/collection examples and guarded end-to-end tests
+- [x] Trusted mocked read_file acceptance (test-only IO, no live worker)
+- [x] Initial AST/source/session/library roundtrips and unsupported-AST diagnostics
+- [x] Review corrections: Python argument binding, async call fidelity and helper shadowing
+- [x] Single-function inspect→resubmit with permission-filtered runtime signatures
+- [x] Independent reviews and complete offline release gates
+
+### Final Python acceptance evidence
+- `cargo test --release python_`: **52 unit + 5 CLI subprocess tests passed**.
+- `cargo test --release native_`: **84 passed**.
+- `cargo test --release`: **1583 unit tests passed, 2 ignored**, plus **5 CLI
+  integration tests passed**. These gates were rerun after the final mechanical
+  admission-helper extraction; parse → authorize → finalize → reauthorize →
+  runtime-check ordering and error messages stayed unchanged.
+- `cargo build --release` passed. Package version remains 0.1.0. The current
+  executable's `test --help` documents language/module/paired-test flags.
+- `cargo run --release -- memory-eval` passed: 6 cases, recall 1.0, zero duplicate,
+  precedence, contradiction, ACL, citation, stale and omission violations.
+- All **28 existing `.ax` example files passed**; `node tools/test_native_events.mjs`
+  passed. Actual provider-free Python commands passed:
+  ```sh
+  ./target/release/adapsis test examples/python/basic.py --language python --module PyBasic --tests examples/python/test_basic.py
+  # TEST SUMMARY: 2 passed, 0 failed
+  ./target/release/adapsis test examples/python/flow.py --language python --module PyFlow --tests examples/python/test_flow.py
+  # TEST SUMMARY: 7 passed, 0 failed
+  ```
+- Both independent source reviews accepted all corrections; Astra separately
+  confirmed the final admission-helper extraction. No remaining review blocker.
+  Runtime follow-ups #82 (user Result-await semantics) and #83 (narrower helper
+  collision usability) remain explicitly deferred, with safe frontend refusal.
+- `Cargo.lock` adds 28 parser-related packages without upgrading existing locked
+  dependencies. No CPython, origin metadata, deployment, service restart, live
+  provider trial, or claim of improved model effectiveness is part of this gate.
+- Three release warnings remain: the existing structural-only native validator
+  API and reserved frontend source-map fields are unused by production callers.
+  Diagnostics themselves use actual source spans. Existing main target only;
+  final free space remains about 31 GiB on `/home`, 15 GiB on `/tmp`.
+
+### Active review corrections / recovery
+- Keep Python positional-vs-keyword call semantics: exact parameter count/names
+  are checked at dispatch and in the isolated CLI test path. `_0`, `_1`, …
+  parameter/keyword names are reserved to avoid ambiguity with legacy positional
+  carriers. Newly submitted direct calls use same-source plus current-program
+  signatures; never re-analyze pre-existing trusted bodies transitively (#79).
+- Direct user-call async effects must match await usage; synchronous functions
+  cannot be awaited and async functions cannot be silently called without await.
+  Runtime-provided asynchronous IO builtins remain supported.
+- Recheck helper collisions at Python test/evaluate, not only mutation: later
+  `.ax` edits must not intercept a previously installed Python list/concat/len
+  helper. Without origin metadata, Python execution can conservatively reject
+  runtime builtin-name collisions in the current program, including after reload.
+  This includes `BUILTINS` and `IO_BUILTINS` and all aliases. Python inspection
+  runs the same neutral helper safety check separately from its filtered
+  signature catalog. Narrower helper-specific usability is tracked in #83.
+- Approved two-phase mutation admission: complete parser-only supported-syntax,
+  declaration/effect/annotation and direct-reference preflight with no existence
+  checks; authorize module Write and direct-reference Execute using the pinned
+  turn permissions; then per-call final lowering with only authorized runtime
+  signatures plus same-source declarations. The resulting canonical operations
+  still pass all existing native checks and executor gates. This enables an
+  inspected single function with nested calls/arithmetic/loop conditions to be
+  resubmitted without requiring its entire module. No hidden signature may
+  influence diagnostics before authorization. Batches remain sequential, not
+  atomic; later calls see earlier successfully applied mutations.
+- Result-returning **user-function awaits** are rejected in Python lowering,
+  direct runtime-call checks and Python inspection until the inherited runtime
+  unwrapping policy is reconciled (#82). No interpreter semantics were changed.
+  Direct IO builtin Result awaits remain supported: an in-memory IoRequest
+  responder verifies the actual Ok wrapper through native evaluation, without
+  any HTTP/network request. Trusted mocked read_file remains the runnable IO test.
+- The approved quote-aware parser correction is isolated in
+  `src/parser/test_values.rs`: quoted/escaped parentheses/braces and test `->`
+  separators remain literal data. i64::MIN remains explicitly unsupported.
+- Last disk/build state: existing main target only; 31 GiB free on `/home`,
+  15 GiB free on `/tmp`. No deployment, service changes or live-provider trials.
+
+### Approved Python v1 contract
+- Exact `rustpython-parser = "=0.4.0"`, default location/bigint features. The
+  crate was published 2024-08-06; the repository remains maintained. Its MSRV
+  1.72.1 works with current Rust 1.93.1. Ruff's current published parser needs a
+  newer toolchain and is not selected. Parse using `ast::Suite::parse`; convert
+  UTF-8 byte spans to one-based source line/column diagnostics using the source
+  text (including character-aware columns).
+- Lower into typed `parser::Operation` declarations/tests, then a trusted
+  canonical `.ax` emitter and structural roundtrip validation before the existing
+  guarded native executor. This is node serialization, never text substitution
+  or Python execution. Keep the same authorization and immutable completion gate.
+- Native mutate/test add `language: "adapsis" | "python"` (default Adapsis);
+  Python requires explicit `module`, Adapsis rejects the new module field.
+  Evaluate adds the same optional language for literal input conversion, keeping
+  the qualified `function` name. Inspect source adds `format: "adapsis" | "python"`
+  (default Adapsis); other inspection kinds reject format. Finish is unchanged.
+- Python modules contain an optional docstring plus annotated `def`/`async def`.
+  Parameters, return values and new locals require annotations; reassignments
+  lower to Set. Types: int, float, bool, str, list[T], Result[T]. Regular functions
+  cannot return None (the runtime has no Unit type). Integer literals range from
+  -9223372036854775807 through 9223372036854775807; i64::MIN is rejected because
+  canonical `.ax` cannot parse its positive magnitude before unary minus.
+  Numeric storage/overflow remains explicitly the existing typed
+  runtime model, not a claim of arbitrary-precision CPython semantics.
+- Support if/elif/else, while without else, and for over statically typed lists.
+  A for target is fresh and confined to its body: reject prior bindings, reuse
+  and reads outside the loop instead of silently changing Python's target
+  leakage. New block locals cannot escape their block; existing variables can
+  be reassigned. No break/continue or loop else.
+- Collections are read-only values: list literals, iteration and len(list). Mutable
+  aliases, append, item/slice assignment, += and subscripts are deferred. Numeric
+  +, -, * and single comparisons are supported; string + maps to concat only
+  when both operands are statically strings. Reject /, //, %, **, chained
+  comparisons and operand-returning truthiness. Boolean and/or require Bool and
+  total call-free operands unless exact short-circuit lowering is provided.
+- Bare local calls lower to explicit metadata-module qualification; cross-module
+  calls use Module.fn directly. Builtin-name definitions, callable variables,
+  dynamic attributes, dunders, eval/exec/open/getattr and imports are rejected.
+  No classes, lambdas, comprehensions, f-strings, ternaries, exceptions or nested
+  defs. `@effects("io", "fail", "mut")` is a closed inert declaration; async def
+  supplies async. Await is supported only in an annotated direct-call binding.
+- Python tests are zero-argument `def test_*` wrappers containing one equality
+  assertion of a direct function call against a literal, optionally with a
+  docstring. They lower to TestMutation, never runtime function definitions or
+  arbitrary test execution. Inputs/expectations accept scalar/read-only list
+  literals; native Result matchers/global after assertions remain deferred.
+- Python evaluate parses only literal arguments (including True/False and list
+  syntax), not general expressions. The literal policy may admit canonical
+  `list(literals...)` only with collision checks proving no user function/union
+  variant can intercept construction; arbitrary nested calls remain forbidden.
+  Python mutation lowering also checks synthetic helper collisions (including
+  concat for string addition and builtin calls), even against otherwise
+  authorized user functions; Python syntax must retain the promised operation.
+- Mocked IO acceptance uses trusted harness-seeded session IO mocks and the
+  existing mock-only test runtime, with a String-returning read_file example.
+  Python cannot install mocks and no new mock schema/global state is introduced.
+- AST is the only persisted truth: no frontend-origin metadata, sidecars or `.ax`
+  header markers. Explicit Python inspection prints supported AST after reload;
+  unsupported legacy forms return precise target/construct errors. Canonical
+  Python print→lower→print is idempotent with normalized semantic AST equivalence;
+  formatting/comments are not retained. Submitted functions replace existing
+  functions as `.ax` does; unsubmitted functions keep CoW identity. No inferred
+  deletes or whole-file diff system.
+- Release cases: typed scalar, local calls, if, while, list/for, list arguments,
+  explicit cross-module calls, bools, reserved-name/authority rejection,
+  canonical source roundtrip and session/library reload. HTTP and SSE fixtures
+  must demonstrate Python mutate → premature finish refusal → Python test →
+  Python-literal evaluate → finish. Include location negatives, caller-authored
+  nested references, list-constructor collisions and trusted mocked IO. Run
+  Python/native/full Rust, example, memory and UI gates plus independent reviews.
+- Direct executable demonstration uses the existing isolated CLI test runtime:
+  `adapsis test examples/python/basic.py --language python --module PyBasic
+  --tests examples/python/test_basic.py`. Production lowerers supply canonical
+  operations to the existing test path; Python module/tests flags are required
+  together, with no zero-test success. Legacy `.ax` defaults remain unchanged.
+  No CPython, provider, live library state or new mock-authoring API is involved.
+
+## Completed foundation — native tools first (#78)
 
 **Approved direction (2026-10-25).** Implement native JSON-schema tool calls over
 the existing permission-checked runtime before any Python frontend. The first
@@ -135,7 +336,7 @@ mutation/`!done` protocol throughout migration.
 - [x] Negative protocol + authorization suite
 - [x] Independent review acceptance
 - [ ] Live gateway/provider certification (llm-gateway #2)
-- [ ] Measured Python-subset frontend (later)
+- [x] Working Python-subset frontend (completed in #81 above; model-effectiveness trials remain separate)
 
 ---
 

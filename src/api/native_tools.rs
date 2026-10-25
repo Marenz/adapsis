@@ -47,6 +47,8 @@ use crate::ast::Program;
 use crate::permissions::PermissionLevel;
 use crate::parser;
 mod authored;
+mod frontend;
+mod literals;
 
 // ── Bounds ─────────────────────────────────────────────────────────────────
 
@@ -161,23 +163,32 @@ pub fn tool_definitions(_config: &AppConfig) -> Vec<ToolDefinition> {
                 serde_json::json!({
                     "kind": {"type": "string", "enum": ["symbols", "source", "deps", "tasks", "library"]},
                     "target": {"type": "string", "description": "Qualified Module.member for source/deps; module name for symbols. Bare source/deps targets are rejected."},
+                    "format": {"type": "string", "enum": ["adapsis", "python"], "description": "Source inspection only. Explicit python prints the supported subset; default adapsis preserves existing calls."},
                 }),
             ),
         },
         ToolDefinition {
             name: "mutate".into(),
-            description: "Declare or modify modules: +module blocks containing functions, types, docs and shared vars.".into(),
+            description: "Declare or replace functions using Python with explicit module metadata, or legacy Adapsis declarations.".into(),
             parameters: obj(
                 &["source"],
-                serde_json::json!({ "source": {"type": "string", "description": "Adapsis +module source."} }),
+                serde_json::json!({
+                    "source": {"type": "string", "description": "Typed Python-subset source or Adapsis +module source."},
+                    "language": {"type": "string", "enum": ["adapsis", "python"], "description": "Choose python for the Python frontend. Omission preserves adapsis."},
+                    "module": {"type": "string", "description": "Required with python: one module identifier. Forbidden with adapsis."}
+                }),
             ),
         },
         ToolDefinition {
             name: "test".into(),
-            description: "Run +test blocks for qualified functions (persists passing tests).".into(),
+            description: "Run literal pytest-shaped Python assertions or Adapsis +test blocks; passing tests are persisted.".into(),
             parameters: obj(
                 &["source"],
-                serde_json::json!({ "source": {"type": "string", "description": "Adapsis +test source."} }),
+                serde_json::json!({
+                    "source": {"type": "string", "description": "Python def test_* wrappers with literal assertions, or Adapsis +test source."},
+                    "language": {"type": "string", "enum": ["adapsis", "python"], "description": "Default adapsis; explicit python uses Python assertion syntax."},
+                    "module": {"type": "string", "description": "Required for Python local-name resolution; forbidden with adapsis."}
+                }),
             ),
         },
         ToolDefinition {
@@ -188,6 +199,7 @@ pub fn tool_definitions(_config: &AppConfig) -> Vec<ToolDefinition> {
                 serde_json::json!({
                     "function": {"type": "string", "description": "Qualified Module.func name."},
                     "input": {"type": "string", "description": "Optional literal input or named literal fields. Function calls and variable references are rejected."},
+                    "language": {"type": "string", "enum": ["adapsis", "python"], "description": "Literal input syntax, default adapsis; python accepts True/False and list literals."},
                 }),
             ),
         },
@@ -210,10 +222,11 @@ enum InspectKind {
 }
 
 enum ParsedTool {
-    Inspect { kind: InspectKind, target: Option<String> },
-    Mutate { source: String, modules: Vec<String> },
-    Test { source: String, targets: Vec<String> },
-    Evaluate { function: String, source: String },
+    Inspect { kind: InspectKind, target: Option<String>, format: frontend::SourceFormat },
+    Mutate { source: String, modules: Vec<String>, python: bool },
+    PythonMutate { source: String, module: String, references: Vec<String> },
+    Test { source: String, targets: Vec<String>, python: bool },
+    Evaluate { function: String, source: String, python: bool },
     Finish,
 }
 
@@ -426,7 +439,8 @@ fn validate_test_ops(ops: &[parser::Operation]) -> Result<(), String> {
 /// (op kinds, qualified names, injection-free lowering). Pure: touches no
 /// program or permission state.
 fn parse_tool(name: &str, arguments: &str) -> Result<ParsedTool, String> {
-    let map = parse_args_object(arguments)?;
+    let normalized = frontend::normalize(name, parse_args_object(arguments)?)?;
+    let map = normalized.arguments;
     match name {
         "inspect" => {
             reject_extra_fields(&map, &["kind", "target"])?;
@@ -457,81 +471,12 @@ fn parse_tool(name: &str, arguments: &str) -> Result<ParsedTool, String> {
                     }
                 }
             }
-            Ok(ParsedTool::Inspect { kind, target })
+            Ok(ParsedTool::Inspect { kind, target, format: normalized.format })
         }
-        "mutate" => {
-            reject_extra_fields(&map, &["source"])?;
-            let source = take_string(&map, "source", true, MAX_SOURCE_BYTES)?.unwrap();
-            if source.trim().is_empty() {
-                return Err("mutate `source` is empty".to_string());
-            }
-            let ops =
-                parser::parse(&source).map_err(|e| format!("mutate `source` parse error: {e}"))?;
-            validate_mutate_ops(&ops)?;
-            let mut modules = Vec::new();
-            for op in &ops {
-                if let parser::Operation::Module(decl) = op {
-                    collect_module_names(decl, &mut modules);
-                }
-            }
-            Ok(ParsedTool::Mutate { source, modules })
-        }
-        "test" => {
-            reject_extra_fields(&map, &["source"])?;
-            let source = take_string(&map, "source", true, MAX_SOURCE_BYTES)?.unwrap();
-            if source.trim().is_empty() {
-                return Err("test `source` is empty".to_string());
-            }
-            let ops =
-                parser::parse(&source).map_err(|e| format!("test `source` parse error: {e}"))?;
-            validate_test_ops(&ops)?;
-            let targets = ops
-                .iter()
-                .filter_map(|op| match op {
-                    parser::Operation::Test(t) => Some(t.function_name.clone()),
-                    _ => None,
-                })
-                .collect();
-            Ok(ParsedTool::Test { source, targets })
-        }
-        "evaluate" => {
-            reject_extra_fields(&map, &["function", "input"])?;
-            let function = take_string(&map, "function", true, MAX_TARGET_BYTES)?.unwrap();
-            let input = take_string(&map, "input", false, MAX_SOURCE_BYTES)?.unwrap_or_default();
-            if !is_qualified_function_name(&function) {
-                return Err(format!(
-                    "`function` must be a qualified function name (Module.func), got `{function}`"
-                ));
-            }
-            if input.contains('\n') || input.contains('\r') {
-                return Err("evaluate `input` must not contain newlines".to_string());
-            }
-            if !input.trim().is_empty() {
-                let parsed = parser::parse_test_input(0, &input)
-                    .map_err(|e| format!("evaluate `input` is not a valid expression: {e}"))?;
-                authored::literal(&parsed)?;
-            }
-            let source = if input.trim().is_empty() {
-                format!("!eval {function}")
-            } else {
-                format!("!eval {function} {input}")
-            };
-            // Injection guard: the lowered source must be exactly one `!eval`
-            // of the requested function, never an inline expression or a second
-            // smuggled operation.
-            let ops =
-                parser::parse(&source).map_err(|e| format!("evaluate lowering failed: {e}"))?;
-            match ops.as_slice() {
-                [parser::Operation::Eval(ev)]
-                    if ev.function_name == function && ev.inline_expr.is_none() => {}
-                _ => {
-                    return Err(
-                        "evaluate lowering produced unexpected operations (rejected)".to_string(),
-                    )
-                }
-            }
-            Ok(ParsedTool::Evaluate { function, source })
-        }
+        "mutate" if normalized.python => frontend::parse_python_mutate(&map),
+        "mutate" => frontend::parse_mutate(&map, false),
+        "test" => frontend::parse_tests(&map, normalized.python),
+        "evaluate" => frontend::parse_evaluate(&map, normalized.python),
         "finish" => {
             reject_extra_fields(&map, &[])?;
             Ok(ParsedTool::Finish)
@@ -577,7 +522,17 @@ pub fn validate_native_tool_authorized(
 /// shared by [`validate_native_tool_authorized`] and [`execute_native_tool`].
 fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> Result<(), String> {
     match parsed {
-        ParsedTool::Inspect { kind, target } => match kind {
+        ParsedTool::PythonMutate { module, references, .. } => {
+            if resolve_module(config, model, module) < PermissionLevel::Write {
+                return Err(format!("permission denied: cannot modify module '{module}' (need Write)"));
+            }
+            for target in references {
+                if resolve_module(config, model, module_of(target)) < PermissionLevel::Execute {
+                    return Err(format!("permission denied for authored reference `{target}` (need Execute)"));
+                }
+            }
+        }
+        ParsedTool::Inspect { kind, target, .. } => match kind {
             InspectKind::Source | InspectKind::Deps => {
                 let t = target.as_deref().unwrap_or("");
                 let module = module_of(t);
@@ -597,7 +552,7 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
             }
             InspectKind::Tasks | InspectKind::Library => {}
         },
-        ParsedTool::Mutate { modules, source } => {
+        ParsedTool::Mutate { modules, source, .. } => {
             for m in modules {
                 if resolve_module(config, &model, m) < PermissionLevel::Write {
                     return Err(format!(
@@ -737,6 +692,7 @@ fn execute_inspect(
     model: &str,
     kind: InspectKind,
     target: Option<String>,
+    format: frontend::SourceFormat,
 ) -> NativeToolResult {
     let program = &session.program;
     let result: Result<String, String> = match kind {
@@ -753,7 +709,10 @@ fn execute_inspect(
         },
         InspectKind::Source => {
             let t = target.as_deref().unwrap_or("");
-            Ok(crate::typeck::reconstruct_source(program, t))
+            match format {
+                frontend::SourceFormat::Adapsis => Ok(crate::typeck::reconstruct_source(program, t)),
+                frontend::SourceFormat::Python => frontend::print_source(config, model, program, t),
+            }
         }
         InspectKind::Deps => {
             let t = target.as_deref().unwrap_or("");
@@ -995,6 +954,33 @@ fn inspect_library(config: &AppConfig, model: &str, program: &Program) -> String
 
 // ── Dispatch ───────────────────────────────────────────────────────────────
 
+/// Admission order is load-bearing: authorize before signature-aware lowering,
+/// then reauthorize canonical operations and check the actual runtime targets.
+fn prepare_native_tool(
+    name: &str,
+    arguments: &str,
+    config: &AppConfig,
+    program: &Program,
+) -> Result<(ParsedTool, String), String> {
+    if is_guest(config) {
+        return Err("native tool dispatch denied: guest turns are not eligible".to_string());
+    }
+    if !native_tools_eligible(config) {
+        return Err("native tool dispatch denied: not write-capable".to_string());
+    }
+    let parsed = parse_tool(name, arguments)?;
+    // Resolve the pinned permission model and re-check per-module permission
+    // before dispatching. Authority is read only from the pinned config
+    // (`llm_model`) and turn identity — never a live mutable conversation read,
+    // so it cannot drift from the caller's per-turn permission snapshot (#79).
+    let model = model_name(config);
+    check_authorization(&parsed, config, &model)?;
+    let parsed = frontend::finalize(parsed, config, program)?;
+    check_authorization(&parsed, config, &model)?;
+    authored::runtime_targets(&parsed, config, program)?;
+    Ok((parsed, model))
+}
+
 /// Execute a single native tool against a caller-prepared working snapshot.
 ///
 /// All tools run through [`execute_code_with_baseline`] with the *same*
@@ -1009,36 +995,13 @@ pub async fn execute_native_tool(
     session: &mut WorkingSet,
     completion_baseline: &Program,
 ) -> NativeToolResult {
-    if is_guest(config) {
-        return denied_result(
-            name,
-            "native tool dispatch denied: guest turns are not eligible".to_string(),
-        );
-    }
-    if !native_tools_eligible(config) {
-        return denied_result(
-            name,
-            "native tool dispatch denied: not write-capable".to_string(),
-        );
-    }
-    let parsed = match parse_tool(name, arguments) {
-        Ok(p) => p,
-        Err(e) => return denied_result(name, e),
+    let (parsed, model) = match prepare_native_tool(name, arguments, config, &session.program) {
+        Ok(prepared) => prepared,
+        Err(error) => return denied_result(name, error),
     };
-    // Resolve the pinned permission model and re-check per-module permission
-    // before dispatching. Authority is read only from the pinned config
-    // (`llm_model`) and turn identity — never a live mutable conversation read,
-    // so it cannot drift from the caller's per-turn permission snapshot (#79).
-    let model = model_name(config);
-    if let Err(e) = check_authorization(&parsed, config, &model) {
-        return denied_result(name, e);
-    }
-    if let Err(e) = authored::runtime_targets(&parsed, config, &session.program) {
-        return denied_result(name, e);
-    }
-
     match parsed {
-        ParsedTool::Inspect { kind, target } => execute_inspect(config, session, &model, kind, target),
+        ParsedTool::PythonMutate { .. } => denied_result(name, "Python mutation was not finalized".into()),
+        ParsedTool::Inspect { kind, target, format } => execute_inspect(config, session, &model, kind, target, format),
         ParsedTool::Mutate { source, .. } => {
             let code =
                 execute_code_with_baseline(&source, config, session, None, Some(completion_baseline))

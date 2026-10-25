@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+mod test_values;
 
 #[derive(Debug, Clone)]
 pub enum PlanAction {
@@ -3157,25 +3158,7 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
         let rest = &input[end_offset..];
         Ok((Expr::String(value), rest))
     } else if input.starts_with('{') {
-        // Nested struct literal — find matching brace
-        let mut depth = 0;
-        let mut end = 0;
-        for (i, ch) in input.char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = i + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if depth != 0 {
-            bail!("line {}: unmatched brace in test value", line);
-        }
+        let end = test_values::balanced_end(line, input, '{', '}')?;
         let expr = parse_expr(line, &input[..end])?;
         Ok((expr, &input[end..]))
     } else {
@@ -3188,26 +3171,7 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
         let after_ident = &input[ident_end..];
 
         if !ident.is_empty() && after_ident.starts_with('(') {
-            // Constructor call: Name(arg1, arg2, ...)
-            // Find matching closing paren
-            let mut depth = 0;
-            let mut paren_end = 0;
-            for (i, ch) in after_ident.char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            paren_end = i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if depth != 0 {
-                bail!("line {}: unmatched paren in test value", line);
-            }
+            let paren_end = test_values::balanced_end(line, after_ident, '(', ')')?;
             let full = &input[..ident_end + paren_end];
             let rest = &input[ident_end + paren_end..];
             // Parse the full expression using the main expression parser
@@ -3239,7 +3203,7 @@ fn parse_test_value(line: usize, input: &str) -> Result<(Expr, &str)> {
 }
 
 fn split_test_case<'a>(line: usize, input: &'a str) -> Result<(&'a str, &'a str)> {
-    let (left, right) = split_once_required(line, input, "->")?;
+    let (left, right) = test_values::split_case(line, input)?;
     let right = right.trim();
     let expected = right
         .strip_prefix("expect")

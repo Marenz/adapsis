@@ -20,6 +20,8 @@ mod memory_graph;
 mod orchestrator;
 mod parser;
 mod prompt;
+mod python_frontend;
+mod python_cli;
 mod repl;
 mod server;
 mod session;
@@ -615,10 +617,19 @@ enum Command {
         path: String,
     },
 
-    /// Parse a .ax file and run its !test blocks
+    /// Run Adapsis tests, or paired typed Python source and assertion files
     Test {
-        /// Path to .ax file
+        /// Path to Adapsis source, or Python source with --language python
         path: String,
+        /// Source syntax; Python uses the guarded frontend, never CPython
+        #[arg(long, default_value = "adapsis", value_parser = ["adapsis", "python"])]
+        language: String,
+        /// Explicit module namespace (required for Python)
+        #[arg(long)]
+        module: Option<String>,
+        /// Paired Python test_* assertion file (required for Python)
+        #[arg(long)]
+        tests: Option<String>,
     },
 
     /// Compile a .ax file to native code and run it
@@ -1072,8 +1083,8 @@ async fn main() -> Result<()> {
             println!("\n--- Program state ---");
             println!("{program}");
         }
-        Command::Test { path } => {
-            let source = std::fs::read_to_string(&path)?;
+        Command::Test { path, language, module, tests } => {
+            let source = python_cli::test_source(&path, &language, module.as_deref(), tests.as_deref())?;
             let operations = parser::parse(&source)?;
             let mut program = ast::Program::default();
             let mut test_ops = vec![];

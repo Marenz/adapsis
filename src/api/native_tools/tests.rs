@@ -12,6 +12,10 @@ use crate::session::{RuntimeState, SessionMeta};
 use std::sync::Arc;
 #[path = "regressions.rs"]
 mod regressions;
+#[path = "python_tests.rs"]
+mod python_tests;
+#[path = "python_runtime_tests.rs"]
+mod python_runtime_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

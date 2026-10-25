@@ -2,14 +2,8 @@
 use super::{AppConfig, PermissionLevel, Program, model_name, module_of, resolve_module};
 use crate::parser::{Expr, Operation};
 
-pub(super) fn literal(expr: &Expr) -> Result<(), String> {
-    match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => Ok(()),
-        Expr::Unary { expr, .. } => literal(expr),
-        Expr::StructLiteral(fields) => fields.iter().try_for_each(|field| literal(&field.value)),
-        _ => Err("native inputs, exact expectations and shared defaults must be literals; calls and references are not supported".into()),
-    }
-}
+pub(super) use super::literals::literal;
+type Runtime<'a> = (&'a Program, bool);
 
 fn name(expr: &Expr) -> Option<String> {
     match expr {
@@ -23,7 +17,7 @@ fn reference(
     target: &str,
     config: &AppConfig,
     model: &str,
-    program: Option<&Program>,
+    program: Option<Runtime<'_>>,
 ) -> Result<(), String> {
     if target.contains('.') {
         if resolve_module(config, model, module_of(target)) < PermissionLevel::Execute {
@@ -39,7 +33,10 @@ fn reference(
         }
         // Runtime tiers differ in builtin-vs-user lookup order. Never let a
         // nominal builtin spelling resolve to a denied user function.
-        if let Some(program) = program {
+        if let Some((program, python)) = program {
+            if python {
+                super::literals::require_unshadowed(program, target)?;
+            }
             if program.get_function(target).is_some() {
                 let qualified = program.qualify_function_name(target);
                 if !qualified.contains('.')
@@ -60,7 +57,7 @@ fn expression(
     expr: &Expr,
     config: &AppConfig,
     model: &str,
-    program: Option<&Program>,
+    program: Option<Runtime<'_>>,
 ) -> Result<(), String> {
     match expr {
         Expr::Call { callee, args } => {
@@ -94,7 +91,7 @@ pub(super) fn check_operations(
     ops: &[Operation],
     config: &AppConfig,
     model: &str,
-    program: Option<&Program>,
+    program: Option<Runtime<'_>>,
 ) -> Result<(), String> {
     for op in ops {
         let check = |expr: &Expr| expression(expr, config, model, program);
@@ -102,7 +99,12 @@ pub(super) fn check_operations(
         match op {
             Operation::Module(decl) => body(&decl.body)?,
             Operation::Function(decl) => body(&decl.body)?,
-            Operation::SharedVar(decl) => literal(&decl.default)?,
+            Operation::SharedVar(decl) => {
+                literal(&decl.default)?;
+                if let Some((program, _)) = program {
+                    super::literals::check_runtime(&decl.default, program)?;
+                }
+            }
             Operation::Type(_) | Operation::Doc { .. } => {}
             Operation::Let(decl) => check(&decl.expr)?,
             Operation::Set(decl) => {
@@ -165,13 +167,54 @@ pub(super) fn runtime_targets(
     program: &Program,
 ) -> Result<(), String> {
     match parsed {
-        super::ParsedTool::Evaluate { function, .. } => exists(program, function),
-        super::ParsedTool::Test { targets, .. } => targets
-            .iter()
-            .try_for_each(|target| exists(program, target)),
-        super::ParsedTool::Mutate { source, .. } => {
+        super::ParsedTool::Evaluate {
+            function,
+            source,
+            python,
+        } => {
+            exists(program, function)?;
+            let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
+            if *python {
+                super::literals::require_python_environment(program)?;
+                crate::python_frontend::validate_runtime_arguments(&ops, program)?;
+            }
+            for op in ops {
+                if let Operation::Eval(eval) = op {
+                    super::literals::check_runtime(&eval.input, program)?;
+                }
+            }
+            Ok(())
+        }
+        super::ParsedTool::Test {
+            targets,
+            source,
+            python,
+        } => {
+            targets
+                .iter()
+                .try_for_each(|target| exists(program, target))?;
+            let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
+            if *python {
+                super::literals::require_python_environment(program)?;
+                crate::python_frontend::validate_runtime_arguments(&ops, program)?;
+            }
+            for op in ops {
+                if let Operation::Test(test) = op {
+                    for case in test.cases {
+                        super::literals::check_runtime(&case.input, program)?;
+                        super::literals::check_runtime(&case.expected, program)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        super::ParsedTool::Mutate { source, python, .. } => {
             let ops = crate::parser::parse(source).map_err(|e| e.to_string())?;
-            check_operations(&ops, config, &model_name(config), Some(program))
+            check_operations(&ops, config, &model_name(config), Some((program, *python)))?;
+            if *python {
+                crate::python_frontend::validate_runtime_arguments(&ops, program)?;
+            }
+            Ok(())
         }
         _ => Ok(()),
     }

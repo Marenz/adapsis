@@ -2,6 +2,8 @@
 use super::*;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+#[path = "python_turn_tests.rs"]
+mod python_turn_tests;
 
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}})
