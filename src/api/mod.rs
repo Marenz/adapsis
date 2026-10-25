@@ -40,6 +40,8 @@ pub use execute::{
 pub use execute::CodeExecutionResult;
 pub mod llm_handlers;
 mod native_turn;
+mod takeover_budget;
+mod takeover_native;
 pub mod native_tools;
 mod http_context;
 mod working_set;

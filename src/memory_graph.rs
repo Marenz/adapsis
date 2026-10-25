@@ -120,7 +120,9 @@ pub struct MemoryGraph {
 }
 
 pub struct MemoryEmbedder {
-    model: Mutex<TextEmbedding>,
+    /// `None` only for the test-only deterministic embedder, which lets
+    /// takeover tests exercise recall and persistence without loading FastEmbed.
+    model: Option<Mutex<TextEmbedding>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1188,8 +1190,25 @@ impl MemoryEmbedder {
             .with_show_download_progress(false);
         let model = TextEmbedding::try_new(options).context("initialize multilingual FastEmbed model")?;
         Ok(Self {
-            model: Mutex::new(model),
+            model: Some(Mutex::new(model)),
         })
+    }
+
+    /// Offline embedder for tests: stable 384-dimension hashed bag of words.
+    #[cfg(test)]
+    pub(crate) fn deterministic() -> Self {
+        Self { model: None }
+    }
+
+    fn embed_texts(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        match &self.model {
+            Some(model) => model.lock().unwrap().embed(inputs, None),
+            #[cfg(test)]
+            None => Ok(inputs.iter().map(|text| hashed_embedding(text)).collect()),
+            // Unreachable outside tests: `new` is the only production constructor.
+            #[cfg(not(test))]
+            None => Err(anyhow!("FastEmbed model is not initialized")),
+        }
     }
 
     pub fn embed_passages(&self, passages: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -1197,23 +1216,28 @@ impl MemoryEmbedder {
             .iter()
             .map(|passage| format!("passage: {passage}"))
             .collect();
-        self.model
-            .lock()
-            .unwrap()
-            .embed(inputs, None)
-            .context("embed memory passages")
+        self.embed_texts(inputs).context("embed memory passages")
     }
 
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
-        self.model
-            .lock()
-            .unwrap()
-            .embed(vec![format!("query: {query}")], None)
+        self.embed_texts(vec![format!("query: {query}")])
             .context("embed memory query")?
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("FastEmbed returned no query embedding"))
     }
+}
+
+/// Deterministic normalized word-hash vector for the test-only embedder.
+#[cfg(test)]
+fn hashed_embedding(text: &str) -> Vec<f32> {
+    let mut vector = vec![0f32; 384];
+    for word in text.split_whitespace() {
+        let digest = Sha256::digest(word.to_lowercase().as_bytes());
+        vector[(usize::from(digest[0]) << 8 | usize::from(digest[1])) % 384] += 1.0;
+    }
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0);
+    vector.iter().map(|v| v / norm).collect()
 }
 
 /// The single `CREATE (:Memory …)` in the codebase.

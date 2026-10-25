@@ -1,6 +1,30 @@
 # AdapsisOS Roadmap
 
-## Current execution — working Python frontend (#81)
+## Current execution — native tools for takeover conversations (#85)
+
+Owner request 2026-10-25: "switch everything" to native/Python. Issue:
+https://github.com/Marenz/adapsis/issues/85. Phase: **implemented offline, all
+gates green; awaiting independent review, then manager commit/deploy + Telegram
+smoke.** Not committed, installed, deployed or restarted.
+
+- With `--native-tools`, write-capable non-guest `llm_takeover` turns (Telegram
+  admin DMs, groups while the admin speaks) use the shared native driver
+  `NativeLoop::drive` (`src/api/native_turn.rs`); `src/api/takeover_native.rs`
+  only decides eligibility and renders the reply. Guests, execute-only/read-only
+  speakers and processes without the flag keep the legacy protocol unchanged.
+- Explicitly unavailable natively (stated in the prompt): plan, roadmap,
+  `!agent`, `!opencode`, model switching, mocks/stubs, removal. The speaker block
+  reports agents/opencode as unavailable for native turns.
+- Fixed live bug: native requests sent `temperature: 0.7`, which
+  `anthropic/claude-opus-5` rejects with 400; now omitted (regression in the
+  HTTP/stream lifecycle and takeover fixtures).
+- Gates: `cargo test --release` 1589 passed + 5 CLI, 2 ignored (6 new
+  `takeover_native` tests); release build; `memory-eval` passed; 28 `.ax`
+  examples; Python CLI examples 2/2 and 7/7.
+- Remaining: independent review, deploy here, live Telegram smoke on the dev-bot
+  chain (opus-5 primary). Guest native schemas are a separate later slice.
+
+## Completed — working Python frontend (#81)
 
 **User-approved stop gate (2026-10-25):** "your stop gate is the working python impl".
 Native HTTP tools #78 are committed as `8e10876` on `work/native-tools`; the

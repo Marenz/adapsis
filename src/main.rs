@@ -1935,7 +1935,7 @@ async fn main() -> Result<()> {
                                     io_sender, task_registry, snap_registry,
                                     oc_lock, oc_git_dir, t_log,
                                     al, pc,
-                                    save_notify, ai_log,
+                                    save_notify, ai_log, native_tools,
                                 ).await;
                                 let _ = reply.send(result);
                             });

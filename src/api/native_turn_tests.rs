@@ -205,6 +205,12 @@ async fn lifecycle(streaming: bool, module: &str) {
     let requests = fixture.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
     assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 5);
+    // Regression: an explicit temperature makes claude-opus-5 reject every
+    // native turn (400 "temperature is deprecated"); omit it like legacy.
+    assert!(
+        requests.iter().all(|r| r.get("temperature").is_none()),
+        "native request bodies must omit temperature"
+    );
     assert!(
         requests[0]["messages"][0]["content"]
             .as_str()

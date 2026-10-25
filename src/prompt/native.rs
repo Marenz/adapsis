@@ -92,3 +92,30 @@ payloads. No agent, plan or roadmap tool exists in this native protocol.
 "#
     )
 }
+
+/// Conversation mechanics for native `llm_takeover` turns (Telegram chats and
+/// other conversational callers). HTTP native turns do not receive this block.
+pub fn native_takeover_mechanics() -> String {
+    r#"## Conversation turn mechanics
+The person in this conversation sees only your plain response text. Tool calls,
+tool results and reasoning are never shown to them. Write the user-facing answer
+as normal text, preferably in the same response as the final finish call, and
+never paste raw tool JSON. Your most recent non-empty text is the reply that is
+delivered; if finish is refused or the turn runs out of rounds, the person is
+told that completion is unconfirmed.
+
+Your first non-empty response may include a hidden
+<iteration_budget>N</iteration_budget> estimate of model rounds for this turn.
+Without one the budget is 10; the hard ceiling is 50 generations per turn. When
+the budget is spent you get one final round without tools to report status in
+plain text; that turn is reported as not confirmed complete. An empty
+response is retried once; a second consecutive empty response ends the turn.
+
+Unavailable in this native protocol: plans (!plan), roadmap (!roadmap),
+background agents (!agent), !opencode runtime changes, model switching, IO
+mocks/stubs, removal commands and every other legacy <code> command. Runtime
+builtins (memory, messaging, files, HTTP) are reachable only by evaluating an
+existing module function that wraps them. If the person asks for an unavailable
+feature, say so plainly instead of pretending it happened."#
+        .to_string()
+}

@@ -67,24 +67,41 @@ pub fn compose(inputs: &PromptInputs<'_>) -> String {
 /// Returned together so rendering and epoch detection use the same identity and
 /// mesh snapshot even if an operator edits either file during a turn.
 pub fn stable_prefix_keyed(inputs: &PromptInputs<'_>) -> (String, StablePrefixKey) {
-    stable_prefix_keyed_mode(inputs, false)
+    stable_prefix_keyed_mode(inputs, None)
 }
 
-/// HTTP-only opt-in protocol; takeover continues to use the legacy composer.
+/// Native protocol prefix for HTTP ask/ask-stream turns.
 pub fn native_prefix_keyed(inputs: &PromptInputs<'_>) -> (String, StablePrefixKey) {
-    stable_prefix_keyed_mode(inputs, true)
+    stable_prefix_keyed_mode(inputs, Some(false))
 }
 
-fn stable_prefix_keyed_mode(inputs: &PromptInputs<'_>, native: bool) -> (String, StablePrefixKey) {
+/// Native protocol prefix for write-capable `llm_takeover` conversations (#85):
+/// the same native protocol plus conversation mechanics (visible reply text,
+/// iteration budget, explicitly unavailable legacy features), then mesh and the
+/// context's own identity file.
+pub fn native_takeover_prefix_keyed(inputs: &PromptInputs<'_>) -> (String, StablePrefixKey) {
+    stable_prefix_keyed_mode(inputs, Some(true))
+}
+
+fn stable_prefix_keyed_mode(
+    inputs: &PromptInputs<'_>,
+    native_takeover: Option<bool>,
+) -> (String, StablePrefixKey) {
     let dir = contexts_dir();
     let dir = dir.as_deref();
     let mesh = crate::prompt::mesh_topology();
     let identity = identity_section(dir, inputs.context);
-    let rendered = if native {
-        [crate::prompt::native_tool_prompt(inputs.context),
-         mesh.clone().unwrap_or_default(), identity.clone()].join("\n\n")
-    } else {
-        render_stable_prefix(inputs, mesh.as_deref(), &identity)
+    let rendered = match native_takeover {
+        None => render_stable_prefix(inputs, mesh.as_deref(), &identity),
+        Some(takeover) => {
+            let mut sections = vec![crate::prompt::native_tool_prompt(inputs.context)];
+            if takeover {
+                sections.push(crate::prompt::native_takeover_mechanics());
+            }
+            sections.push(mesh.clone().unwrap_or_default());
+            sections.push(identity.clone());
+            sections.join("\n\n")
+        }
     };
     let key = StablePrefixKey {
         context: inputs.context.to_string(),
@@ -351,6 +368,13 @@ pub fn contexts_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("ADAPSIS_CONTEXTS_DIR") {
         return Some(PathBuf::from(dir));
     }
+    // Like `library::library_dir`: `cargo test` must never read or write the
+    // developer's live identity files, so tests get a per-process directory.
+    #[cfg(test)]
+    {
+        return Some(std::env::temp_dir().join(format!("adapsis-test-contexts-{}", std::process::id())));
+    }
+    #[cfg(not(test))]
     std::env::var_os("HOME")
         .map(|home| Path::new(&home).join(".config").join("adapsis").join("contexts"))
 }

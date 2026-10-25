@@ -153,7 +153,7 @@ fn context_principal(context: &str) -> String {
         .map_or_else(|| "user:unknown".to_string(), |id| format!("telegram:user:{id}"))
 }
 
-async fn persist_takeover_message(
+pub(super) async fn persist_takeover_message(
     memory_graph: &std::sync::Arc<crate::memory_graph::MemoryGraph>,
     context: &str,
     principal_id: String,
@@ -1186,116 +1186,8 @@ pub async fn ask_stream(
 // handle_llm_takeover — Telegram/agent LLM handler
 // ═══════════════════════════════════════════════════════════════════════
 
-const DEFAULT_TAKEOVER_ITERATION_BUDGET: usize = 10;
-const MAX_TAKEOVER_ITERATION_BUDGET: usize = 50;
-
-pub(super) fn takeover_iteration_budget(text: &str) -> Option<usize> {
-    let start = text.find("<iteration_budget>")? + "<iteration_budget>".len();
-    let end = text[start..].find("</iteration_budget>")? + start;
-    text[start..end].trim().parse().ok()
-}
-
-#[derive(Default)]
-pub(crate) struct TakeoverIterationEstimate {
-    observed_meaningful_response: bool,
-}
-
-impl TakeoverIterationEstimate {
-    pub(crate) fn observe(&mut self, text: &str, code: &str) -> Option<Option<usize>> {
-        if self.observed_meaningful_response || (text.trim().is_empty() && code.trim().is_empty()) {
-            return None;
-        }
-        self.observed_meaningful_response = true;
-        Some(takeover_iteration_budget(text))
-    }
-}
-
-fn visible_takeover_prose(text: &str) -> String {
-    let mut clean = text.to_string();
-    while let Some(start) = clean.find("<think>") {
-        if let Some(end) = clean[start..].find("</think>") {
-            clean.replace_range(start..start + end + 8, "");
-        } else {
-            break;
-        }
-    }
-    clean = clean.replace("</think>", "");
-    while let Some(start) = clean.find("<iteration_budget>") {
-        let Some(end) = clean[start..].find("</iteration_budget>") else {
-            break;
-        };
-        clean.replace_range(start..start + end + "</iteration_budget>".len(), "");
-    }
-    if let Some(start) = clean.find("<code>") {
-        clean.truncate(start);
-    }
-    clean.trim().trim_end_matches("!done").trim().to_string()
-}
-
-const EMPTY_RESPONSE_CORRECTION: &str = "Your previous response was empty. Resume from the latest tool result without repeating completed or irreversible actions. Execute the next necessary operation, or end with <code>!done</code> if the task is complete.";
-pub(crate) const EMPTY_RESPONSE_ERROR: &str = "Entschuldigung — das Modell hat gerade leer geantwortet. Die Nachricht und der vollständige Verlauf sind gespeichert; bitte versuch es noch einmal.";
-const TAKEOVER_CALL_LIMIT_REPLY: &str = "I reached the 50-generation safety limit before I could produce the final summary. The conversation and completed operations are saved.";
-
-#[derive(Default)]
-pub(crate) struct TakeoverCallBudget { used: usize }
-
-impl TakeoverCallBudget {
-    pub(crate) fn reserve(&mut self) -> bool {
-        if self.used >= MAX_TAKEOVER_ITERATION_BUDGET {
-            return false;
-        }
-        self.used += 1;
-        true
-    }
-
-    pub(crate) fn has_remaining(&self) -> bool {
-        self.used < MAX_TAKEOVER_ITERATION_BUDGET
-    }
-
-    pub(crate) fn used(&self) -> usize {
-        self.used
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum EmptyResponseAction {
-    Retry(&'static str),
-    Terminate(&'static str),
-}
-
-#[derive(Default)]
-pub(crate) struct EmptyResponseRetry {
-    retried: bool,
-}
-
-impl EmptyResponseRetry {
-    pub(crate) fn on_empty(&mut self, replacement_available: bool) -> EmptyResponseAction {
-        if self.retried || !replacement_available {
-            return EmptyResponseAction::Terminate(EMPTY_RESPONSE_ERROR);
-        }
-        self.retried = true;
-        EmptyResponseAction::Retry(EMPTY_RESPONSE_CORRECTION)
-    }
-
-    pub(crate) fn on_non_empty(&mut self) {
-        self.retried = false;
-    }
-}
-
-pub(crate) fn set_empty_response_error(reply_text: &mut String, error: &str) {
-    *reply_text = error.to_string();
-}
-
-pub(crate) fn prepare_empty_replacement(iteration: usize, iteration_budget: &mut usize,
-    call_budget: &TakeoverCallBudget) -> bool {
-    if iteration + 1 >= *iteration_budget
-        && *iteration_budget < MAX_TAKEOVER_ITERATION_BUDGET
-        && call_budget.has_remaining()
-    {
-        *iteration_budget += 1;
-    }
-    iteration + 1 < *iteration_budget && call_budget.has_remaining()
-}
+// Round accounting shared by the legacy and native takeover loops.
+pub(crate) use super::takeover_budget::*;
 
 /// Handle a `llm_takeover` IO request: call LLM with per-context conversation
 /// history, return text reply immediately, execute any code in background.
@@ -1326,6 +1218,8 @@ pub async fn handle_llm_takeover(
     // mutations, and Telegram traffic never reached --log-file).
     save_notify: Option<tokio::sync::mpsc::Sender<()>>,
     log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    // `--native-tools`: eligible write-capable turns use the native protocol (#85).
+    native_tools: bool,
 ) -> anyhow::Result<String> {
     let context_lock = takeover_context_lock(&context);
     let _context_guard = context_lock.lock().await;
@@ -1453,11 +1347,63 @@ pub async fn handle_llm_takeover(
             access_level, &effective_model,
         )
     };
+    // Build a temporary AppConfig so we can reuse execute_code()
+    let (self_trigger_tx, _self_trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
+    let tmp_config = AppConfig {
+        program: program.clone(),
+        meta: meta.clone(),
+        llm_url: llm_url.to_string(),
+        // Gate execution (mutations, !opencode, spawned agents) against the
+        // effective model: the conversation's permission_model override when set,
+        // otherwise the active model. This makes the non-admin sandbox enforced,
+        // not just a filtered view. The conversational reply itself was already
+        // generated above with the real model.
+        llm_model: std::sync::Arc::new(std::sync::RwLock::new(effective_model.clone())),
+        llm_api_key: llm_key.clone(),
+        project_dir: ".".to_string(),
+        io_sender: Some(io_sender.clone()),
+        self_trigger: self_trigger_tx,
+        task_registry: Some(task_registry.clone()),
+        snapshot_registry: Some(snap_registry.clone()),
+        log_file: log_file.clone(),
+        training_log: training_log.clone(),
+        jit_cache: crate::eval::new_jit_cache(),
+        event_broadcast: tokio::sync::broadcast::channel(16).0,
+        opencode_git_dir: opencode_git_dir.clone(),
+        opencode_lock: opencode_lock.clone(),
+        opencode_attach: None,
+        message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        max_iterations: 10,
+        native_tools,
+        runtime: runtime.clone(),
+        sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        save_notify: save_notify.clone(),
+        access_level,
+        permission_config: permission_config.clone(),
+        // Server-bound identity for this turn (issue #41). Code the model emits
+        // executes under it; it is not something the model can name.
+        turn: Some(crate::coroutine::TurnIdentity {
+            context: context.clone(),
+            principal: speaker_id.clone(),
+            may_write: authority.may_write,
+            guest_tools: guest_tools.clone(),
+        }),
+    };
+
+    // Native protocol decision (#85) uses the same pinned, intersected
+    // snapshot that will execute the turn; guests/non-write speakers stay legacy.
+    let native_config = super::takeover_native::native_snapshot(native_tools, &tmp_config, &context);
+    if native_config.is_some() {
+        // The native protocol has no agent or !opencode tool; say so truthfully.
+        authority.may_agent = false;
+        authority.may_opencode = false;
+    }
+
     // Composed fresh every turn (issue #41). The identity comes from the
     // context's own file and the authority block from the current speaker, so a
     // shared group keeps one identity across speakers while still telling each
     // speaker the truth about what they may have done.
-    let available_models = if guest_tools.is_some() { Vec::new() } else { permission_config.model_names() };
+    let available_models = if guest_tools.is_some() || native_config.is_some() { Vec::new() } else { permission_config.model_names() };
     let prompt_inputs = crate::context_prompt::PromptInputs {
         context: &context,
         program_summary: &program_summary,
@@ -1470,7 +1416,11 @@ pub async fn handle_llm_takeover(
     // carry the program summary, the current model or this speaker's authority:
     // those change between turns and would invalidate the cached prefix. They
     // move to the volatile tail below, beside the retrieved memory blocks.
-    let (system, prefix_key) = crate::context_prompt::stable_prefix_keyed(&prompt_inputs);
+    let (system, prefix_key) = if native_config.is_some() {
+        crate::context_prompt::native_takeover_prefix_keyed(&prompt_inputs)
+    } else {
+        crate::context_prompt::stable_prefix_keyed(&prompt_inputs)
+    };
     let authority_block = crate::context_prompt::volatile_suffix(&prompt_inputs);
 
     let messages = {
@@ -1581,49 +1531,12 @@ pub async fn handle_llm_takeover(
     if let Some(ref tx) = save_notify {
         let _ = tx.try_send(());
     }
-
-    // Build a temporary AppConfig so we can reuse execute_code()
-    let (self_trigger_tx, _self_trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
-    let tmp_config = AppConfig {
-        program: program.clone(),
-        meta: meta.clone(),
-        llm_url: llm_url.to_string(),
-        // Gate execution (mutations, !opencode, spawned agents) against the
-        // effective model: the conversation's permission_model override when set,
-        // otherwise the active model. This makes the non-admin sandbox enforced,
-        // not just a filtered view. The conversational reply itself was already
-        // generated above with the real model.
-        llm_model: std::sync::Arc::new(std::sync::RwLock::new(effective_model.clone())),
-        llm_api_key: llm_key.clone(),
-        project_dir: ".".to_string(),
-        io_sender: Some(io_sender.clone()),
-        self_trigger: self_trigger_tx,
-        task_registry: Some(task_registry.clone()),
-        snapshot_registry: Some(snap_registry.clone()),
-        log_file: log_file.clone(),
-        training_log: training_log.clone(),
-        jit_cache: crate::eval::new_jit_cache(),
-        event_broadcast: tokio::sync::broadcast::channel(16).0,
-        opencode_git_dir: opencode_git_dir.clone(),
-        opencode_lock: opencode_lock.clone(),
-        opencode_attach: None,
-        message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-        max_iterations: 10,
-        native_tools: false,
-        runtime: runtime.clone(),
-        sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        save_notify: save_notify.clone(),
-        access_level,
-        permission_config: permission_config.clone(),
-        // Server-bound identity for this turn (issue #41). Code the model emits
-        // executes under it; it is not something the model can name.
-        turn: Some(crate::coroutine::TurnIdentity {
-            context: context.clone(),
-            principal: speaker_id.clone(),
-            may_write: authority.may_write,
-            guest_tools,
-        }),
-    };
+    if let Some(config) = native_config {
+        return super::takeover_native::run(super::takeover_native::TakeoverRun {
+            config, context: &context, generator: llm_model, messages,
+            training_context: message.clone(), memory_graph: memory_graph.clone(),
+        }).await;
+    }
 
     // Build agent completion callback from conversation's reply info
     let agent_cb = {

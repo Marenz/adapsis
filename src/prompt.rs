@@ -1,5 +1,5 @@
 mod native;
-pub use native::native_tool_prompt;
+pub use native::{native_takeover_mechanics, native_tool_prompt};
 
 /// System prompt for the Adapsis feedback loop.
 /// This teaches the model Adapsis's syntax and the interactive protocol.
@@ -1299,6 +1299,12 @@ pub fn mesh_topology_path() -> Option<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("ADAPSIS_MESH_FILE") {
         return Some(std::path::PathBuf::from(p));
     }
+    // Tests never read the developer's live mesh file.
+    #[cfg(test)]
+    {
+        return Some(std::env::temp_dir().join(format!("adapsis-test-mesh-{}.md", std::process::id())));
+    }
+    #[cfg(not(test))]
     std::env::var_os("HOME").map(|h| {
         std::path::Path::new(&h).join(".config").join("adapsis").join("mesh.md")
     })

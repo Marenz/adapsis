@@ -446,7 +446,8 @@ replaces that branch with one composer.
 ## Conversation System (llm_takeover)
 - **Experimental native HTTP tools (#78):** `adapsis os --native-tools` opts
   write-capable, non-guest `/api/ask` and `/api/ask-stream` turns into the native
-  protocol. Default, Telegram/takeover and guests retain legacy behavior.
+  protocol. Since #85 the same flag also covers takeover turns (below); guests,
+  non-write speakers and processes without the flag retain legacy behavior.
   `api/native_turn.rs` owns the shared HTTP loop; `api/native_tools.rs` validates
   arguments and permissions over the existing executor. The initial surface is
   inspect (symbols/source/deps/tasks/library), mutate (explicit module/function/
@@ -480,6 +481,50 @@ replaces that branch with one composer.
   semantics, so a corrected error can coexist with `completed: true`.
   The main conversation's permission profile intersects the active model per
   group in a pinned turn snapshot; an override can only narrow execution.
+- **Native takeover turns (#85).** With `--native-tools`, `handle_llm_takeover`
+  (Telegram DMs/groups) uses the native protocol when the speaker's pinned snapshot
+  `native_turn::permission_snapshot_for(tmp_config, context)` (active/effective
+  model intersected with the context `permission_model` and `[principals]`
+  profile, never widened) is write-capable and non-guest
+  (`takeover_native::native_snapshot`). Everything around the model loop is
+  unchanged and shared with legacy: per-context lock, Ladybug user/attachment
+  ingest, ranked + canonical memory, image recovery, episodes, activity snapshot,
+  reply_fn/reply_arg storage, the user turn in session history. The branch
+  changes only the stable prefix (`context_prompt::native_takeover_prefix_keyed`
+  = native prompt + `prompt::native_takeover_mechanics` + mesh + identity file;
+  the speaker/runtime tail is the same, with agents/opencode reported as
+  unavailable) and then calls `takeover_native::run`.
+  - **One loop.** `NativeLoop::drive` serves HTTP and takeover. `RoundBudget`
+    distinguishes them: `Fixed(max_iterations)` for HTTP, and for takeover the
+    legacy semantics from `api/takeover_budget.rs`: `<iteration_budget>` estimate
+    (default 10), 50-generation ceiling, corrections extend an exhausted estimate,
+    one empty-response retry, one final status round. The final round is sent
+    without tool schemas (`tool_choice: none`); any tool calls it still returns
+    are reported as an error and never executed, and the turn stays unconfirmed.
+    The incomplete-turn note is reply-only for takeover (HTTP still persists it
+    in `main`). Takeover batches go to the
+    context's own conversation without HTTP's `trim(101)`, relying on the bounded
+    view + compaction like legacy. Every non-empty assistant text is also written
+    to Ladybug as `agent:kronk`. A Ladybug write failure aborts the turn (`Err`),
+    as legacy does. `NativeLoop.generator` keeps the generating model separate
+    from the pinned permission model.
+  - **Reply = latest visible prose** (`visible_takeover_prose`), never tool JSON.
+    If finish was not accepted, the reply says so truthfully: exhaustion note,
+    50-generation note, the German provider-error apology, or `EMPTY_RESPONSE_ERROR`.
+    An accepted finish with no prose at all returns `""`, as legacy `!done` does,
+    so the Telegram module sends nothing.
+  - Not available natively: `!agent` (so no agent completion callbacks),
+    plan/roadmap, `!opencode`, model switching, mocks. Builtins are reachable only
+    through existing module functions via evaluate.
+  - Native assistant text has no `!done`, so compaction's "end chunk at the last
+    `!done`" boundary does not apply to native segments (it compacts the whole
+    bounded chunk).
+  - Native requests omit `temperature` (claude-opus-5 400s on any explicit value).
+  - Tests: `cargo test --release takeover_native` (mock provider, in-memory
+    Ladybug, `MemoryEmbedder::deterministic()`, which exists only under
+    `cfg(test)`). Under `cfg(test)`, `contexts_dir()` and `mesh_topology_path()`
+    resolve to per-process temp paths unless the env override is set, so tests
+    never read live identity/mesh files.
 - Native session history stores complete assistant/correlated-result batches;
   `session/native_history.rs` drops malformed/orphan batches on conversion and
   trims complete groups. Bounded views budget argument text and never truncate a
