@@ -16,6 +16,7 @@ use crate::ast;
 use crate::parser;
 use crate::validator;
 mod conversation_view;
+mod native_history;
 
 /// Per-resource locked map of `+shared` variable values (issue #9, Tier 2).
 ///
@@ -783,13 +784,17 @@ impl AgentBranch {
 }
 
 /// A chat message for LLM conversation history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
     /// Binary attachments (audio, images, etc.). Not serialized to session file.
     #[serde(skip)]
     pub attachments: Vec<crate::attachment::Attachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<crate::llm::ToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// A conversation context with its own message history and callback info.
@@ -850,7 +855,7 @@ impl Conversation {
     }
 
     pub fn push_user(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage { role: "user".to_string(), content: content.into(), attachments: vec![] });
+        self.messages.push(ChatMessage { role: "user".to_string(), content: content.into(), ..Default::default() });
     }
 
     pub fn push_user_with_attachment(
@@ -862,20 +867,21 @@ impl Conversation {
             role: "user".to_string(),
             content: content.into(),
             attachments: vec![attachment],
+            ..Default::default()
         });
     }
 
     pub fn push_assistant(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage { role: "assistant".to_string(), content: content.into(), attachments: vec![] });
+        self.messages.push(ChatMessage { role: "assistant".to_string(), content: content.into(), ..Default::default() });
     }
 
     pub fn push_system(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage { role: "system".to_string(), content: content.into(), attachments: vec![] });
+        self.messages.push(ChatMessage { role: "system".to_string(), content: content.into(), ..Default::default() });
     }
 
     /// Install the current runtime prompt while preserving conversation history.
     pub fn set_primary_system(&mut self, content: impl Into<String>) {
-        let message = ChatMessage { role: "system".to_string(), content: content.into(), attachments: vec![] };
+        let message = ChatMessage { role: "system".to_string(), content: content.into(), ..Default::default() };
         if let Some(existing) = self.messages.first_mut().filter(|m| m.role == "system") {
             *existing = message;
         } else {
@@ -885,11 +891,8 @@ impl Conversation {
 
     /// Convert conversation history to LLM-compatible message format.
     pub fn to_llm_messages(&self) -> Vec<crate::llm::ChatMessage> {
-        self.messages.iter().map(|m| match m.role.as_str() {
-            "system" => crate::llm::ChatMessage::system(m.content.clone()),
-            "assistant" => crate::llm::ChatMessage::assistant(&m.content),
-            _ => crate::llm::ChatMessage::user_with_attachments(m.content.clone(), &m.attachments),
-        }).collect()
+        native_history::complete_groups(&self.messages).into_iter().flatten()
+            .map(native_history::to_llm).collect()
     }
 
     /// Build a bounded model-visible view without deleting persisted history.
@@ -904,13 +907,7 @@ impl Conversation {
 
     /// Trim conversation to at most `max` messages, preserving the system prompt.
     pub fn trim(&mut self, max: usize) {
-        if self.messages.len() > max && max >= 2 {
-            let system = self.messages[0].clone();
-            let start = self.messages.len() - (max - 1);
-            let keep: Vec<_> = self.messages[start..].to_vec();
-            self.messages = vec![system];
-            self.messages.extend(keep);
-        }
+        native_history::trim(self, max);
     }
 }
 
@@ -2449,7 +2446,7 @@ mod tests {
         meta.revision = 5;
         meta.roadmap.push(RoadmapItem { description: "build feature X".to_string(), done: false });
         meta.plan.push(PlanStep { description: "step 1".to_string(), status: PlanStatus::Pending });
-        meta.chat_messages.push(ChatMessage { role: "user".to_string(), content: "hello".to_string(), attachments: vec![] });
+        meta.chat_messages.push(ChatMessage { role: "user".to_string(), content: "hello".to_string(), ..Default::default() });
 
         let json = serde_json::to_string(&meta).expect("serialize");
         let restored: SessionMeta = serde_json::from_str(&json).expect("deserialize");

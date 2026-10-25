@@ -519,8 +519,13 @@ inputEl.focus();
         refreshProgram();
         break;
       case 'done':
-        addMessage('system', 'Done');
+        addMessage('system', event.completed === false ? 'Incomplete — completion was not confirmed' :
+          event.has_errors ? 'Done — reported errors occurred during the turn' : 'Done');
         refreshProgram();
+        break;
+      case 'error':
+        if (!broadcastMsg) broadcastMsg = addMessage('ai', '');
+        addResult(broadcastMsg, 'ERROR: ' + event.message, 'error');
         break;
       case 'end':
         broadcastMsg = null;

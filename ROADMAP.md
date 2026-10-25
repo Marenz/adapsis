@@ -1,5 +1,150 @@
 # AdapsisOS Roadmap
 
+## Current execution — native tools first (#78)
+
+**Approved direction (2026-10-25).** Implement native JSON-schema tool calls over
+the existing permission-checked runtime before any Python frontend. The first
+slice must complete one inspect → mutate → test → evaluate → finish task without
+bypassing runtime authorization, test obligations, CoW write-back, session
+persistence or completion validation. Related: #78 (this work) and #76 (manager
+cutover, **not** satisfied by this slice). Preserve the legacy `<code>`
+mutation/`!done` protocol throughout migration.
+
+### Scope and explicit non-goals
+- In: fixed named tool schemas; strict server-side argument validation; exposure
+  filtered by permissions (exposure is not the execution boundary); streaming and
+  non-streaming tool calls with correlated results; backward-compatible persisted
+  history; shared execution/completion semantics for HTTP (`ask`, `ask_stream`);
+  offline mock-transport and negative authorization/protocol tests. Takeover stays
+  on the legacy protocol in this first slice.
+- Out (first slice): deployment, generic MCP client, Python frontend, model-quality
+  claims, changing `!opencode`/agent authority, replacing the AST/runtime.
+- Later, separately measured: Python-subset frontend lowering to the existing AST.
+
+### Execution phases
+1. Research and agree the shared API (tool schema shape, assistant `tool_calls`
+   envelope, tool-result correlation, persisted-history representation).
+2. Isolated implementation in worktrees (schemas/dispatcher, transport, fixtures).
+3. Single-writer integration in `src/llm.rs`, `src/api/{llm_handlers,execute}.rs`,
+   `src/context_prompt.rs`, `src/permissions.rs`, `src/session.rs`, `src/builtins.rs`.
+4. Full release tests, offline evaluation gate, independent diff review.
+
+### Evaluation gate
+- A fixed offline fixture suite certifies protocol shape and execution semantics
+  with a mock provider. It does **not** certify model tool-selection quality.
+- Real-model effectiveness is a separate opt-in measurement using the same tasks
+  and result schema (model id/revision, repeats, success, attempts, tokens,
+  latency); it is not a CI gate and no improvement claim is made without it.
+- Mock results record token/latency provenance explicitly so harness overhead is
+  never presented as model cost or speed.
+- Report contract for future measured runs (documentation only; no generic
+  benchmark CLI yet): `schema_version`, `fixture_id`, `transport` (`http`/`sse`),
+  `mode` (`offline-scripted`/`live-provider`), `model_id`, `model_revision`,
+  `repeat_index`, `attempts`, `completed`, `encountered_errors`, `assertions_passed`,
+  `prompt_tokens`, `completion_tokens`, `token_source`, `latency_ms`, and
+  `latency_source`. Offline provider fixtures use model `native-fixture`, fixed
+  synthetic usage (10 input/5 output per scripted response),
+  `token_source=fixture`, and `latency_source=local-harness`; never infer model
+  performance from those values. Live runs require exact model/revision and
+  provider-reported usage, retaining missing counters as null rather than zero.
+- Fixture cases live in `src/api/native_turn_tests.rs`,
+  `src/api/native_tools/tests.rs`, `src/llm/native.rs`, and
+  `src/session/native_history.rs`: full lifecycle with early finish rejection,
+  no-finish exhaustion, closed schemas, permission narrowing, guest exclusion,
+  duplicate ids, same arguments/new ids, truncated/error streams, no legacy
+  double-execution, immutable baseline, dependent batches and restored/bounded
+  protocol pairs. A successful `finish` is task completion; encountered and
+  subsequently corrected errors remain separately observable.
+
+### Recovery / baseline
+- Branch `work/native-tools`, baseline `90883a2`; upstream `origin/master`
+  `6667139`. Do not merge pre-sanitization history or archived feature branches.
+- Local-only recovery refs: `refs/archive/2026-10-25/*` (see AGENTS.md). Inspect,
+  do not publish. No deployment or commit is authorized by the roadmap.
+- Main integration writer: `ses_e8d51b0b2ffe2YU2n1nfJe0WbS` (main checkout).
+  Transport: `ses_e8d53de21ffeTkWfOEP3G1FCYy` (`adapsis-native-transport`).
+  Dispatcher: `ses_e8d5328a9ffepJ6zzxG43iUzuC` (`adapsis-native-dispatch`).
+  Manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi` imports reviewed final diffs and
+  retains architecture/release authority. Workers never commit or deploy.
+- Approved surface: `inspect` (symbols/source/deps/tasks/library), `mutate`
+  (explicit module/function/type/doc/shared declarations), `test` (qualified
+  function test blocks), `evaluate` (qualified named functions), `finish`.
+  Opt-in `--native-tools`, write-capable non-guest HTTP turns only. Plans,
+  roadmap, agents, guest native tools and Python are deferred.
+- Current phase: finalized transport/dispatcher imported; integrated offline gates
+  pass and critical integration review accepted. Native
+  completion uses one immutable turn baseline and explicit successful finish;
+  provider stop/prose never certifies completion, and no legacy fallback runs.
+- Model policy: preserve Claude quota above 90%; integration uses no Claude.
+  Offline mock results only; real-model effectiveness remains unmeasured.
+- Disk guard: serialize builds and recheck `df` before heavy phases. Reuse the
+  existing main target; no new `/home` target trees. Cache inventory worker
+  `ses_e8d384e9affeGaFjnegdZpoKtz` is read-only until the manager approves an
+  exact cleanup list. Main target and both native worker trees/targets are
+  protected; do not delete unrelated caches or files.
+- Approved cleanup completed: six inactive cache/target paths reclaimed 25.0 GiB;
+  `/home` free space rose from 7 to 32 GiB. Active main/native targets were
+  untouched. Continue serial builds with a fresh space check before verification.
+- Independent reviewers: Astra critical integration
+  `ses_e8d27edc9ffeFZJshutWc7PbXM`; DeepSeek Pro transport/history
+  `ses_e8d279e0bffe6hI60QWbBO7jmg`. Both accepted reviewed corrections,
+  including DeepSeek's fresh acceptance of the final whitespace id/name
+  validation tightening. All source reviews are clear with final offline gates
+  green. Read-only reviewers; integration remains sole writer.
+- Integrated verification after review fixes (2026-10-25):
+  `cargo test --release native_` 57 passed; `cargo test --release llm::` 41 passed;
+  completion suite 9 passed; conversation-view suite 7 passed;
+  full `cargo test --release` 1529 passed,
+  2 ignored; release build passed; `memory-eval` passed (6 cases, recall 1.0,
+  zero ACL/citation/stale/duplicate violations); all 28 example files passed.
+  No live provider calls, deployment, service changes, commits or pushes.
+- UI gates: `node tools/test_native_events.mjs` passed; independent browser
+  validation by `ses_e8d5eb051ffe2vVYWvhJwWh71j` passed at 1280×800 and 390×844
+  against isolated mock SSE using the actual `web/adapsis.html`. Incomplete
+  turns, corrected completion-with-errors, legacy done events and thinking
+  toggles were verified, with no overflow or JavaScript errors. Screenshots:
+  `/tmp/opencode/native-ui-verify/{desktop,mobile}-*.png`. The pre-existing
+  mobile program-panel width issue is deferred as #80; the mock server stopped.
+- Final build state: package version remains 0.1.0; `os --help` documents the
+  HTTP-only flag. One release dead-code warning remains for the structural-only
+  `validate_native_tool` API exercised by tests; production uses its authorized
+  counterpart. Only intended new files are intent-to-add for full diff visibility;
+  no staged content or commits. Disk remains 32 GiB free on `/home`, 9.5 GiB on
+  `/tmp` after sequential gates.
+- Post-gate cleanup removed only the two disposable `/tmp` native worktree
+  target caches after builds stopped, reclaiming 5.36 GiB of tmpfs. Current free
+  space is 15 GiB on `/tmp` and 32 GiB on `/home`; the main target, screenshots
+  and logs remain available. No functional changes followed the accepted gates.
+- Live gateway usability remains blocked/unverified by llm-gateway #2; legacy
+  permission follow-up is tracked in #79. Neither is certified by offline gates.
+- Review tightened the initial surface: source/deps require qualified members;
+  evaluate/test inputs, exact expectations and shared defaults are literal-only;
+  contains/starts_with matchers remain, Result matchers and global +after are
+  deferred. New user-function calls must be qualified, including local calls.
+  Direct authored module references are checked; task rows are Read-filtered
+  and contain only categorical states. Unknown qualified eval/test targets get
+  neutral diagnostics rather than legacy cross-module suggestions. Browser/TUI
+  event handling distinguishes successful finish from incomplete stream end.
+
+### Status
+- [x] Baseline cleanup and direction recorded (2026-10-25)
+- [x] Shared tool-call API and persisted-history compatibility
+- [x] Tool dispatcher over existing guarded operations
+- [x] Offline fixture suite + documented results contract
+- [x] Offline streaming/non-streaming transport certification
+- [x] Negative protocol + authorization suite
+- [x] Independent review acceptance
+- [ ] Live gateway/provider certification (llm-gateway #2)
+- [ ] Measured Python-subset frontend (later)
+
+---
+
+## Historical sections (pre-#78)
+
+Everything below this line predates the 2026-10-25 native-tools decision and is
+retained for context. It is not the current execution plan; in particular
+"Current Priority: Telegram Bot" and the "Next Targets" list are historical.
+
 ## The Three Modes
 
 AdapsisOS operates in three distinct modes, each building on the previous:

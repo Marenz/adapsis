@@ -436,6 +436,46 @@ replaces that branch with one composer.
   widening is not.
 
 ## Conversation System (llm_takeover)
+- **Experimental native HTTP tools (#78):** `adapsis os --native-tools` opts
+  write-capable, non-guest `/api/ask` and `/api/ask-stream` turns into the native
+  protocol. Default, Telegram/takeover and guests retain legacy behavior.
+  `api/native_turn.rs` owns the shared HTTP loop; `api/native_tools.rs` validates
+  arguments and permissions over the existing executor. The initial surface is
+  inspect (symbols/source/deps/tasks/library), mutate (explicit module/function/
+  type/doc/shared declarations), test (qualified function test blocks), evaluate
+  (qualified named functions), finish. Plans, agents and Python are deferred.
+  Source/deps inspection requires `Module.member` (bare module/function/type
+  lookups are rejected); use symbols for module listings. Evaluate/test inputs,
+  exact expectations and shared defaults are literal-only. Only contains and
+  starts_with test matchers are supported; Result matchers and global +after
+  assertions are deferred because the legacy expected-expression/diagnostic
+  paths can resolve or reveal hidden modules. New mutation bodies must qualify
+  every user-function call, including local calls; bare calls are limited to
+  builtins, and direct unauthorized module references are rejected before apply.
+  Pre-existing trusted function internals are not reinterpreted as a new
+  transitive capability policy (#79). Task inspection lists only readable,
+  attributable functions with categorical states; raw results/paths/commands
+  are intentionally omitted.
+  Native mode never executes `<code>` text or falls back after provider errors.
+  Successful finish uses one immutable turn-start baseline; stop/prose is not
+  completion. Every complete stream is validated before any tool executes.
+  Calls execute sequentially with a fresh WorkingSet and CoW write-back per call;
+  a batch is not an atomic transaction. Duplicate ids are rejected without replay;
+  identical arguments with a new id intentionally run again.
+  Native HTTP responses add `completed` (and streaming done events carry it):
+  only successful finish makes it true. `has_errors` retains legacy aggregate
+  semantics, so a corrected error can coexist with `completed: true`.
+  The main conversation's permission profile intersects the active model per
+  group in a pinned turn snapshot; an override can only narrow execution.
+- Native session history stores complete assistant/correlated-result batches;
+  `session/native_history.rs` drops malformed/orphan batches on conversion and
+  trims complete groups. Bounded views budget argument text and never truncate a
+  native batch into a partial protocol. Hidden reasoning is not replayed as text.
+  Offline fixture gates: `cargo test --release native_`, plus existing completion
+  and conversation-view tests. These measure protocol/runtime behavior, not model
+  quality. **Live gateway compatibility is blocked/unverified**: llm-gateway #2
+  tracks tool-dropping virtual routes, call-id and terminal-status translation.
+  Do not advertise live-provider usability until that separate gate passes.
 - `/api/ask` also requires explicit `<code>!done</code>` for
   conversational completion. Prose/empty replies receive an execute-or-finish
   correction within the existing iteration budget; exhaustion is reported as

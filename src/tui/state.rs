@@ -56,6 +56,10 @@ pub(crate) enum ServerEvent {
     Feedback(String),
     Error(String),
     Complete,
+    NativeComplete {
+        completed: bool,
+        has_errors: bool,
+    },
     Unknown {
         kind: String,
         payload: String,
@@ -115,6 +119,10 @@ impl ServerEvent {
             },
             "feedback" => Self::Feedback(text("message")),
             "error" => Self::Error(text("message")),
+            "done" if value["completed"].is_boolean() => Self::NativeComplete {
+                completed: value["completed"] == true,
+                has_errors: value["has_errors"] == true,
+            },
             "done" | "end" => Self::Complete,
             _ => Self::Unknown {
                 kind: kind.to_string(),
@@ -316,6 +324,36 @@ impl AppState {
                 self.push(EntryKind::Error, message, Some(false), false);
             }
             ServerEvent::Complete => self.complete_turn(),
+            ServerEvent::NativeComplete {
+                completed,
+                has_errors,
+            } => {
+                self.pending_echo = None;
+                self.live_content_id = None;
+                self.turn_had_errors |= has_errors;
+                self.turn = if completed {
+                    TurnState::Complete
+                } else {
+                    TurnState::Failed
+                };
+                let text = if !completed {
+                    "Task incomplete — completion was not confirmed"
+                } else if self.turn_had_errors {
+                    "Task complete — reported errors occurred during the turn"
+                } else {
+                    "Task complete"
+                };
+                self.push(
+                    if completed {
+                        EntryKind::System
+                    } else {
+                        EntryKind::Error
+                    },
+                    text.into(),
+                    Some(completed),
+                    false,
+                );
+            }
             ServerEvent::Unknown { kind, payload } => {
                 self.push(
                     EntryKind::System,
@@ -643,6 +681,29 @@ mod tests {
                 .text
                 .contains("before")
         );
+    }
+
+    #[test]
+    fn native_completion_is_distinct_from_stream_end_and_corrected_errors() {
+        for (completed, has_errors, expected) in [
+            (false, false, TurnState::Failed),
+            (false, true, TurnState::Failed),
+            (true, true, TurnState::Complete),
+        ] {
+            let mut state = AppState::new("http://local".into());
+            state.begin_turn("go".into());
+            let event =
+                serde_json::json!({"type":"done","completed":completed,"has_errors":has_errors});
+            state.apply(ClientMessage::Stream(
+                ServerEvent::parse(&event.to_string()).unwrap(),
+            ));
+            assert_eq!(state.turn, expected);
+            assert_eq!(state.timeline.back().unwrap().success, Some(completed));
+            assert_eq!(
+                state.timeline.back().unwrap().text.contains("incomplete"),
+                !completed
+            );
+        }
     }
 
     #[test]

@@ -300,6 +300,12 @@ fn hash_message(message: &ChatMessage) -> u64 {
     if let Some(cache_control) = &message.cache_control {
         cache_control.to_string().hash(&mut hasher);
     }
+    for call in &message.tool_calls {
+        call.id.hash(&mut hasher);
+        call.name.hash(&mut hasher);
+        call.arguments.hash(&mut hasher);
+    }
+    message.tool_call_id.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -526,5 +532,17 @@ mod tests {
         assert!(messages[0].cache_control.is_some());
         assert!(messages[1].cache_control.is_some());
         assert!(messages[2].cache_control.is_none());
+    }
+
+    #[test]
+    fn native_call_arguments_and_result_ids_change_history_hashes() {
+        let mut message = ChatMessage::assistant_with_tool_calls("", vec![crate::llm::ToolCall {
+            id: "a".into(), name: "inspect".into(), arguments: "{}".into(),
+        }]);
+        let before = hash_message(&message);
+        message.tool_calls[0].arguments = "{\"kind\":\"symbols\"}".into();
+        assert_ne!(before, hash_message(&message));
+        assert_ne!(hash_message(&ChatMessage::tool_result("a", "same")),
+            hash_message(&ChatMessage::tool_result("b", "same")));
     }
 }

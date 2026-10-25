@@ -503,7 +503,7 @@ pub(super) async fn write_log_file(
 }
 
 /// Write a training data entry (JSONL) for one iteration.
-async fn log_training_data(
+pub(super) async fn log_training_data(
     training_log: &Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     model: &str,
     context: &str,
@@ -551,67 +551,8 @@ async fn log_training_data(
 /// `caller` is set when a peer AdapsisOS node calls over the VPN. That peer *is*
 /// the speaker for the turn, which is why it appears in the authority block
 /// rather than only in the user message.
-fn main_context_prompts(
-    config: &AppConfig,
-    program_summary: &str,
-    caller: Option<&str>,
-) -> (String, String, crate::context_prompt::StablePrefixKey, String) {
-    let model = config.llm_model.read().unwrap().clone();
-    let available_models = config.permission_config.model_names();
-    let speaker = caller
-        .map(str::trim)
-        .filter(|caller| !caller.is_empty())
-        .map_or_else(|| "local:api".to_string(), |caller| format!("peer:{caller}"));
-    let inputs = crate::context_prompt::PromptInputs {
-        context: "main",
-        program_summary,
-        llm_model: &model,
-        available_models: &available_models,
-        speaker: &speaker,
-        authority: config.permission_config.authority(config.access_level, &model),
-    };
-    let (stable, key) = crate::context_prompt::stable_prefix_keyed(&inputs);
-    let volatile = crate::context_prompt::volatile_suffix(&inputs);
-    (stable, volatile, key, model)
-}
-
-fn report_prompt_epoch(
-    context: &str,
-    key: &crate::context_prompt::StablePrefixKey,
-    model: &str,
-    stable: &str,
-    history: &[crate::llm::ChatMessage],
-    compacted: bool,
-) {
-    if let crate::context_log::Epoch::Reset { reason } = crate::context_log::observe_epoch(
-        context, key, model, stable, history, compacted,
-    ) {
-        eprintln!("[llm:{context}] prompt-cache epoch reset: {reason}");
-    }
-}
-
-fn report_llm_usage(
-    context: &str,
-    started: std::time::Instant,
-    usage: &crate::llm::LlmUsage,
-) {
-    eprintln!(
-        "[llm:{context}] latency_ms={} usage: {}",
-        started.elapsed().as_millis(),
-        usage.summary()
-    );
-}
-
-fn persist_main_assistant(config: &AppConfig, content: String) {
-    {
-        let mut meta = config.meta.lock().unwrap();
-        let conv = meta.conversations.get_or_create("main");
-        conv.push_assistant(content);
-        // Keep the system prefix plus complete user/assistant pairs.
-        conv.trim(51);
-    }
-    config.notify_save();
-}
+use super::http_context::{main_context_prompts, report_prompt_epoch, report_llm_usage,
+    persist_main_assistant};
 
 pub async fn ask(
     State(config): State<AppConfig>,
@@ -623,6 +564,9 @@ pub async fn ask(
     eprintln!("\n[web:user] {}", req.message);
     let tx = EventSender::broadcast_only(config.event_broadcast.clone());
     tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
+    if super::native_turn::eligible(&config) {
+        return Json(super::native_turn::run(&config, &req, &tx, false).await);
+    }
     let llm = crate::llm::LlmClient::new_with_model_and_key(
         &config.llm_url, &config.llm_model.read().unwrap(), config.llm_api_key.clone(),
     );
@@ -838,6 +782,7 @@ pub async fn ask(
         results: all_results,
         test_results: all_test_results,
         has_errors,
+        completed: None,
     })
 }
 
@@ -867,6 +812,10 @@ pub async fn ask_stream(
         );
 
         let _ = tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
+        if super::native_turn::eligible(&config_clone) {
+            super::native_turn::run(&config_clone, &req, &tx, true).await;
+            return;
+        }
 
             let mut messages = {
             // Tier 1: read program briefly for summary
@@ -1660,6 +1609,7 @@ pub async fn handle_llm_takeover(
         opencode_attach: None,
         message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         max_iterations: 10,
+        native_tools: false,
         runtime: runtime.clone(),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         save_notify: save_notify.clone(),
@@ -1799,10 +1749,6 @@ pub async fn handle_llm_takeover(
 
         let code = output.code.trim().to_string();
 
-        if code == "!done" {
-            eprintln!("[llm_takeover:{context}] done at iteration {}", iteration + 1);
-            break;
-        }
         if code.is_empty() {
             let correction = "Your response contained no Adapsis operation. If you promised or need to do work, execute the next step now in a <code> block. If no action remains, end the response with <code>!done</code>. Do not defer work to a future turn.";
             eprintln!("[llm_takeover:{context}] prose-only at iteration {}, requesting an operation or explicit completion", iteration + 1);
@@ -1866,6 +1812,11 @@ pub async fn handle_llm_takeover(
         }
         *meta.lock().unwrap() = session.meta;
         tmp_config.notify_save();
+
+        if exec_result.done_accepted && !exec_result.has_errors {
+            final_summary_pending = false;
+            break;
+        }
 
         // Build feedback and append to conversation
         let feedback: Vec<String> = exec_result.mutation_results.iter()

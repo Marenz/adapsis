@@ -6,6 +6,8 @@ use tower::ServiceExt as _; // for .oneshot()
 
 #[path = "ask_completion_tests.rs"]
 mod ask_completion_tests;
+#[path = "native_turn_tests.rs"]
+mod native_turn_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {
@@ -30,6 +32,7 @@ fn test_config() -> AppConfig {
         opencode_attach: None,
         message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         max_iterations: 1,
+        native_tools: false,
         runtime: std::sync::Arc::new(std::sync::RwLock::new(
             crate::session::RuntimeState::default(),
         )),
@@ -747,6 +750,7 @@ fn test_config_with_io() -> (
         opencode_attach: None,
         message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         max_iterations: 1,
+        native_tools: false,
         runtime: std::sync::Arc::new(std::sync::RwLock::new(
             crate::session::RuntimeState::default(),
         )),
@@ -1487,9 +1491,9 @@ fn session_migrates_chat_messages_to_conversations() {
     // Build a session with legacy chat_messages but no conversations["main"]
     let mut session = crate::session::Session::new();
     session.meta.chat_messages = vec![
-        crate::session::ChatMessage { role: "system".to_string(), content: "you are helpful".to_string(), attachments: vec![] },
-        crate::session::ChatMessage { role: "user".to_string(), content: "hello".to_string(), attachments: vec![] },
-        crate::session::ChatMessage { role: "assistant".to_string(), content: "hi there".to_string(), attachments: vec![] },
+        crate::session::ChatMessage { role: "system".to_string(), content: "you are helpful".to_string(), ..Default::default() },
+        crate::session::ChatMessage { role: "user".to_string(), content: "hello".to_string(), ..Default::default() },
+        crate::session::ChatMessage { role: "assistant".to_string(), content: "hi there".to_string(), ..Default::default() },
     ];
     // Ensure no "main" conversation exists yet
     assert!(session.meta.conversations.get("main").is_none());
@@ -1682,7 +1686,8 @@ fn llm_takeover_requires_explicit_completion_for_prose_only_turns() {
     let takeover = &source[takeover_start..];
 
     assert!(
-        takeover.contains("if code == \"!done\"")
+        takeover.contains("if exec_result.done_accepted && !exec_result.has_errors")
+            && !takeover.contains("if code == \"!done\"")
             && takeover.contains("if code.is_empty()")
             && takeover.contains("llm_messages.push(crate::llm::ChatMessage::user(correction.to_string()))")
             && takeover.contains("Do not defer work to a future turn.")

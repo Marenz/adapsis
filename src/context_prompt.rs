@@ -67,11 +67,25 @@ pub fn compose(inputs: &PromptInputs<'_>) -> String {
 /// Returned together so rendering and epoch detection use the same identity and
 /// mesh snapshot even if an operator edits either file during a turn.
 pub fn stable_prefix_keyed(inputs: &PromptInputs<'_>) -> (String, StablePrefixKey) {
+    stable_prefix_keyed_mode(inputs, false)
+}
+
+/// HTTP-only opt-in protocol; takeover continues to use the legacy composer.
+pub fn native_prefix_keyed(inputs: &PromptInputs<'_>) -> (String, StablePrefixKey) {
+    stable_prefix_keyed_mode(inputs, true)
+}
+
+fn stable_prefix_keyed_mode(inputs: &PromptInputs<'_>, native: bool) -> (String, StablePrefixKey) {
     let dir = contexts_dir();
     let dir = dir.as_deref();
     let mesh = crate::prompt::mesh_topology();
     let identity = identity_section(dir, inputs.context);
-    let rendered = render_stable_prefix(inputs, mesh.as_deref(), &identity);
+    let rendered = if native {
+        [crate::prompt::native_tool_prompt(inputs.context),
+         mesh.clone().unwrap_or_default(), identity.clone()].join("\n\n")
+    } else {
+        render_stable_prefix(inputs, mesh.as_deref(), &identity)
+    };
     let key = StablePrefixKey {
         context: inputs.context.to_string(),
         may_write: inputs.authority.may_write,

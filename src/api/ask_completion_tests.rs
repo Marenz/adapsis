@@ -61,6 +61,7 @@ async fn scripted_turn(outputs: Vec<&str>, budget: usize, prelude: &str, streami
                 success: e["success"].as_bool().unwrap_or(false),
             }).collect();
         AskResponse {
+            completed: None,
             has_errors: results.iter().any(|r| !r.success) || events.iter().any(|e| e["type"] == "error"),
             reply: body, code: String::new(), results, test_results: vec![],
         }
@@ -115,6 +116,17 @@ async fn last_operation_is_not_a_completion_claim() {
 }
 
 const OLD_DEBT: &str = "+module CompletionDebt\n+fn pending (x:Int)->Int\n  +let a:Int = x+1\n  +let b:Int = a+1\n  +return b\n+end\n";
+
+#[test]
+fn takeover_completion_uses_executor_acceptance_not_raw_done_text() {
+    // Full takeover requires the memory/identity service; the behavioral tests
+    // below exercise the shared gate, while this guard protects its call site.
+    let source = include_str!("llm_handlers.rs");
+    let takeover = source.split("let tmp_config = AppConfig {").nth(1).unwrap();
+    assert!(!takeover.contains("if code == \"!done\""));
+    assert!(takeover.contains("if exec_result.done_accepted && !exec_result.has_errors"));
+    assert!(takeover.contains("Some(&completion_baseline)"));
+}
 
 #[tokio::test]
 async fn mixed_inspection_and_done_ignore_unrelated_existing_test_debt() {

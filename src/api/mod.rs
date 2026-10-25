@@ -39,75 +39,12 @@ pub use execute::{
 #[cfg(test)]
 pub use execute::CodeExecutionResult;
 pub mod llm_handlers;
+mod native_turn;
+pub mod native_tools;
+mod http_context;
+mod working_set;
 pub use llm_handlers::{ask, ask_stream, handle_llm_takeover};
 use llm_handlers::EventSender;
-
-impl AppConfig {
-    /// Build a temporary working snapshot from the live tiers.
-    async fn snapshot_working_set(&self) -> WorkingSet {
-        let program = self.program.read().await.clone();
-        WorkingSet {
-            base_program: Some(program.clone()),
-            program,
-            runtime: self.runtime.read().unwrap().clone(),
-            meta: self.meta.lock().unwrap().clone(),
-            sandbox: None,
-        }
-    }
-
-    /// Merge a mutated program back into the live program using per-function
-    /// copy-on-write (issue #9). `base` is the snapshot the mutation started
-    /// from; only the `base → new` function delta is applied, so a concurrent
-    /// writer that touched a *different* function is not clobbered. The live
-    /// program write lock is held only for the brief merge, never during eval.
-    async fn commit_program_delta(&self, base: &crate::ast::Program, new: &crate::ast::Program) {
-        let mut live = self.program.write().await;
-        live.merge_changed_from(base, new);
-    }
-
-    /// Write a temporary working snapshot back into the live tiers.
-    /// Uses per-function CoW merge when a base snapshot is available (issue #9);
-    /// otherwise falls back to a full program overwrite.
-    async fn write_back_working_set(&self, ws: &WorkingSet) {
-        match &ws.base_program {
-            Some(base) => self.commit_program_delta(base, &ws.program).await,
-            None => *self.program.write().await = ws.program.clone(),
-        }
-        *self.meta.lock().unwrap() = ws.meta.clone();
-        if let Ok(mut rt) = self.runtime.write() {
-            rt.shared_vars.replace_from(ws.runtime.shared_vars.snapshot());
-            rt.http_routes = ws.runtime.http_routes.clone();
-            rt.agent_mailbox = ws.meta.agent_mailbox.clone();
-            // Sync library errors from LibraryState into RuntimeState
-            if let Some(ref lib_state) = ws.meta.library_state {
-                if let Ok(errs) = lib_state.errors.lock() {
-                    rt.library_errors = errs.clone();
-                }
-                if let Ok(load_errs) = lib_state.load_errors.lock() {
-                    rt.library_load_errors = load_errs.iter()
-                        .map(|le| (le.module_name.clone(), le.error.clone()))
-                        .collect();
-                }
-            }
-        }
-        self.notify_save();
-    }
-
-    /// Pull state that async eval/top-level IO can mutate via SHARED_META/
-    /// SHARED_RUNTIME back into the local working snapshot before it gets
-    /// written over by stale data.
-    fn sync_async_side_effects_into(&self, ws: &mut WorkingSet) {
-        if let Ok(meta) = self.meta.lock() {
-            ws.meta.roadmap = meta.roadmap.clone();
-            ws.meta.plan = meta.plan.clone();
-            ws.meta.agent_mailbox = meta.agent_mailbox.clone();
-            ws.meta.io_mocks = meta.io_mocks.clone();
-        }
-        if let Ok(runtime) = self.runtime.read() {
-            ws.runtime = runtime.clone();
-        }
-    }
-}
 
 fn emit_event(state: &AppConfig, event_json: &str) {
     let _ = state.event_broadcast.send(event_json.to_string());
@@ -202,6 +139,8 @@ pub struct AppConfig {
     pub message_queue: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     /// Maximum iterations per AI request
     pub max_iterations: usize,
+    /// Opt-in native tool protocol for eligible HTTP ask/ask-stream turns only.
+    pub native_tools: bool,
     /// JSONL training data log — one entry per iteration with input/output/outcome
     pub training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// Shared runtime state (Tier 2) — HTTP routes, shared variables
@@ -1207,6 +1146,9 @@ pub struct AskResponse {
     pub results: Vec<MutationResult>,
     pub test_results: Vec<TestCaseResult>,
     pub has_errors: bool,
+    /// Native completion is independent of errors encountered and corrected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed: Option<bool>,
 }
 
 

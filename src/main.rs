@@ -141,6 +141,7 @@ fn append_conversation_notification(
         role: "system".to_string(),
         content: message.to_string(),
         attachments: vec![],
+        ..Default::default()
     };
     if let Some(attachment) = attachment {
         stored.attachments.push(attachment.clone());
@@ -732,6 +733,10 @@ enum Command {
         /// Maximum iterations per AI request (default 20)
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
+
+        /// Native tools for write-capable HTTP ask/ask-stream turns (Telegram stays legacy)
+        #[arg(long)]
+        native_tools: bool,
 
         /// Process-level access cap: full, adapsis-only, user-only, execute-only.
         /// Defaults to adapsis-only so !opencode (which rebuilds and re-execs the
@@ -1543,7 +1548,7 @@ async fn main() -> Result<()> {
         Command::Tui { api } => {
             tui::run(&api).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, access_level, permissions_file, admin_id, host } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, native_tools, access_level, permissions_file, admin_id, host } => {
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -2362,6 +2367,7 @@ async fn main() -> Result<()> {
                 jit_cache: eval::new_jit_cache(),
                 event_broadcast: tokio::sync::broadcast::channel(256).0,
                 max_iterations,
+                native_tools,
                 opencode_lock: opencode_lock,
                 opencode_attach: opencode_attach.clone(),
                 message_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -2522,6 +2528,7 @@ async fn main() -> Result<()> {
                             role: "tool".to_string(),
                             content: event_message.clone(),
                             attachments: vec![],
+                            ..Default::default()
                         });
                         conv.to_llm_messages()
                     };

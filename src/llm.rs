@@ -11,6 +11,14 @@ use tracing::{debug, info, warn};
 const MAX_LLM_RETRIES: usize = 5;
 const MAX_SERVER_RETRY_DELAY: Duration = Duration::from_secs(15 * 60);
 
+mod native;
+mod tool_call;
+
+#[allow(unused_imports)]
+pub use native::{NativeResponse, NativeStreamEvent, TurnRequest};
+#[allow(unused_imports)]
+pub use tool_call::{NativeFinishReason, NativeToolDefinition, ToolCall};
+
 #[derive(Debug)]
 enum LlmError {
     Api {
@@ -89,15 +97,93 @@ pub enum ChatRole {
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: ChatContent,
     /// A client-requested prompt-cache breakpoint (issue #68, stage 5), passed
     /// through to providers that have an explicit prompt cache. `None` means
     /// "no preference"; the gateway may still place its own heuristic markers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<serde_json::Value>,
+    /// Tool calls authored by the model in this message (native tool transport).
+    /// Empty on the wire; serialized in the OpenAI nested `function` shape.
+    pub tool_calls: Vec<ToolCall>,
+    /// For `Tool`-role messages: the id of the tool call this message answers.
+    pub tool_call_id: Option<String>,
+}
+
+/// Manual `Serialize` for `ChatMessage`. The derive is replaced so that
+/// (a) an assistant message carrying tool calls with empty text content
+/// serializes `content` as `null` (the OpenAI wire convention), and (b)
+/// `tool_calls`/`tool_call_id` are omitted when absent — keeping legacy
+/// messages byte-identical to before.
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("ChatMessage", 5)?;
+        state.serialize_field("role", &self.role)?;
+
+        let empty_text = matches!(&self.content, ChatContent::Text(text) if text.is_empty());
+        if empty_text && !self.tool_calls.is_empty() {
+            state.serialize_field("content", &Value::Null)?;
+        } else {
+            state.serialize_field("content", &self.content)?;
+        }
+
+        if let Some(cache_control) = &self.cache_control {
+            state.serialize_field("cache_control", cache_control)?;
+        }
+        if !self.tool_calls.is_empty() {
+            state.serialize_field("tool_calls", &self.tool_calls)?;
+        }
+        if let Some(tool_call_id) = &self.tool_call_id {
+            state.serialize_field("tool_call_id", tool_call_id)?;
+        }
+        state.end()
+    }
+}
+
+/// Manual `Deserialize` for `ChatMessage`. Backward compatible: a message
+/// without tool fields (or with `content` as a bare string or parts array)
+/// deserializes exactly as before. A `null` or missing `content` becomes an
+/// empty text content (the assistant tool-call wire shape).
+impl<'de> Deserialize<'de> for ChatMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            role: ChatRole,
+            #[serde(default)]
+            content: Option<Value>,
+            #[serde(default)]
+            cache_control: Option<Value>,
+            #[serde(default)]
+            tool_calls: Vec<ToolCall>,
+            #[serde(default)]
+            tool_call_id: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let content = match wire.content {
+            None | Some(Value::Null) => ChatContent::Text(String::new()),
+            Some(Value::String(text)) => ChatContent::Text(text),
+            Some(other) => serde_json::from_value(other).map_err(serde::de::Error::custom)?,
+        };
+
+        Ok(ChatMessage {
+            role: wire.role,
+            content,
+            cache_control: wire.cache_control,
+            tool_calls: wire.tool_calls,
+            tool_call_id: wire.tool_call_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +227,8 @@ impl ChatMessage {
             role,
             content,
             cache_control: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 
@@ -193,6 +281,31 @@ impl ChatMessage {
 
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(ChatRole::Assistant, ChatContent::Text(content.into()))
+    }
+
+    /// An assistant message that requests one or more tool calls.
+    ///
+    /// `content` may be empty; on the wire an empty text content serializes as
+    /// `null` and the calls use the OpenAI nested `function` shape.
+    pub fn assistant_with_tool_calls(content: impl Into<String>, calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: ChatRole::Assistant,
+            content: ChatContent::Text(content.into()),
+            cache_control: None,
+            tool_calls: calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// A tool result message answering a prior tool call by id.
+    pub fn tool_result(id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content: ChatContent::Text(content.into()),
+            cache_control: None,
+            tool_calls: Vec::new(),
+            tool_call_id: Some(id.into()),
+        }
     }
 }
 

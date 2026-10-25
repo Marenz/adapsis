@@ -1,3 +1,6 @@
+mod native;
+pub use native::native_tool_prompt;
+
 /// System prompt for the Adapsis feedback loop.
 /// This teaches the model Adapsis's syntax and the interactive protocol.
 pub fn system_prompt() -> String {
