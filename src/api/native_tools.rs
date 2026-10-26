@@ -141,10 +141,11 @@ pub fn native_tools_eligible(config: &AppConfig) -> bool {
 
 // ── Tool definitions ───────────────────────────────────────────────────────
 
-/// The static set of native tool schemas. Pure metadata — exposure gating is the
-/// caller's responsibility via [`native_tools_eligible`] (dispatch still rejects
-/// guests regardless of what is exposed).
-pub fn tool_definitions(_config: &AppConfig) -> Vec<ToolDefinition> {
+/// The static set of native tool schemas. The memory tools are turn-bound, so
+/// they are only advertised when the turn carries a [`crate::coroutine::TurnIdentity`]
+/// (a live conversational context and speaker). Dispatch additionally rejects
+/// guests and non-write turns regardless of what is exposed.
+pub fn tool_definitions(config: &AppConfig) -> Vec<ToolDefinition> {
     let obj = |required: &[&str], props: serde_json::Value| {
         serde_json::json!({
             "type": "object",
@@ -154,7 +155,7 @@ pub fn tool_definitions(_config: &AppConfig) -> Vec<ToolDefinition> {
         })
     };
 
-    vec![
+    let mut tools = vec![
         ToolDefinition {
             name: "inspect".into(),
             description: "Read program metadata: symbols, source, dependencies, tasks, or the module library.".into(),
@@ -208,7 +209,61 @@ pub fn tool_definitions(_config: &AppConfig) -> Vec<ToolDefinition> {
             description: "Signal task completion (!done) against the current turn's baseline.".into(),
             parameters: obj(&[], serde_json::json!({})),
         },
-    ]
+    ];
+
+    // Turn-bound memory tools (Ladybug). Context and speaker are read only from
+    // the turn identity; a model cannot name them. Absent a live conversation
+    // they are neither advertised nor executable (fail closed).
+    if config.turn.is_some() {
+        tools.extend([
+            ToolDefinition {
+                name: "memory_inspect".into(),
+                description: "Inspect memories (Ladybug) visible to THIS conversation. An optional query narrows to an exact memory id or a topic. No context or speaker arguments: they are bound to this conversation.".into(),
+                parameters: obj(
+                    &[],
+                    serde_json::json!({
+                        "query": {"type": "string", "description": "Optional exact memory id (e.g. memory:8f0e…) or a topic phrase. Omit for the general view."},
+                    }),
+                ),
+            },
+            ToolDefinition {
+                name: "memory_remember".into(),
+                description: "Remember something permanently in THIS conversation (Ladybug). Scope context is the default; scope global is a governance choice. No context or speaker arguments: they are bound to this conversation.".into(),
+                parameters: obj(
+                    &["content"],
+                    serde_json::json!({
+                        "content": {"type": "string", "description": "The assertion to remember."},
+                        "scope": {"type": "string", "enum": ["context", "global"], "description": "context (this conversation only, default) or global (every conversation)."},
+                    }),
+                ),
+            },
+            ToolDefinition {
+                name: "memory_correct".into(),
+                description: "Correct a memory (Ladybug) this conversation can change, keeping an auditable history. No context or speaker arguments: they are bound to this conversation.".into(),
+                parameters: obj(
+                    &["old_id", "replacement"],
+                    serde_json::json!({
+                        "old_id": {"type": "string", "description": "The memory id shown in brackets."},
+                        "replacement": {"type": "string", "description": "The corrected content."},
+                        "valid_from_ms": {"type": "integer", "description": "Optional Unix ms lower bound for the correction."},
+                        "valid_until_ms": {"type": "integer", "description": "Optional Unix ms upper bound; requires valid_from_ms."},
+                    }),
+                ),
+            },
+            ToolDefinition {
+                name: "memory_forget".into(),
+                description: "Forget a specific memory (Ladybug) the bound speaker is authorized to contribute to. No context or speaker arguments: identity is bound to this turn; existing builtin membership rules apply.".into(),
+                parameters: obj(
+                    &["id"],
+                    serde_json::json!({
+                        "id": {"type": "string", "description": "The memory id shown in brackets."},
+                    }),
+                ),
+            },
+        ]);
+    }
+
+    tools
 }
 
 // ── Argument parsing (pure, side-effect free) ──────────────────────────────
@@ -227,6 +282,15 @@ enum ParsedTool {
     PythonMutate { source: String, module: String, references: Vec<String> },
     Test { source: String, targets: Vec<String>, python: bool },
     Evaluate { function: String, source: String, python: bool },
+    MemoryInspect { query: String },
+    MemoryRemember { content: String, scope: String },
+    MemoryCorrect {
+        old_id: String,
+        replacement: String,
+        valid_from_ms: Option<i64>,
+        valid_until_ms: Option<i64>,
+    },
+    MemoryForget { id: String },
     Finish,
 }
 
@@ -269,6 +333,19 @@ fn take_string(
         }
         Some(_) => Err(format!("field `{key}` must be a string")),
         None if required => Err(format!("missing required field `{key}`")),
+        None => Ok(None),
+    }
+}
+
+fn take_optional_int(
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<i64>, String> {
+    match map.get(key) {
+        Some(serde_json::Value::Number(n)) => n.as_i64().map(Some).ok_or_else(|| {
+            format!("field `{key}` must be a signed 64-bit integer")
+        }),
+        Some(_) => Err(format!("field `{key}` must be an integer")),
         None => Ok(None),
     }
 }
@@ -477,6 +554,62 @@ fn parse_tool(name: &str, arguments: &str) -> Result<ParsedTool, String> {
         "mutate" => frontend::parse_mutate(&map, false),
         "test" => frontend::parse_tests(&map, normalized.python),
         "evaluate" => frontend::parse_evaluate(&map, normalized.python),
+        "memory_inspect" => {
+            reject_extra_fields(&map, &["query"])?;
+            let query = take_string(&map, "query", false, MAX_TARGET_BYTES)?.unwrap_or_default();
+            Ok(ParsedTool::MemoryInspect { query })
+        }
+        "memory_remember" => {
+            reject_extra_fields(&map, &["content", "scope"])?;
+            let content = take_string(&map, "content", true, MAX_SOURCE_BYTES)?.unwrap();
+            let scope = match take_string(&map, "scope", false, MAX_TARGET_BYTES)? {
+                None => "context".to_string(),
+                Some(value) => match value.as_str() {
+                    "context" | "global" => value,
+                    other => {
+                        return Err(format!(
+                            "memory_remember `scope` must be \"context\" or \"global\", got `{other}`"
+                        ))
+                    }
+                },
+            };
+            Ok(ParsedTool::MemoryRemember { content, scope })
+        }
+        "memory_correct" => {
+            reject_extra_fields(
+                &map,
+                &["old_id", "replacement", "valid_from_ms", "valid_until_ms"],
+            )?;
+            let old_id = take_string(&map, "old_id", true, MAX_TARGET_BYTES)?.unwrap();
+            let replacement = take_string(&map, "replacement", true, MAX_SOURCE_BYTES)?.unwrap();
+            let valid_from_ms = take_optional_int(&map, "valid_from_ms")?;
+            let valid_until_ms = take_optional_int(&map, "valid_until_ms")?;
+            if valid_from_ms.is_none() && valid_until_ms.is_some() {
+                return Err(
+                    "memory_correct `valid_until_ms` requires `valid_from_ms` (the builtin \
+                     signature is positional: old_id, replacement[, valid_from_ms[, valid_until_ms]])"
+                        .to_string(),
+                );
+            }
+            if let (Some(from), Some(until)) = (valid_from_ms, valid_until_ms) {
+                if from > until {
+                    return Err(format!(
+                        "memory_correct `valid_from_ms` ({from}) must be <= `valid_until_ms` ({until})"
+                    ));
+                }
+            }
+            Ok(ParsedTool::MemoryCorrect {
+                old_id,
+                replacement,
+                valid_from_ms,
+                valid_until_ms,
+            })
+        }
+        "memory_forget" => {
+            reject_extra_fields(&map, &["id"])?;
+            let id = take_string(&map, "id", true, MAX_TARGET_BYTES)?.unwrap();
+            Ok(ParsedTool::MemoryForget { id })
+        }
         "finish" => {
             reject_extra_fields(&map, &[])?;
             Ok(ParsedTool::Finish)
@@ -579,6 +712,21 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
                 return Err(format!(
                     "permission denied: cannot evaluate function '{function}' (module '{module}' needs Execute)"
                 ));
+            }
+        }
+        ParsedTool::MemoryInspect { .. }
+        | ParsedTool::MemoryRemember { .. }
+        | ParsedTool::MemoryCorrect { .. }
+        | ParsedTool::MemoryForget { .. } => {
+            // Turn-bound: context and speaker come from the turn identity, and
+            // there is no honest default for a route handler or the autonomous
+            // loop. Fail closed when no conversation is in scope.
+            if config.turn.is_none() {
+                return Err(
+                    "memory tools are bound to a live conversation and its speaker; no turn \
+                     identity is in scope"
+                        .to_string(),
+                );
             }
         }
         ParsedTool::Finish => {}
@@ -981,13 +1129,78 @@ fn prepare_native_tool(
     Ok((parsed, model))
 }
 
+/// Run a turn-bound memory builtin through the exact same coroutine dispatch
+/// the `!eval memory_*` path uses, so ACL, scope and write-capability rules are
+/// identical. The handle is bound to the turn identity and runs in a blocking
+/// task because `execute_await` spin-waits on the IO reply.
+async fn run_memory_builtin(
+    config: &AppConfig,
+    op: &str,
+    args: Vec<crate::eval::Value>,
+) -> Result<String, String> {
+    let turn = config.turn.clone().ok_or_else(|| {
+        "memory tools are bound to a live conversation and its speaker; no turn identity is in scope"
+            .to_string()
+    })?;
+    let sender = config
+        .io_sender
+        .clone()
+        .ok_or_else(|| "memory tools require the coroutine IO runtime".to_string())?;
+    let op = op.to_string();
+    tokio::task::spawn_blocking(move || {
+        let handle = crate::coroutine::CoroutineHandle::new(sender).with_turn(Some(turn));
+        handle.execute_await(&op, &args)
+    })
+    .await
+    .map_err(|join| format!("memory tool task failed: {join}"))?
+    .map(|value| match value {
+        crate::eval::Value::String(s) => s.as_ref().clone(),
+        other => other.to_string(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Build the success envelope for a memory tool. Inspection output is carried as
+/// a read-only `query_results` block (surfaced by the native loop); remember,
+/// correct and forget report the builtin's message as a successful result.
+fn memory_ok_result(name: &str, output: String, as_query: bool) -> NativeToolResult {
+    let execution = CodeExecutionResult {
+        mutation_results: if as_query {
+            vec![]
+        } else {
+            vec![MutationResult {
+                message: output.clone(),
+                success: true,
+            }]
+        },
+        test_results: vec![],
+        has_errors: false,
+        needs_opencode_restart: false,
+        agent_spawned: false,
+        spawned_agent_names: vec![],
+        done_accepted: false,
+    };
+    let content = build_envelope(
+        name,
+        &execution,
+        &output,
+        if as_query { Some(&output) } else { None },
+        None,
+    );
+    NativeToolResult {
+        execution,
+        content,
+    }
+}
+
 /// Execute a single native tool against a caller-prepared working snapshot.
 ///
 /// All tools run through [`execute_code_with_baseline`] with the *same*
 /// immutable completion baseline, so the executor's mutation semantics, test
 /// gate and per-function CoW write-back remain authoritative. Inspection is
-/// read-only and permission-filtered. The caller snapshots before and writes
-/// the working set back after **every** call.
+/// read-only and permission-filtered. Memory tools bypass the code executor and
+/// dispatch the turn-bound builtins directly. The caller snapshots before and
+/// writes the working set back after **every** call.
 pub async fn execute_native_tool(
     name: &str,
     arguments: &str,
@@ -1055,6 +1268,56 @@ pub async fn execute_native_tool(
             NativeToolResult {
                 execution: code,
                 content,
+            }
+        }
+        ParsedTool::MemoryInspect { query } => {
+            let args = if query.trim().is_empty() {
+                vec![]
+            } else {
+                vec![crate::eval::Value::string(query)]
+            };
+            match run_memory_builtin(config, "memory_inspect", args).await {
+                Ok(output) => memory_ok_result(name, output, true),
+                Err(error) => denied_result(name, error),
+            }
+        }
+        ParsedTool::MemoryRemember { content, scope } => {
+            match run_memory_builtin(
+                config,
+                "memory_remember",
+                vec![crate::eval::Value::string(content), crate::eval::Value::string(scope)],
+            )
+            .await
+            {
+                Ok(output) => memory_ok_result(name, output, false),
+                Err(error) => denied_result(name, error),
+            }
+        }
+        ParsedTool::MemoryCorrect {
+            old_id,
+            replacement,
+            valid_from_ms,
+            valid_until_ms,
+        } => {
+            let mut args = vec![
+                crate::eval::Value::string(old_id),
+                crate::eval::Value::string(replacement),
+            ];
+            if let Some(value) = valid_from_ms {
+                args.push(crate::eval::Value::Int(value));
+            }
+            if let Some(value) = valid_until_ms {
+                args.push(crate::eval::Value::Int(value));
+            }
+            match run_memory_builtin(config, "memory_correct", args).await {
+                Ok(output) => memory_ok_result(name, output, false),
+                Err(error) => denied_result(name, error),
+            }
+        }
+        ParsedTool::MemoryForget { id } => {
+            match run_memory_builtin(config, "memory_forget", vec![crate::eval::Value::string(id)]).await {
+                Ok(output) => memory_ok_result(name, output, false),
+                Err(error) => denied_result(name, error),
             }
         }
     }

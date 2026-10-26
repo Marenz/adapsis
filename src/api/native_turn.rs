@@ -106,6 +106,17 @@ pub(super) enum LoopEnd {
     Empty(&'static str),
 }
 
+impl LoopEnd {
+    pub(super) fn category(&self) -> &'static str {
+        match self {
+            Self::Finished => "finished",
+            Self::Exhausted => "exhausted",
+            Self::ProviderError(_) => "provider-error",
+            Self::Empty(_) => "empty-response",
+        }
+    }
+}
+
 pub(super) struct NativeLoop {
     pub(super) messages: Vec<ChatMessage>,
     seen: HashSet<String>,

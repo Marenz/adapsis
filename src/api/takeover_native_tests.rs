@@ -3,6 +3,8 @@
 use crate::session::{SessionMeta, SharedMeta};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
+#[path = "takeover_logging_tests.rs"]
+mod logging;
 
 const ADMIN: &str = "telegram:user:100000001";
 
@@ -33,6 +35,7 @@ struct Harness {
     graph: Arc<crate::memory_graph::MemoryGraph>,
     permissions: Arc<crate::permissions::PermissionConfig>,
     native_tools: bool,
+    log_file: Option<Arc<tokio::sync::Mutex<tokio::fs::File>>>,
 }
 
 struct Provider {
@@ -103,11 +106,23 @@ impl Harness {
             graph: Arc::new(crate::memory_graph::MemoryGraph::in_memory().unwrap()),
             permissions: Arc::new(crate::permissions::PermissionConfig::default()),
             native_tools,
+            log_file: None,
         }
     }
 
     async fn turn(&self, provider: &Provider, context: &str, speaker: &str, text: &str) -> String {
         let (io_tx, _io_rx) = tokio::sync::mpsc::channel(8);
+        self.turn_with_io(provider, io_tx, context, speaker, text).await
+    }
+
+    async fn turn_with_io(
+        &self,
+        provider: &Provider,
+        io_tx: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+        context: &str,
+        speaker: &str,
+        text: &str,
+    ) -> String {
         let metadata = json!({"speaker_id": speaker}).to_string();
         let future = super::super::handle_llm_takeover(
             context.into(),
@@ -133,7 +148,7 @@ impl Harness {
             crate::permissions::AccessLevel::Full,
             self.permissions.clone(),
             None,
-            None,
+            self.log_file.clone(),
             self.native_tools,
         );
         tokio::time::timeout(std::time::Duration::from_secs(30), future)
@@ -206,7 +221,7 @@ async fn native_takeover_python_mutate_test_evaluate_finish_delivers_prose() {
     assert!(speaker.contains("Change the runtime itself (`!opencode`): no"));
     assert!(speaker.contains("Add or modify code: yes"));
     assert!(!system.contains("NEVER use <tool_call>"), "no legacy language prompt");
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 9);
     assert!(requests.iter().all(|r| r.get("temperature").is_none()));
     assert!(requests.iter().all(|r| r["model"] == "takeover-fixture"));
     let first = all_text(&requests[0]);
@@ -373,4 +388,261 @@ async fn native_takeover_carries_conversation_images_to_the_provider() {
     assert_eq!(reply, "A fixture image.");
     let request = all_text(&provider.requests.lock().unwrap()[0]);
     assert!(request.contains("image_url") && request.contains("data:image/png;base64"), "{request}");
+}
+
+// ── Native memory tools (#87) ──────────────────────────────────────────────
+//
+// The native memory tools dispatch the turn-bound builtins through the same
+// coroutine runtime, so these fixtures service the IO requests with an in-memory
+// Ladybug graph and the deterministic embedder, exactly as main.rs does.
+
+fn spawn_memory_io(
+    graph: Arc<crate::memory_graph::MemoryGraph>,
+    embedder: Arc<crate::memory_graph::MemoryEmbedder>,
+) -> tokio::sync::mpsc::Sender<crate::coroutine::IoRequest> {
+    use crate::coroutine::IoRequest;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<IoRequest>(32);
+    let worker_tx = tx.clone();
+    tokio::spawn(async move {
+        while let Some(request) = rx.recv().await {
+            let graph = graph.clone();
+            let embedder = embedder.clone();
+            let sender = worker_tx.clone();
+            match request {
+                IoRequest::MemoryInspect {
+                    context_id,
+                    principal_id,
+                    query,
+                    reply,
+                } => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let embedding = if query.trim().is_empty()
+                            || query.trim().starts_with("memory:")
+                        {
+                            None
+                        } else {
+                            embedder.embed_query(&query).ok()
+                        };
+                        graph
+                            .inspect(&principal_id, &context_id, &query, embedding.as_deref())
+                            .map(|inspection| crate::memory_graph::render_inspection(&inspection))
+                    })
+                    .await
+                    .unwrap_or_else(|join| Err(anyhow::anyhow!("inspect join: {join}")));
+                    let _ = reply.send(result);
+                }
+                IoRequest::MemoryRemember {
+                    context_id,
+                    principal_id,
+                    content,
+                    scope,
+                    reply,
+                } => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let embedding = embedder
+                            .embed_passages(&[content.clone()])?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| anyhow::anyhow!("no embedding"))?;
+                        graph
+                            .remember_canonical(&crate::memory_graph::CanonicalDraft {
+                                content,
+                                context_id,
+                                principal_id,
+                                embedding,
+                                scope,
+                                created_at_ms: crate::memory_graph::now_ms(),
+                            })
+                            .map(|id| format!("remembered as {id}"))
+                    })
+                    .await
+                    .unwrap_or_else(|join| Err(anyhow::anyhow!("remember join: {join}")));
+                    let _ = reply.send(result);
+                }
+                IoRequest::MemoryForget {
+                    principal_id,
+                    memory_id,
+                    reply,
+                } => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        graph.forget_memory(&principal_id, &memory_id).map(|forgotten| {
+                            if forgotten {
+                                format!("forgot {memory_id}")
+                            } else {
+                                format!("nothing forgotten: {memory_id} is not a memory this conversation can change")
+                            }
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|join| Err(anyhow::anyhow!("forget join: {join}")));
+                    let _ = reply.send(result);
+                }
+                IoRequest::Scoped { request, reply } => {
+                    let result =
+                        crate::capabilities::dispatch(request, graph, embedder, sender).await;
+                    let _ = reply.send(result);
+                }
+                _ => {}
+            }
+        }
+    });
+    tx
+}
+
+fn remember(
+    harness: &Harness,
+    embedder: &crate::memory_graph::MemoryEmbedder,
+    content: &str,
+    context: &str,
+    principal: &str,
+    scope: crate::memory_graph::MemoryScope,
+) -> String {
+    harness
+        .graph
+        .remember_canonical(&crate::memory_graph::CanonicalDraft {
+            content: content.into(),
+            context_id: context.into(),
+            principal_id: principal.into(),
+            embedding: embedder.embed_passages(&[content.into()]).unwrap().remove(0),
+            scope,
+            created_at_ms: 1,
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn native_takeover_memory_inspect_then_correct_authorized_memory() {
+    let context = "telegram:100000001";
+    let harness = Harness::new(true);
+    let embedder = crate::memory_graph::MemoryEmbedder::deterministic();
+    let wrong = remember(
+        &harness,
+        &embedder,
+        "Opus 5 does not exist",
+        context,
+        ADMIN,
+        crate::memory_graph::MemoryScope::Context,
+    );
+    let io = spawn_memory_io(harness.graph.clone(), Arc::new(embedder));
+    let provider = provider(vec![
+        tool("inspect", "memory_inspect", json!({})),
+        tool(
+            "correct",
+            "memory_correct",
+            json!({"old_id": wrong, "replacement": "Opus 5 exists"}),
+        ),
+        response("Corrected.", vec![call("done", "finish", json!({}))]),
+    ])
+    .await;
+    let reply = harness
+        .turn_with_io(&provider, io, context, ADMIN, "Opus 5 does not exist")
+        .await;
+    assert_eq!(reply, "Corrected.");
+    let active = harness
+        .graph
+        .canonical_for_context(ADMIN, context, 40, 8_000)
+        .unwrap();
+    assert!(
+        active.iter().any(|m| m.content == "Opus 5 exists"),
+        "{active:?}"
+    );
+    assert!(!active.iter().any(|m| m.content == "Opus 5 does not exist"));
+}
+
+#[tokio::test]
+async fn native_takeover_memory_inspect_other_context_id_is_indistinguishable() {
+    let context = "telegram:100000001";
+    let harness = Harness::new(true);
+    let embedder = crate::memory_graph::MemoryEmbedder::deterministic();
+    let foreign = remember(
+        &harness,
+        &embedder,
+        "secret from another chat",
+        "telegram:group:-100000099",
+        "telegram:user:999999",
+        crate::memory_graph::MemoryScope::Context,
+    );
+    let io = spawn_memory_io(harness.graph.clone(), Arc::new(embedder));
+    let provider = provider(vec![
+        tool("look", "memory_inspect", json!({"query": foreign})),
+        response("done", vec![call("done", "finish", json!({}))]),
+    ])
+    .await;
+    harness
+        .turn_with_io(&provider, io, context, ADMIN, "look it up")
+        .await;
+    let request = all_text(&provider.requests.lock().unwrap()[1]);
+    assert!(request.contains("indistinguishable"), "{request}");
+    assert!(!request.contains("secret from another chat"), "foreign content leaked: {request}");
+}
+
+#[tokio::test]
+async fn native_takeover_memory_remember_global_scope_works_for_write_turn() {
+    let context = "telegram:100000001";
+    let harness = Harness::new(true);
+    let embedder = crate::memory_graph::MemoryEmbedder::deterministic();
+    let io = spawn_memory_io(harness.graph.clone(), Arc::new(embedder));
+    let provider = provider(vec![
+        tool(
+            "remember",
+            "memory_remember",
+            json!({"content": "Prefers dark mode everywhere", "scope": "global"}),
+        ),
+        response("Remembered globally.", vec![call("done", "finish", json!({}))]),
+    ])
+    .await;
+    let reply = harness
+        .turn_with_io(&provider, io, context, ADMIN, "remember this globally")
+        .await;
+    assert_eq!(reply, "Remembered globally.");
+    let active = harness
+        .graph
+        .canonical_for_context(ADMIN, context, 40, 8_000)
+        .unwrap();
+    assert!(
+        active.iter().any(|m| m.content == "Prefers dark mode everywhere"),
+        "{active:?}"
+    );
+}
+
+#[tokio::test]
+async fn native_takeover_memory_forget_foreign_and_absent_are_indistinguishable() {
+    let context = "telegram:100000001";
+    let harness = Harness::new(true);
+    let embedder = crate::memory_graph::MemoryEmbedder::deterministic();
+    // A memory this conversation cannot change (foreign context).
+    let foreign = remember(
+        &harness,
+        &embedder,
+        "secret from another chat",
+        "telegram:group:-100000099",
+        "telegram:user:999999",
+        crate::memory_graph::MemoryScope::Context,
+    );
+    let io = spawn_memory_io(harness.graph.clone(), Arc::new(embedder));
+    let provider = provider(vec![
+        response(
+            "",
+            vec![
+                call("forget-foreign", "memory_forget", json!({"id": foreign})),
+                call("forget-absent", "memory_forget", json!({"id": "memory:absent-xyz"})),
+            ],
+        ),
+        response("done", vec![call("done", "finish", json!({}))]),
+    ])
+    .await;
+    harness
+        .turn_with_io(&provider, io, context, ADMIN, "forget both")
+        .await;
+    let round = all_text(&provider.requests.lock().unwrap()[1]);
+    // "Not yours" and "does not exist" read identically (same wording, echoing
+    // only the caller-supplied id) so forgetting cannot probe other
+    // conversations' memory ids.
+    let foreign_msg = format!("nothing forgotten: {foreign} is not a memory this conversation can change");
+    let absent_msg =
+        "nothing forgotten: memory:absent-xyz is not a memory this conversation can change".to_string();
+    assert!(round.contains(&foreign_msg), "{round}");
+    assert!(round.contains(&absent_msg), "{round}");
+    assert!(!round.contains("does not exist"), "{round}");
+    assert!(!round.contains("not yours"), "{round}");
 }

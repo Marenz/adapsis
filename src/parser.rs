@@ -1837,10 +1837,17 @@ impl<'a> Parser<'a> {
         // Treat unknown ! operations as queries (AI often uses !symbols instead of ?symbols)
         if text.starts_with('!') {
             let as_query = format!("?{}", &text[1..]);
-            eprintln!(
-                "[parser] line {}: treating `{}` as `{}`",
-                line.number, text, as_query
-            );
+            if crate::logging::content() {
+                eprintln!(
+                    "[parser] line {}: treating `{}` as `{}`",
+                    line.number, text, as_query
+                );
+            } else {
+                eprintln!(
+                    "[parser] line {}: treating a `!`-prefixed line as a query",
+                    line.number
+                );
+            }
             self.index += 1;
             return Ok(Operation::Query(as_query));
         }
@@ -1858,10 +1865,14 @@ impl<'a> Parser<'a> {
         }
 
         // Skip truly unknown operations
-        eprintln!(
-            "[parser] line {}: skipping unknown `{}`",
-            line.number, line.text
-        );
+        if crate::logging::content() {
+            eprintln!(
+                "[parser] line {}: skipping unknown `{}`",
+                line.number, line.text
+            );
+        } else {
+            eprintln!("[parser] line {}: skipping an unknown operation", line.number);
+        }
         self.index += 1;
         Ok(Operation::Query(format!(
             "WARNING: unknown operation `{}` (skipped)",

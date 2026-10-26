@@ -1,6 +1,132 @@
 # AdapsisOS Roadmap
 
-## Current execution — native tools for takeover conversations (#85)
+## Release handoff — native memory, metadata-only logging, default protocol (#87/#88/#89)
+
+Recovery checkpoint 2026-10-26. Sole writer worktree:
+`/home/marenz/Projects/adapsis-wt87`, branch `work/issue-87-88`, based on
+`668559986187e388d522e904637657f5d48f6e32` (#85). **Final independent Astra review
+ACCEPTED; offline gates green. Changes are NOT COMMITTED or DEPLOYED.** No
+installation, restart or service modification was performed by this writer.
+Release authority remains manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`.
+
+- **#87:** native `memory_inspect`, `memory_remember`, `memory_correct` and
+  `memory_forget` dispatch the existing turn-bound coroutine builtins. No caller
+  context/principal/authority fields; only advertised with `TurnIdentity` and
+  available to eligible write-capable non-guest turns. HTTP without identity
+  omits memory schemas and claims. Inventory guidance requires authorized
+  inspection first, distinguishes bounded surfaced records from exhaustive
+  storage, and forbids another-private-chat trawl. Existing ACLs stay intact:
+  non-guest forget can authorize cross-context contributions through membership
+  in all governing groups; it is not artificially restricted to this context.
+- **#88:** default incidental stdout/stderr/activity-log diagnostics carry
+  categories and byte counts. Native provider end states cannot print error
+  payloads; provider/serde/regex errors and command arguments are redacted at
+  logging sinks. Event tags never authorize their arbitrary detail strings.
+  `ADAPSIS_LOG_CONTENT=1` restores debug content. Rich caller/UI results remain;
+  provider-error apologies omit raw diagnostics. Tests capture actual production
+  paths in child processes with immutable policies, not shared flag overrides.
+  Explicit language print/CLI output and operational identifiers are outside
+  incidental-content redaction. `--training-log` is deliberately **default-on**
+  at `training.jsonl` and content-bearing; its behavior is unchanged.
+- **#89 (superseded, bounded scope):** native protocol is the default;
+  `--native-tools` remains accepted as a no-op, `--legacy-tools` opts out, and
+  legacy implementation is retained. Guest/execute-only turns remain whole-turn
+  legacy. A write-capable native turn has **no per-feature fallback** for
+  agents/plans/roadmap/opencode/mocks; unavailable features remain unavailable.
+- Runtime `Memory`/`MemFix` cleanup was completed and verified absent from the
+  saved session by the parent; it is not an outstanding local task.
+- **Main checkout #86 is a separate RED workstream**, per manager/reviewer
+  status. It is not in this release or its acceptance. Parent intends to commit
+  and deploy this independently reviewed branch before integrating #86.
+
+### Acceptance and exact verification
+
+- Final read-only Astra reviewer: `ses_e888436abffenlBGkG1Ek8bZHF`.
+  Final verdict **ACCEPTED**, no remaining release-blocking findings within the
+  reviewed #87/#88/#89 boundaries. Reviewer checked the new production-premise
+  canaries and accepted author build/test evidence; live/deploy gates remain
+  parent-owned. Writer session: `ses_e8aac711bffeXf5bq9NAdQrc8U`.
+- All builds/tests used `CARGO_TARGET_DIR=/tmp/opencode/target-wt87`, release-only.
+  Final gates: `cargo build --release`; `cargo test --release` **1609 passed,
+  2 ignored, 0 failed**, plus **5 integration passed**; `cargo test --release
+  native_` **102 passed**; `cargo test --release takeover_native` **13 passed**.
+  `cargo run --release -- memory-eval`: six cases, recall 1.0, all violation
+  counts zero, `passed=true`. All `examples/*.ax` passed (no FAILED output).
+  Python `basic.py`/`test_basic.py`: **2 passed**; `flow.py`/`test_flow.py`:
+  **7 passed**. `git diff --check` clean.
+- Complete final build/test/subset/memory-eval transcript:
+  `/home/marenz/.local/share/opencode/tool-output/tool_177db57c5001YVyg6259eWOxHS`.
+  Earlier full-suite transcript:
+  `/home/marenz/.local/share/opencode/tool-output/tool_177d7a0b8001bH8hXHPPntx7oQ`.
+  Example/Python command output is retained in the writer session; the exact
+  results above are its recovery summary, not a newly rerun test transcript.
+- Tested binary: `/tmp/opencode/target-wt87/release/adapsis`.
+  SHA-256: `9154f11f7360bf6a0de3c88c389e4d14a7cf4ae8ed1d9424d158e9fe7a4d2ec1`.
+  Package version remains `0.1.0`. No Git SHA/date/dirty stamp mechanism was
+  found in crate source/build configuration. `build.rs` only emits OpenSSL
+  link directives; commit alone does not stamp or change this existing binary.
+  Cargo may rerun that build script after package-file changes (it has no
+  explicit rerun-if inputs), but neither ROADMAP nor AGENTS text is compiled
+  into this binary. No build/test rerun was needed for this docs-only handoff.
+  If the parent rebuilds, re-hash that resulting artifact rather than assuming
+  reproducible bytes across a changed environment.
+
+### Read-only creative deployment preflight — INCOMPLETE (sanitized inputs)
+
+- Ran `python3 tools/check_guest_creative_config.py config/guest-creative.toml
+  /home/marenz/.config/adapsis/permissions.toml`. Exit **1**:
+  `live config is missing principals.telegram:user:100000101`.
+  **This is the sanitized repository's GuestUser placeholder, not an identified
+  real Telegram user.** The literal example-to-live mismatch does not establish
+  that the real deployed permissions are wrong. A reviewed mapping to intended
+  live deployment inputs is needed before this check can certify them.
+- Required comparison `cmp contexts/telegram_user_100000101.md
+  /home/marenz/.config/adapsis/contexts/telegram_user_100000101.md` could not run:
+  the **reviewed worktree context file is absent** (ignored/local-only input).
+  No replacement was manufactured and no live input was overwritten.
+- These checks do not certify the real deployment inputs. Parent must resolve
+  the intended reviewed inputs before a creative-profile deployment. This inspection
+  used deployment configuration only, not any other user's chats or memory.
+
+### Intended commit manifest (parent only; nothing committed here)
+
+The following list includes all source/docs changes and all new test files;
+exclude unrelated main-checkout #86 work:
+
+```text
+AGENTS.md
+ROADMAP.md
+src/api/execute.rs
+src/api/execution_logging_tests.rs        (new, untracked)
+src/api/llm_handlers.rs
+src/api/logging_gate_tests.rs             (new, untracked)
+src/api/mod.rs
+src/api/native_tools.rs
+src/api/native_tools/tests.rs
+src/api/native_turn.rs
+src/api/takeover_logging_tests.rs         (new, untracked)
+src/api/takeover_native.rs
+src/api/takeover_native_tests.rs
+src/api/tests.rs
+src/capabilities/cad.rs
+src/capabilities/music.rs
+src/capabilities/video.rs
+src/context_prompt.rs
+src/coroutine/mod.rs
+src/library.rs
+src/llm.rs
+src/llm/logging_tests.rs                  (new, untracked)
+src/logging.rs                           (new)
+src/main.rs
+src/memory_graph/inspect.rs
+src/parser.rs
+src/prompt/native.rs
+```
+
+## Historical checkpoint — native tools for takeover conversations (#85)
+
+The following #85 checkpoint is historical; #85 is now the worktree baseline
+`6685599`. Current release status and protocol default are recorded above.
 
 Owner request 2026-10-25: "switch everything" to native/Python. Issue:
 https://github.com/Marenz/adapsis/issues/85. Phase: **implemented offline, all

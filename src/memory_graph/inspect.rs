@@ -315,7 +315,7 @@ impl MemoryGraph {
                 })
             }
             Err(error) => {
-                eprintln!("memory inspection semantic search failed: {error:#}");
+                crate::logging::diagnostic("memory-semantic-search-error", format_args!("{error:#}"));
                 self.inspect_lexical(
                     principal_id,
                     context_id,

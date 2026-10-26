@@ -421,7 +421,7 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
         }
         Err(e) => {
             let msg = format!("could not create library dir: {e}");
-            eprintln!("[library] init: ERROR — {msg}");
+            crate::logging::diagnostic("library-init-error", &msg);
             state.record_error(msg);
             return state;
         }
@@ -449,7 +449,7 @@ fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut Library
             .collect(),
         Err(e) => {
             let msg = format!("could not read library dir {}: {e}", dir.display());
-            eprintln!("[library] warning: {msg}");
+            crate::logging::diagnostic("library-read-error", &msg);
             state.record_error(msg);
             return;
         }
@@ -480,7 +480,7 @@ fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut Library
                     Err(e) => {
                         let err_msg = format!("{e}");
                         let msg = format!("failed to load {}: {e}", path.display());
-                        eprintln!("[library] warning: {msg}");
+                        crate::logging::diagnostic("library-load-error", &msg);
                         state.record_error(msg);
                         state.record_load_error(file_module_name, err_msg);
                     }
@@ -489,7 +489,7 @@ fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut Library
             Err(e) => {
                 let err_msg = format!("could not read file: {e}");
                 let msg = format!("could not read {}: {e}", path.display());
-                eprintln!("[library] warning: {msg}");
+                crate::logging::diagnostic("library-read-error", &msg);
                 state.record_error(msg);
                 state.record_load_error(file_module_name, err_msg);
             }
@@ -846,7 +846,7 @@ fn record_reload_error(
     module_name: &str,
     error: &anyhow::Error,
 ) {
-    eprintln!("[library] reload failed for `{module_name}`: {error}");
+    crate::logging::diagnostic("library-reload-error", format_args!("{module_name}: {error}"));
     if let Some(state) = lib_state {
         state.record_load_error(module_name.to_string(), error.to_string());
     }
@@ -892,7 +892,7 @@ pub fn persist_affected_modules(
                          (the in-memory definition is live; do not re-apply the mutation, \
                          reconcile with the file instead)"
                     );
-                    eprintln!("[library] warning: {msg}");
+                    crate::logging::diagnostic("library-save-error", &msg);
                     if let Some(state) = lib_state {
                         state.record_error(msg.clone());
                     }

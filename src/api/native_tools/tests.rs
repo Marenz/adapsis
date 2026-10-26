@@ -153,6 +153,107 @@ fn tool_definitions_are_complete_and_closed() {
     }
 }
 
+// ── Memory tools: advertising, fail-closed dispatch (#87) ─────────────────
+
+#[test]
+fn memory_tool_schemas_present_only_with_a_turn_identity() {
+    let no_turn = config_for("writer", AccessLevel::Full, perm_config(), Program::default());
+    let names: Vec<String> = tool_definitions(&no_turn)
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    assert_eq!(names, ["inspect", "mutate", "test", "evaluate", "finish"]);
+
+    let mut with_turn = no_turn;
+    with_turn.turn = Some(TurnIdentity {
+        context: "telegram:100000001".into(),
+        principal: "telegram:user:100000001".into(),
+        may_write: true,
+        guest_tools: None,
+    });
+    let names: Vec<String> = tool_definitions(&with_turn)
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "inspect",
+            "mutate",
+            "test",
+            "evaluate",
+            "finish",
+            "memory_inspect",
+            "memory_remember",
+            "memory_correct",
+            "memory_forget",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn memory_tools_fail_closed_without_a_turn_identity() {
+    let cfg = config_for("writer", AccessLevel::Full, perm_config(), Program::default());
+    let mut session = cfg.snapshot_working_set().await;
+    let baseline = cfg.program.read().await.clone();
+    for (tool, args) in [
+        ("memory_inspect", r#"{}"#),
+        ("memory_remember", r#"{"content":"note"}"#),
+        ("memory_correct", r#"{"old_id":"memory:a","replacement":"b"}"#),
+        ("memory_forget", r#"{"id":"memory:a"}"#),
+    ] {
+        let res = execute_native_tool(tool, args, &cfg, &mut session, &baseline).await;
+        assert!(res.execution.has_errors, "{tool} accepted without a turn");
+        assert!(
+            res.content.contains("turn identity is in scope"),
+            "{tool}: {content}",
+            content = res.content
+        );
+    }
+}
+
+#[tokio::test]
+async fn memory_tools_denied_for_non_write_turn() {
+    let mut cfg = config_for("writer", AccessLevel::Full, perm_config(), Program::default());
+    cfg.turn = Some(TurnIdentity {
+        context: "telegram:group:-1".into(),
+        principal: "telegram:user:100000103".into(),
+        may_write: false,
+        guest_tools: None,
+    });
+    let mut session = cfg.snapshot_working_set().await;
+    let baseline = cfg.program.read().await.clone();
+    // A non-write speaker cannot reach any native tool, including a global
+    // memory_remember — the surface gate refuses it before the builtin runs.
+    let res = execute_native_tool(
+        "memory_remember",
+        r#"{"content":"note","scope":"global"}"#,
+        &cfg,
+        &mut session,
+        &baseline,
+    )
+    .await;
+    assert!(res.execution.has_errors);
+    assert!(res.content.contains("not write-capable"), "{}", res.content);
+}
+
+#[test]
+fn memory_tools_reject_identity_arguments() {
+    // Context, speaker and authority are bound to the turn identity; a model
+    // must not be able to name them. Any such field is rejected by the closed
+    // schema (canary: the caller cannot smuggle a principal/context through).
+    for (tool, args) in [
+        ("memory_inspect", r#"{"query":"topic","context":"telegram:group:-1"}"#),
+        ("memory_remember", r#"{"content":"note","principal":"telegram:user:1"}"#),
+        ("memory_correct", r#"{"old_id":"memory:a","replacement":"b","may_write":true}"#),
+        ("memory_forget", r#"{"id":"memory:a","context":"telegram:group:-1"}"#),
+    ] {
+        let err = validate_native_tool(tool, args)
+            .expect_err(&format!("{tool} must reject the identity argument"));
+        assert!(err.contains("unexpected field"), "{tool}: {err}");
+    }
+}
+
 #[test]
 fn validate_rejects_extra_fields() {
     assert!(validate_native_tool("finish", r#"{"x": 1}"#).is_err());

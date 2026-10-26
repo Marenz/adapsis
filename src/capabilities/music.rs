@@ -14,7 +14,7 @@ pub(super) fn start(context: String, caption: String, duration: i64, lyrics: Str
         let (message, attachment) = match result {
             Ok(audio) => ("Your generated song is ready.".to_string(), Some(audio)),
             Err(error) => {
-                eprintln!("[music:{context}] generation failed: {error:#}");
+                crate::logging::diagnostic("music-generation-error", format_args!("{error:#}"));
                 ("Music generation failed; no song was produced. Please try again later.".into(), None)
             }
         };
@@ -22,7 +22,7 @@ pub(super) fn start(context: String, caption: String, duration: i64, lyrics: Str
         if sender.send(IoRequest::ConversationNotify { context: context.clone(), message, attachment, reply: tx }).await.is_ok() {
             match rx.await {
                 Ok(Ok(_)) => eprintln!("[music:{context}] notification dispatched"),
-                error => eprintln!("[music:{context}] notification failed: {error:?}"),
+                error => crate::logging::diagnostic("music-notification-error", format_args!("{error:?}")),
             }
         }
     });

@@ -522,7 +522,7 @@ impl Runtime {
                 // Enforce the shell policy at the single choke point that
                 // actually spawns a process. Refusals never run `sh`.
                 if let Err(reason) = self.shell_policy.check(&command) {
-                    eprintln!("[shell_policy] refused: {reason} (command: {command:?})");
+                    crate::logging::diagnostic("shell-policy-refused", format_args!("{reason} (command: {command:?})"));
                     let _ = reply.send(Err(anyhow::anyhow!(
                         "shell_exec refused: {reason}"
                     )));
@@ -573,7 +573,7 @@ impl Runtime {
                         .unwrap_or_default()
                 });
                 let args: Vec<String> = std::env::args().collect();
-                eprintln!("AdapsisOS restarting: {} {}", exe.display(), args[1..].join(" "));
+                crate::logging::diagnostic("restart", format_args!("{} {}", exe.display(), args[1..].join(" ")));
                 let err = exec::execvp(&exe, &args);
                 eprintln!("restart failed: {err}");
             }
@@ -1625,12 +1625,16 @@ impl CoroutineHandle {
                     ) {
                         Ok(val) => {
                             let msg = format!("{}.startup -> {}", module_name, val);
-                            eprintln!("[run_module_startups] {}", msg);
+                            if crate::logging::content() {
+                                eprintln!("[run_module_startups] {}", msg);
+                            } else {
+                                eprintln!("[run_module_startups] {}.startup completed", module_name);
+                            }
                             results.push(msg);
                         }
                         Err(e) => {
                             let msg = format!("{}.startup error: {}", module_name, e);
-                            eprintln!("[run_module_startups] {}", msg);
+                            crate::logging::diagnostic("module-startup-error", &msg);
                             results.push(msg);
                         }
                     }

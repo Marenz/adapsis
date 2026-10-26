@@ -12,6 +12,7 @@ mod coroutine;
 mod eval;
 mod events;
 pub mod intern;
+mod logging;
 mod permissions;
 mod capabilities;
 pub mod library;
@@ -110,7 +111,7 @@ async fn dispatch_optional_conversation_callback(
     };
     let (function_name, args) = if let Some(attachment) = attachment {
         let function_name = format!("{function_name}_with_attachment");
-        eprintln!("[conversation_notify:{context}] delivering with attachment via {function_name}({argument})");
+        crate::logging::diagnostic("callback-attachment", format_args!("{context}: {function_name}({argument})"));
         (
             function_name,
             vec![
@@ -120,7 +121,7 @@ async fn dispatch_optional_conversation_callback(
             ],
         )
     } else {
-        eprintln!("[conversation_notify:{context}] delivering text via {function_name}({argument})");
+        crate::logging::diagnostic("callback-text", format_args!("{context}: {function_name}({argument})"));
         (
             function_name,
             vec![eval::Value::string(argument), eval::Value::string(message)],
@@ -160,7 +161,7 @@ async fn monitor_spawned_task(
 ) {
     if let Err(error) = task.await {
         let detail = if error.is_panic() { "panicked" } else { "was cancelled" };
-        eprintln!("spawn {function_name} {detail}: {error}");
+        crate::logging::diagnostic("spawn-error", format_args!("{function_name} {detail}: {error}"));
         if let Ok(mut tasks) = registry.lock()
             && let Some(info) = tasks.get_mut(&task_id)
         {
@@ -745,9 +746,15 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
 
-        /// Native tools for write-capable HTTP ask/ask-stream turns (Telegram stays legacy)
+        /// Native tools are the default conversation protocol (#89). This flag
+        /// is accepted for backwards compatibility with existing unit files but
+        /// has no effect.
         #[arg(long)]
         native_tools: bool,
+
+        /// Opt out of native tools, restoring the legacy <code> protocol.
+        #[arg(long)]
+        legacy_tools: bool,
 
         /// Process-level access cap: full, adapsis-only, user-only, execute-only.
         /// Defaults to adapsis-only so !opencode (which rebuilds and re-execs the
@@ -911,7 +918,7 @@ enum Command {
 async fn main() -> Result<()> {
     // Ensure panics in any thread are logged to stderr
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("[PANIC] {info}");
+        crate::logging::diagnostic("panic", info);
         let bt = std::backtrace::Backtrace::force_capture();
         eprintln!("{bt}");
     }));
@@ -1375,7 +1382,7 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("spawn {function_name}: {e}");
+                                        crate::logging::diagnostic("spawn-error", &e);
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
                                                 info.status = coroutine::WaitReason::Failed(format!("{e}"));
@@ -1434,8 +1441,14 @@ async fn main() -> Result<()> {
                                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                                 env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_name)));
                                                 match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
-                                                    Ok(val) => eprintln!("[timer:{}] {} -> {}", alias, handler_name, val),
-                                                    Err(e) => eprintln!("[timer:{}] {} error: {}", alias, handler_name, e),
+                                                    Ok(val) => {
+                                                        if crate::logging::content() {
+                                                            eprintln!("[timer:{}] {} -> {}", alias, handler_name, val);
+                                                        } else {
+                                                            eprintln!("[timer:{}] {} completed", alias, handler_name);
+                                                        }
+                                                    }
+                                                    Err(e) => crate::logging::diagnostic("timer-error", &e),
                                                 }
                                             });
                                         }
@@ -1559,7 +1572,13 @@ async fn main() -> Result<()> {
         Command::Tui { api } => {
             tui::run(&api).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, native_tools, access_level, permissions_file, admin_id, host } => {
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, native_tools: _native_tools, legacy_tools, access_level, permissions_file, admin_id, host } => {
+            // Native tools are the default (#89). `--legacy-tools` opts back to
+            // the legacy <code> protocol; `--native-tools` is a no-op for
+            // compatibility with existing unit files. Turns the native protocol
+            // cannot serve (guests, execute-only speakers) still fall back to
+            // legacy automatically, unchanged.
+            let native_tools = !legacy_tools;
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -1614,7 +1633,7 @@ async fn main() -> Result<()> {
             let pending_routes: Vec<_> = sess.program.pending_routes.drain(..).collect();
             for route in pending_routes {
                 let msg = sess.add_route(route);
-                eprintln!("[library] {msg}");
+                crate::logging::diagnostic("library-error", &msg);
             }
             eprintln!("[library] http_routes after drain: {:?}", sess.runtime.http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
             sess.meta.library_state = Some(lib_state);
@@ -1785,7 +1804,7 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("spawn {function_name}: {e}");
+                                        crate::logging::diagnostic("spawn-error", &e);
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
                                                 info.status = coroutine::WaitReason::Failed(format!("{e}"));
@@ -1852,10 +1871,14 @@ async fn main() -> Result<()> {
                                                 env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_for_tick)));
                                                 match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
                                                     Ok(val) => {
-                                                        eprintln!("[timer:{}] {} -> {}", alias_for_tick, handler_name, val);
+                                                        if crate::logging::content() {
+                                                            eprintln!("[timer:{}] {} -> {}", alias_for_tick, handler_name, val);
+                                                        } else {
+                                                            eprintln!("[timer:{}] {} completed", alias_for_tick, handler_name);
+                                                        }
                                                     }
                                                     Err(e) => {
-                                                        eprintln!("[timer:{}] {} error: {}", alias_for_tick, handler_name, e);
+                                                        crate::logging::diagnostic("timer-error", &e);
                                                     }
                                                 }
                                             });
@@ -1972,9 +1995,7 @@ async fn main() -> Result<()> {
                                     match embedder.embed_query(&query) {
                                         Ok(embedding) => Some(embedding),
                                         Err(error) => {
-                                            eprintln!(
-                                                "[memory:{context_id}] inspection embedding unavailable; using lexical fallback: {error:#}"
-                                            );
+                                            crate::logging::diagnostic("memory-embedding-unavailable", format_args!("{error:#}"));
                                             None
                                         }
                                     }
@@ -2072,7 +2093,11 @@ async fn main() -> Result<()> {
                                     Ok(resp) => {
                                         let status = resp.status();
                                         let body = resp.text().await.unwrap_or_default();
-                                        eprintln!("[llm_set_model] model '{test_name}' failed: {status} {body}");
+                                        if crate::logging::content() {
+                                            eprintln!("[llm_set_model] model '{test_name}' failed: {status} {body}");
+                                        } else {
+                                            eprintln!("[llm_set_model] model '{test_name}' failed: {status} ({} byte body)", body.len());
+                                        }
                                         let _ = reply.send(Err(anyhow::anyhow!(
                                             "model '{test_name}' failed to load: {status}. Staying on '{old_model}'"
                                         )));
@@ -2114,7 +2139,7 @@ async fn main() -> Result<()> {
                                 )
                                 .await;
                                 if let Err(error) = &result {
-                                    eprintln!("[conversation_notify:{context}] delivery failed: {error:#}");
+                                    crate::logging::diagnostic("conversation-delivery-error", format_args!("{error:#}"));
                                 }
                                 let _ = reply.send(result);
                             });
@@ -2159,8 +2184,14 @@ async fn main() -> Result<()> {
                         env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                         env.set("__module_name", eval::Value::String(std::sync::Arc::new(mod_name.clone())));
                         match eval::eval_function_body_named(&prog, &format!("{}.startup", mod_name), &startup_fn.body, &mut env) {
-                            Ok(val) => eprintln!("[startup] {}.startup -> {}", mod_name, val),
-                            Err(e) => eprintln!("[startup] {}.startup error: {}", mod_name, e),
+                            Ok(val) => {
+                                if crate::logging::content() {
+                                    eprintln!("[startup] {}.startup -> {}", mod_name, val);
+                                } else {
+                                    eprintln!("[startup] {}.startup completed", mod_name);
+                                }
+                            }
+                            Err(e) => crate::logging::diagnostic("startup-error", &e),
                         }
                     });
                 }
@@ -2183,9 +2214,9 @@ async fn main() -> Result<()> {
                         } else {
                             format!("{}.{}", module_name, src.handler)
                         };
-                        eprintln!("[startup] registering source {}.{} ({} {})",
+                        crate::logging::diagnostic("startup-source", format_args!("registering source {}.{} ({} {})",
                             module_name, src.name, src.source_type,
-                            src.config.iter().map(|(k,v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" "));
+                            src.config.iter().map(|(k,v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" ")));
                         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                         let _ = io_sender_for_startup.send(
                             coroutine::IoRequest::SourceAdd {
@@ -2198,8 +2229,14 @@ async fn main() -> Result<()> {
                             }
                         ).await;
                         match reply_rx.await {
-                            Ok(Ok(msg)) => eprintln!("[startup] source {}.{}: {}", module_name, src.name, msg),
-                            Ok(Err(e)) => eprintln!("[startup] source {}.{} error: {}", module_name, src.name, e),
+                            Ok(Ok(msg)) => {
+                                if crate::logging::content() {
+                                    eprintln!("[startup] source {}.{}: {}", module_name, src.name, msg);
+                                } else {
+                                    eprintln!("[startup] source {}.{} registered", module_name, src.name);
+                                }
+                            }
+                            Ok(Err(e)) => crate::logging::diagnostic("startup-source-error", &e),
                             Err(_) => eprintln!("[startup] source {}.{}: reply channel closed", module_name, src.name),
                         }
                     }
@@ -2528,7 +2565,9 @@ async fn main() -> Result<()> {
             let trigger_key = api_key.clone();
             tokio::spawn(async move {
                 while let Some(event_message) = trigger_rx.recv().await {
-                    eprintln!("[self-trigger] {}", event_message.chars().take(80).collect::<String>());
+                    if crate::logging::content() {
+                        eprintln!("[self-trigger] {}", event_message.chars().take(80).collect::<String>());
+                    }
                     let llm = llm::LlmClient::new_with_model_and_key(&trigger_url, &trigger_model, trigger_key.clone());
 
                     // Add event as tool message — AI decides whether to act
@@ -2547,7 +2586,9 @@ async fn main() -> Result<()> {
                     match llm.generate(messages).await {
                         Ok(output) => {
                             let code = output.code.clone();
-                            eprintln!("[self-trigger:response] {}...", output.text.chars().take(100).collect::<String>());
+                            if crate::logging::content() {
+                                eprintln!("[self-trigger:response] {}...", output.text.chars().take(100).collect::<String>());
+                            }
 
                             // Apply code if any
                             if !code.is_empty() && code.trim() != "DONE" {
@@ -2570,7 +2611,9 @@ async fn main() -> Result<()> {
                                     }
                                     if let Ok(results) = crate::session::apply_to_tiers(&mut program, &mut runtime, &mut meta, &mut sandbox, &code) {
                                         for (msg, ok) in &results {
-                                            eprintln!("[self-trigger:{}] {msg}", if *ok { "ok" } else { "err" });
+                                            if crate::logging::content() {
+                                                eprintln!("[self-trigger:{}] {msg}", if *ok { "ok" } else { "err" });
+                                            }
                                         }
                                     }
                                 }
@@ -2591,7 +2634,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[self-trigger:error] {e}");
+                            crate::logging::diagnostic("self-trigger-error", &e);
                         }
                     }
                 }
@@ -2611,7 +2654,11 @@ async fn main() -> Result<()> {
                     } else {
                         goal
                     };
-                    eprintln!("[startup] injecting goal into 'main' context: {}...", msg.chars().take(80).collect::<String>());
+                    if crate::logging::content() {
+                        eprintln!("[startup] injecting goal into 'main' context: {}...", msg.chars().take(80).collect::<String>());
+                    } else {
+                        eprintln!("[startup] injecting goal into 'main' context");
+                    }
                     let _ = inject_sender.send(crate::coroutine::IoRequest::LlmTakeover {
                         context: "main".to_string(),
                         message: msg,
@@ -2740,4 +2787,41 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn native_tools_is_the_default_and_legacy_tools_opts_out() {
+        use clap::Parser;
+
+        // Default: no flag -> legacy_tools is false, i.e. native is the default.
+        let cli = Cli::try_parse_from(["adapsis", "os", "--model", "m"]).unwrap();
+        match cli.command {
+            Command::Os { legacy_tools, native_tools, .. } => {
+                assert!(!legacy_tools, "native tools must be the default (#89)");
+                assert!(!native_tools, "--native-tools flag itself is false by default");
+            }
+            _ => panic!("expected Os command"),
+        }
+
+        // --legacy-tools opts back out.
+        let cli = Cli::try_parse_from(["adapsis", "os", "--model", "m", "--legacy-tools"]).unwrap();
+        match cli.command {
+            Command::Os { legacy_tools, .. } => assert!(legacy_tools),
+            _ => panic!("expected Os command"),
+        }
+
+        // --native-tools remains accepted (no-op for compatibility).
+        let cli = Cli::try_parse_from(["adapsis", "os", "--model", "m", "--native-tools"]).unwrap();
+        match cli.command {
+            Command::Os { native_tools, legacy_tools, .. } => {
+                assert!(native_tools);
+                assert!(!legacy_tools);
+            }
+            _ => panic!("expected Os command"),
+        }
+    }
 }

@@ -8,6 +8,8 @@ use tower::ServiceExt as _; // for .oneshot()
 mod ask_completion_tests;
 #[path = "native_turn_tests.rs"]
 mod native_turn_tests;
+#[path = "execution_logging_tests.rs"]
+mod execution_logging_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {
