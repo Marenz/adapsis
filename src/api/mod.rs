@@ -141,9 +141,9 @@ pub struct AppConfig {
     pub message_queue: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     /// Maximum iterations per AI request
     pub max_iterations: usize,
-    /// Native tool protocol for eligible HTTP ask/ask-stream turns (the default
-    /// since #89; `--legacy-tools` sets it false). Guests and execute-only turns
-    /// still fall back to the legacy protocol.
+    /// Opt-in native tool protocol for eligible HTTP/takeover turns. Legacy is
+    /// default pending capability parity (#89); explicit --legacy-tools wins
+    /// over --native-tools. Ineligible turns retain whole-turn legacy routing.
     pub native_tools: bool,
     /// JSONL training data log — one entry per iteration with input/output/outcome
     pub training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,

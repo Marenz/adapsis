@@ -1,6 +1,84 @@
 # AdapsisOS Roadmap
 
-## Release handoff — native memory, metadata-only logging, default protocol (#87/#88/#89)
+## Current release candidate — #87/#88 + TUI, native still opt-in (#89 parity gate)
+
+2026-10-26 superseding owner decision: **conversation capability parity and
+independent review are required before native becomes the default.** Retain
+legacy and the guarded external `!opencode` integration (process/model gates,
+external runner boundary). Native schemas do not replace OpenCode's development
+environment. No deployment or production self-modification was authorized here.
+
+- Parent committed the accepted #87/#88 manifest as `5445a76`, then cherry-picked
+  the independently reviewed three-file TUI change as `1d700fe` on this worktree.
+  Both commits are local; the candidate is **NOT DEPLOYED**. Main #86 remains a
+  separate RED workstream and is not included.
+- A new, **uncommitted correction** above `1d700fe` reverses only the default
+  flip: no flags means legacy; `--native-tools` actively opts eligible turns in;
+  `--legacy-tools` explicitly forces legacy and takes precedence in either flag
+  order. The production resolver is exercised by the CLI test. Ineligible turns
+  remain whole-turn legacy; native has no per-feature fallback. Native memory,
+  privacy logging, TUI, and existing guarded legacy `!opencode` are unchanged.
+- Correction manifest: `src/main.rs` (flag help, production boolean resolver,
+  CLI test), `src/api/mod.rs` (field documentation), `AGENTS.md`, `ROADMAP.md`.
+  No source drift outside that list; no permission/context edits, installs,
+  restarts, service operations or writer commits. Parent will create a new
+  correction commit, never amend the accepted commits.
+- Prior source acceptance remains recorded below: Astra
+  `ses_e888436abffenlBGkG1Ek8bZHF` accepted #87/#88; parent reports the TUI delta
+  independently accepted twice. This opt-in correction is queued for a bounded
+  read-only re-review; source acceptance does not itself authorize deployment.
+
+### Corrected combined verification and artifact
+
+All commands used `CARGO_TARGET_DIR=/tmp/opencode/target-wt87`, never the main
+checkout target. `cargo build --release` passed; `cargo test --release cli_tests`
+**1 passed**; full `cargo test --release` **1628 unit passed, 2 ignored**, plus
+**5 integration passed**; `cargo test --release tui` **32 passed**;
+`cargo test --release native_` **102 passed**; `cargo test --release
+takeover_native` **13 passed**. `memory-eval`: six cases, recall 1.0, all violation
+counts zero, `passed=true`. All `.ax` examples passed; Python basic **2/2**, flow
+**7/7**. `git diff --check` clean.
+
+- Corrected build/CLI/full/focused/memory-eval transcript:
+  `/home/marenz/.local/share/opencode/tool-output/tool_17806241b001R93vnr32NozDUr`.
+- Earlier combined verification at committed `1d700fe` (before the superseding
+  opt-in correction) also passed; transcript:
+  `/home/marenz/.local/share/opencode/tool-output/tool_177fe35b0001P2Gc0LnPx4xGtN`.
+- Final corrected binary: `/tmp/opencode/target-wt87/release/adapsis`.
+  SHA-256: `d025fddeb021ea430c46e97313926b59fc20da008c56ecce02f77bd141fe82f7`.
+  This is built from `1d700fe` plus the uncommitted opt-in correction. No Git/date
+  stamp exists; commit alone does not alter the tested artifact. Rehash if the
+  parent rebuilds. ROADMAP is not compiled into it.
+
+### Actual creative deployment-input audit — still requires operator resolution
+
+Read-only audit compared deployment TOML and directly corresponding context
+files only. No personal names/IDs/contents were emitted, and no chats or memory
+were accessed. The sanitized public placeholder is not treated as a real user.
+
+- One actual principal maps to the creative profile. The live tool allowlist and
+  reviewed model-profile fields match the public reviewed fragment exactly.
+- That principal's deployed context exists. A main-checkout **ignored local
+  reference also exists and is byte-identical**; the worktree has no copy. The
+  real local reference is not Git-tracked, so equality alone does **not** prove
+  its review provenance or approve the actual principal mapping.
+- Content/path hashes and the alias-only comparison were reported privately to
+  the manager. Reproducible read-only audit script:
+  `/tmp/opencode/wt87-creative-preflight.py`. It creates no approval baseline.
+- **Smallest resolution:** operator/reviewer confirms that the existing actual
+  principal-to-creative mapping and that exact ignored local context (identified
+  by the reported hashes) are the intended reviewed deployment inputs. Then
+  revalidate equality and the service's actual configured permissions path
+  before parent-authorized deployment. No permission rewrite or fabricated
+  context file is needed merely to make the sanitized example checker pass.
+  Until that review confirmation, the creative deployment gate remains
+  **INCOMPLETE / release-blocking**, not a claim that the live config is wrong.
+
+## Historical pre-commit handoff — #87/#88/#89 (default-flip scope superseded)
+
+The checkpoint below records the earlier accepted implementation. Parent has
+since committed it as `5445a76`; its default-flip decision and artifact/status
+are superseded by the current opt-in correction and combined evidence above.
 
 Recovery checkpoint 2026-10-26. Sole writer worktree:
 `/home/marenz/Projects/adapsis-wt87`, branch `work/issue-87-88`, based on

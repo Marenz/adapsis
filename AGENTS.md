@@ -448,12 +448,17 @@ replaces that branch with one composer.
   widening is not.
 
 ## Conversation System (llm_takeover)
-- **Native tools are the default protocol (#89).** Write-capable, non-guest
-  `/api/ask`, `/api/ask-stream` and `llm_takeover` turns use the native protocol
-  by default. `--legacy-tools` restores the legacy `<code>` protocol;
-  `--native-tools` is accepted as a no-op for compatibility with existing unit
-  files. Turns the native protocol cannot serve (guests, execute-only speakers)
-  still fall back to legacy automatically — legacy code is retained, not deleted.
+- **Native tools remain opt-in pending parity (#89).** `--native-tools` enables
+  the native protocol for eligible write-capable, non-guest `/api/ask`,
+  `/api/ask-stream` and `llm_takeover` turns. With no flag, legacy remains the
+  default. `--legacy-tools` explicitly forces legacy and wins if both flags are
+  supplied, regardless of order. Guests/execute-only speakers retain whole-turn
+  legacy routing. Native turns do not have per-feature fallback for unavailable
+  operations. The owner's superseding gate requires executable conversation
+  capability parity and independent review before changing the default. Preserve
+  legacy code and the guarded external `!opencode` integration (process/model
+  gates and runner boundary); native schemas do not replace that development
+  environment. Memory/logging/TUI fixes can ship independently under opt-in.
   `api/native_turn.rs` owns the shared HTTP loop; `api/native_tools.rs` validates
   arguments and permissions over the existing executor. The initial surface is
   inspect (symbols/source/deps/tasks/library), mutate (explicit module/function/
@@ -487,7 +492,7 @@ replaces that branch with one composer.
   semantics, so a corrected error can coexist with `completed: true`.
   The main conversation's permission profile intersects the active model per
   group in a pinned turn snapshot; an override can only narrow execution.
-- **Native takeover turns (#85).** With the native protocol (default; see above),
+- **Native takeover turns (#85).** With the native protocol opted in (see above),
   `handle_llm_takeover`
   (Telegram DMs/groups) uses the native protocol when the speaker's pinned snapshot
   `native_turn::permission_snapshot_for(tmp_config, context)` (active/effective

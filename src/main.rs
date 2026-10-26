@@ -746,13 +746,12 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         max_iterations: usize,
 
-        /// Native tools are the default conversation protocol (#89). This flag
-        /// is accepted for backwards compatibility with existing unit files but
-        /// has no effect.
+        /// Opt into native tools for eligible write-capable, non-guest turns.
+        /// Legacy remains the default until conversation capability parity (#89).
         #[arg(long)]
         native_tools: bool,
 
-        /// Opt out of native tools, restoring the legacy <code> protocol.
+        /// Force the legacy <code> protocol, even if --native-tools is supplied.
         #[arg(long)]
         legacy_tools: bool,
 
@@ -912,6 +911,10 @@ enum Command {
         #[arg(long)]
         report: Option<std::path::PathBuf>,
     },
+}
+
+fn native_protocol_enabled(native_tools: bool, legacy_tools: bool) -> bool {
+    native_tools && !legacy_tools
 }
 
 #[tokio::main]
@@ -1572,13 +1575,11 @@ async fn main() -> Result<()> {
         Command::Tui { api } => {
             tui::run(&api).await?;
         }
-        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, native_tools: _native_tools, legacy_tools, access_level, permissions_file, admin_id, host } => {
-            // Native tools are the default (#89). `--legacy-tools` opts back to
-            // the legacy <code> protocol; `--native-tools` is a no-op for
-            // compatibility with existing unit files. Turns the native protocol
-            // cannot serve (guests, execute-only speakers) still fall back to
-            // legacy automatically, unchanged.
-            let native_tools = !legacy_tools;
+        Command::Os { port, session, url, model, api_key, daemonize, autonomous, log_file, training_log, opencode_git_dir, opencode_attach, max_iterations, native_tools, legacy_tools, access_level, permissions_file, admin_id, host } => {
+            // Owner gate (#89): native must reach conversation capability parity
+            // before becoming default. Explicit legacy always wins if both flags
+            // are supplied. Ineligible turns retain whole-turn legacy routing.
+            let native_tools = native_protocol_enabled(native_tools, legacy_tools);
             // Resolve session path: plain names go to ~/.config/adapsis/sessions/,
             // absolute paths or paths with directory separators are used as-is.
             let session = if std::path::Path::new(&session).is_absolute() || session.contains('/') || session.contains('\\') {
@@ -2794,15 +2795,14 @@ mod cli_tests {
     use super::*;
 
     #[test]
-    fn native_tools_is_the_default_and_legacy_tools_opts_out() {
+    fn native_tools_is_opt_in_and_explicit_legacy_takes_precedence() {
         use clap::Parser;
 
-        // Default: no flag -> legacy_tools is false, i.e. native is the default.
+        // The same resolver is used by the production Os startup path.
         let cli = Cli::try_parse_from(["adapsis", "os", "--model", "m"]).unwrap();
         match cli.command {
             Command::Os { legacy_tools, native_tools, .. } => {
-                assert!(!legacy_tools, "native tools must be the default (#89)");
-                assert!(!native_tools, "--native-tools flag itself is false by default");
+                assert!(!native_protocol_enabled(native_tools, legacy_tools));
             }
             _ => panic!("expected Os command"),
         }
@@ -2810,18 +2810,25 @@ mod cli_tests {
         // --legacy-tools opts back out.
         let cli = Cli::try_parse_from(["adapsis", "os", "--model", "m", "--legacy-tools"]).unwrap();
         match cli.command {
-            Command::Os { legacy_tools, .. } => assert!(legacy_tools),
+            Command::Os { native_tools, legacy_tools, .. } => {
+                assert!(legacy_tools);
+                assert!(!native_protocol_enabled(native_tools, legacy_tools));
+            }
             _ => panic!("expected Os command"),
         }
 
-        // --native-tools remains accepted (no-op for compatibility).
+        // Existing unit files explicitly opting in keep that behavior.
         let cli = Cli::try_parse_from(["adapsis", "os", "--model", "m", "--native-tools"]).unwrap();
         match cli.command {
             Command::Os { native_tools, legacy_tools, .. } => {
-                assert!(native_tools);
-                assert!(!legacy_tools);
+                assert!(native_protocol_enabled(native_tools, legacy_tools));
             }
             _ => panic!("expected Os command"),
+        }
+        for flags in [["--native-tools", "--legacy-tools"], ["--legacy-tools", "--native-tools"]] {
+            let cli = Cli::try_parse_from(["adapsis", "os", "--model", "m", flags[0], flags[1]]).unwrap();
+            let Command::Os { native_tools, legacy_tools, .. } = cli.command else { panic!("expected Os"); };
+            assert!(!native_protocol_enabled(native_tools, legacy_tools));
         }
     }
 }
