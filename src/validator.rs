@@ -931,7 +931,7 @@ fn struct_field_names_in_types(
 
 // --- Conversion from parser types to AST types ---
 
-fn convert_type_decl(decl: &parser::TypeDecl) -> Result<ast::TypeDecl> {
+pub fn convert_type_decl(decl: &parser::TypeDecl) -> Result<ast::TypeDecl> {
     match &decl.body {
         parser::TypeBody::Struct(fields) => {
             let mut ast_fields = vec![];
@@ -1625,6 +1625,21 @@ fn resolve_union_types_in_stmts(
             _ => {}
         }
     }
+}
+
+/// Public entry point for the Python printer: resolve union type references in a
+/// reconstructed statement list so the roundtrip comparison sees `TaggedUnion`
+/// names exactly as the live program does.
+pub fn resolve_union_types_in_statement_list(
+    stmts: &mut [ast::Statement],
+    union_names: &std::collections::HashSet<String>,
+) {
+    resolve_union_types_in_stmts(stmts, union_names);
+}
+
+/// Collect the set of declared union type names from the program.
+pub fn union_type_names(program: &ast::Program) -> std::collections::HashSet<String> {
+    collect_union_names(program)
 }
 
 /// Generate a summary of the current program state for injection into the LLM context.

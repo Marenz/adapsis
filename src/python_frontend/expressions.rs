@@ -1,3 +1,4 @@
+use super::call_sites::{self, Effects, Site, Target, UserSignature};
 use super::{Context, Diagnostic};
 use crate::parser as p;
 use rustpython_parser::ast as py;
@@ -9,33 +10,48 @@ pub(super) enum Ty {
     Float,
     Bool,
     Str,
+    Byte,
     List(Box<Ty>),
+    Map(Box<Ty>, Box<Ty>),
+    Set(Box<Ty>),
+    Option(Box<Ty>),
     Result(Box<Ty>),
+    /// Named struct/union identity, owner-qualified internally when resolved.
+    /// Parser/Python emission retains only the original declared type name.
+    Named(String),
     Unknown,
 }
 
 impl Ty {
     pub(super) fn parser(&self) -> p::TypeExpr {
         match self {
-            Self::List(t) | Self::Result(t) => p::TypeExpr::Generic {
-                name: if matches!(self, Self::List(_)) {
-                    "List"
-                } else {
-                    "Result"
-                }
-                .into(),
+            Self::List(t) => p::TypeExpr::Generic {
+                name: "List".into(),
                 args: vec![t.parser()],
             },
-            _ => p::TypeExpr::Named(
-                match self {
-                    Self::Int => "Int",
-                    Self::Float => "Float",
-                    Self::Bool => "Bool",
-                    Self::Str => "String",
-                    _ => "Unknown",
-                }
-                .into(),
-            ),
+            Self::Map(k, v) => p::TypeExpr::Generic {
+                name: "Map".into(),
+                args: vec![k.parser(), v.parser()],
+            },
+            Self::Set(t) => p::TypeExpr::Generic {
+                name: "Set".into(),
+                args: vec![t.parser()],
+            },
+            Self::Option(t) => p::TypeExpr::Generic {
+                name: "Option".into(),
+                args: vec![t.parser()],
+            },
+            Self::Result(t) => p::TypeExpr::Generic {
+                name: "Result".into(),
+                args: vec![t.parser()],
+            },
+            Self::Named(n) => p::TypeExpr::Named(super::types::bare_name(n).into()),
+            Self::Int => p::TypeExpr::Named("Int".into()),
+            Self::Float => p::TypeExpr::Named("Float".into()),
+            Self::Bool => p::TypeExpr::Named("Bool".into()),
+            Self::Str => p::TypeExpr::Named("String".into()),
+            Self::Byte => p::TypeExpr::Named("Byte".into()),
+            Self::Unknown => p::TypeExpr::Named("Unknown".into()),
         }
     }
     fn numeric(&self) -> bool {
@@ -50,33 +66,95 @@ pub(super) struct Signature {
     pub effects: Vec<String>,
 }
 
-pub(super) fn annotation(cx: &Context<'_>, e: &py::Expr) -> Result<Ty, Diagnostic> {
+pub(super) fn annotation(
+    cx: &Context<'_>,
+    e: &py::Expr,
+    types: &super::types::TypeCatalog,
+) -> Result<Ty, Diagnostic> {
     match e {
-        py::Expr::Name(n) => match n.id.as_str() {
-            "int" => Ok(Ty::Int),
-            "float" => Ok(Ty::Float),
-            "bool" => Ok(Ty::Bool),
-            "str" => Ok(Ty::Str),
-            _ => Err(cx.at(
-                e,
-                "unsupported type; use int, float, bool, str, list[T], or Result[T]",
-            )),
-        },
+        py::Expr::Name(n) => named(cx, e, n.id.as_str(), types),
         py::Expr::Subscript(s) => {
             let py::Expr::Name(n) = s.value.as_ref() else {
-                return Err(cx.at(e, "unsupported generic type; use list[T] or Result[T]"));
+                return Err(cx.at(
+                    e,
+                    "unsupported generic type; use list[T], Result[T], Map[K, V], Set[T], or Option[T]",
+                ));
             };
-            if !matches!(n.id.as_str(), "list" | "Result") {
-                return Err(cx.at(e, "unsupported generic type; use list[T] or Result[T]"));
-            }
-            let inner = Box::new(annotation(cx, &s.slice)?);
             match n.id.as_str() {
-                "list" => Ok(Ty::List(inner)),
-                "Result" => Ok(Ty::Result(inner)),
-                _ => Err(cx.at(e, "unsupported generic type; use list[T] or Result[T]")),
+                "list" | "Result" | "Set" | "Option" => {
+                    if n.id.as_str() == "Option" && types.contains_key(&super::types::owned_name(cx.module, "Option")) {
+                        return Err(cx.at(
+                            e,
+                            "Option[...] is ambiguous in this module because a type named Option is declared; rename the type or use it bare",
+                        ));
+                    }
+                    let inner = Box::new(annotation(cx, &s.slice, types)?);
+                    match n.id.as_str() {
+                        "list" => Ok(Ty::List(inner)),
+                        "Result" => Ok(Ty::Result(inner)),
+                        "Set" => Ok(Ty::Set(inner)),
+                        "Option" => Ok(Ty::Option(inner)),
+                        _ => unreachable!("matched arm above"),
+                    }
+                }
+                "Map" => {
+                    let py::Expr::Tuple(tuple) = s.slice.as_ref() else {
+                        return Err(cx.at(
+                            e,
+                            "Map requires exactly two type arguments: Map[K, V]",
+                        ));
+                    };
+                    if tuple.elts.len() != 2 {
+                        return Err(cx.at(
+                            e,
+                            "Map requires exactly two type arguments: Map[K, V]",
+                        ));
+                    }
+                    let key = Box::new(annotation(cx, &tuple.elts[0], types)?);
+                    let value = Box::new(annotation(cx, &tuple.elts[1], types)?);
+                    Ok(Ty::Map(key, value))
+                }
+                _ => Err(cx.at(
+                    e,
+                    "unsupported generic type; use list[T], Result[T], Map[K, V], Set[T], or Option[T]",
+                )),
             }
         }
+        py::Expr::Constant(c) => match &c.value {
+            py::Constant::Str(name) => named(cx, e, name, types),
+            _ => Err(cx.at(e, "unsupported annotation; explicit subset type required")),
+        },
         _ => Err(cx.at(e, "unsupported annotation; explicit subset type required")),
+    }
+}
+
+/// A bare type name is either a primitive (`int`, `float`, `bool`, `str`, `Byte`)
+/// or a reference to a declared struct/union type. String forward references
+/// (`"Point"`) also land here, which is idiomatic Python for recursive types.
+fn named(
+    cx: &Context<'_>,
+    e: &py::Expr,
+    name: &str,
+    types: &super::types::TypeCatalog,
+) -> Result<Ty, Diagnostic> {
+    match name {
+        "int" => Ok(Ty::Int),
+        "float" => Ok(Ty::Float),
+        "bool" => Ok(Ty::Bool),
+        "str" => Ok(Ty::Str),
+        "Byte" => Ok(Ty::Byte),
+        other => {
+            if !super::identifier(other) || super::forbidden(other) {
+                return Err(cx.at(
+                    e,
+                    format!("unsupported type name {other:?}; expected a primitive or a declared struct/union type"),
+                ));
+            }
+            let key = super::types::resolve_name(types, cx.module, other)
+                .map_err(|message| cx.at(e, message))?
+                .unwrap_or_else(|| other.into());
+            Ok(Ty::Named(key))
+        }
     }
 }
 
@@ -84,7 +162,24 @@ pub(super) fn compatible(expected: &Ty, actual: &Ty) -> bool {
     match (expected, actual) {
         (_, Ty::Unknown) => true,
         (Ty::List(a), Ty::List(b)) => compatible(a, b),
+        (Ty::Map(ak, av), Ty::Map(bk, bv)) => compatible(ak, bk) && compatible(av, bv),
+        (Ty::Set(a), Ty::Set(b))
+        | (Ty::Option(a), Ty::Option(b))
+        | (Ty::Result(a), Ty::Result(b)) => compatible(a, b),
         _ => expected == actual,
+    }
+}
+
+/// Collect the named struct/union type references within a `Ty`, recursively.
+pub(super) fn collect_ty_names(ty: &Ty, out: &mut Vec<String>) {
+    match ty {
+        Ty::Named(name) => out.push(super::types::bare_name(name).into()),
+        Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Result(t) => collect_ty_names(t, out),
+        Ty::Map(k, v) => {
+            collect_ty_names(k, out);
+            collect_ty_names(v, out);
+        }
+        _ => {}
     }
 }
 
@@ -92,21 +187,503 @@ pub(super) struct Expressions<'a, 'b> {
     pub cx: &'a Context<'b>,
     pub env: &'a HashMap<String, Ty>,
     pub signatures: &'a HashMap<String, Signature>,
+    pub types: &'a super::types::TypeCatalog,
+    pub shared_vars: &'a HashMap<String, Ty>,
+    pub effects: &'a [String],
 }
 
 impl Expressions<'_, '_> {
     pub fn lower(&self, e: &py::Expr) -> Result<(p::Expr, Ty), Diagnostic> {
         match e {
+            py::Expr::Constant(c) if matches!(&c.value, py::Constant::None) => self.none_value(),
             py::Expr::Constant(_) | py::Expr::List(_) => self.literal_or_list(e),
-            py::Expr::Name(n) => self.env.get(n.id.as_str()).cloned()
-                .map(|ty| (p::Expr::Ident(n.id.to_string()), ty))
-                .ok_or_else(|| self.cx.at(e, format!("unbound or out-of-block name {}; annotate new local bindings", n.id))),
-            py::Expr::Call(c) => self.call(c, false),
+            py::Expr::Name(n) => self.name(n.id.as_str(), e),
+            py::Expr::Call(c) => {
+                if let Some(div_mod) = self.try_div_mod(c)? {
+                    return Ok(div_mod);
+                }
+                if let Some(constructed) = self.try_struct_constructor(c)? {
+                    return Ok(constructed);
+                }
+                if let Some(constructed) = self.try_variant_constructor(c)? {
+                    return Ok(constructed);
+                }
+                self.call(c, Site::Ordinary)
+            }
+            py::Expr::Attribute(a) => self.field_access(a),
             py::Expr::BinOp(b) => self.binary(b),
             py::Expr::Compare(c) => self.compare(c),
             py::Expr::BoolOp(b) => self.boolean(b),
             py::Expr::UnaryOp(u) => self.unary(u),
             _ => Err(self.cx.at(e, format!("unsupported expression {}; use typed names, literals, direct calls or supported operators", expression_kind(e)))),
+        }
+    }
+
+    fn name(&self, name: &str, e: &py::Expr) -> Result<(p::Expr, Ty), Diagnostic> {
+        if let Some(ty) = self.env.get(name).cloned() {
+            return Ok((
+                p::Expr::Ident(name.to_string()),
+                super::types::resolve_ty(self.types, &ty)
+                    .map_err(|message| self.cx.at(e, message))?,
+            ));
+        }
+        if let Some(ty) = self.shared_vars.get(name).cloned() {
+            return Ok((
+                p::Expr::Ident(name.to_string()),
+                super::types::resolve_ty(self.types, &ty)
+                    .map_err(|message| self.cx.at(e, message))?,
+            ));
+        }
+        match super::types::variant_payloads(self.types, name, &self.cx.module) {
+            Ok(Some((union, payload))) => {
+                if payload.is_empty() {
+                    return Ok((p::Expr::Ident(name.to_string()), Ty::Named(union)));
+                }
+                return Err(self.cx.at(
+                    e,
+                    format!(
+                        "variant {name} requires {} payload argument(s)",
+                        payload.len()
+                    ),
+                ));
+            }
+            Ok(None) => {}
+            Err(message) => return Err(self.cx.error(0, message)),
+        }
+        Err(self.cx.at(
+            e,
+            format!("unbound or out-of-block name {name}; annotate new local bindings"),
+        ))
+    }
+
+    /// Shared-var defaults are value-only: literals, list literals, struct
+    /// construction and union-variant construction. Function/IO calls are refused.
+    /// Shared defaults are data-only. This walker never delegates to ordinary
+    /// expression lowering, so a nested call inside a list or record cannot slip
+    /// past an outer-node literal check (#slice3).
+    pub fn lower_shared_default(&self, e: &py::Expr) -> Result<(p::Expr, Ty), Diagnostic> {
+        match e {
+            py::Expr::Constant(_) => literal(self.cx, e),
+            py::Expr::UnaryOp(u) if matches!(u.op, py::UnaryOp::USub | py::UnaryOp::UAdd) => {
+                literal(self.cx, e)
+            }
+            py::Expr::List(list) => {
+                let mut item_ty = Ty::Unknown;
+                let mut args = Vec::new();
+                for item in &list.elts {
+                    let (value, ty) = self.lower_shared_default(item)?;
+                    if ty == Ty::Unknown {
+                        return Err(self.cx.at(item, "shared list items need a known data type"));
+                    }
+                    if item_ty != Ty::Unknown && item_ty != ty {
+                        return Err(self.cx.at(item, "shared list items must have one element type"));
+                    }
+                    item_ty = ty;
+                    args.push(value);
+                }
+                Ok((call("list", args), Ty::List(Box::new(item_ty))))
+            }
+            py::Expr::Name(n) => self.name(n.id.as_str(), e),
+            py::Expr::Call(c) => self.shared_constructor(c, e),
+            _ => Err(self.cx.at(
+                e,
+                "shared var default must be a literal, list or record/variant constructor; calls and references are unsupported",
+            )),
+        }
+    }
+
+    fn shared_constructor(
+        &self,
+        c: &py::ExprCall,
+        e: &py::Expr,
+    ) -> Result<(p::Expr, Ty), Diagnostic> {
+        // Zero-argument calls are ambiguous between a struct with no fields
+        // (invalid) and a zero-payload variant. Prefer a declared struct so the
+        // field-shape diagnostics fire, then fall back to variants.
+        if !c.keywords.is_empty() {
+            return self.struct_default(c);
+        }
+        if let py::Expr::Name(n) = c.func.as_ref() {
+            let declared_struct =
+                super::types::resolve_name(self.types, self.cx.module, n.id.as_str())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|key| {
+                        matches!(
+                            self.types.get(&key),
+                            Some(super::types::TypeInfo::Struct { .. })
+                        )
+                    });
+            if declared_struct {
+                return self.struct_default(c);
+            }
+        }
+        self.variant_default(c, e)
+    }
+
+    /// Struct defaults re-check each field value as data rather than reusing
+    /// ordinary expression lowering (which would accept calls in field values).
+    fn struct_default(&self, c: &py::ExprCall) -> Result<(p::Expr, Ty), Diagnostic> {
+        let py::Expr::Name(n) = c.func.as_ref() else {
+            return Err(self
+                .cx
+                .at(c, "shared struct default requires a bare type name"));
+        };
+        let Some(key) = super::types::resolve_name(self.types, self.cx.module, n.id.as_str())
+            .map_err(|message| self.cx.at(c, message))?
+        else {
+            return Err(self.cx.at(
+                c,
+                "shared struct default requires a declared local or authorized type",
+            ));
+        };
+        let Some(super::types::TypeInfo::Struct { fields }) = self.types.get(&key).cloned() else {
+            return Err(self
+                .cx
+                .at(c, "shared struct default requires a struct type"));
+        };
+        let mut provided = std::collections::HashSet::new();
+        let mut values = Vec::new();
+        for keyword in &c.keywords {
+            let Some(field) = &keyword.arg else {
+                return Err(self.cx.at(
+                    keyword,
+                    "shared struct default does not support ** expansion",
+                ));
+            };
+            let Some((_, expected)) = fields.iter().find(|(name, _)| name == field.as_str()) else {
+                return Err(self.cx.at(
+                    keyword,
+                    format!("unknown field {field:?} for shared default"),
+                ));
+            };
+            if !provided.insert(field.to_string()) {
+                return Err(self.cx.at(
+                    keyword,
+                    format!("duplicate field {field:?} in shared default"),
+                ));
+            }
+            let expected = super::types::resolve_ty(self.types, expected)
+                .map_err(|message| self.cx.at(keyword, message))?;
+            let (value, ty) = self.lower_shared_default(&keyword.value)?;
+            if !compatible(&expected, &ty) {
+                return Err(self.cx.at(
+                    &keyword.value,
+                    format!("shared default field {field} expects {expected:?}, got {ty:?}"),
+                ));
+            }
+            values.push(p::FieldValue {
+                name: field.to_string(),
+                value,
+            });
+        }
+        let missing: Vec<&str> = fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !provided.contains(*name))
+            .collect();
+        if !missing.is_empty() {
+            return Err(self.cx.at(
+                c,
+                format!(
+                    "shared struct default is missing field(s): {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+        Ok((p::Expr::StructLiteral(values), Ty::Named(key)))
+    }
+
+    fn variant_default(&self, c: &py::ExprCall, e: &py::Expr) -> Result<(p::Expr, Ty), Diagnostic> {
+        let py::Expr::Name(n) = c.func.as_ref() else {
+            return Err(self.cx.at(
+                e,
+                "shared var default must be a literal, list or record/variant constructor; calls and references are unsupported",
+            ));
+        };
+        let name = n.id.as_str();
+        let (union, payload) = match super::types::variant_payloads(self.types, name, self.cx.module)
+            .map_err(|message| self.cx.error(0, message))?
+        {
+            Some(found) => found,
+            None => {
+                return Err(self.cx.at(
+                    e,
+                    "shared var default must be a literal, list or record/variant constructor; function calls are unsupported",
+                ))
+            }
+        };
+        if c.args.len() != payload.len() {
+            return Err(self.cx.at(
+                c,
+                format!(
+                    "variant {name} expects {} payload argument(s), got {}",
+                    payload.len(),
+                    c.args.len()
+                ),
+            ));
+        }
+        let mut values = Vec::new();
+        for (arg, expected) in c.args.iter().zip(&payload) {
+            let expected = super::types::resolve_ty(self.types, expected)
+                .map_err(|message| self.cx.at(arg, message))?;
+            let (value, ty) = self.lower_shared_default(arg)?;
+            if !compatible(&expected, &ty) {
+                return Err(self.cx.at(
+                    arg,
+                    format!("payload of {name} expects {expected:?}, got {ty:?}"),
+                ));
+            }
+            values.push(value);
+        }
+        Ok((call(name, values), Ty::Named(union)))
+    }
+
+    /// Python's `None` literal names the Adapsis `None` variant (there is no
+    /// unit type). It is accepted structurally even when no `None` variant is
+    /// declared — the runtime resolves it like any bare identifier.
+    fn none_value(&self) -> Result<(p::Expr, Ty), Diagnostic> {
+        let ty = match super::types::variant_payloads(self.types, "None", &self.cx.module) {
+            Ok(Some((union, payload))) if payload.is_empty() => Ty::Named(union),
+            Ok(_) => Ty::Unknown,
+            Err(message) => return Err(self.cx.error(0, message)),
+        };
+        Ok((p::Expr::Ident("None".to_string()), ty))
+    }
+
+    /// `div(a, b)` / `rem(a, b)` are the reserved helpers for the runtime's
+    /// integer division and remainder operators (Python's `/` and `%` differ in
+    /// semantics). They lower to `BinaryOp::Div`/`BinaryOp::Mod`, not a call.
+    fn try_div_mod(&self, c: &py::ExprCall) -> Result<Option<(p::Expr, Ty)>, Diagnostic> {
+        if !c.keywords.is_empty() {
+            return Ok(None);
+        }
+        let name = match c.func.as_ref() {
+            py::Expr::Name(n) if !self.env.contains_key(n.id.as_str()) => n.id.as_str(),
+            _ => return Ok(None),
+        };
+        let op = match name {
+            "div" => p::BinaryOp::Div,
+            "rem" => p::BinaryOp::Mod,
+            _ => return Ok(None),
+        };
+        if c.args.len() != 2 {
+            return Err(self
+                .cx
+                .at(c, format!("{name} expects exactly 2 numeric arguments")));
+        }
+        let (left, left_ty) = self.lower(&c.args[0])?;
+        let (right, right_ty) = self.lower(&c.args[1])?;
+        if !left_ty.numeric() || !right_ty.numeric() {
+            return Err(self.cx.at(c, format!("{name} expects numeric arguments")));
+        }
+        let ty = if left_ty == Ty::Float || right_ty == Ty::Float {
+            Ty::Float
+        } else {
+            Ty::Int
+        };
+        Ok(Some((
+            p::Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+            ty,
+        )))
+    }
+
+    /// `Point(x=1, y=2)` is a struct construction when `Point` is a declared
+    /// struct and every argument is a keyword. Function calls keep the existing
+    /// positional-only rule, so this check must run before `call`.
+    fn try_struct_constructor(
+        &self,
+        c: &py::ExprCall,
+    ) -> Result<Option<(p::Expr, Ty)>, Diagnostic> {
+        let name = match c.func.as_ref() {
+            py::Expr::Name(n) if !self.env.contains_key(n.id.as_str()) => n.id.as_str(),
+            _ => return Ok(None),
+        };
+        let Some(key) = super::types::resolve_name(self.types, self.cx.module, name)
+            .map_err(|message| self.cx.at(c, message))?
+        else {
+            return Ok(None);
+        };
+        let Some(super::types::TypeInfo::Struct { fields }) = self.types.get(&key).cloned() else {
+            return Ok(None);
+        };
+        if self.signatures.contains_key(name)
+            || self
+                .signatures
+                .contains_key(&format!("{}.{}", self.cx.module, name))
+        {
+            return Err(self.cx.at(
+                c,
+                format!("{name} is declared as both a struct and a function; rename one of them"),
+            ));
+        }
+        if !c.keywords.is_empty() && !c.args.is_empty() {
+            return Err(self.cx.at(
+                c,
+                "struct construction takes either all keyword fields or none; mixed positional/keyword is unsupported",
+            ));
+        }
+        if !c.keywords.is_empty() {
+            let mut provided = std::collections::HashSet::new();
+            let mut values = Vec::new();
+            for keyword in &c.keywords {
+                let Some(field) = &keyword.arg else {
+                    return Err(self.cx.at(
+                        keyword,
+                        "** expansion is unsupported in struct construction",
+                    ));
+                };
+                if !fields.iter().any(|(n, _)| n == field.as_str()) {
+                    return Err(self.cx.at(
+                        keyword,
+                        format!("unknown field {field:?} for struct {name}"),
+                    ));
+                }
+                if !provided.insert(field.to_string()) {
+                    return Err(self.cx.at(
+                        keyword,
+                        format!("duplicate field {field:?} for struct {name}"),
+                    ));
+                }
+                let (value, ty) = self.lower(&keyword.value)?;
+                if let Some((_, expected)) = fields.iter().find(|(n, _)| n == field.as_str()) {
+                    let expected = super::types::resolve_ty(self.types, expected)
+                        .map_err(|message| self.cx.at(&keyword.value, message))?;
+                    if !compatible(&expected, &ty) {
+                        return Err(self.cx.at(
+                            &keyword.value,
+                            format!("field {field} of {name} expects {expected:?}, got {ty:?}"),
+                        ));
+                    }
+                }
+                values.push(p::FieldValue {
+                    name: field.to_string(),
+                    value,
+                });
+            }
+            let missing: Vec<&str> = fields
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .filter(|n| !provided.contains(*n))
+                .collect();
+            if !missing.is_empty() {
+                return Err(self.cx.at(
+                    c,
+                    format!("struct {name} is missing field(s): {}", missing.join(", ")),
+                ));
+            }
+            return Ok(Some((p::Expr::StructLiteral(values), Ty::Named(key))));
+        }
+        Err(self.cx.at(
+            c,
+            format!("struct {name} requires keyword fields, e.g. {name}(x=1)"),
+        ))
+    }
+
+    /// `Cons(head, tail)` is a union variant construction when `Cons` is a
+    /// declared variant. Builtins (`Some`, `Ok`, `Err`) are handled by `call`,
+    /// so this only runs for non-builtin variant names.
+    fn try_variant_constructor(
+        &self,
+        c: &py::ExprCall,
+    ) -> Result<Option<(p::Expr, Ty)>, Diagnostic> {
+        if !c.keywords.is_empty() {
+            return Ok(None);
+        }
+        let name = match c.func.as_ref() {
+            py::Expr::Name(n) if !self.env.contains_key(n.id.as_str()) => n.id.as_str(),
+            _ => return Ok(None),
+        };
+        if crate::builtins::is_builtin(name) {
+            return Ok(None);
+        }
+        if self.signatures.contains_key(name)
+            || self
+                .signatures
+                .contains_key(&format!("{}.{}", self.cx.module, name))
+        {
+            if self.types.values().any(|info| matches!(info, super::types::TypeInfo::Union { module, variants } if module == self.cx.module && variants.iter().any(|(variant, _)| variant == name))) {
+                return Err(self.cx.at(c, "ambiguous local function/constructor role"));
+            }
+            return Ok(None);
+        }
+        let (union, payload) =
+            match super::types::variant_payloads(self.types, name, &self.cx.module) {
+                Ok(Some(found)) => found,
+                Ok(None) => return Ok(None),
+                Err(message) => return Err(self.cx.error(0, message)),
+            };
+        if c.args.len() != payload.len() {
+            return Err(self.cx.at(
+                c,
+                format!(
+                    "variant {name} expects {} payload argument(s), got {}",
+                    payload.len(),
+                    c.args.len()
+                ),
+            ));
+        }
+        let values = c
+            .args
+            .iter()
+            .map(|arg| self.lower(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (expected, (_, actual)) in payload.iter().zip(&values) {
+            if !compatible(expected, actual) {
+                return Err(self.cx.at(
+                    c,
+                    format!("variant {name} payload expects {expected:?}, got {actual:?}"),
+                ));
+            }
+        }
+        Ok(Some((
+            call(name, values.into_iter().map(|(e, _)| e).collect()),
+            Ty::Named(union),
+        )))
+    }
+
+    fn field_access(&self, a: &py::ExprAttribute) -> Result<(p::Expr, Ty), Diagnostic> {
+        let (base, base_ty) = self.field_base(a.value.as_ref())?;
+        if !matches!(base_ty, Ty::Named(_)) {
+            return Err(self
+                .cx
+                .at(a, "field access requires a struct-typed base name"));
+        }
+        let field_ty = super::types::struct_field_type(self.types, &base_ty, a.attr.as_str())
+            .map_err(|message| self.cx.at(a, message))?
+            .ok_or_else(|| {
+                self.cx.at(
+                    a,
+                    format!(
+                        "unknown field {} on {base_ty:?}; use a field declared on this struct",
+                        a.attr
+                    ),
+                )
+            })?;
+        Ok((
+            p::Expr::FieldAccess {
+                base: Box::new(base),
+                field: a.attr.to_string(),
+            },
+            field_ty,
+        ))
+    }
+
+    fn field_base(&self, e: &py::Expr) -> Result<(p::Expr, Ty), Diagnostic> {
+        match e {
+            py::Expr::Name(n) if self.env.contains_key(n.id.as_str()) => Ok((
+                p::Expr::Ident(n.id.to_string()),
+                self.env[n.id.as_str()].clone(),
+            )),
+            py::Expr::Attribute(inner) => self.field_access(inner),
+            _ => Err(self.cx.at(
+                e,
+                "field access requires a struct-typed name; dynamic attributes are unsupported",
+            )),
         }
     }
 
@@ -133,7 +710,20 @@ impl Expressions<'_, '_> {
         literal(self.cx, e)
     }
 
-    pub fn call(&self, c: &py::ExprCall, awaited: bool) -> Result<(p::Expr, Ty), Diagnostic> {
+    pub fn lower_match_subject(&self, e: &py::Expr) -> Result<(p::Expr, Ty), Diagnostic> {
+        if let py::Expr::Call(c) = e {
+            if let Some(constructed) = self.try_struct_constructor(c)? {
+                return Ok(constructed);
+            }
+            if let Some(constructed) = self.try_variant_constructor(c)? {
+                return Ok(constructed);
+            }
+            return self.call(c, Site::DirectBuiltinMatch);
+        }
+        self.lower(e)
+    }
+
+    pub fn call(&self, c: &py::ExprCall, site: Site) -> Result<(p::Expr, Ty), Diagnostic> {
         if !c.keywords.is_empty() {
             return Err(self.cx.at(
                 c,
@@ -162,34 +752,54 @@ impl Expressions<'_, '_> {
                     .strip_prefix(&format!("{}.", self.cx.module))
                     .and_then(|n| self.signatures.get(n))
             });
-        let is_io = crate::builtins::is_io_builtin(&name)
-            || sig.is_some_and(|s| s.effects.iter().any(|e| e == "io" || e == "async"));
-        if awaited
-            && !crate::builtins::is_io_builtin(&name)
-            && (crate::builtins::is_builtin(&name)
-                || sig.is_some_and(|s| !s.effects.iter().any(|e| e == "async")))
-        {
-            return Err(self.cx.at(c, "await requires an async function or runtime IO builtin; synchronous calls are not awaitable"));
-        }
-        if awaited
-            && !crate::builtins::is_io_builtin(&name)
-            && sig.is_some_and(|signature| matches!(signature.result, Ty::Result(_)))
-        {
-            return Err(self.cx.at(c, "awaiting Result-returning user functions is unsupported until runtime Result unwrapping is reconciled (#82); direct runtime IO builtin awaits remain supported"));
-        }
-        if is_io && !awaited {
-            return Err(self.cx.at(c, "IO/async call requires an annotated await binding in an async function with @effects('io')"));
+        let target = if resolved.contains('.') {
+            Target::User(sig.map(|s| UserSignature {
+                effects: Effects::from_names(&s.effects),
+                returns_result: matches!(s.result, Ty::Result(_)),
+            }))
+        } else {
+            Target::BuiltinOrConstructor {
+                io: crate::builtins::is_io_builtin(&resolved),
+            }
+        };
+        call_sites::check(site, target, Effects::from_names(self.effects))
+            .map_err(|message| self.cx.at(c, message))?;
+        if matches!(site, Site::DirectBuiltinMatch | Site::AwaitBinding)
+            && matches!(target, Target::BuiltinOrConstructor { io: true })
+            && self.types.values().any(|info| matches!(info, super::types::TypeInfo::Union { variants, .. } if variants.iter().any(|(variant, _)| variant == &resolved))) {
+            return Err(self.cx.at(c, "runtime IO builtin is shadowed by a declared variant; this call requires an unshadowed IO builtin"));
         }
         let values = c
             .args
             .iter()
             .map(|a| self.lower(a))
             .collect::<Result<Vec<_>, _>>()?;
+        let result = self.typed_call_result(c, &name, &resolved, sig, &values)?;
+        Ok((
+            call(&resolved, values.into_iter().map(|(e, _)| e).collect()),
+            result,
+        ))
+    }
+
+    fn typed_call_result(
+        &self,
+        c: &py::ExprCall,
+        name: &str,
+        resolved: &str,
+        sig: Option<&Signature>,
+        values: &[(p::Expr, Ty)],
+    ) -> Result<Ty, Diagnostic> {
         if let Some(s) = sig {
+            let expected = s
+                .params
+                .iter()
+                .map(|ty| super::types::resolve_ty(self.types, ty))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|message| self.cx.at(c, message))?;
             if s.params.len() != values.len()
-                || s.params
+                || expected
                     .iter()
-                    .zip(&values)
+                    .zip(values)
                     .any(|(a, (_, b))| !compatible(a, b))
             {
                 return Err(self.cx.at(
@@ -198,41 +808,34 @@ impl Expressions<'_, '_> {
                 ));
             }
         }
-        let result = if matches!(name.as_str(), "len" | "length") {
-            if values.len() != 1 || !matches!(values[0].1, Ty::List(_)) {
-                return Err(self.cx.at(
-                    c,
-                    "len requires one statically typed list argument in the Python subset",
-                ));
+        let result = if matches!(name, "len" | "length") {
+            if values.len() != 1 {
+                return Err(self.cx.at(c, "len expects one argument"));
+            }
+            if !matches!(
+                &values[0].1,
+                Ty::List(_) | Ty::Str | Ty::Map(_, _) | Ty::Set(_)
+            ) {
+                return Err(self.cx.at(c, "len expects a statically known list, str, Map, or Set; unsupported or unresolved argument type — annotate an unresolved call result first"));
             }
             Ty::Int
         } else if name == "concat" {
             if values.len() < 2 || values.iter().any(|(_, t)| *t != Ty::Str) {
-                return Err(self.cx.at(c, "concat requires at least two statically str arguments; implicit coercion is unsupported"));
+                return Err(self.cx.at(c, "concat requires at least two str-compatible arguments; implicit coercion is unsupported"));
             }
             Ty::Str
-        } else if matches!(name.as_str(), "read_file" | "file_read") {
+        } else if matches!(name, "read_file" | "file_read") {
             Ty::Str
         } else if name == "http_get" {
             Ty::Result(Box::new(Ty::Str))
         } else {
-            sig.map(|s| s.result.clone()).unwrap_or(Ty::Unknown)
+            match sig {
+                Some(s) => super::types::resolve_ty(self.types, &s.result)
+                    .map_err(|message| self.cx.at(c, message))?,
+                None => Ty::Unknown,
+            }
         };
-        Ok((
-            call(&resolved, values.into_iter().map(|(e, _)| e).collect()),
-            result,
-        ))
-    }
-
-    pub fn requires_io(&self, call: &py::ExprCall) -> Result<bool, Diagnostic> {
-        let name = direct_name(self.cx, &call.func, self.env)?;
-        let signature = self
-            .signatures
-            .get(&name)
-            .or_else(|| self.signatures.get(&format!("{}.{}", self.cx.module, name)));
-        Ok(crate::builtins::is_io_builtin(&name)
-            || signature
-                .is_some_and(|signature| signature.effects.iter().any(|effect| effect == "io")))
+        Ok(result)
     }
 
     fn binary(&self, b: &py::ExprBinOp) -> Result<(p::Expr, Ty), Diagnostic> {
@@ -242,20 +845,21 @@ impl Expressions<'_, '_> {
             return Ok((call("concat", vec![left, right]), Ty::Str));
         }
         if !lt.numeric() || lt != rt {
-            return Err(self.cx.at(b, "arithmetic requires matching known int/float types (str + str is also supported); annotate unknown call results first"));
+            return Err(self.cx.at(b, "arithmetic requires matching known int/float types; annotate unresolved call results first"));
         }
         let op = match b.op {
             py::Operator::Add => p::BinaryOp::Add, py::Operator::Sub => p::BinaryOp::Sub,
             py::Operator::Mult => p::BinaryOp::Mul,
             _ => return Err(self.cx.at(b, "unsupported arithmetic operator; only +, -, * preserve this runtime's subset semantics")),
         };
+        let result = lt;
         Ok((
             p::Expr::Binary {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
             },
-            lt,
+            result,
         ))
     }
 
@@ -343,7 +947,11 @@ impl Expressions<'_, '_> {
                 op,
                 expr: Box::new(expr),
             },
-            ty,
+            if matches!(u.op, py::UnaryOp::Not) {
+                Ty::Bool
+            } else {
+                ty
+            },
         ))
     }
 }
@@ -426,16 +1034,6 @@ pub(super) fn reject_unsafe_builtin(
         return Err(cx.at(
             c,
             "Python constructors/coercions are unsupported; use typed values and list literals",
-        ));
-    }
-    let list_builtin = crate::builtins::BUILTINS
-        .iter()
-        .find(|b| b.name == name || b.aliases.contains(&name))
-        .is_some_and(|b| matches!(b.category, crate::builtins::BuiltinCategory::List));
-    if list_builtin && !matches!(name, "len" | "length") {
-        return Err(cx.at(
-            c,
-            "list operations are read-only in this subset; use literals, iteration, or len",
         ));
     }
     Ok(())

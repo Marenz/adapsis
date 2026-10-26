@@ -1,0 +1,4 @@
++module P3
++fn three (a:String, b:String, c:String)->String
+  +return concat(a, "|", b, "|", c)
+

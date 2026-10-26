@@ -1,0 +1,4 @@
++module Hidden
++fn secret ()->String
+  +return "42"
+

@@ -1,0 +1,67 @@
++module GithubSync
++doc "<redacted>"
++fn api_base ()->String
+  +return "<redacted>"
++doc "Return the GitHub API base URL for the adapsis repo"
+
++test api_base
+  +with  -> expect "<redacted>"
+
++fn fetch_issues ()->String [io,async]
+  +await response:String = shell_exec("<redacted>")
+  +return response
++doc "Fetch open issues from GitHub via gh CLI"
+
++fn sync_to_roadmap ()->String [io,async]
+  +await json:String = fetch_issues()
+  +let issues:List<String> = parse_all_issues(json)
+  +let count:Int = len(issues)
+  +let added:Int = 0
+  +let i:Int = 0
+  +await current:String = roadmap_list()
+  +while i<count
+    +let issue:String = get(issues, i)
+    +if NOT contains(current, issue)
+      +await r:String = roadmap_add(issue)
+      +set added = added+1
+    +set i = i+1
+  +return concat("Synced ", to_string(count), " issues, added ", to_string(added), " new to roadmap")
++doc "Fetch all open issues and add new ones to the roadmap"
+
++test sync_to_roadmap
+  +with  -> expect contains("Synced")
+
++fn extract_issue (json:String, idx:Int)->String
+  +let num:String = json_get(json, concat(to_string(idx), ".number"))
+  +let title:String = json_get(json, concat(to_string(idx), ".title"))
+  +return concat("#", num, " ", title)
++doc "Extract issue number and title from JSON array at given index"
+
++test extract_issue
+  +with json="[{\"number\":42,\"title\":\"Fix bug\"},{\"number\":7,\"title\":\"Add feature\"}]" idx=0 -> expect "#42 Fix bug"
+  +with json="[{\"number\":42,\"title\":\"Fix bug\"},{\"number\":7,\"title\":\"Add feature\"}]" idx=1 -> expect "#7 Add feature"
+
++fn parse_all_issues (json:String)->List<String>
+  +let count:Int = json_array_len(json)
+  +let result:List<String> = list()
+  +let i:Int = 0
+  +while i<count
+    +let issue:String = extract_issue(json, i)
+    +set result = push(result, issue)
+    +set i = i+1
+  +return result
++doc "Parse a JSON array of GitHub issues into a list of '#N title' strings"
+
++test parse_all_issues
+  +with json="[{\"number\":1,\"title\":\"First\"},{\"number\":2,\"title\":\"Second\"}]" -> expect contains("#1 First")
+
++fn read_issue ()->String [io,async]
+  +await body:String = http_get("<redacted>")
+  +return body
++doc "Fetch issue #23 details from GitHub API"
+
++fn read_issue_23 ()->String [io,async]
+  +await body:String = http_get("<redacted>")
+  +return body
++doc "Fetch issue #23 details from GitHub API (duplicate of read_issue)"
+

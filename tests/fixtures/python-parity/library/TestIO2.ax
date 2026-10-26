@@ -1,0 +1,4 @@
++module TestIO2
++fn process (a:String, b:Int, c:String)->String [io,async]
+  +return concat(a, to_string(b), c)
+

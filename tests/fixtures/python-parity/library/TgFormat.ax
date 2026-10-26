@@ -1,0 +1,210 @@
++module TgFormat
++doc "Pure Markdown to Telegram HTML conversion and length-safe splitting. Nothing here performs IO; TelegramBot owns delivery."
++fn escape_html (text:String)->String
+  +let amp:String = regex_replace("&", "&amp;", text)
+  +let lt:String = regex_replace("<", "&lt;", amp)
+  +return regex_replace(">", "&gt;", lt)
++doc "HTML-escape ampersand, less-than and greater-than so user text can never inject a tag. Runs first; every later step appends tags after this point, so generated tags are never re-escaped."
+
++test escape_html
+  +with text="a < b & c > d" -> expect "a &lt; b &amp; c &gt; d"
+  +with text="<script>alert(1)</script>" -> expect "&lt;script&gt;alert(1)&lt;/script&gt;"
+  +with text="plain text" -> expect "plain text"
+
++fn apply_inline (s:String)->String
+  +let links:String = regex_replace("\\[([^\\]]+)\\]\\(([^)]+)\\)", "<a href=\"$2\">$1</a>", s)
+  +let spoiler:String = regex_replace("\\|\\|(.+?)\\|\\|", "<tg-spoiler>$1</tg-spoiler>", links)
+  +let strike:String = regex_replace("~~(.+?)~~", "<s>$1</s>", spoiler)
+  +let bold1:String = regex_replace("\\*\\*(.+?)\\*\\*", "<b>$1</b>", strike)
+  +let bold2:String = regex_replace("__(.+?)__", "<b>$1</b>", bold1)
+  +let ital1:String = regex_replace("\\*(.+?)\\*", "<i>$1</i>", bold2)
+  +return regex_replace("_(.+?)_", "<i>$1</i>", ital1)
++doc "Apply inline Markdown to an already-escaped segment that is not inside a code span. Longest delimiters first - double asterisk before single, double underscore before single - so bold never degrades into italics. Emits only Telegram-allowed tags."
+
++test apply_inline
+  +with s="**b**" -> expect "<b>b</b>"
+  +with s="__b__" -> expect "<b>b</b>"
+  +with s="*i*" -> expect "<i>i</i>"
+  +with s="_i_" -> expect "<i>i</i>"
+  +with s="~~s~~" -> expect "<s>s</s>"
+  +with s="||sp||" -> expect "<tg-spoiler>sp</tg-spoiler>"
+  +with s="[lbl](http://x.y)" -> expect "<a href=\"http://x.y\">lbl</a>"
+  +with s="hi _x_ y" -> expect "hi <i>x</i> y"
+
++fn tag (name:String, closing:Bool)->String
+  +if closing
+    +return concat("</", name, ">")
+  +return concat("<", name, ">")
++doc "Build an HTML tag from separate pieces. The source never contains a literal closing code or pre tag, because the runtime stops reading this code block at the first closing code fence it sees anywhere in the payload - including inside a string."
+
++fn code_wrap (s:String)->String
+  +return concat(tag("code", false), s, tag("code", true))
++doc "Wrap text in a code tag. Tests use this to build expected values the source cannot write literally."
+
++fn code_segments (parts:List<String>, i:Int, acc:String)->String
+  +if i>=len(parts)
+    +return acc
+  +let seg:String = get(parts, i)
+  +if i%2==0
+    +return code_segments(parts, i+1, concat(acc, apply_inline(seg)))
+  +else
+    +return code_segments(parts, i+1, concat(acc, code_wrap(seg)))
++doc "Fold the backtick-split segments of a single line: even segments are prose with Markdown applied, odd segments are code spans wrapped in a code tag with every other rule skipped."
+
++test code_segments
+  +with {parts: list("a"), i: 0, acc: ""} -> expect "a"
+  +with {parts: list("a", "b"), i: 0, acc: ""} -> expect concat("a", code_wrap("b"))
+  +with {parts: list("a", "b", "c"), i: 0, acc: ""} -> expect concat("a", code_wrap("b"), "c")
+
++fn inline_code (s:String)->String
+  +return code_segments(split(s, "`"), 0, "")
++doc "Convert one line of inline Markdown while protecting backtick code spans from the other rules."
+
++test inline_code
+  +with s="`c`" -> expect code_wrap("c")
+  +with s="a `c` b" -> expect concat("a ", code_wrap("c"), " b")
+  +with s="`**x**`" -> expect code_wrap("**x**")
+  +with s="no code here" -> expect "no code here"
+
++fn convert_line (line:String)->String
+  +let t:String = trim(line)
+  +if starts_with(t, "### ")
+    +return concat("<b>", inline_code(substring(t, 4, len(t))), "</b>")
+  +if starts_with(t, "## ")
+    +return concat("<b>", inline_code(substring(t, 3, len(t))), "</b>")
+  +if starts_with(t, "# ")
+    +return concat("<b>", inline_code(substring(t, 2, len(t))), "</b>")
+  +if starts_with(t, "&gt; ")
+    +return concat("<blockquote>", inline_code(substring(t, 5, len(t))), "</blockquote>")
+  +if t=="&gt;"
+    +return "<blockquote></blockquote>"
+  +if starts_with(t, "- ")
+    +return concat("• ", inline_code(substring(t, 2, len(t))))
+  +if starts_with(t, "* ")
+    +return concat("• ", inline_code(substring(t, 2, len(t))))
+  +return inline_code(line)
++doc "Convert one non-fence line: heading, blockquote, bullet or plain prose. The blockquote marker is matched in its ESCAPED form, because escaping runs first by design - the source line starts with the gt entity, not a bare angle bracket."
+
++test convert_line
+  +with line="# H" -> expect "<b>H</b>"
+  +with line="## H" -> expect "<b>H</b>"
+  +with line="### H" -> expect "<b>H</b>"
+  +with line="&gt; q" -> expect "<blockquote>q</blockquote>"
+  +with line="&gt;" -> expect "<blockquote></blockquote>"
+  +with line="- i" -> expect "• i"
+  +with line="* i" -> expect "• i"
+  +with line="plain" -> expect "plain"
+  +with line="`c`" -> expect code_wrap("c")
+
++fn convert_lines (lines:List<String>, i:Int, in_pre:Bool, buf:String, acc:List<String>)->List<String>
+  +if i>=len(lines)
+    +if in_pre
+      +return push(acc, concat(tag("pre", false), buf, tag("pre", true)))
+    +return acc
+  +let raw:String = get(lines, i)
+  +if starts_with(trim(raw), "```")
+    +if in_pre
+      +return convert_lines(lines, i+1, false, "", push(acc, concat(tag("pre", false), buf, tag("pre", true))))
+    +return convert_lines(lines, i+1, true, "", acc)
+  +if in_pre
+    +if buf==""
+      +return convert_lines(lines, i+1, true, raw, acc)
+    +return convert_lines(lines, i+1, true, concat(buf, "\n", raw), acc)
+  +return convert_lines(lines, i+1, false, "", push(acc, convert_line(raw)))
++doc "Walk the escaped lines, folding each fenced block into ONE pre-tagged element so no later step can split it apart or reformat its contents."
+
++test convert_lines
+  +with {lines: list("a", "b"), i: 0, in_pre: false, buf: "", acc: list()} -> expect list("a", "b")
+  +with {lines: list("```", "x", "```"), i: 0, in_pre: false, buf: "", acc: list()} -> expect list(pre_wrap("x"))
+  +with {lines: list("a", "```", "x"), i: 0, in_pre: false, buf: "", acc: list()} -> expect list("a", pre_wrap("x"))
+
++fn markdown_to_html (text:String)->String
+  +let esc:String = escape_html(text)
+  +let lines:List<String> = split(esc, "\n")
+  +let parts:List<String> = convert_lines(lines, 0, false, "", list())
+  +return join(parts, "\n")
++doc "Markdown to Telegram HTML. Escapes first, so user text can never inject a tag; every tag added afterwards is generated by this module."
+
++test markdown_to_html
+  +with text="**bold**" -> expect "<b>bold</b>"
+  +with text="__bold__" -> expect "<b>bold</b>"
+  +with text="*ital*" -> expect "<i>ital</i>"
+  +with text="_ital_" -> expect "<i>ital</i>"
+  +with text="~~gone~~" -> expect "<s>gone</s>"
+  +with text="<redacted>" -> expect "<redacted>"
+  +with text="`code`" -> expect code_wrap("code")
+  +with text="# Title" -> expect "<b>Title</b>"
+  +with text="## Title" -> expect "<b>Title</b>"
+  +with text="### Title" -> expect "<b>Title</b>"
+  +with text="- item" -> expect "• item"
+  +with text="* item" -> expect "• item"
+  +with text="> quoted" -> expect "<blockquote>quoted</blockquote>"
+  +with text="a < b & c" -> expect "a &lt; b &amp; c"
+  +with text="<script>x</script>" -> expect "&lt;script&gt;x&lt;/script&gt;"
+  +with text="[lbl](http://x.y)" -> expect "<a href=\"http://x.y\">lbl</a>"
+  +with text="**hi** _x_ `y`" -> expect concat("<b>hi</b> <i>x</i> ", code_wrap("y"))
+  +with text="```\n**not bold**\n```" -> expect pre_wrap("**not bold**")
+  +with text="`**x**`" -> expect code_wrap("**x**")
+
++fn pre_wrap (s:String)->String
+  +return concat(tag("pre", false), s, tag("pre", true))
++doc "Wrap text in a pre tag. Tests and samples build expected values through this because the source cannot contain a literal closing pre tag."
+
++fn split_parts (lines:List<String>, i:Int, part:String, depth:Int, limit:Int, acc:List<String>)->List<String>
+  +if i>=len(lines)
+    +if part==""
+      +return acc
+    +return push(acc, part)
+  +let line:String = get(lines, i)
+  +let opens:Int = len(split(line, tag("pre", false)))-1
+  +let closes:Int = len(split(line, tag("pre", true)))-1
+  +let ndepth:Int = depth+opens-closes
+  +if part==""
+    +return split_parts(lines, i+1, line, ndepth, limit, acc)
+  +if depth==0 AND ndepth==0 AND len(concat(part, "\n", line))>limit
+    +return split_parts(lines, i+1, line, ndepth, limit, push(acc, part))
+  +return split_parts(lines, i+1, concat(part, "\n", line), ndepth, limit, acc)
++doc "Fold lines into parts; a break only when it starts and ends outside a pre block."
+
++test split_parts
+  +with {lines: list("a", "b"), i: 0, part: "", depth: 0, limit: 1, acc: list()} -> expect list("a", "b")
+  +with {lines: list("solo"), i: 0, part: "", depth: 0, limit: 2, acc: list()} -> expect list("solo")
+
++fn split_for_telegram (html:String, limit:Int)->List<String>
+  +return split_parts(split(html, "\n"), 0, "", 0, limit, list())
++doc "Split converted HTML into message-sized parts on line boundaries. Telegram rejects text over 4096 characters, so callers pass a limit comfortably below that."
+
++test split_for_telegram
+  +with {html: sample_lines(), limit: 2} -> expect list("aaa", "bbb", "ccc")
+  +with html="solo" limit=2 -> expect list("solo")
+
++fn parts_preview (html:String, limit:Int)->String
+  +return join(split_for_telegram(html, limit), " || ")
++doc "Render split parts joined by a separator so assertions stay readable as single strings."
+
++test parts_preview
+  +with {html: sample_lines(), limit: 7} -> expect sample_join7()
+  +with {html: sample_lines(), limit: 2} -> expect sample_join2()
+  +with {html: sample_lines(), limit: 100} -> expect sample_lines()
+  +with {html: sample_pre(), limit: 5} -> expect sample_pre_join()
+
++fn sample_lines ()->String
+  +return concat("aaa", "\n", "bbb", "\n", "ccc")
++doc "Three sample lines built at runtime so a multi-parameter test block never needs a newline escape in an argument."
+
++fn sample_join7 ()->String
+  +return concat("aaa", "\n", "bbb", " || ", "ccc")
++doc "Expected parts_preview output for sample_lines at limit 7."
+
++fn sample_join2 ()->String
+  +return concat("aaa", " || ", "bbb", " || ", "ccc")
++doc "Expected parts_preview output for sample_lines at limit 2."
+
++fn sample_pre ()->String
+  +return concat(pre_wrap(concat("a", "\n", "b")), "\nxx")
++doc "A pre block followed by a short line, used to prove a pre block is never split."
+
++fn sample_pre_join ()->String
+  +return concat(pre_wrap(concat("a", "\n", "b")), " || xx")
++doc "Expected parts_preview output for sample_pre at limit 5."
+

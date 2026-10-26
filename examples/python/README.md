@@ -29,39 +29,57 @@ Omitting `language` or source `format` preserves Adapsis syntax. Python `module`
 metadata selects a namespace, never permission. Live gateway compatibility is
 a separate deployment/certification gate; these local examples need no gateway.
 
-## Supported subset
+## Implemented surface (parity work in progress)
 
-- Annotated functions, parameters, returns, and new local bindings. Reassignments
-  use ordinary `name = expression`. Module/function docstrings become docs.
-- `int`, `float`, `bool`, `str`, `list[T]`, and effectful `Result[T]` declarations.
-- `if`/`elif`/`else`, `while`, and `for` over statically typed read-only lists.
-  A loop target must be fresh and used only in its loop body. Newly declared
-  block locals cannot escape; previously declared variables may be reassigned.
-- Numeric `+`, `-`, `*`, single comparisons, and typed string concatenation.
-  Boolean operators require total, call-free Boolean operands.
-- List literals, iteration, and `len(list_value)` (not string length); local calls resolve within the explicit
-  module, and cross-module calls use `Module.function(...)` without imports.
-- Test files contain zero-argument `test_*` functions, each with one equality
-  assertion of a function call against a scalar or read-only list literal.
-  Calls require exactly the declared argument count or keyword names. Parameter
-  and keyword names `_0`, `_1`, … are reserved for runtime positional carriers.
-- An inert `@effects("io", "fail", "mut")` declaration and `async def` describe
-  runtime effects. Await requires an annotated direct-call binding. IO tests
-  need trusted runtime mocks; Python cannot install mocks or enable live IO.
-  Pure async calls need await but do not need an IO effect; synchronous calls
-  cannot be awaited. Awaiting a Result-returning **user function** is currently
-  rejected because the inherited runtime unwraps that result ([#82](https://github.com/Marenz/adapsis/issues/82)).
-  Direct IO builtin awaits retain their Result wrapper and remain supported.
+Full `.ax` parity is **not yet verified**. The strict `python_parity` inventory
+reports invalid original fixtures separately from unsupported constructs, exact
+AST differences and non-idempotent printing. No fixture exclusions count as passes.
+Boolean evaluation also differs between the existing execution tiers (#90), so
+the frontend retains its call-free, statically Boolean `and`/`or` restriction.
+The entries below describe implemented frontend forms, not a whole-corpus or
+live-provider certification; native tools retain their additional admission rules.
 
-This is a deliberately bounded language. Imports, classes, arbitrary decorators,
-defaults/variadic parameters, exceptions, lambdas, comprehensions, f-strings,
-mutable list methods, subscripts, `break`/`continue`, loop `else`, `/`, `//`, `%`,
-`**`, and truthiness-based operand selection are rejected with source locations.
-Ordinary functions require a value return; `-> None` is reserved for test wrappers.
-Integer literals currently range from −9223372036854775807 to
-9223372036854775807: the existing canonical parser cannot yet represent
-−9223372036854775808. Numeric storage/overflow follows the typed Adapsis runtime,
-not arbitrary-precision CPython integers.
+- Annotated functions, parameters, returns, and new local bindings; reassignment
+  uses `name = expression`. Module/function docstrings become docs.
+- Types: `int`, `float`, `bool`, `str`, `Byte`, `list[T]`, `Map[K, V]`, `Set[T]`,
+  `Option[T]`, `Result[T]`, and named struct/union types. Structs are `@dataclass`
+  classes (keyword-arg construction + field access); tagged unions are `@union`
+  classes with `Variant: tuple[...]` payload attributes (`tuple[()]` = none;
+  the `None` variant is written `None_`).
+- Statements: `if`/`elif`/`else`, `while`, `for`, and `match` with `case` patterns
+  (declared variants, `Ok`/`Err`/`Some`/`None`, nested class patterns, literal
+  sub-patterns, `_`). A match must be exhaustive. Match subjects may call IO
+  builtins directly. Module-level `name: Type = literal` declares a `+shared`
+  variable (bare-name reads, plain-assignment writes).
+- Numeric `+`, `-`, `*`, comparisons, typed string `+`, and Boolean `and`/`or`/`not`.
+  Integer division and remainder are the reserved helpers `div(a, b)` / `rem(a, b)`
+  (Python `/` and `%` have different semantics and are rejected).
+- Reserved helpers: `propagate(f(x))` (`+call`), `check("label", cond, "err")`
+  (`+check`), `spawn(f(x))` (`+spawn`), `source_add/remove/replace/list(...)` and
+  `event_register/emit(...)`. Module-level `@route("METHOD", "/path")` and
+  `@source(name, type=..., k=v)` decorators; reserved `async def startup()/shutdown() -> None`.
+- Effects: `@effects("io", "fail", "mut", "rand", "yield", "parallel", "unsafe")`
+  plus `async` from `async def`. Await requires an annotated direct-call binding.
+  Awaiting a Result-returning **user function** is rejected ([#82]); direct IO
+  builtin awaits keep their Result wrapper.
+- Call-site exceptions apply only to the root call. A direct unshadowed IO builtin
+  match subject needs an `io`+`async` caller; a user async function cannot use that
+  exception. Nested call arguments keep ordinary call rules. `spawn` requires an
+  async caller and a qualified user-function target after lowering, plus `io` if
+  the target has it. It schedules a runtime task, not a native LLM agent.
+  The shared runtime-argument validator visits match arms, checks, spawns and
+  lifecycle bodies; native mutation still refuses lifecycle/source/route forms.
+  Encoded source operations are explicitly refused by that validator rather than
+  having timer/handler execution silently bypass call checks.
+- Test matchers: `assert contains(f(x), "s")`, `assert starts_with(...)`,
+  `assert is_ok(f(x))` / `assert is_err(f(x))`, `assert f(x) == Err("msg")`, and
+  side-effect checks `assert_after("target", "matcher", "value")`.
+
+Rejected with source locations: imports, arbitrary decorators, defaults/variadic
+parameters, exceptions, lambdas, comprehensions, f-strings, subscripts,
+`break`/`continue`, `**`, truthiness-based selection, and short-circuiting
+`and`/`or` with calls. Integer literals range from −9223372036854775807 to
+9223372036854775807.
 
 The AST remains the sole persisted source of truth. Python inspection prints
 canonical supported source after session/library reload. Unsupported legacy AST
@@ -81,3 +99,44 @@ Python execution/inspection conservatively rejects current builtin-name collisio
 modules. This protects installed Python after later `.ax` changes. Narrower
 helper-specific usability is deferred to [#83](https://github.com/Marenz/adapsis/issues/83);
 the broad safe check is intentional in this first release.
+
+## Direct IO match runtime limitation (#94)
+
+The no-await direct builtin `match http_get(url):` form is admitted by the
+frontend, but it is **not VM-portable after an earlier IO operation in the same
+function**. The VM's compiled direct IO expression has no coroutine handle, and
+whole-function fallback is deliberately forbidden after IO because it would
+replay completed side effects. Prefer binding the result first:
+
+```python
+@effects("io")
+async def fetch_ok(url: str) -> str:
+    response: Result[str] = await http_get(url)
+    match response:
+        case Ok(value):
+            return value
+        case Err(error):
+            return error
+```
+
+This form is covered by native mutation/evaluation with an in-memory HTTP
+fixture. It uses a **direct runtime IO builtin** await; awaiting a
+Result-returning user function remains unsupported (#82). Never retry the whole
+function or fall back after IO. #93 fixes dedicated Result value matching, not
+IO expression portability.
+
+## Shared declarations and constructor-name safety
+
+Module-level `name: Type = default` declares a `+shared` variable. Native Python
+mutation requires an explicit annotation and a data-only default: scalars, checked
+list literals, and record/variant constructors whose fields and payload types match
+the annotation. Empty `[]` inherits its element type from the annotation; any
+other unresolved default is refused. Nested calls or references inside a list or
+record default are rejected, not silently accepted by an outer literal check.
+
+A Python-authored function may not share a spelling with a union variant declared
+in another module. The tree walker prefers variants and the VM prefers functions,
+so mutation refuses the collision rather than installing a program whose
+behaviour depends on the execution tier. A legacy program that already contains
+one keeps evaluating unrelated functions; only entries whose reachable call graph
+hits the ambiguous spelling are refused.

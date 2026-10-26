@@ -1,0 +1,11 @@
++module Diag
++fn run ()->String [io,async,mut]
+  +let url:String = concat("<redacted>", telegram_token, "/getUpdates?timeout=1&limit=5&offset=", to_string(poll_offset))
+  +match http_get(url)
+  +case Ok(body)
+    +let arr:String = json_get(body, "result")
+    +let n:Int = json_array_len(arr)
+    +return concat("got n=", to_string(n), " body0=", body)
+  +case Err(e)
+    +return concat("ERR ", e)
+

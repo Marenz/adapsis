@@ -94,10 +94,11 @@ pub fn lower_tests(source: &str, module: &str) -> Result<LoweredSource, Diagnost
         } else {
             &f.body
         };
-        let [py::Stmt::Assert(assert)] = body else {
-            return Err(cx.at(stmt, "test body must contain exactly one assert target(literals) == literal (optional initial docstring)"));
-        };
-        let op = assertion(&cx, assert)?;
+        let mut iter = body.iter();
+        let first = iter
+            .next()
+            .ok_or_else(|| cx.at(stmt, "test body must contain an assertion"))?;
+        let op = test_assertion(&cx, stmt, first, iter)?;
         source_map.push(cx.span(stmt, operations.len()));
         operations.push(op);
     }
@@ -107,12 +108,49 @@ pub fn lower_tests(source: &str, module: &str) -> Result<LoweredSource, Diagnost
     cx.finish(operations, source_map)
 }
 
-fn assertion(cx: &Context<'_>, a: &py::StmtAssert) -> Result<p::Operation, Diagnostic> {
+/// Lower a test body: one leading assertion plus zero or more `assert_after(...)`
+/// side-effect checks.
+fn test_assertion<'a>(
+    cx: &Context<'_>,
+    fn_stmt: &py::Stmt,
+    assert_stmt: &py::Stmt,
+    after: impl Iterator<Item = &'a py::Stmt>,
+) -> Result<p::Operation, Diagnostic> {
+    let py::Stmt::Assert(a) = assert_stmt else {
+        return Err(cx.at(
+            assert_stmt,
+            "test body must begin with assert target(...) == expected or a matcher helper",
+        ));
+    };
+    let (function_name, input, expected, matcher) = assertion(cx, fn_stmt, a)?;
+    let mut after_checks = Vec::new();
+    for stmt in after {
+        after_checks.push(assert_after(cx, stmt)?);
+    }
+    Ok(p::Operation::Test(p::TestMutation {
+        function_name,
+        cases: vec![p::TestCase {
+            input,
+            expected,
+            matcher,
+            after_checks,
+        }],
+    }))
+}
+
+fn assertion(
+    cx: &Context<'_>,
+    fn_stmt: &py::Stmt,
+    a: &py::StmtAssert,
+) -> Result<(String, p::Expr, p::Expr, Option<p::TestMatcher>), Diagnostic> {
     if a.msg.is_some() {
         return Err(cx.at(a, "assert messages are unsupported in test declarations"));
     }
+    if let py::Expr::Call(call) = a.test.as_ref() {
+        return matcher_assertion(cx, call);
+    }
     let py::Expr::Compare(c) = a.test.as_ref() else {
-        return Err(cx.at(a, "test requires assert target(literals) == literal"));
+        return Err(cx.at(a, "test requires assert target(literals) == literal or a matcher helper"));
     };
     if c.ops != [py::CmpOp::Eq] || c.comparators.len() != 1 {
         return Err(cx.at(c, "test requires one == comparison"));
@@ -123,23 +161,142 @@ fn assertion(cx: &Context<'_>, a: &py::StmtAssert) -> Result<p::Operation, Diagn
             "test left side must call the named target function",
         ));
     };
+    let function_name = qualify(cx, call)?;
+    let input = arguments(cx, call)?;
+    let (expected, matcher) = parse_expected(cx, &c.comparators[0])?;
+    let _ = fn_stmt;
+    Ok((function_name, input, expected, matcher))
+}
+
+/// `assert contains(f(x), "s")`, `assert starts_with(f(x), "p")`,
+/// `assert is_ok(f(x))` and `assert is_err(f(x))` matcher helpers.
+fn matcher_assertion(
+    cx: &Context<'_>,
+    call: &py::ExprCall,
+) -> Result<(String, p::Expr, p::Expr, Option<p::TestMatcher>), Diagnostic> {
     let name = direct_name(cx, &call.func, &HashMap::new())?;
-    let function_name = if name.contains('.') {
+    if name.contains('.') {
+        return Err(cx.at(call, "matcher helpers must be bare names"));
+    }
+    match name.as_str() {
+        "contains" | "starts_with" => {
+            if !call.keywords.is_empty() || call.args.len() != 2 {
+                return Err(cx.at(call, format!("{name}(f(x), \"substring\") expects 2 arguments")));
+            }
+            let py::Expr::Call(inner) = &call.args[0] else {
+                return Err(cx.at(&call.args[0], "matcher first argument must be a function call"));
+            };
+            let function_name = qualify(cx, inner)?;
+            let input = arguments(cx, inner)?;
+            let s = string_literal(cx, &call.args[1])?
+                .ok_or_else(|| cx.at(&call.args[1], "matcher substring must be a string literal"))?;
+            let matcher = if name == "contains" {
+                p::TestMatcher::Contains(s.clone())
+            } else {
+                p::TestMatcher::StartsWith(s.clone())
+            };
+            Ok((function_name, input, p::Expr::String(s), Some(matcher)))
+        }
+        "is_ok" | "is_err" => {
+            if !call.keywords.is_empty() || call.args.len() != 1 {
+                return Err(cx.at(call, format!("{name}(f(x)) expects 1 argument")));
+            }
+            let py::Expr::Call(inner) = &call.args[0] else {
+                return Err(cx.at(&call.args[0], "matcher first argument must be a function call"));
+            };
+            let function_name = qualify(cx, inner)?;
+            let input = arguments(cx, inner)?;
+            let (variant, matcher) = if name == "is_ok" {
+                ("Ok", p::TestMatcher::AnyOk)
+            } else {
+                ("Err", p::TestMatcher::AnyErr)
+            };
+            Ok((
+                function_name,
+                input,
+                p::Expr::Ident(variant.to_string()),
+                Some(matcher),
+            ))
+        }
+        other => Err(cx.at(call, format!("unsupported matcher helper {other}"))),
+    }
+}
+
+fn qualify(cx: &Context<'_>, call: &py::ExprCall) -> Result<String, Diagnostic> {
+    let name = direct_name(cx, &call.func, &HashMap::new())?;
+    Ok(if name.contains('.') {
         name
     } else {
         format!("{}.{}", cx.module, name)
+    })
+}
+
+/// `assert f(x) == Err("msg")` → `ErrContaining`; `assert f(x) == Err(label)` →
+/// an exact `Err(label)` match; otherwise a literal equality.
+fn parse_expected(cx: &Context<'_>, e: &py::Expr) -> Result<(p::Expr, Option<p::TestMatcher>), Diagnostic> {
+    if let Some(found) = parse_err_expected(cx, e)? {
+        return Ok(found);
+    }
+    Ok((literal(cx, e)?.0, None))
+}
+
+fn parse_err_expected(
+    cx: &Context<'_>,
+    e: &py::Expr,
+) -> Result<Option<(p::Expr, Option<p::TestMatcher>)>, Diagnostic> {
+    let py::Expr::Call(c) = e else {
+        return Ok(None);
     };
-    let input = arguments(cx, call)?;
-    let expected = literal(cx, &c.comparators[0])?.0;
-    Ok(p::Operation::Test(p::TestMutation {
-        function_name,
-        cases: vec![p::TestCase {
-            input,
-            expected,
-            matcher: None,
-            after_checks: vec![],
-        }],
-    }))
+    let py::Expr::Name(n) = c.func.as_ref() else {
+        return Ok(None);
+    };
+    if n.id.as_str() != "Err" || !c.keywords.is_empty() || c.args.len() != 1 {
+        return Ok(None);
+    }
+    if let Some(s) = string_literal(cx, &c.args[0])? {
+        let expected = super::expressions::call("Err", vec![p::Expr::String(s.clone())]);
+        return Ok(Some((expected, Some(p::TestMatcher::ErrContaining(s)))));
+    }
+    let py::Expr::Name(arg) = &c.args[0] else {
+        return Err(cx.at(&c.args[0], "Err(...) expected a string or identifier"));
+    };
+    let expected = super::expressions::call("Err", vec![p::Expr::Ident(arg.id.to_string())]);
+    Ok(Some((expected, None)))
+}
+
+/// `assert_after("target", "matcher", "value")` → `AfterCheck`.
+fn assert_after(cx: &Context<'_>, stmt: &py::Stmt) -> Result<p::AfterCheck, Diagnostic> {
+    let py::Stmt::Expr(e) = stmt else {
+        return Err(cx.at(stmt, "only the leading assert and assert_after(...) calls are allowed in test bodies"));
+    };
+    let py::Expr::Call(c) = e.value.as_ref() else {
+        return Err(cx.at(e, "assert_after requires a call"));
+    };
+    let name = direct_name(cx, &c.func, &HashMap::new())?;
+    if name != "assert_after" {
+        return Err(cx.at(e, "only assert_after(...) calls may follow the leading assert"));
+    }
+    if !c.keywords.is_empty() || c.args.len() != 3 {
+        return Err(cx.at(c, "assert_after(target, matcher, value) expects 3 string arguments"));
+    }
+    let target = string_literal(cx, &c.args[0])?
+        .ok_or_else(|| cx.at(&c.args[0], "assert_after target must be a string literal"))?;
+    let matcher = string_literal(cx, &c.args[1])?
+        .ok_or_else(|| cx.at(&c.args[1], "assert_after matcher must be a string literal"))?;
+    let value = string_literal(cx, &c.args[2])?
+        .ok_or_else(|| cx.at(&c.args[2], "assert_after value must be a string literal"))?;
+    Ok(p::AfterCheck { target, matcher, value })
+}
+
+fn string_literal(cx: &Context<'_>, e: &py::Expr) -> Result<Option<String>, Diagnostic> {
+    let _ = cx;
+    match e {
+        py::Expr::Constant(c) => match &c.value {
+            py::Constant::Str(s) => Ok(Some(s.clone())),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }
 
 fn arguments(cx: &Context<'_>, c: &py::ExprCall) -> Result<p::Expr, Diagnostic> {

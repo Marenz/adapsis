@@ -196,6 +196,89 @@ async fn python_source_format_is_opt_in_and_refuses_unsupported_legacy_ast() {
         &program,
     )
     .await;
-    assert!(python.execution.has_errors);
-    assert!(python.content.contains("PyLegacySource.shared_value"));
+    assert!(!python.execution.has_errors, "{}", python.content);
+    assert!(python.content.contains("def shared_value"), "{}", python.content);
+}
+
+#[tokio::test]
+async fn python_inspect_prints_types_and_match_functions() {
+    let program = build_program("+module PyRound\n+type Point = {x:Int, y:Int}\n+type Expr = Literal(Int) | Add(Expr, Expr)\n+fn eval_expr (e:Expr)->Int\n  +match e\n  +case Literal(v)\n    +return v\n  +case Add(l, r)\n    +return 0\n  +case _\n    +return 0\n  +end\n+end\n").await;
+    let cfg = config_for(
+        "writer",
+        AccessLevel::Full,
+        PermissionConfig::default(),
+        program.clone(),
+    );
+    let mut ws = cfg.snapshot_working_set().await;
+    let function = execute_native_tool(
+        "inspect",
+        r#"{"kind":"source","target":"PyRound.eval_expr","format":"python"}"#,
+        &cfg,
+        &mut ws,
+        &program,
+    )
+    .await;
+    assert!(!function.execution.has_errors, "{}", function.content);
+    assert!(function.content.contains("case Add("), "{}", function.content);
+    let ty = execute_native_tool(
+        "inspect",
+        r#"{"kind":"source","target":"PyRound.Point","format":"python"}"#,
+        &cfg,
+        &mut ws,
+        &program,
+    )
+    .await;
+    assert!(!ty.execution.has_errors, "{}", ty.content);
+    assert!(ty.content.contains("@dataclass"), "{}", ty.content);
+    let union = execute_native_tool(
+        "inspect",
+        r#"{"kind":"source","target":"PyRound.Expr","format":"python"}"#,
+        &cfg,
+        &mut ws,
+        &program,
+    )
+    .await;
+    assert!(!union.execution.has_errors, "{}", union.content);
+    assert!(union.content.contains("@union"), "{}", union.content);
+}
+
+#[tokio::test]
+async fn python_telegrambot_like_inspect_edit_mutate_roundtrip() {
+    let program = build_program("+module TgBot\n+shared bot_name:String = \"<redacted>\"\n+fn greet (name:String)->String\n  +return concat(bot_name, \": hi \", name)\n+fn classify (code:Int)->String\n  +match code\n  +case 0\n    +return \"zero\"\n  +case _\n    +return \"other\"\n  +end\n+end\n").await;
+    let cfg = config_for("writer", AccessLevel::Full, PermissionConfig::default(), program.clone());
+    let mut ws = cfg.snapshot_working_set().await;
+    let inspected = execute_native_tool(
+        "inspect",
+        r#"{"kind":"source","target":"TgBot.greet","format":"python"}"#,
+        &cfg,
+        &mut ws,
+        &program,
+    )
+    .await;
+    assert!(!inspected.execution.has_errors, "{}", inspected.content);
+    assert!(!inspected.execution.has_errors, "{}", inspected.content);
+    let envelope: serde_json::Value = serde_json::from_str(&inspected.content).unwrap();
+    let printed = envelope["query_results"].as_str().unwrap_or("").to_string();
+    assert!(printed.contains("def greet"), "{printed}");
+    // Re-mutate the printed function (plus its shared var) into a new module and test it.
+    let source = format!("bot_name: str = \"<redacted>\"\n\n{printed}");
+    let mutated = execute_native_tool(
+        "mutate",
+        &json!({"language":"python","module":"TgBot2","source":source}).to_string(),
+        &cfg,
+        &mut ws,
+        &program,
+    )
+    .await;
+    assert!(!mutated.execution.has_errors, "{}", mutated.content);
+    let tested = execute_native_tool(
+        "test",
+        &json!({"language":"python","module":"TgBot2","source":"def test_greet():\n    assert greet('bob') == '<redacted>: hi bob'\n"}).to_string(),
+        &cfg,
+        &mut ws,
+        &program,
+    )
+    .await;
+    assert!(!tested.execution.has_errors, "{}", tested.content);
+    assert!(!tested.execution.test_results.is_empty());
 }

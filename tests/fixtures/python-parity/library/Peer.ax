@@ -1,0 +1,84 @@
++module Peer
++doc "Talk to other AdapsisOS instances on the VPN mesh (10.0.0.0/24, port 3002). Pass your own name as `caller` so peer /api/ask calls are identified. Resolve peers by name (kronk/hobbes/moonwolf) or by IP. See mesh.md for the topology."
++shared self_name:String = "<redacted>"
+
++fn base_url (ip:String)->String
+  +return concat("http://", ip, ":3002")
++doc "Build a peer's base API URL from its 10.0.0.x address."
+
++test base_url
+  +with ip="10.0.0.1" -> expect "http://10.0.0.1:3002"
+
++fn ip_for (name:String)->String
+  +if name=="kronk"
+    +return "10.0.0.1"
+  +if name=="here"
+    +return "10.0.0.1"
+  +if name=="hobbes"
+    +return "10.0.0.2"
+  +if name=="sleek"
+    +return "10.0.0.2"
+  +if name=="moonwolf"
+    +return "10.0.0.4"
+  +if name=="edox"
+    +return "10.0.0.4"
+  +return ""
++doc "Resolve a peer name (kronk/here, hobbes/sleek, moonwolf/edox) to its VPN IP, or empty string if unknown."
+
++test ip_for
+  +with name="kronk" -> expect "10.0.0.1"
+  +with name="sleek" -> expect "10.0.0.2"
+  +with name="moonwolf" -> expect "10.0.0.4"
+  +with name="nobody" -> expect ""
+
++fn ask_payload (message:String, caller:String)->String
+  +return concat("{\"message\":\"", json_escape(message), "\",\"caller\":\"", json_escape(caller), "\"}")
++doc "Build the JSON body for /api/ask, tagging the call with `caller`."
+
++test ask_payload
+  +with message="hi" caller="<redacted>" -> expect "<redacted>"
+
++fn eval_payload (function:String, input:String)->String
+  +return concat("{\"function\":\"", json_escape(function), "\",\"input\":\"", json_escape(input), "\"}")
++doc "Build the JSON body for /api/eval."
+
++test eval_payload
+  +with function="Math.add" input="3 4" -> expect "{\"function\":\"Math.add\",\"input\":\"3 4\"}"
+
++fn status (ip:String)->String [io,async]
+  +match http_get(concat(base_url(ip), "/api/status"))
+  +case Ok(body)
+    +return body
+  +case Err(e)
+    +return concat("peer unreachable: ", e)
++doc "GET a peer's /api/status (program state, plan, roadmap). Pass the peer's 10.0.0.x IP. Returns the raw JSON, or 'peer unreachable: ...' on transport failure."
+
++fn ask (ip:String, message:String, caller:String)->String [io,async]
+  +match http_post(concat(base_url(ip), "/api/ask"), ask_payload(message, caller), "application/json")
+  +case Ok(resp)
+    +return json_get(resp, "reply")
+  +case Err(e)
+    +return concat("peer unreachable: ", e)
++doc "<redacted>"
+
++fn eval (ip:String, function:String, input:String)->String [io,async]
+  +match http_post(concat(base_url(ip), "/api/eval"), eval_payload(function, input), "application/json")
+  +case Ok(resp)
+    +return resp
+  +case Err(e)
+    +return concat("peer unreachable: ", e)
++doc "Evaluate a function on a peer via /api/eval. function is like 'Math.add', input is the argument string. Returns the raw JSON response."
+
++fn mutate (ip:String, source:String)->String [io,async]
+  +match http_post(concat(base_url(ip), "/api/mutate"), concat("{\"source\":\"", json_escape(source), "\"}"), "application/json")
+  +case Ok(resp)
+    +return resp
+  +case Err(e)
+    +return concat("peer unreachable: ", e)
++doc "Apply Adapsis source as a mutation on a peer via /api/mutate. Use sparingly — this changes the peer's program."
+
++fn ask_named (name:String, message:String, caller:String)->String [io,async]
+  +await reply:String = ask(ip_for(name), message, caller)
+  +return reply
++doc "Ask a peer by name (kronk/hobbes/moonwolf) instead of IP. Pass your own name as `caller`. Unknown names resolve to empty IP and the call will fail."
+

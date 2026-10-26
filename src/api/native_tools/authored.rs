@@ -4,6 +4,7 @@ use crate::parser::{Expr, Operation};
 
 pub(super) use super::literals::literal;
 type Runtime<'a> = (&'a Program, bool);
+mod walk;
 
 fn name(expr: &Expr) -> Option<String> {
     match expr {
@@ -18,6 +19,7 @@ fn reference(
     config: &AppConfig,
     model: &str,
     program: Option<Runtime<'_>>,
+    constructor: bool,
 ) -> Result<(), String> {
     if target.contains('.') {
         if resolve_module(config, model, module_of(target)) < PermissionLevel::Execute {
@@ -26,6 +28,9 @@ fn reference(
             ));
         }
     } else {
+        if constructor {
+            return Ok(());
+        }
         if !crate::builtins::is_builtin(target) && !matches!(target, "Ok" | "Err" | "Some") {
             return Err(format!(
                 "native mutation requires qualified user calls (Module.func); bare `{target}` is not a builtin"
@@ -53,110 +58,20 @@ fn reference(
     Ok(())
 }
 
-fn expression(
-    expr: &Expr,
-    config: &AppConfig,
-    model: &str,
-    program: Option<Runtime<'_>>,
-) -> Result<(), String> {
-    match expr {
-        Expr::Call { callee, args } => {
-            let callee =
-                name(callee).ok_or("native mutation does not support dynamic call targets")?;
-            reference(&callee, config, model, program)?;
-            args.iter()
-                .try_for_each(|arg| expression(arg, config, model, program))
-        }
-        Expr::FieldAccess { base, .. } => {
-            if let Some(target) = name(expr) {
-                reference(&target, config, model, program)?;
-            }
-            expression(base, config, model, program)
-        }
-        Expr::Binary { left, right, .. } => {
-            expression(left, config, model, program)?;
-            expression(right, config, model, program)
-        }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-            expression(expr, config, model, program)
-        }
-        Expr::StructLiteral(fields) => fields
-            .iter()
-            .try_for_each(|field| expression(&field.value, config, model, program)),
-        _ => Ok(()),
-    }
-}
-
 pub(super) fn check_operations(
     ops: &[Operation],
     config: &AppConfig,
     model: &str,
     program: Option<Runtime<'_>>,
+    roles: Option<&crate::python_frontend::NativeReferences>,
 ) -> Result<(), String> {
-    for op in ops {
-        let check = |expr: &Expr| expression(expr, config, model, program);
-        let body = |ops: &[Operation]| check_operations(ops, config, model, program);
-        match op {
-            Operation::Module(decl) => body(&decl.body)?,
-            Operation::Function(decl) => body(&decl.body)?,
-            Operation::SharedVar(decl) => {
-                literal(&decl.default)?;
-                if let Some((program, _)) = program {
-                    super::literals::check_runtime(&decl.default, program)?;
-                }
-            }
-            Operation::Type(_) | Operation::Doc { .. } => {}
-            Operation::Let(decl) => check(&decl.expr)?,
-            Operation::Set(decl) => {
-                check(&decl.expr)?;
-                if decl.name.contains('.') {
-                    reference(&decl.name, config, model, program)?;
-                }
-            }
-            Operation::Call(decl) => check(&decl.expr)?,
-            Operation::Check(decl) => check(&decl.expr)?,
-            Operation::Return(decl) => check(&decl.expr)?,
-            Operation::Await(decl) => check(&decl.call)?,
-            Operation::Spawn(decl) => check(&decl.call)?,
-            Operation::If(decl) => {
-                check(&decl.condition)?;
-                body(&decl.then_body)?;
-                body(&decl.else_body)?;
-                for (expr, ops) in &decl.elif_branches {
-                    check(expr)?;
-                    body(ops)?;
-                }
-            }
-            Operation::While(decl) => {
-                check(&decl.condition)?;
-                body(&decl.body)?;
-            }
-            Operation::Each(decl) => {
-                check(&decl.collection)?;
-                body(&decl.body)?;
-            }
-            Operation::Match(decl) => {
-                check(&decl.expr)?;
-                for arm in &decl.arms {
-                    body(&arm.body)?;
-                }
-            }
-            Operation::Branch(decl) => {
-                check(&decl.expr)?;
-                for arm in &decl.arms {
-                    check(&arm.pattern)?;
-                    reference(&arm.target, config, model, program)?;
-                }
-            }
-            _ => {
-                return Err(format!(
-                    "native mutation does not support authored `{}` inside functions",
-                    super::describe_op(op)
-                ));
-            }
-        }
+    walk::Checker {
+        config,
+        model,
+        program,
+        roles,
     }
-    Ok(())
+    .operations(ops, "", &mut Default::default())
 }
 
 /// Existence checks are dispatch-time, after earlier batch mutations. Neutral
@@ -175,7 +90,7 @@ pub(super) fn runtime_targets(
             exists(program, function)?;
             let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
             if *python {
-                super::literals::require_python_environment(program)?;
+                super::literals::require_python_entry(program, function)?;
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }
             for op in ops {
@@ -195,7 +110,9 @@ pub(super) fn runtime_targets(
                 .try_for_each(|target| exists(program, target))?;
             let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
             if *python {
-                super::literals::require_python_environment(program)?;
+                for target in targets {
+                    super::literals::require_python_entry(program, target)?;
+                }
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }
             for op in ops {
@@ -208,9 +125,20 @@ pub(super) fn runtime_targets(
             }
             Ok(())
         }
-        super::ParsedTool::Mutate { source, python, .. } => {
+        super::ParsedTool::Mutate {
+            source,
+            python,
+            roles,
+            ..
+        } => {
             let ops = crate::parser::parse(source).map_err(|e| e.to_string())?;
-            check_operations(&ops, config, &model_name(config), Some((program, *python)))?;
+            check_operations(
+                &ops,
+                config,
+                &model_name(config),
+                Some((program, *python)),
+                roles.as_ref(),
+            )?;
             if *python {
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }

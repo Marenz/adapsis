@@ -1,0 +1,8 @@
++module Probe2
++fn rm ()->String [io,async]
+  +await r:String = module_remove("Probe")
+  +return r
+
++test rm
+  +with  -> expect contains("R")
+

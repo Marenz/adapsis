@@ -1,0 +1,18 @@
++module MusicGen
++doc "Music generation via ace-step-rs daemon HTTP API. Non-blocking: spawns generation in background and delivers via conversation_notify. No LLM model switch happens here — the daemon does all the work over HTTP. (gemma* are llm-gateway aliases to a cloud model so +spawn's background-model switch can't 502.)"
++shared daemon_url:String = "http://127.0.0.1:8092"
+
++fn _generate_and_deliver (context:String, caption:String, duration:Int, lyrics:String, metas:String)->String [io,async]
+  +let url:String = "http://127.0.0.1:8092/generate"
+  +let body:String = concat("{\"caption\":\"", json_escape(caption), "\",\"lyrics\":\"", json_escape(lyrics), "\",\"metas\":\"", json_escape(metas), "\",\"duration_s\":", to_string(duration), ",\"output\":\"song.mp3\"}")
+  +await audio:Attachment = http_post_binary(url, body)
+  +await _:String = conversation_notify(context, concat("Here is your song: ", caption), audio)
+  +return "delivered"
+
++fn generate (context:String, caption:String, duration:Int, lyrics:String, metas:String)->String [io,async]
+  +spawn _generate_and_deliver(context, caption, duration, lyrics, metas)
+  +return "Generation started"
+
++test generate
+  +with context="telegram:user:1" caption="c" duration=10 lyrics="" metas="" -> expect Err
+

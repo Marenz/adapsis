@@ -173,7 +173,7 @@ pub fn tool_definitions(_config: &AppConfig) -> Vec<ToolDefinition> {
             parameters: obj(
                 &["source"],
                 serde_json::json!({
-                    "source": {"type": "string", "description": "Typed Python-subset source or Adapsis +module source."},
+                    "source": {"type": "string", "description": "Typed Python-subset source or Adapsis +module source. Python user async calls require annotated await or explicit spawn; only a direct unshadowed IO builtin match has a no-await exception (io+async caller), admitted syntax that is not VM-portable after earlier IO in that function (#94). Prefer `response: Result[str] = await http_get(url)` then match response; never replay the function. Native bare union constructors are limited to same submission/target module; bound-field access is data, not a call reference. A Python function reusing another module's variant name is refused (tier resolution differs); pre-existing legacy collisions do not block unrelated functions. Shared declarations need an explicit annotation plus a data-only type-checked default. Native lifecycle/source/route declarations remain unsupported."},
                     "language": {"type": "string", "enum": ["adapsis", "python"], "description": "Choose python for the Python frontend. Omission preserves adapsis."},
                     "module": {"type": "string", "description": "Required with python: one module identifier. Forbidden with adapsis."}
                 }),
@@ -223,8 +223,8 @@ enum InspectKind {
 
 enum ParsedTool {
     Inspect { kind: InspectKind, target: Option<String>, format: frontend::SourceFormat },
-    Mutate { source: String, modules: Vec<String>, python: bool },
-    PythonMutate { source: String, module: String, references: Vec<String> },
+    Mutate { source: String, modules: Vec<String>, python: bool, roles: Option<crate::python_frontend::NativeReferences> },
+    PythonMutate { source: String, module: String, preflight: crate::python_frontend::NativePreflight },
     Test { source: String, targets: Vec<String>, python: bool },
     Evaluate { function: String, source: String, python: bool },
     Finish,
@@ -522,11 +522,11 @@ pub fn validate_native_tool_authorized(
 /// shared by [`validate_native_tool_authorized`] and [`execute_native_tool`].
 fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> Result<(), String> {
     match parsed {
-        ParsedTool::PythonMutate { module, references, .. } => {
+        ParsedTool::PythonMutate { module, preflight, .. } => {
             if resolve_module(config, model, module) < PermissionLevel::Write {
                 return Err(format!("permission denied: cannot modify module '{module}' (need Write)"));
             }
-            for target in references {
+            for target in &preflight.references {
                 if resolve_module(config, model, module_of(target)) < PermissionLevel::Execute {
                     return Err(format!("permission denied for authored reference `{target}` (need Execute)"));
                 }
@@ -552,7 +552,7 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
             }
             InspectKind::Tasks | InspectKind::Library => {}
         },
-        ParsedTool::Mutate { modules, source, .. } => {
+        ParsedTool::Mutate { modules, source, roles, .. } => {
             for m in modules {
                 if resolve_module(config, &model, m) < PermissionLevel::Write {
                     return Err(format!(
@@ -561,7 +561,7 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
                 }
             }
             let ops = parser::parse(source).map_err(|e| e.to_string())?;
-            authored::check_operations(&ops, config, model, None)?;
+            authored::check_operations(&ops, config, model, None, roles.as_ref())?;
         }
         ParsedTool::Test { targets, .. } => {
             for t in targets {

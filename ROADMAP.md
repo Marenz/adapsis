@@ -1,5 +1,107 @@
 # AdapsisOS Roadmap
 
+## Recovery — Python parity #86 (2026-10-26, red)
+
+- Full feature equality is **not achieved**. Last pre-foundational-fix gate:
+  54 fixture files / 573 inventory entries; 114 verified, 58 invalid-program
+  entries (4 roots plus descendants), 329 unsupported, 72 exact AST mismatches.
+  Release tests: 1662 passed, parity gate failed, 2 ignored; CLI 5/5 passed.
+  These are historical measured counts, not current-fix verification or file coverage.
+- Foundational steps 1–2 now reject non-exact bare-call inspection, share full
+  structural comparison after typed NodeId clearing, and restore known operand
+  checks. Latest `cargo test --release python_`: **130 passed, 2 failed** — the
+  corpus gate and the separate new owner-colliding-type native regression.
+  Corpus remains 54 files / 573 entries: 90 verified, 58 invalid, 425 unsupported;
+  zero AST mismatches now means earlier refusal, not fixed representation gaps.
+  Full release suite has not been rerun for this foundational delta. Target slot
+  yielded to TUI after the focused run; no main builds until manager handoff.
+- After the next manager handoff, bounded owner-aware catalog work fixed the
+  duplicate-type regression. Current release gate: **1672 passed, corpus parity
+  alone failed, 2 ignored; CLI 5/5 passed**. Corpus counts remain 90 verified /
+  58 invalid / 425 unsupported. Internal type identities now retain declaration
+  and signature owners without changing persisted AST names. Both-order native
+  struct/recursive-union inspect/resubmit and hidden-competitor tests pass.
+  This slice awaits independent review before the native-reference pass.
+- Review found a hidden-schema risk in filtered unique fallback after owner
+  erasure. The bounded pre-executor binding guard now checks full-state metadata
+  (owner/kind/order only), including global union reclassification, and refuses
+  colliding external fallback before schema validation. Native canaries and safe
+  local/top-level/no-collision controls pass. Latest release gate: **1678 passed,
+  strict corpus parity alone failed, 2 ignored; CLI 5/5 passed**. Corpus counts
+  remain unchanged. Independent bounded re-review accepted this correction;
+  whole #86 remains red and no release/deployment approval follows.
+- Slice 2 was subsequently authorized and implemented (server-derived target/
+  same-submission union-constructor roles, sequential lexical field scopes,
+  neutral collision refusal, owner-qualified type closure): final combined gate
+  **1705 passed, strict parity alone failed, 2 ignored; CLI 5/5**. Frozen for
+  independent review. External bare Variants remain explicitly unsupported and
+  visible. #94 after-earlier-IO direct-match limitation is documented; slice 3
+  (shared defaults) is not implemented.
+- #95 fixed and slice 3 implemented as the next authorized pair. #95: native
+  Python mutation refuses a declared function whose spelling collides with a
+  variant in any module (state becomes unreachable), while the runtime recheck is
+  now scoped to the reachable call graph so legacy collisions keep unrelated
+  functions usable. Slice 3: module shared declarations are structurally
+  preflighted, shared-only submissions are valid, and defaults are lowered by a
+  data-only walker and type-checked against the complete local catalog. Final
+  combined gate: **1712 passed, strict parity alone failed, 2 ignored; CLI 5/5**.
+  Frozen for independent review. Record defaults remain outside the native
+  literal policy by existing design (frontend accepts, native tool refuses).
+- Reviewer REJECT follow-up fixed: #95 reachable-graph walkers now recurse into
+  call arguments (nested-argument consumers no longer escape the check); the
+  declaration guard uses the POST-SUBMISSION catalog and checks BOTH directions
+  (function-vs-variant and variant-vs-function), so single-mutate and reverse-order
+  collisions are refused. Corrected a factual misreport: typed RECORD shared
+  defaults are natively admitted end-to-end; only VARIANT constructor defaults are
+  refused by the native literal gate while the frontend accepts them — a known
+  frontend/native policy inconsistency, deliberately not widened. Qualified-call
+  over-refusal is recorded as a known safe-direction limitation.
+- Earlier design note (superseded for slices 1-2 by the authorizations above): (1) exhaustive
+  direct-call admission visitor and builtin-only IO-match exception; (2) scoped
+  variant/function/value-reference classification, preserving authority-first
+  lookup and bare-user-call refusal; (3) structural shared-declaration preflight
+  plus typed recursively data-only defaults. Each slice needs actual native
+  refusal/no-mutation regressions and independent review before broadening.
+  Builtin signatures, runtime #90/#92 and the full TelegramBot port remain
+  separately sequenced; current source/tool descriptions must stay truthful.
+- Slice 1 was subsequently authorized and implemented (explicit root call modes,
+  exhaustive executable traversal, native/direct-validator regressions). It is
+  **not accepted yet**: full release run found 1690 passing / 2 failing / 2 ignored
+  (strict parity plus the new native synchronous-Result-match positive test).
+  Bounded differential diagnosis proves identical `.ax`/Python ASTs: tree returns
+  5 for Ok(5), 0 for Err; VM and normal native routing return None because VM
+  MatchVariant only handles Value::Union, not dedicated Ok/Err values. No await/IO
+  is involved; this is distinct from #82. The positive assertion stays red;
+  runtime correction awaits separate authorization. Slices 2–3 remain unstarted.
+- #93 was separately authorized: a cohesive VM match helper now recognizes
+  dedicated Ok/Err values and supplies the existing payload/bool stack protocol.
+  Targeted Result-match gates pass, including unchanged native expected 5,
+  original `.ax`/Python AST equality, nested match statements, Union controls
+  and no IO replay. Final combined #93 + slice1 release gate: **1697 passed,
+  strict parity alone failed, 2 ignored; CLI 5/5 passed**. Both deltas are frozen
+  for independent review; neither acceptance nor deployment is implied. Option,
+  nested payload patterns, non-exhaustive matches and JIT remain separate.
+- Sole main writer: `ses_e8b17a23affedgH4V52JdwxNDL` (Astra). Manager/release:
+  `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; P0 reviewer:
+  `ses_e888436abffenlBGkG1Ek8bZHF`. Independent #87/#88/#89 and TUI worktrees
+  remain separate. Shared main target builds are manager-coordinated.
+- Approved current slice: exact typed-NodeId-only production comparison,
+  rejection of unsafe call qualification/Unknown admission, native regressions,
+  truthful prompt and module-lowering extraction. Owner-aware catalogs and other
+  parity/authority gaps need separate bounded plans. #90 runtime Boolean behavior
+  and #91 original TelegramBot source correction are independent gates.
+- Required acceptance: a runnable checked-in full sanitized TelegramBot Python
+  port with paired tests, exact AST/idempotence and mocked raw-update behavior
+  across admin/guest/group routing, text/media/replies and lifecycle/shared/spawn.
+  Diagnose the invalid original visibly; use a separately reviewed #91 correction,
+  never silently repair the fixture. No live Telegram/network or permission changes.
+- Complementary owner requirement: native conversation capability parity (#89),
+  including a permission-checked `!opencode` equivalent, has its own implementation
+  owner. The #86 TelegramBot port must test protocol/takeover interactions but
+  does not absorb agent/plan/roadmap/model/mock/stub/remove tool implementation.
+  Native-default deployment remains deferred until both acceptance gates pass.
+- No commit, push, integration deployment or service restart authorized.
+
 ## Current execution — native tools for takeover conversations (#85)
 
 Owner request 2026-10-25: "switch everything" to native/Python. Issue:

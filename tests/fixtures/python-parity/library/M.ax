@@ -1,0 +1,7 @@
++module M
++fn a ()->Int
+  +return 119
+
++fn b ()->Int
+  +return 219
+

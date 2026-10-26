@@ -1,0 +1,17 @@
++module ProbeTV
++fn fp ()->String
+  +let file_info:String = "{\"ok\":true,\"result\":{\"file_id\":\"abc\",\"file_path\":\"voice/file_5.oga\"}}"
+  +let file_path:String = json_get(file_info, "result.file_path")
+  +return file_path
+
++test fp
+  +with  -> expect "voice/file_5.oga"
+
++fn tx ()->String
+  +let result:String = "{\"text\":\"hallo welt\"}"
+  +let transcript:String = json_get(result, "text")
+  +return transcript
+
++test tx
+  +with  -> expect "hallo welt"
+

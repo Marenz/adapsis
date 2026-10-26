@@ -2000,9 +2000,10 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
                 let payload = if payload_text.is_empty() {
                     vec![]
                 } else {
-                    // Parse comma-separated types
-                    payload_text
-                        .split(',')
+                    // Parse comma-separated types (angle-bracket aware, so a
+                    // Map<K, V> payload does not split on its inner comma).
+                    split_top_level(payload_text, ',')
+                        .into_iter()
                         .map(|s| parse_type(line, s.trim()))
                         .collect::<Result<Vec<_>>>()?
                 };
@@ -2026,8 +2027,8 @@ fn parse_type_decl(line: usize, input: &str) -> Result<TypeDecl> {
 
     // Check if it looks like struct fields: name:Type, name:Type
     if value.contains(':') {
-        let fields = value
-            .split(',')
+        let fields = split_top_level(value, ',')
+            .into_iter()
             .map(|f| {
                 let f = f.trim();
                 let (fname, ftype) = f.split_once(':').ok_or_else(|| {
@@ -3524,11 +3525,11 @@ fn parse_match_pattern(line_num: usize, input: &str) -> Result<MatchPatternDecl>
         return Ok(MatchPatternDecl::LiteralBool(false));
     }
 
-    // Literal string
+    // Literal string (escape-processed, matching string expressions)
     if input.starts_with('"') && input.ends_with('"') && input.len() >= 2 {
-        return Ok(MatchPatternDecl::LiteralString(
-            input[1..input.len() - 1].to_string(),
-        ));
+        return Ok(MatchPatternDecl::LiteralString(unescape_string_content(
+            &input[1..input.len() - 1],
+        )));
     }
 
     // Variant with sub-patterns: e.g. Literal(x) or Add(Literal(0), y)

@@ -45,39 +45,72 @@ def test_add_two() -> None:
 5. Call finish alone. Functions with more than two statements need passing tests
    before evaluation/completion. Resubmitting functions may require tests again.
 
-## Supported Python subset
-Annotate every parameter, return and new local binding: int, float, bool, str,
-list[T], Result[T]. Reassign an existing local with name = expression. Module
-and function docstrings become documentation. Python local calls are qualified
-to the explicit module automatically; cross-module calls use Module.function.
-No imports are needed or allowed. Builtin-name definitions and dynamic calls
-are rejected. Permission checks apply to every caller-authored module reference.
+## Admitted Python subset (full parity is not complete)
+Annotate every parameter, return and new local binding. Types: int, float, bool,
+str, Byte, list[T], Map[K, V], Set[T], Option[T], Result[T], and named struct or
+union types. Structs are declared with @dataclass classes (keyword-arg
+construction and field access); tagged unions with @union classes whose
+`Variant: tuple[...]` attributes list payload types (tuple[()] = no payload;
+`None` is written `None_`). Module and function docstrings become documentation.
+Cross-module calls use Module.function; no imports are needed or allowed.
+Builtin-name and reserved-helper definitions are rejected.
+Named-type construction/references and same-named types across modules remain
+under parity review; follow admission errors. Inspection refuses bare user calls
+when Python lowering would qualify them: qualification can change the runtime
+target. Inspect Adapsis source instead of inferring a current-module target.
 
-Use if/elif/else, while and for over read-only typed lists. A for target must be
-fresh, used only inside its loop and never reused. New block locals cannot
-escape their blocks. Numeric +, -, *, single comparisons, typed string + and
-total call-free Boolean and/or/not are supported. List literals, iteration and
-len(list_value) are supported; string len is not in this subset. Python True/False and list literal inputs are converted as
-data; a runtime symbol collision cannot turn a literal into executable code.
+Statements: if/elif/else, while, for over typed lists. Conditions and not require
+known bool operands; not produces bool. Numeric +, -, * require matching known
+numeric types; comparisons require matching known primitive types (numeric
+ordering only). Typed string + is supported. and/or require total, call-free,
+known bool operands because runtime tiers disagree on short-circuiting.
+len requires a known list/str/Map/Set; annotate unresolved call results before
+typed operations. Unknown is not proof of operand compatibility. div(a, b) and
+rem(a, b) are frontend operator helpers; Python / and % are rejected.
 
-Unsupported constructs fail with source locations: classes, imports, arbitrary
-decorators, defaults/variadic parameters, exceptions, lambdas, comprehensions,
-f-strings, subscripts, list mutation, break/continue, loop else, /, //, %, **,
-chained comparisons and truthiness-based operand selection. No implicit type
-coercions. Integer literals are limited to -9223372036854775807 through
-9223372036854775807; numeric storage/overflow follows the typed Adapsis runtime.
+Native tests are data-only literal assertions. Exact literal equality, contains
+and starts_with are admitted. Result matchers is_ok/is_err/Err and assert_after
+exist in the broader frontend experiment but are REJECTED by native tests.
+Routes, source/event declarations or operations and startup/shutdown lifecycle
+blocks are NOT available through native mutation. Extended match,
+propagate/check/spawn, shared and struct forms remain under parity review; do not
+assume every frontend form is admitted by this native surface. The permission,
+literal-data and explicit completion/test gates always apply.
 
-The inert @effects("io", "fail", "mut") declaration and async def express
-effects. Await is allowed only in an annotated direct-call binding. Async user
-calls must be awaited; synchronous calls cannot be awaited. Pure async calls
-need no IO effect; IO awaits also require @effects("io"). Awaiting Result-returning
-user functions is currently unsupported (#82); direct runtime IO builtin awaits
-can preserve Result values. Effectful tests need trusted runtime-provided IO
-mocks; Python cannot install mocks.
-Test wrappers contain one equality assertion of a direct function call against
-scalar/list literal values, with no arbitrary helper execution. None return
-annotations belong only to test wrappers. Result matchers and global side-effect
-assertions are deferred.
+The inert @effects(...) decorator takes io, fail, mut, rand, yield, parallel,
+unsafe (async comes from async def). Await is allowed only in an annotated
+direct-call binding. Awaiting Result-returning user functions is currently
+unsupported (#82); direct runtime IO builtin awaits can preserve Result values.
+Effectful tests need trusted runtime-provided IO mocks; Python cannot install mocks.
+The no-await match exception applies ONLY to a direct, unshadowed runtime IO
+builtin in an io+async function. It is admitted syntax but NOT VM-portable after
+an earlier IO operation in the same function (#94), and the runtime never
+replays a whole function after IO. Prefer binding first:
+`response: Result[str] = await http_get(url)` then `match response:` (direct
+builtin await; awaiting Result-returning user functions is unsupported, #82).
+User async calls still require annotated await; matching them does not bypass
+that rule or the Result-await restriction. Nested arguments never inherit a
+match/await/spawn exception. spawn(Module.function(...)) schedules a qualified
+runtime function, not an agent; its caller must be async and also declare io when
+the target has io effects. Target argument counts are checked against the current
+declaration. A builtin cannot be a spawn target.
+Bare union constructors admitted by native Python mutation must belong to the
+submitted source or the writable target module; external bare variants are
+refused. Field access through a sequentially bound local (`p.x`) is data, never a
+module reference, but call targets always require authorization. A Python
+function may not reuse the name of a union variant declared in another module:
+execution tiers resolve bare identifiers differently, so mutation refuses that
+collision instead of creating an unusable program. A legacy program that already
+contains such a collision can still evaluate unrelated functions.
+
+Module-level shared declarations are admitted when they have an explicit
+annotation and a data-only default: scalars, checked list literals, and record or
+variant constructors whose fields/payloads match the declared type. Any nested
+function call, unresolved reference, field mismatch or type mismatch is refused
+before mutation.
+Unsupported Python forms (imports, lambdas, comprehensions, f-strings, subscripts,
+break/continue, truthiness-based selection, short-circuiting and/or with calls)
+fail with source locations.
 
 ## Compatibility and remaining tools
 Omitting language preserves Adapsis syntax; explicitly choose python for the

@@ -1,0 +1,8 @@
++module SongGen
++fn generate_cicero_song ()->String [io,async]
+  +let caption:String = "Cicero Style - romantic German love song, pop with country influences, gentle male vocals, acoustic guitar and piano, nostalgic and warm atmosphere"
+  +let lyrics:String = "Pferde stehlen ist ihr nicht genug\nNein, sie nimmt den ganzen Stall\nAuf Tinder hab ich sie gesucht\nUnd mich sofort in sie verknallt\n\nIhre Augen haben mich tief berührt\nIhre Locken mir den Kopf verdreht\nIch bin ein Glückspilz denn sie will mit mir\nZusammen durch dick und dünn gehen\n\nDu bist mein zuhause du bist mein Glück\nIch sehe Sterne wenn du mich küsst\nSeit ich dich kenne bin ich Optimist\nIch werd dich erinnern wenn du dich vergisst\nWenn du soweit bist\nDann heirat ich dich\n\nWenn du dein Lachen mal wieder verkneifst\nNach einem dummen Witz von mir\nWeiß ich du bist mein Sonnenschein\nDu weißt ich gehör nur dir\n\nDu bist mein zuhause du bist mein Glück\nIch sehe Sterne wenn du mich küsst\nSeit ich dich kenne bin ich Optimist\nIch werd dich erinnern wenn du dich vergisst\nWenn du soweit bist\nDann heirat ich dich\n\nDu hast mir eine Tochter geschenkt\nDas bedeutet mir die Welt\n\nDu bist mein zuhause du bist mein Glück\nIch sehe Sterne wenn du mich küsst\nSeit ich dich kenne bin ich Optimist\nIch werd dich erinnern wenn du dich vergisst\nWenn du soweit bist\nDann heirat ich dich"
+  +let metas:String = "style:Cicero, mood:romantic, genre:german-pop-country, vocal:male, instruments:acoustic-guitar+piano+gentle-drums, tempo:medium-slow, structure:verse-chorus-verse-chorus-bridge-chorus"
+  +await result:String = MusicGen.generate("telegram:user:1449219273", caption, 120, lyrics, metas)
+  +return result
+

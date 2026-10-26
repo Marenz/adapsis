@@ -1,0 +1,18 @@
++module IssueReader
++doc "Fetch GitHub issue details and comments via the API"
++fn fetch_issue (num:Int)->String [io,async]
+  +let url:String = concat("<redacted>", to_string(num))
+  +await body:String = http_request("GET", url, "User-Agent: AdapsisOS", "")
+  +return body
+
++test fetch_issue
+  +with num=23 -> expect contains("number")
+
++fn fetch_comments (num:Int)->String [io,async]
+  +let url:String = concat("<redacted>", to_string(num), "/comments")
+  +await body:String = http_request("GET", url, "User-Agent: AdapsisOS", "")
+  +return body
+
++test fetch_comments
+  +with num=23 -> expect contains("number")
+

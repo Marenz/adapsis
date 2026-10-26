@@ -379,6 +379,21 @@ async fn python_batch_final_lowering_uses_earlier_created_signatures() {
 }
 
 #[tokio::test]
+async fn python_batch_call_mode_checks_use_updated_signature_without_undoing_accepted_edit() {
+    let fixture = Fixture::new(vec![response("", vec![
+        call("make-async", "mutate", json!({"language":"python","module":"PyBatchCallModeTarget","source":"async def value(x: int) -> Result[int]:\n    return Ok(x)\n"})),
+        call("bad-caller", "mutate", json!({"language":"python","module":"PyBatchCallModeCaller","source":"def probe() -> int:\n    match PyBatchCallModeTarget.value(1):\n        case Ok(v):\n            return v\n        case Err(e):\n            return 0\n"})),
+    ]), tool("finish", "finish", json!({}))],
+        "+module PyBatchCallModeTarget\n+fn value (x:Int)->Result<Int>\n +return Ok(x)\n+end\n").await;
+    let result = fixture.run(false).await;
+    assert!(result.has_errors && result.results.iter().any(|r| !r.success && r.message.contains("annotated await")), "{:?}", result.results);
+    assert_eq!(result.completed, Some(true), "a corrected/refused call does not roll back an earlier accepted edit");
+    let program = fixture.config.program.read().await;
+    assert!(program.get_function("PyBatchCallModeTarget.value").unwrap().effects.contains(&crate::ast::Effect::Async));
+    assert!(program.get_function("PyBatchCallModeCaller.probe").is_none());
+}
+
+#[tokio::test]
 async fn python_batch_preflight_checks_the_whole_source_before_any_effect() {
     let fixture = Fixture::new(vec![response("", vec![
         call("good", "mutate", json!({"language":"python","module":"PyBatchMustNotExist","source":"def value() -> int:\n    return 1\n"})),
@@ -394,4 +409,26 @@ async fn python_batch_preflight_checks_the_whole_source_before_any_effect() {
             .get_function("PyBatchMustNotExist.value")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn python_reference_batch_resolves_target_constructor_from_earlier_call() {
+    let mut fixture = Fixture::new(vec![response("", vec![
+        call("type", "mutate", json!({"language":"python","module":"PyRoleBatch","source":"@union\nclass Expr:\n    Leaf: tuple[int]\n    Empty: tuple[()]\n"})),
+        call("function", "mutate", json!({"language":"python","module":"PyRoleBatch","source":"def score() -> int:\n    value: Expr = Leaf(7)\n    match value:\n        case Leaf(n):\n            return n\n        case Empty():\n            return 0\n"})),
+    ]), tool("eval", "evaluate", json!({"language":"python","function":"PyRoleBatch.score","input":""})), tool("finish", "finish", json!({}))], "").await;
+    fixture.config.permission_config = Arc::new(toml::from_str("[groups]\nown=['PyRoleBatch']\n[model.native-fixture]\nown='write'\nuser='none'\n").unwrap());
+    let result = fixture.run(false).await;
+    assert!(!result.has_errors && result.completed == Some(true), "{:?}", result.results);
+    assert!(result.results.iter().any(|r| r.success && r.message.contains("= 7")));
+}
+
+#[tokio::test]
+async fn python_reference_dynamic_call_shape_rejects_batch_before_first_effect() {
+    let fixture = Fixture::new(vec![response("", vec![
+        call("sentinel", "mutate", json!({"language":"python","module":"PyRoleMustNotExist","source":"def value() -> int:\n    return 1\n"})),
+        call("invalid", "mutate", json!({"language":"python","module":"PyRoleInvalid","source":"def f(p: Point) -> int:\n    return p.hidden()\n"})),
+    ])], "").await;
+    assert!(fixture.run(false).await.has_errors);
+    assert!(fixture.config.program.read().await.get_function("PyRoleMustNotExist.value").is_none());
 }

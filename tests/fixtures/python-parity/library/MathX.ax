@@ -1,0 +1,4 @@
++module MathX
++fn double (x:Int)->Int
+  +return x+1
+

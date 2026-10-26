@@ -15,6 +15,7 @@
 use crate::eval::Value;
 use crate::intern::{InternedId, StringInterner};
 use std::sync::Arc;
+mod result_match;
 
 /// A single bytecode instruction.
 #[derive(Debug, Clone)]
@@ -1122,24 +1123,8 @@ fn run_loop(
                 });
             }
             Op::MatchVariant(variant_id, binding_count) => {
-                let binding_count = *binding_count;
                 let val = pop_stack(&mut state.stack)?;
-                match val {
-                    Value::Union {
-                        ref variant,
-                        ref payload,
-                    } if variant == variant_id => {
-                        // Push bindings onto stack (in order), then push true
-                        for i in 0..binding_count.min(payload.len()) {
-                            state.stack.push(payload[i].clone());
-                        }
-                        state.stack.push(Value::Bool(true));
-                    }
-                    _ => {
-                        // No match — push false (no bindings)
-                        state.stack.push(Value::Bool(false));
-                    }
-                }
+                result_match::push_match(&val, *variant_id, *binding_count, interner, &mut state.stack);
             }
         }
     }

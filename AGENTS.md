@@ -178,6 +178,12 @@ Function evaluation goes through up to three tiers (fastest first):
      union variants — anything else is a compile error (fallback signal).
    - Async fallback rule: only safe BEFORE any IO has been performed.
      `eval_async_function` tracks this; never re-run a function after IO.
+   - Dedicated `Value::Ok`/`Value::Err` matching is handled by
+     `vm/result_match.rs` (#93): push the inner value/error String before the
+     match Bool so the existing reverse-order binding stores consume it correctly.
+     User Union payload ordering remains separate. Nested match statements are
+     covered; this does not certify nested payload patterns, Option matching or
+     non-exhaustive-match behavior across tiers.
 3. **Tree-walker** (`eval/mod.rs`) — universal fallback; the only tier with
    `Env`-based shared vars, function stubs, spawned-task snapshot tracking.
 
@@ -534,10 +540,44 @@ replaces that branch with one composer.
   quality. **Live gateway compatibility is blocked/unverified**: llm-gateway #2
   tracks tool-dropping virtual routes, call-id and terminal-status translation.
   Do not advertise live-provider usability until that separate gate passes.
-- **Python-subset frontend (#81):** exact `rustpython-parser = "=0.4.0"` parses
+- **Known safe-direction limitation (#95 related):** native Python mutation may
+  refuse a qualified call whose spelling is also a variant name in a reachable
+  module, even when the fully-qualified call would resolve unambiguously. That is
+  a conservative over-refusal, kept deliberately: it never admits a program whose
+  behaviour could differ between execution tiers. Do not "fix" it by relaxing the
+  declaration or reachable-graph checks without an owner/proven representation.
+- **Python-subset frontend (#81, #86 parity work in progress):** exact
+  `rustpython-parser = "=0.4.0"` parses
   syntax without a Python interpreter. `src/python_frontend/` lowers a bounded
   typed subset into `parser::Operation`, emits canonical `.ax`, and requires a
-  complete structural reparse match. Never interpolate Python text into commands
+  complete structural reparse match. #86 adds forms toward `.ax` parity:
+  `@dataclass`/`@union` types, `match`/`case`, `+shared`, `+call`/`+check`/`+spawn`
+  via `propagate`/`check`/`spawn`, `div`/`rem` helpers, all eight effects, and
+  source/event/route/lifecycle declarations. `src/python_frontend/parity.rs`
+  (test `python_parity`) is a strict test-only inventory/roundtrip gate over
+  `tests/fixtures/python-parity/manifest.json` (examples + a sanitized library copy).
+  The gate is currently RED. It reports invalid source separately, retains
+  unsupported top-level declarations/commands/tests and module-only failures,
+  compares exact ASTs ignoring only typed NodeId fields, and checks second-print
+  byte identity. Do not count a fixture as covered merely because a function
+  printer passed; unqualified call normalization is an AST difference.
+  #90 separately tracks tree-walker short-circuit vs VM/JIT eager Boolean
+  evaluation/truthiness; do not widen Boolean admission before that is resolved.
+  Frontend type catalog keys and resolved Named types retain declaration owners
+  internally (`Owner.Type`); parser/Python emission preserves the original bare
+  AST name. Function signature types carry the callee's owner, never the caller's.
+  Local declarations win, then top-level types, then only a unique cross-module
+  fallback; ambiguous fallback fails without listing candidate owners. Feed only
+  the authority-filtered catalog to native lowering/inspection. Do not flatten
+  it back to bare-name keys: same-named struct/union declarations otherwise overwrite.
+  A filtered catalog's unique fallback is NOT sufficient for native mutation:
+  stripping its owner can make full-program validation select a denied type.
+  `python_frontend/type_bindings.rs` runs before canonical execution and verifies
+  owner/kind/declaration-order invariants against metadata-only full-state lookup,
+  including global union-name reclassification. Colliding external fallback is
+  refused categorically before hidden schema validation, never by sanitizing its
+  errors afterward. Keep this guard after filtered lowering and before execution.
+  Never interpolate Python text into commands
   or add Python eval/exec/import execution. Native normalization lives in
   `api/native_tools/frontend.rs`: Python mutation admission first checks the
   complete supported syntax and collects direct references without looking up

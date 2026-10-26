@@ -29,15 +29,7 @@ pub(super) fn check_runtime(expr: &Expr, program: &ast::Program) -> Result<(), S
 }
 
 pub(super) fn require_unshadowed(program: &ast::Program, name: &str) -> Result<(), String> {
-    let collides = program
-        .functions
-        .iter()
-        .any(|function| function.name == name)
-        || type_collision(&program.types, name)
-        || program
-            .modules
-            .iter()
-            .any(|module| module_collision(module, name));
+    let collides = crate::python_frontend::runtime_shadowed(program, name);
     if collides {
         Err(format!(
             "cannot guarantee literal/frontend helper `{name}` semantics: a user-defined symbol shadows this builtin"
@@ -61,25 +53,13 @@ pub(super) fn require_python_environment(program: &ast::Program) -> Result<(), S
     Ok(())
 }
 
-fn type_collision(types: &[ast::TypeDecl], name: &str) -> bool {
-    types.iter().any(|ty| match ty {
-        ast::TypeDecl::TaggedUnion(union) => {
-            union.variants.iter().any(|variant| variant.name == name)
-        }
-        ast::TypeDecl::Struct(_) => false,
-    })
-}
-
-fn module_collision(module: &ast::Module, name: &str) -> bool {
-    module
-        .functions
-        .iter()
-        .any(|function| function.name == name)
-        || type_collision(&module.types, name)
-        || module
-            .modules
-            .iter()
-            .any(|child| module_collision(child, name))
+/// #95: an ambiguous reachable construct is refused, but only for the entry
+/// point actually being executed. Legacy collisions elsewhere in the program
+/// must not disable unrelated Python functions (they cannot be repaired by any
+/// native tool). Declaration-time checks prevent new Python-authored collisions.
+pub(super) fn require_python_entry(program: &ast::Program, entry: &str) -> Result<(), String> {
+    require_python_environment(program)?;
+    crate::python_frontend::check_constructor_environment(program, entry)
 }
 
 /// A declaration in this same mutation is not present in the runtime snapshot

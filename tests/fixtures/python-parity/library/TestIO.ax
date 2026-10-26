@@ -1,0 +1,4 @@
++module TestIO
++fn greet (name:String)->String [io,async]
+  +return concat("hello ", name)
+

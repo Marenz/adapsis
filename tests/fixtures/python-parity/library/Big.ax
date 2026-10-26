@@ -1,0 +1,9 @@
++module Big
++fn calc (a:Int, b:Int)->Int
+  +let x:Int = a+b
+  +let y:Int = x*2
+  +return y
+
++test calc
+  +with a=2 b=3 -> expect 10
+

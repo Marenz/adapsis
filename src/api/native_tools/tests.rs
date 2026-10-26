@@ -16,6 +16,18 @@ mod regressions;
 mod python_tests;
 #[path = "python_runtime_tests.rs"]
 mod python_runtime_tests;
+#[path = "python_foundation_tests.rs"]
+mod python_foundation_tests;
+#[path = "python_catalog_tests.rs"]
+mod python_catalog_tests;
+#[path = "python_binding_guard_tests.rs"]
+mod python_binding_guard_tests;
+#[path = "python_call_site_tests.rs"]
+mod python_call_site_tests;
+#[path = "python_reference_tests.rs"]
+mod python_reference_tests;
+#[path = "python_shared_tests.rs"]
+mod python_shared_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

@@ -89,6 +89,7 @@ pub(super) fn parse_mutate(map: &Map<String, Value>, python: bool) -> Result<Par
         source,
         modules,
         python,
+        roles: None,
     })
 }
 
@@ -96,12 +97,12 @@ pub(super) fn parse_python_mutate(map: &Map<String, Value>) -> Result<ParsedTool
     reject_extra_fields(map, &["source", "module"])?;
     let module = take_string(map, "module", true, MAX_TARGET_BYTES)?.unwrap();
     let source = take_string(map, "source", true, MAX_SOURCE_BYTES)?.unwrap();
-    let references = crate::python_frontend::preflight_module(&source, &module)
+    let preflight = crate::python_frontend::preflight_module(&source, &module)
         .map_err(|error| error.to_string())?;
     Ok(ParsedTool::PythonMutate {
         source,
         module,
-        references,
+        preflight,
     })
 }
 
@@ -115,26 +116,41 @@ pub(super) fn finalize(
     let ParsedTool::PythonMutate {
         source,
         module,
-        references,
+        preflight,
     } = parsed
     else {
         return Ok(parsed);
     };
     let model = model_name(config);
     let mut signatures = authorized_program(config, &model, program);
-    for module in &mut signatures.modules {
-        module.modules.clear();
-        module
-            .functions
-            .retain(|function| references.contains(&format!("{}.{}", module.name, function.name)));
-    }
-    signatures.rebuild_function_index();
+    let roles = crate::python_frontend::resolve_native_references(
+        &preflight,
+        &module,
+        &signatures,
+        program,
+    )?;
+    crate::python_frontend::retain_native_dependencies(&mut signatures, &roles)?;
     let lowered = crate::python_frontend::lower_module_with_program(&source, &module, &signatures)
         .map_err(|error| error.to_string())?;
-    parse_mutate(
+    // Verify owner erasure before the canonical executor can consult full-state
+    // schemas. The guard sees only full-state binding metadata and returns a
+    // categorical refusal, never hidden field/type diagnostics.
+    crate::python_frontend::check_native_type_bindings(
+        &lowered.operations,
+        &module,
+        &roles.types,
+        &roles.functions,
+        &signatures,
+        program,
+    )?;
+    let mut parsed = parse_mutate(
         &serde_json::Map::from_iter([("source".into(), Value::String(lowered.canonical_adapsis))]),
         true,
-    )
+    )?;
+    if let ParsedTool::Mutate { roles: slot, .. } = &mut parsed {
+        *slot = Some(roles);
+    }
+    Ok(parsed)
 }
 
 fn authorized_program(config: &AppConfig, model: &str, program: &Program) -> Program {
@@ -158,9 +174,19 @@ pub(super) fn print_source(
 ) -> Result<String, String> {
     // Full-state helper safety is categorical and independent of private
     // signatures. The type-aware printer receives only authorized signatures.
-    literals::require_python_environment(program)?;
     let filtered = authorized_program(config, model, program);
-    crate::python_frontend::print_function(&filtered, target).map_err(|error| error.to_string())
+    literals::require_python_entry(&filtered, target)?;
+    if filtered.get_function(target).is_some() {
+        let source = crate::python_frontend::print_function(&filtered, target)
+            .map_err(|error| error.to_string())?;
+        let module = module_of(target);
+        let preflight =
+            crate::python_frontend::preflight_module(&source, module).map_err(|e| e.to_string())?;
+        crate::python_frontend::resolve_native_references(&preflight, module, &filtered, program)?;
+        Ok(source)
+    } else {
+        crate::python_frontend::print_type(&filtered, target).map_err(|error| error.to_string())
+    }
 }
 
 pub(super) fn parse_tests(map: &Map<String, Value>, python: bool) -> Result<ParsedTool, String> {

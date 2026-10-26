@@ -3199,6 +3199,50 @@ fn eval_builtin_math(callee: &str, args: Vec<Value>) -> Result<Value> {
                 _ => bail!("pow() expects numbers"),
             }
         }
+        "div" => {
+            if args.len() != 2 {
+                bail!("div() expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => {
+                    if *b == 0 {
+                        bail!("division by zero")
+                    }
+                    Ok(Value::Int(a / b))
+                }
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 / b)),
+                (Value::Float(a), Value::Int(b)) => {
+                    if *b == 0 {
+                        bail!("division by zero")
+                    }
+                    Ok(Value::Float(a / *b as f64))
+                }
+                _ => bail!("div() expects numbers"),
+            }
+        }
+        "rem" => {
+            if args.len() != 2 {
+                bail!("rem() expects 2 arguments");
+            }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => {
+                    if *b == 0 {
+                        bail!("modulo by zero")
+                    }
+                    Ok(Value::Int(a % b))
+                }
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 % b)),
+                (Value::Float(a), Value::Int(b)) => {
+                    if *b == 0 {
+                        bail!("modulo by zero")
+                    }
+                    Ok(Value::Float(a % *b as f64))
+                }
+                _ => bail!("rem() expects numbers"),
+            }
+        }
         "floor" => {
             if args.len() != 1 {
                 bail!("floor() expects 1 argument");
@@ -3486,7 +3530,7 @@ pub fn eval_builtin_or_user(
         // Set operations
         "set" | "set_add" | "set_remove" | "set_has" | "set_to_list" => eval_builtin_set(callee, args),
         // Math operations
-        "abs" | "sqrt" | "pow" | "floor"
+        "abs" | "sqrt" | "pow" | "div" | "rem" | "floor"
         | "to_int" | "parse_int" | "int"
         | "digit_value"
         | "is_digit_char" => eval_builtin_math(callee, args),

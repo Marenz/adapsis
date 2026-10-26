@@ -1,0 +1,4 @@
++module Math
++fn square (x:Int)->Int
+  +return x*x
+

@@ -1,0 +1,119 @@
++module IdleLoop
++doc "Background idle loop that polls the inbox for commands and executes them"
++shared last_check:String = ""
++shared processed_count:Int = 0
+
++fn check_inbox ()->String [io,async]
+  +await raw:String = inbox_read()
+  +return raw
++doc "Read and return raw inbox messages as JSON"
+
++fn parse_command (msg:String)->String
+  +let trimmed:String = trim(msg)
+  +if starts_with(trimmed, "!eval ")
+    +return concat("eval:", substring(trimmed, 6, len(trimmed)))
+  +else
+    +if starts_with(trimmed, "!roadmap ")
+      +return concat("roadmap:", substring(trimmed, 9, len(trimmed)))
+    +else
+      +if starts_with(trimmed, "!plan ")
+        +return concat("plan:", substring(trimmed, 6, len(trimmed)))
+      +else
+        +if starts_with(trimmed, "sync github")
+          +return "action:sync_github"
+        +else
+          +if starts_with(trimmed, "status")
+            +return "action:status"
+          +else
+            +return concat("unknown:", trimmed)
++doc "Parse a message string into a typed command prefix (eval:, roadmap:, plan:, action:, unknown:)"
+
++fn execute_command (cmd:String)->String [io,async]
+  +if starts_with(cmd, "eval:")
+    +let expr:String = substring(cmd, 5, len(cmd))
+    +await result:String = mutate(concat("!eval ", expr))
+    +return concat("Evaluated: ", result)
+  +else
+    +if starts_with(cmd, "action:sync_github")
+      +await result:String = GithubSync.sync_to_roadmap()
+      +return concat("GitHub sync: ", result)
+    +else
+      +if starts_with(cmd, "action:status")
+        +await syms:String = query_symbols()
+        +await tasks:String = query_tasks()
+        +await plan:String = plan_show()
+        +await roadmap:String = roadmap_list()
+        +return concat("=== Status ===\nSymbols:\n", syms, "\n\nTasks:\n", tasks, "\n\nPlan:\n", plan, "\n\nRoadmap:\n", roadmap)
+      +else
+        +if starts_with(cmd, "unknown:")
+          +let msg:String = substring(cmd, 8, len(cmd))
+          +return concat("Unknown command: ", msg)
+        +else
+          +return concat("Unhandled: ", cmd)
++doc "Execute a parsed command string and return the result"
+
++fn process_inbox ()->String [io,async]
+  +await raw:String = inbox_read()
+  +await result:String = process_messages(raw)
+  +return result
++doc "Read inbox and process all pending messages"
+
++test process_inbox
+  +with  -> expect "no messages"
+
++fn extract_message (raw:String, idx:Int)->String
+  +let msg:String = json_get(raw, to_string(idx))
+  +return msg
++doc "Extract a single message from a JSON array by index"
+
++fn process_messages (raw:String)->String [io,async]
+  +let count:Int = json_array_len(raw)
+  +if count==0
+    +return "no messages"
+  +let i:Int = 0
+  +let results:List<String> = list()
+  +while i<count
+    +let msg:String = extract_message(raw, i)
+    +let cmd:String = parse_command(msg)
+    +await result:String = execute_command(cmd)
+    +set results = push(results, result)
+    +set i = i+1
+  +return join(results, "\n")
++doc "Process a JSON array of messages, parsing and executing each command"
+
++test process_messages
+  +with raw="[]" -> expect "no messages"
+  +with raw="[\"status\"]" -> expect contains("Status")
+
++fn idle_tick ()->String [io,async]
+  +await result:String = process_inbox()
+  +return result
++doc "Run one iteration of the idle loop: process inbox and return result"
+
++fn idle_loop ()->String [io,async]
+  +while true
+    +await result:String = idle_tick()
+    +if result!="no messages"
+      +await p:Int = println(concat("[IdleLoop] ", result))
+    +await s:Int = sleep(5000)
+  +return "idle loop ended"
++doc "Continuously poll inbox every 5 seconds and process commands"
+
++fn e2e_test ()->String [io,async]
+  +await s:String = msg_send("main", "status")
+  +await result:String = process_inbox()
+  +return result
++doc "End-to-end test: send a status command to self and process it"
+
++test e2e_test
+  +with  -> expect contains("Status")
+
++fn e2e_test_sync ()->String [io,async]
+  +await s:String = msg_send("main", "sync github")
+  +await result:String = process_inbox()
+  +return result
++doc "End-to-end test: send a github sync command to self and process it"
+
++test e2e_test_sync
+  +with  -> expect contains("GitHub sync")
+

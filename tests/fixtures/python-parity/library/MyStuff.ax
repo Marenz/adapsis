@@ -1,0 +1,4 @@
++module MyStuff
++fn hello ()->String
+  +return "hi"
+

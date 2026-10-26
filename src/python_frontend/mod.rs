@@ -2,20 +2,53 @@
 //! No Python interpreter, imports, source sidecars, or authority decisions live here.
 
 mod emit;
+mod ast_equality;
 mod expressions;
 mod lower;
+#[cfg(test)]
+mod parity;
 mod printer;
 mod runtime_arguments;
+mod call_sites;
 mod surface;
+mod shared_default;
+mod references;
 mod tests_lower;
+mod types;
+mod type_bindings;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod types_tests;
+#[cfg(test)]
+mod match_tests;
+#[cfg(test)]
+mod module_tests;
+#[cfg(test)]
+mod review_tests;
+#[cfg(test)]
+mod task4_tests;
+#[cfg(test)]
+mod task5_tests;
+#[cfg(test)]
+mod admission_regression_tests;
+#[cfg(test)]
+mod runtime_semantics_tests;
+#[cfg(test)]
+mod call_site_tests;
 
 use rustpython_parser::{ast as py, ast::Ranged, Parse};
 
 pub use printer::print_function;
+pub use printer::print_module;
+pub use printer::print_type;
 pub use runtime_arguments::validate_runtime_arguments;
+pub use references::{NativeReferences, resolve_native_references, retain_native_dependencies, check_constructor_environment};
+pub use lower::Preflight as NativePreflight;
+pub(crate) use references::COLLISION as CONSTRUCTOR_ROLE_ERROR;
+pub(crate) use call_sites::runtime_shadowed;
+pub use type_bindings::check_native_type_bindings;
 pub use tests_lower::{lower_input, lower_tests};
 
 #[derive(Debug, Clone)]
@@ -60,7 +93,7 @@ pub fn lower_module(source: &str, module: &str) -> Result<LoweredSource, Diagnos
 
 /// Program-free whole-source structural preflight. Returned references must be
 /// authorized before a caller supplies any runtime signatures to final lowering.
-pub fn preflight_module(source: &str, module: &str) -> Result<Vec<String>, Diagnostic> {
+pub fn preflight_module(source: &str, module: &str) -> Result<lower::Preflight, Diagnostic> {
     lower::preflight(source, module)
 }
 
@@ -74,7 +107,9 @@ pub fn lower_module_with_program(source: &str, module: &str, program: &crate::as
         name.strip_prefix(&prefix).filter(|name| !name.contains('.')).map(|name| (name.to_string(), signature.clone()))
     }).collect();
     signatures.extend(local);
-    lower::module_with_signatures(source, module, signatures, true)
+    let types = types::catalog_from_program(program);
+    let shared = types::module_shared_vars(program, module);
+    lower::module_with_signatures(source, module, signatures, &types, &shared, true)
 }
 
 struct Context<'a> {
@@ -180,6 +215,27 @@ fn forbidden(name: &str) -> bool {
             | "input"
             | "import"
     ) || name.contains("__")
+}
+
+/// Frontend-only reserved helper names. They may not be shadowed by a user
+/// function, parameter or local binding, but they are not `forbidden` (which
+/// `direct_name`/`identifier` reject as unsafe).
+pub(super) fn reserved_helper_name(name: &str) -> bool {
+    matches!(
+        name,
+        "propagate"
+            | "check"
+            | "spawn"
+            | "source_add"
+            | "source_remove"
+            | "source_replace"
+            | "source_list"
+            | "event_register"
+            | "event_emit"
+            | "is_ok"
+            | "is_err"
+            | "assert_after"
+    )
 }
 
 fn docstring(stmt: &py::Stmt) -> Option<&str> {

@@ -1,0 +1,13 @@
++module ProbeV2
++fn pall ()->String
+  +let p:String = "<redacted>"
+  +let cid:Int = extract_chat_id(p)
+  +let uid:Int = extract_user_id(p)
+  +let ct:String = extract_chat_type(p)
+  +let vfid:String = json_get(p, "message.voice.file_id")
+  +let txt:String = extract_text(p)
+  +return concat(to_string(cid), "|", to_string(uid), "|", ct, "|", vfid, "|txt=", txt)
+
++test pall
+  +with  -> expect "<redacted>"
+

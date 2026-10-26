@@ -1,0 +1,23 @@
++module WebUI
++doc "Web dashboard UI serving HTML, CSS, and JS for the AdapsisOS event stream"
++fn serve_page ()->String
+  +let html:String = concat("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>AdapsisOS</title><style>", serve_styles(), "</style></head><body>", serve_body(), "<script>", serve_script(), "</script></body></html>")
+  +return html
++doc "Return the full HTML page combining styles, body, and script"
+
++fn serve_styles ()->String
+  +return "*{margin:0;padding:0;box-sizing:border-box}body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;display:flex;flex-direction:column;height:100vh}header{background:#16213e;padding:12px 20px;display:flex;justify-content:space-between;align-items:center}header h1{color:#0f3460;font-size:1.4em}header h1 span{color:#e94560}.status{color:#53d769;font-size:0.9em}.main{display:flex;flex:1;overflow:hidden}.panel{flex:1;padding:16px;overflow-y:auto;border-right:1px solid #333}.panel:last-child{border-right:none}.panel h2{color:#e94560;margin-bottom:12px;font-size:1.1em}.event{background:#16213e;border-left:3px solid #0f3460;padding:8px 12px;margin-bottom:8px;font-size:0.85em;border-radius:0 4px 4px 0}.event.mutation{border-color:#e94560}.event.eval{border-color:#53d769}.event.test{border-color:#f5a623}.event .time{color:#666;font-size:0.8em}.event .type{font-weight:bold;text-transform:uppercase;margin-right:8px}.event.mutation .type{color:#e94560}.event.eval .type{color:#53d769}.event.test .type{color:#f5a623}#eval-input{width:100%;background:#16213e;border:1px solid #333;color:#e0e0e0;padding:8px 12px;font-family:monospace;font-size:0.9em;border-radius:4px;margin-bottom:12px}#eval-result{background:#16213e;padding:12px;min-height:60px;border-radius:4px;font-size:0.85em;white-space:pre-wrap}"
++doc "Return the CSS stylesheet for the dashboard"
+
++fn serve_body ()->String
+  +return "<header><h1>Adapsis<span>OS</span></h1><span class=\"status\" id=\"conn\">connecting...</span></header><div class=\"main\"><div class=\"panel\" style=\"flex:2\"><h2>Events</h2><div id=\"events\"></div></div><div class=\"panel\"><h2>Eval</h2><input id=\"eval-input\" placeholder=\"Type expression and press Enter...\" /><div id=\"eval-result\">Ready.</div><h2 style=\"margin-top:16px\">Info</h2><div id=\"info\">Loading...</div></div></div>"
++doc "Return the HTML body markup with event panel, eval input, and info section"
+
++fn serve_script ()->String
+  +return concat("const evDiv=document.getElementById('events');const conn=document.getElementById('conn');const evalIn=document.getElementById('eval-input');const evalRes=document.getElementById('eval-result');const info=document.getElementById('info');", "let es=new EventSource('/api/events');es.onopen=()=>{conn.textContent='connected';conn.style.color='#53d769'};es.onerror=()=>{conn.textContent='disconnected';conn.style.color='#e94560'};", "function addEvent(type,data){const d=document.createElement('div');d.className='event '+type;const now=new Date().toLocaleTimeString();d.innerHTML='<span class=\"time\">'+now+'</span> <span class=\"type\">'+type+'</span>'+JSON.stringify(data);evDiv.prepend(d);if(evDiv.children.length>100)evDiv.lastChild.remove()}", "es.addEventListener('mutation',e=>{addEvent('mutation',JSON.parse(e.data))});", "es.addEventListener('eval',e=>{addEvent('eval',JSON.parse(e.data))});", "es.addEventListener('test',e=>{addEvent('test',JSON.parse(e.data))});", "evalIn.addEventListener('keydown',async e=>{if(e.key==='Enter'){const expr=evalIn.value;evalRes.textContent='Running...';try{const r=await fetch('/api/eval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:expr})});const j=await r.json();evalRes.textContent=j.result||JSON.stringify(j)}catch(err){evalRes.textContent='Error: '+err.message}}});", "async function loadInfo(){try{const r=await fetch('/api/status');const j=await r.json();info.innerHTML='<pre>'+JSON.stringify(j,null,2)+'</pre>'}catch(e){info.textContent='Failed to load'}}loadInfo();setInterval(loadInfo,10000);")
++doc "Return the JavaScript for SSE event listening, eval submission, and status polling"
+
++fn ping ()->String
+  +return "pong"
++doc "Return 'pong' — simple health check endpoint"
+

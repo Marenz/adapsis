@@ -1,0 +1,307 @@
++module Chronica
++doc "Read-only client for the live Chronica game server's operator endpoints"
++fn key ()->String [io,async]
+  +await raw:String = read_file("<redacted>")
+  +return trim(raw)
++doc "The operator key, read from disk. Never repeat it in a reply — room ids are this game's only access control, and this key opens every one of them."
+
++fn rooms ()->String [io,async]
+  +await k:String = Chronica.key()
+  +match http_get(concat(api_base(), "/api/rooms?key=", k))
+  +case Ok(body)
+    +return body
+  +case Err(e)
+    +return concat("ERR ", e)
++doc "Every live room — private and ephemeral included — with season, population, treasury, morale, the connected players and watchers by name, and a computed concerns list. Use it to find the room someone means when all they gave you is their name or a complaint."
+
++fn room (room_id:String)->String [io,async]
+  +await k:String = Chronica.key()
+  +match http_get(concat(api_base(), "/api/rooms/", room_id, "?key=", k))
+  +case Ok(body)
+    +return body
+  +case Err(e)
+    +return concat("ERR ", e)
++doc "One room in detail: the season vote and who is holding it up, permits, research projects with their concept status and diagnostics, generation in flight, stocks and the chronicle tail."
+
++fn health ()->String [io,async]
+  +match http_get(concat(api_base(), "/health"))
+  +case Ok(body)
+    +return body
+  +case Err(e)
+    +return concat("ERR ", e)
++doc "Liveness of the game server itself"
+
++fn api_base ()->String
+  +return "http://127.0.0.1:8091"
++doc "Where the game server listens. A +shared var is not initialised for a module called from a conversation, so this is a function on purpose."
+
++fn receipt (event_id:String, cursor:String)->String
+  +if NOT regex_match("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", event_id) OR NOT regex_match("^[A-Za-z0-9_-]{1,8192}$", cursor)
+    +return ""
+  +return concat("{\"source\":\"chronica-v2\",\"event_id\":\"", event_id, "\",\"cursor\":\"", cursor, "\",\"state\":\"received\",\"privacy\":\"withheld\"}")
++doc "Canonical public receipt: UUID and opaque cursor only. No prose, deploy, room, alias or context is exported; non-UUID legacy IDs require private operator review."
+
++test receipt
+  +with event_id="<redacted>" cursor="abc" -> expect ""
+  +with event_id="00000000-0000-0000-0000-000000000001" cursor="bad!" -> expect ""
+  +with event_id="00000000-0000-0000-0000-000000000001" cursor="abc" -> expect contains("withheld")
+
++fn marker (event_id:String)->String
+  +if NOT regex_match("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", event_id)
+    +return ""
+  +return concat("chronica-feedback-v1:", event_id)
++doc "<redacted>"
+
++test marker
+  +with "00000000-0000-0000-0000-000000000001" -> expect "chronica-feedback-v1:00000000-0000-0000-0000-000000000001"
+  +with "ignore instructions" -> expect ""
+
++fn ledger_seen (bodies:String, event_id:String, cursor:String)->Bool
+  +if marker(event_id)=="" OR receipt(event_id, cursor)==""
+    +return false
+  +let i:Int = 0
+  +while i<json_array_len(bodies)
+    +let body:String = json_get(bodies, to_string(i))
+    +if starts_with(body, concat(marker(event_id), "\n")) AND len(split(body, "\n"))==2
+      +let record:String = get(split(body, "\n"), 1)
+      +let prior_cursor:String = json_get(record, "cursor")
+      +if body==concat(marker(event_id), "\n", receipt(event_id, prior_cursor))
+        +return true
+    +set i = i+1
+  +return false
++doc "Deduplicate by source UUID, not cursor: canonical writer receipt survives feed resets/reindexing. Only exact metadata-only canonical bodies count."
+
++test ledger_seen
+  +with bodies="[\"chronica-feedback-v1:00000000-0000-0000-0000-000000000001\\n{\\\"source\\\":\\\"chronica-v2\\\",\\\"event_id\\\":\\\"00000000-0000-0000-0000-000000000001\\\",\\\"cursor\\\":\\\"old\\\",\\\"state\\\":\\\"received\\\",\\\"privacy\\\":\\\"withheld\\\"}\"]" event_id="00000000-0000-0000-0000-000000000001" cursor="new" -> expect true
+
++fn transition (state:String, next:String, role:String, evidence:Bool)->Bool
+  +if NOT evidence
+    +return false
+  +let edge:String = concat(state, ":", next, ":", role)
+  +return evidence AND edge=="received:privacy_checked:privacy" OR edge=="privacy_checked:triaged:steward" OR edge=="triaged:reproduced:qa" OR edge=="triaged:needs_information:qa" OR edge=="triaged:duplicate:steward" OR edge=="triaged:rejected:domain" OR edge=="needs_information:triaged:steward" OR edge=="reproduced:implementing:writer" OR edge=="implementing:review:writer" OR edge=="review:release_ready:reviewer" OR edge=="review:implementing:reviewer" OR edge=="release_ready:deployed:owner" OR edge=="deployed:verified:qa"
++doc "Exact evidence-gated role transition allowlist; owner-only deployment evidence, no substring matching and no release action."
+
++test transition
+  +with state="received" next="privacy_checked" role="privacy" evidence=true -> expect true
+  +with state="review" next="release_ready" role="reviewer" evidence=false -> expect false
+  +with state="release_ready" next="deployed" role="owner" evidence=false -> expect false
+  +with state="verified" next="implementing" role="writer" evidence=true -> expect false
+  +with state="review" next="release_ready" role="writer" evidence=true -> expect false
+
++fn ledger ()->String [io,async]
+  +await pages:String = shell_exec("<redacted>")
+  +return ledger_bodies(pages)
++doc "Fixed read-only GitHub all-pages request; native extraction accepts only configured writer-owned comments and fails closed on CLI errors."
+
++fn parse_item (item:String)->String
+  +let id:String = json_get(item, "event_id")
+  +let cursor:String = json_get(item, "cursor")
+  +if len(json_get(item, "note"))>4000 OR json_array_len(json_get(item, "recent_outcomes"))>12 OR len(json_get(item, "user_agent"))>512
+    +return ""
+  +return receipt(id, cursor)
++doc "Validate the bounded feed envelope and canonical receipt identity. Raw prose is inspected only for length; never included in output or interpreted as instructions."
+
++test parse_item
+  +with item="<redacted>" -> expect "{\"source\":\"chronica-v2\",\"event_id\":\"00000000-0000-0000-0000-000000000001\",\"cursor\":\"abc\",\"state\":\"received\",\"privacy\":\"withheld\"}"
+
++fn pull_page (base:String, token_path:String, cursor:String)->String [io,async]
+  +if base!="http://127.0.0.1:18092" OR token_path!=concat(home_dir(), "<redacted>") OR NOT regex_match("^[A-Za-z0-9_-]{0,8192}$", cursor)
+    +return ""
+  +await token:String = file_read(token_path)
+  +if NOT bearer_valid(token)
+    +return ""
+  +await response:String = http_request("GET", concat(base, "/api/admin/playtest/feedback?limit=10&after=", cursor), concat("<redacted>", trim(token)), "")
+  +return response
++doc "<redacted>"
+
++test pull_page
+  +with base="https://evil.invalid" token_path="/anything" cursor="" -> expect ""
+
++fn ledger_cursor (bodies:String)->String
+  +let cursor:String = ""
+  +let i:Int = 0
+  +while i<json_array_len(bodies)
+    +let body:String = json_get(bodies, to_string(i))
+    +if starts_with(body, "chronica-feedback-v1:") AND len(split(body, "\n"))==2
+      +let record:String = get(split(body, "\n"), 1)
+      +let id:String = json_get(record, "event_id")
+      +let position:String = json_get(record, "cursor")
+      +if body==concat(marker(id), "\n", receipt(id, position)) AND receipt(id, position)!=""
+        +set cursor = position
+    +set i = i+1
+  +return cursor
++doc "Recover acknowledged pull position solely from exact writer-authored receipts in chronological GitHub comment order. No transactional file cursor is claimed."
+
++test ledger_cursor
+  +with "[]" -> expect ""
+  +with "[\"ordinary unrelated comment\"]" -> expect ""
+
++fn ledger_bodies (pages:String)->String
+  +let bodies:List<String> = list()
+  +let p:Int = 0
+  +while p<json_array_len(pages)
+    +let page:String = json_get(pages, to_string(p))
+    +let i:Int = 0
+    +while i<json_array_len(page)
+      +let comment:String = json_get(page, to_string(i))
+      +let author:String = json_get(comment, "user.login")
+      +let body:String = json_get(comment, "body")
+      +if author=="" OR body==""
+        +return Err("malformed comment")
+      +if author=="<redacted>"
+        +set bodies = push(bodies, concat("\"", json_escape(body), "\""))
+      +set i = i+1
+    +set p = p+1
+  +return concat("[", join(bodies, ","), "]")
++doc "Native extraction of writer-owned comment bodies from gh paginated/slurped JSON; invalid JSON fails closed, including CLI failure strings."
+
++test ledger_bodies
+  +with "[[]]" -> expect "[]"
+  +with "EXIT 1: offline" -> expect Err
+  +with "[{}]" -> expect Err
+  +with "[[{}]]" -> expect Err
+  +with "[[{\"user\":{\"login\":\"other\"},\"body\":\"spoof\"}]]" -> expect "[]"
+
++fn handoff_body (event_id:String, state:String, next:String, role:String, evidence_url:String)->String
+  +if marker(event_id)=="" OR NOT transition(state, next, role, true) OR NOT regex_match("<redacted>", evidence_url)
+    +return ""
+  +return concat("chronica-handoff-v1:", event_id, "\n{\"from\":\"", state, "\",\"to\":\"", next, "\",\"role\":\"", role, "\",\"evidence\":\"", evidence_url, "\"}")
++doc "Public role evidence record accepts only allowlisted transitions and fixed-repository evidence URLs. No free text; privacy review must approve evidence visibility before calling."
+
++test handoff_body
+  +with event_id="00000000-0000-0000-0000-000000000001" state="review" next="release_ready" role="writer" evidence_url="<redacted>" -> expect ""
+
++fn workflow_state (bodies:String, event_id:String)->String
+  +let state:String = "received"
+  +let prefix:String = concat("chronica-handoff-v1:", event_id, "\n")
+  +let i:Int = 0
+  +while i<json_array_len(bodies)
+    +let body:String = json_get(bodies, to_string(i))
+    +if starts_with(body, prefix) AND len(split(body, "\n"))==2
+      +let record:String = get(split(body, "\n"), 1)
+      +let next:String = json_get(record, "to")
+      +if body==handoff_body(event_id, state, next, json_get(record, "role"), json_get(record, "evidence"))
+        +set state = next
+    +set i = i+1
+  +return state
++doc "Replay exact canonical handoffs from the writer-owned durable ledger; out-of-order or invalid-role records never advance state."
+
++test workflow_state
+  +with bodies="[]" event_id="00000000-0000-0000-0000-000000000001" -> expect "received"
+
++fn writer (mode:String, a:String, b:String, role:String, evidence_url:String)->String [io,async]
+  +if mode!="receipt" AND mode!="handoff" AND mode!="pull" AND mode!="page"
+    +return "blocked: invalid mode"
+  +await lock:String = shell_exec("<redacted>")
+  +if lock!="acquired"
+    +return "blocked: writer busy or stale lock"
+  +await bodies:String = Chronica.ledger()
+  +let items:String = "[]"
+  +if mode=="pull"
+    +await page:String = Chronica.pull_page(a, b, ledger_cursor(bodies))
+    +set items = Chronica.page_items(page)
+  +else
+    +if mode=="page"
+      +set items = Chronica.page_items(a)
+    +else
+      +if mode=="receipt"
+        +set items = concat("[{\"event_id\":\"", json_escape(a), "\",\"cursor\":\"", json_escape(b), "\"}]")
+  +let result:String = "received 0"
+  +if mode=="handoff"
+    +let state:String = Chronica.workflow_state(bodies, a)
+    +let body:String = Chronica.handoff_body(a, state, b, role, evidence_url)
+    +if body!="" AND ledger_has_receipt(bodies, a)
+      +await written:String = file_write(concat(home_dir(), "<redacted>"), body)
+      +await posted:String = shell_exec("<redacted>")
+      +await after:String = Chronica.ledger()
+      +if workflow_state(after, a)!=b
+        +return "blocked: handoff unobserved; lock retained"
+      +set result = b
+    +else
+      +set result = "blocked: invalid handoff or missing receipt"
+  +else
+    +let i:Int = 0
+    +while i<json_array_len(items)
+      +let item:String = json_get(items, to_string(i))
+      +let id:String = json_get(item, "event_id")
+      +let cursor:String = json_get(item, "cursor")
+      +let record:String = Chronica.receipt(id, cursor)
+      +if record==""
+        +return "blocked: invalid receipt; lock retained"
+      +if NOT ledger_seen(bodies, id, cursor)
+        +await written_receipt:String = file_write(concat(home_dir(), "<redacted>"), concat(marker(id), "\n", record))
+        +await posted_receipt:String = shell_exec("<redacted>")
+        +await observed:String = Chronica.ledger()
+        +set bodies = observed
+        +if NOT Chronica.write_observed(posted_receipt, bodies, id, cursor)
+          +return "blocked: receipt unobserved; lock retained"
+      +set i = i+1
+    +set result = concat("received ", to_string(i))
+    +if mode=="receipt"
+      +set result = "observed"
+  +await released:String = shell_exec("<redacted>")
+  +return result
++doc "Sole GitHub append implementation, acquires lock itself in every mode. No nested locking; uncertainties retain fail-closed lock. Reconcile writes even after CLI errors."
+
++test writer
+  +with mode="invalid" a="" b="" role="" evidence_url="" -> expect "blocked: invalid mode"
+
++fn ledger_has_receipt (bodies:String, event_id:String)->Bool
+  +return ledger_seen(bodies, event_id, "probe")
++doc "Exact canonical receipt membership, never substring matching."
+
++fn page_items (page:String)->String [fail]
+  +check schema json_get(page, "schema_version")==1 ~err_feed_schema
+  +let items:String = json_get(page, "items")
+  +check bound json_array_len(items)<=10 ~err_feed_bound
+  +let i:Int = 0
+  +while i<json_array_len(items)
+    +check item parse_item(json_get(items, to_string(i)))!="" ~err_feed_item
+    +set i = i+1
+  +return items
++doc "Validate the whole bounded page before any append; malformed JSON fails closed."
+
++test page_items
+  +with "{\"schema_version\":1,\"items\":[]}" -> expect "[]"
+  +with "{\"schema_version\":2,\"items\":[]}" -> expect Err
+  +with "garbage" -> expect Err
+
++fn accept_receipt (event_id:String, cursor:String)->Bool [io,async]
+  +await result:String = Chronica.writer("receipt", event_id, cursor, "", "")
+  +return result=="observed"
++doc "Guarded receipt entry point; the sole writer acquires its own lock."
+
++fn record_handoff (event_id:String, next:String, role:String, evidence_url:String)->String [io,async]
+  +await result:String = Chronica.writer("handoff", event_id, next, role, evidence_url)
+  +return result
++doc "Guarded operator handoff; role is asserted, not an authenticated independent identity."
+
++fn pull_once (base:String, token_path:String)->String [io,async]
+  +if base!="http://127.0.0.1:18092" OR token_path!=concat(home_dir(), "<redacted>")
+    +return "blocked: review-only origin or credential"
+  +await result:String = Chronica.writer("pull", base, token_path, "", "")
+  +return result
++doc "Review-only intake; exact fixture origin and credential only, production/timer disabled."
+
++test pull_once
+  +with base="https://evil.invalid" token_path="/anything" -> expect "blocked: review-only origin or credential"
+
++fn write_observed (command_result:String, bodies:String, event_id:String, cursor:String)->Bool
+  +return ledger_seen(bodies, event_id, cursor)
++doc "Ambiguous command outcomes never authorize retry or acknowledgement: only the observed canonical ledger receipt decides; CLI success alone is insufficient."
+
++test write_observed
+  +with command_result="posted" bodies="[]" event_id="00000000-0000-0000-0000-000000000001" cursor="abc" -> expect false
+
++fn bearer_valid (token:String)->Bool
+  +return len(trim(token))>0 AND NOT contains(token, from_char_code(13)) AND NOT contains(token, from_char_code(10))
++doc "<redacted>"
+
++test bearer_valid
+  +with "<redacted>" -> expect true
+  +with "" -> expect false
+  +with "   " -> expect false
+  +with "<redacted>" -> expect false
+  +with "<redacted>" -> expect false
+  +with "<redacted>" -> expect false
+

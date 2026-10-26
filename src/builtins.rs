@@ -195,6 +195,20 @@ pub static BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Math,
     },
     Builtin {
+        name: "div",
+        aliases: &[],
+        short: "integer division (a, b)",
+        long: "Divides a by b with the runtime's integer-division semantics: Int/Int truncates toward zero and returns Int; a Float operand returns Float. Division by zero is an error. This is the function form of the / operator.",
+        category: BuiltinCategory::Math,
+    },
+    Builtin {
+        name: "rem",
+        aliases: &[],
+        short: "remainder (a, b)",
+        long: "Returns the remainder of a divided by b with the runtime's semantics (Int/Int returns Int, matching the % operator). A Float operand returns Float. Division by zero is an error.",
+        category: BuiltinCategory::Math,
+    },
+    Builtin {
         name: "floor",
         aliases: &[],
         short: "floor to integer",

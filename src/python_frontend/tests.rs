@@ -72,7 +72,7 @@ fn python_cross_module_calls_are_preserved_without_import_resolution() {
     assert!(lowered.canonical_adapsis.contains("Other.compute(x)"));
     reject(
         "def f(x: int) -> int:\n    return Other.compute(x) + 1\n",
-        "known int/float",
+        "matching known",
     );
 }
 
@@ -84,7 +84,7 @@ fn python_boolean_operators_reject_short_circuit_effect_changes() {
         evaluate(source, "Example.ready", "a=False, b=False"),
         "false"
     );
-    reject("def check() -> bool:\n    return True\ndef f(flag: bool) -> bool:\n    return flag and check()\n", "call-free");
+    reject("def flag_check() -> bool:\n    return True\ndef f(flag: bool) -> bool:\n    return flag and flag_check()\n", "call-free");
     reject(
         "def f(x: int) -> bool:\n    return x and True\n",
         "call-free",
@@ -191,7 +191,7 @@ fn python_unsupported_forms_fail_explicitly() {
             "{expr}"
         );
     }
-    for body in ["x += 1", "break", "continue", "pass", "values.append(1)"] {
+    for body in ["x += 1", "break", "continue", "values.append(1)"] {
         assert!(
             lower_module(
                 &format!("def f(x: int, values: list[int]) -> int:\n    {body}\n    return x\n"),
@@ -347,23 +347,23 @@ fn python_literal_delimiter_characters_are_data() {
 }
 
 #[test]
-fn python_printer_rejects_unsupported_legacy_ast_with_named_target() {
-    let mut program = ast::Program::default();
+fn python_printer_prints_division_as_div_helper() {
+    let mut prog = ast::Program::default();
     for op in
         parser::parse("+module Example\n+fn divide(x:Int) -> Int\n  +return x / 2\n+end\n").unwrap()
     {
-        validator::apply_and_validate(&mut program, &op).unwrap();
+        validator::apply_and_validate(&mut prog, &op).unwrap();
     }
-    let error = print_function(&program, "Example.divide").unwrap_err();
-    assert!(error.to_string().contains("Example.divide"));
-    assert!(error.message.contains("binary operator"));
-    assert!(error.message.contains("Adapsis source"));
+    let printed = print_function(&prog, "Example.divide").unwrap();
+    assert!(printed.contains("div(x, 2)"), "{printed}");
+    let rebuilt = program(&printed);
+    assert_eq!(print_function(&rebuilt, "Example.divide").unwrap(), printed);
 }
 
 #[test]
 fn python_printer_refuses_boolean_calls_and_helper_collisions() {
     let mut program = program(
-        "def check() -> bool:\n    return True\ndef f(flag: bool) -> bool:\n    return flag\n",
+        "def flag_check() -> bool:\n    return True\ndef f(flag: bool) -> bool:\n    return flag\n",
     );
     let f = program.get_function_mut("Example.f").unwrap();
     f.body[0].kind = ast::StatementKind::Return {
@@ -371,7 +371,7 @@ fn python_printer_refuses_boolean_calls_and_helper_collisions() {
             op: ast::BinaryOp::And,
             left: Box::new(ast::Expr::Identifier("flag".into())),
             right: Box::new(ast::Expr::Call(ast::CallExpr {
-                callee: "Example.check".into(),
+                callee: "Example.flag_check".into(),
                 args: vec![],
             })),
         },

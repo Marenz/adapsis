@@ -1,0 +1,16 @@
++module Probe
++fn rl ()->String [io,async]
+  +await a:String = fn_remove("MusicGen._verify")
+  +await b:String = library_reload("MusicGen")
+  +return concat(a, " ", b)
+
++test rl
+  +with  -> expect contains("R")
+
++fn rm (x:String)->String [io,async]
+  +await r:String = fn_remove(x)
+  +return r
+
++test rm
+  +with x="a" -> expect contains("R")
+
