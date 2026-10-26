@@ -104,10 +104,13 @@ collision instead of creating an unusable program. A legacy program that already
 contains such a collision can still evaluate unrelated functions.
 
 Module-level shared declarations are admitted when they have an explicit
-annotation and a data-only default: scalars, checked list literals, and record or
-variant constructors whose fields/payloads match the declared type. Any nested
-function call, unresolved reference, field mismatch or type mismatch is refused
-before mutation.
+annotation and a data-only default: scalars, checked list literals, record
+constructors, and zero- or single-payload variant constructors whose
+fields/payloads match the declared union. Variant defaults are checked by the same
+data-only walker; a nested function call, unknown constructor, wrong arity, wrong
+payload type or field mismatch is refused before mutation. A variant default never
+bypasses the function/variant name-collision guards: a submission that both uses a
+variant default and declares a same-spelled function is refused.
 Unsupported Python forms (imports, lambdas, comprehensions, f-strings, subscripts,
 break/continue, truthiness-based selection, short-circuiting and/or with calls)
 fail with source locations.

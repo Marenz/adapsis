@@ -848,7 +848,7 @@ fn run_loop(
                         if *b == 0 {
                             bail!("division by zero");
                         }
-                        state.stack.push(Value::Int(a / b));
+                        state.stack.push(Value::Int(crate::eval::checked_div(*a, *b)));
                     }
                     (Value::Float(a), Value::Float(b)) => {
                         state.stack.push(Value::Float(a / b));
@@ -873,7 +873,7 @@ fn run_loop(
                         if *b == 0 {
                             bail!("modulo by zero");
                         }
-                        state.stack.push(Value::Int(a % b));
+                        state.stack.push(Value::Int(crate::eval::checked_rem(*a, *b)));
                     }
                     _ => bail!("Mod: unsupported types"),
                 }

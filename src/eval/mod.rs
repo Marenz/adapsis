@@ -19,6 +19,18 @@ pub fn new_jit_cache() -> JitCache {
     Arc::new(Mutex::new(None))
 }
 
+/// #92: `i64::MIN / -1` and `i64::MIN % -1` overflow in Rust's inherent
+/// operators (panic in debug, wrap in release). Every execution tier must agree,
+/// so both use these helpers: division wraps to `i64::MIN`, remainder is `0`,
+/// matching hardware wraparound. Callers still enforce the zero-divisor error.
+pub fn checked_div(a: i64, b: i64) -> i64 {
+    a.checked_div(b).unwrap_or(i64::MIN)
+}
+
+pub fn checked_rem(a: i64, b: i64) -> i64 {
+    a.checked_rem(b).unwrap_or(0)
+}
+
 /// A runtime value during evaluation.
 ///
 /// **Performance notes**: Struct field keys, struct type names, and union variant
@@ -3765,7 +3777,7 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
                 if *b == 0 {
                     bail!("division by zero")
                 }
-                Ok(Value::Int(a / b))
+                Ok(Value::Int(checked_div(*a, *b)))
             }
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 / b)),
@@ -3782,7 +3794,7 @@ fn eval_binary_op(lhs: &Value, op: &ast::BinaryOp, rhs: &Value) -> Result<Value>
                 if *b == 0 {
                     bail!("modulo by zero")
                 }
-                Ok(Value::Int(a % b))
+                Ok(Value::Int(checked_rem(*a, *b)))
             }
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 % b)),

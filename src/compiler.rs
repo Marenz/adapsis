@@ -247,6 +247,24 @@ extern "C" fn rt_string_len(_ptr: *const u8, len: i64) -> i64 {
     len
 }
 
+/// #92: integer division that wraps on `i64::MIN / -1` instead of trapping,
+/// matching the tree walker and VM. A zero divisor still aborts, preserving the
+/// pre-existing JIT trap (the other tiers raise a normal runtime error).
+extern "C" fn rt_int_div(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        std::process::abort();
+    }
+    crate::eval::checked_div(a, b)
+}
+
+/// #92: integer remainder that returns 0 for `i64::MIN % -1` instead of trapping.
+extern "C" fn rt_int_rem(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        std::process::abort();
+    }
+    crate::eval::checked_rem(a, b)
+}
+
 /// Compile an Adapsis program to native code via Cranelift JIT.
 pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     let mut flag_builder = settings::builder();
@@ -265,6 +283,8 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     builder.symbol("rt_string_concat", rt_string_concat as *const u8);
     builder.symbol("rt_string_eq", rt_string_eq as *const u8);
     builder.symbol("rt_string_len", rt_string_len as *const u8);
+    builder.symbol("rt_int_div", rt_int_div as *const u8);
+    builder.symbol("rt_int_rem", rt_int_rem as *const u8);
 
     let mut module = JITModule::new(builder);
 
@@ -288,9 +308,18 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     rt_eq_sig.returns.push(AbiParam::new(types::I64)); // 1 or 0
     let rt_eq_id = module.declare_function("rt_string_eq", Linkage::Import, &rt_eq_sig)?;
 
+    let mut rt_int_sig = module.make_signature();
+    rt_int_sig.params.push(AbiParam::new(types::I64));
+    rt_int_sig.params.push(AbiParam::new(types::I64));
+    rt_int_sig.returns.push(AbiParam::new(types::I64));
+    let int_div_id = module.declare_function("rt_int_div", Linkage::Import, &rt_int_sig)?;
+    let int_rem_id = module.declare_function("rt_int_rem", Linkage::Import, &rt_int_sig)?;
+
     let runtime_funcs = RuntimeFuncs {
         concat_id: rt_concat_id,
         eq_id: rt_eq_id,
+        int_div_id,
+        int_rem_id,
     };
 
     // First pass: declare all functions (so they can call each other)
@@ -448,6 +477,8 @@ fn compile_function(
 struct RuntimeFuncs {
     concat_id: FuncId,
     eq_id: FuncId,
+    int_div_id: FuncId,
+    int_rem_id: FuncId,
 }
 
 /// Compute the flattened Cranelift types for an Adapsis type.
@@ -1105,8 +1136,24 @@ fn compile_expr(
                     ast::BinaryOp::Add => Ok(ctx.builder.ins().iadd(lhs, rhs)),
                     ast::BinaryOp::Sub => Ok(ctx.builder.ins().isub(lhs, rhs)),
                     ast::BinaryOp::Mul => Ok(ctx.builder.ins().imul(lhs, rhs)),
-                    ast::BinaryOp::Div => Ok(ctx.builder.ins().sdiv(lhs, rhs)),
-                    ast::BinaryOp::Mod => Ok(ctx.builder.ins().srem(lhs, rhs)),
+                    // #92: runtime helpers wrap i64::MIN / -1 and i64::MIN % -1
+                    // identically to the tree walker and VM.
+                    ast::BinaryOp::Div => {
+                        let f = ctx.module.declare_func_in_func(
+                            ctx.runtime_funcs.int_div_id,
+                            ctx.builder.func,
+                        );
+                        let call = ctx.builder.ins().call(f, &[lhs, rhs]);
+                        Ok(ctx.builder.inst_results(call)[0])
+                    }
+                    ast::BinaryOp::Mod => {
+                        let f = ctx.module.declare_func_in_func(
+                            ctx.runtime_funcs.int_rem_id,
+                            ctx.builder.func,
+                        );
+                        let call = ctx.builder.ins().call(f, &[lhs, rhs]);
+                        Ok(ctx.builder.inst_results(call)[0])
+                    }
                     ast::BinaryOp::And => Ok(ctx.builder.ins().band(lhs, rhs)),
                     ast::BinaryOp::Or => Ok(ctx.builder.ins().bor(lhs, rhs)),
                     _ => bail!("unsupported int op {:?}", op),

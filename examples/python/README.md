@@ -129,10 +129,14 @@ IO expression portability.
 
 Module-level `name: Type = default` declares a `+shared` variable. Native Python
 mutation requires an explicit annotation and a data-only default: scalars, checked
-list literals, and record/variant constructors whose fields and payload types match
-the annotation. Empty `[]` inherits its element type from the annotation; any
-other unresolved default is refused. Nested calls or references inside a list or
-record default are rejected, not silently accepted by an outer literal check.
+list literals, record constructors, and variant constructors (`Leaf(7)`, `Empty`)
+whose payloads match the declared annotation. A zero-payload variant uses the bare
+constructor spelling (`kind: Kind = Empty`); `Leaf(7)` uses the call form. Empty
+`[]` inherits its element type from the annotation; any other unresolved default is
+refused. Nested calls or
+references inside a list, record or variant default are rejected, not silently
+accepted by an outer literal check. A variant default cannot be combined with a
+same-named function declaration: the function/variant collision guards still apply.
 
 A Python-authored function may not share a spelling with a union variant declared
 in another module. The tree walker prefers variants and the VM prefers functions,

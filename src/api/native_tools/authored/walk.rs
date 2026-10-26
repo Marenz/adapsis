@@ -10,6 +10,19 @@ pub(super) struct Checker<'a> {
 }
 
 impl Checker<'_> {
+    /// The declaration's OWN annotation resolves to a union in the authorized
+    /// catalog; return that union's constructor spellings. The default's callee
+    /// must be one of THEM, so a foreign, unknown or builtin-spelled constructor
+    /// can never be admitted. Builtin spellings are allowed when they genuinely
+    /// are a declared variant of this annotation.
+    fn annotation_variants(&self, decl: &crate::parser::SharedVarDecl) -> Option<Vec<String>> {
+        let crate::parser::TypeExpr::Named(name) = &decl.ty else {
+            return None;
+        };
+        let roles = self.roles?;
+        roles.union_variants(name)
+    }
+
     fn reference(&self, target: &str, module: &str, call: bool) -> Result<(), String> {
         if self.roles.is_some_and(|r| r.shadows_builtin(target)) {
             return Err(crate::python_frontend::CONSTRUCTOR_ROLE_ERROR.into());
@@ -91,9 +104,21 @@ impl Checker<'_> {
                     self.operations(&decl.body, module, &mut local)?;
                 }
                 Operation::SharedVar(decl) => {
-                    literal(&decl.default)?;
-                    if let Some((program, _)) = self.program {
-                        super::super::literals::check_runtime(&decl.default, program)?;
+                    // The ONE position where a variant constructor is admitted:
+                    // a data-only default whose callee is a variant of its own
+                    // declared union. `variants` is empty otherwise, so every
+                    // other call stays a strict literal error.
+                    let variants = self.annotation_variants(decl).unwrap_or_default();
+                    match self.program {
+                        Some((program, _)) => super::super::literals::check_runtime_variant(
+                            &decl.default,
+                            program,
+                            &variants,
+                        )?,
+                        // Authorization-only pass (no program yet): validate the
+                        // ADMITTED SHAPE without the list-shadow lookup. The
+                        // executor pass repeats this with the real program.
+                        None => admitted_variant_shape(&decl.default, &variants)?,
                     }
                 }
                 Operation::Type(_) | Operation::Doc { .. } => {}
@@ -171,6 +196,20 @@ impl Checker<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// Shape-only form of `literals::check_runtime_variant`, used when no program is
+/// available (authorization pass). Mirrors it minus `list` shadowing.
+fn admitted_variant_shape(expr: &Expr, variants: &[String]) -> Result<(), String> {
+    match expr {
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if variants.iter().any(|v| v == name)) => {
+            args.iter()
+                .try_for_each(|arg| admitted_variant_shape(arg, variants))
+        }
+        // Zero-payload variant default: the bare constructor spelling.
+        Expr::Ident(name) if variants.iter().any(|v| v == name) => Ok(()),
+        other => literal(other),
     }
 }
 

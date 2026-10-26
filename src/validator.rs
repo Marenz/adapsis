@@ -281,9 +281,25 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 }
             }
             parser::Operation::SharedVar(sv) => {
+                // Reclassify a union-spelled annotation exactly as function
+                // signatures are: without this the declared type persisted as
+                // Struct(name) and every union shared var was mis-typed.
+                let mut ty = convert_type(&sv.ty)?;
+                let union_names = {
+                    let mut names = collect_union_names(program);
+                    for td in &program.modules[mod_idx].types {
+                        if let ast::TypeDecl::TaggedUnion(u) = td {
+                            names.insert(u.name.clone());
+                        }
+                    }
+                    names
+                };
+                if !union_names.is_empty() {
+                    resolve_type(&mut ty, &union_names);
+                }
                 let converted = ast::SharedVarDecl {
                     name: sv.name.clone(),
-                    ty: convert_type(&sv.ty)?,
+                    ty,
                     default: convert_expr(&sv.default)?,
                 };
                 let m = &mut program.modules[mod_idx];

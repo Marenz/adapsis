@@ -36,6 +36,19 @@ impl NativeReferences {
     pub fn shadows_builtin(&self, name: &str) -> bool {
         self.builtin_collisions.contains(name)
     }
+
+    /// Constructor spellings of the union that `name` resolves to in THIS
+    /// submission's catalog. Returns `None` unless the annotation names a union,
+    /// so a struct annotation can never admit a call-shaped default here.
+    pub fn union_variants(&self, name: &str) -> Option<Vec<String>> {
+        let key = types::resolve_name(&self.catalog, &self.module, name).ok()??;
+        match self.catalog.get(&key)? {
+            TypeInfo::Union { variants, .. } => {
+                Some(variants.iter().map(|(name, _)| name.clone()).collect())
+            }
+            TypeInfo::Struct { .. } => None,
+        }
+    }
 }
 
 pub(crate) const COLLISION: &str = "Python constructor role cannot be preserved safely: a declaration is shadowed or ambiguous; use a distinct constructor name";

@@ -14,17 +14,35 @@ pub(super) fn literal(expr: &Expr) -> Result<(), String> {
 }
 
 pub(super) fn check_runtime(expr: &Expr, program: &ast::Program) -> Result<(), String> {
-    literal(expr)?;
+    check_runtime_variant(expr, program, &[])
+}
+
+/// Variant-aware runtime check. `variants` is empty everywhere except the shared
+/// default position for a union annotation, where the caller supplies that
+/// union's own constructor spellings. Admitted variant calls are data-only, so
+/// their arguments recurse under the same rule; `list` keeps its shadow check.
+pub(super) fn check_runtime_variant(
+    expr: &Expr,
+    program: &ast::Program,
+    variants: &[String],
+) -> Result<(), String> {
     match expr {
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if variants.iter().any(|v| v == name)) => {
+            args.iter()
+                .try_for_each(|arg| check_runtime_variant(arg, program, variants))
+        }
         Expr::Call { args, .. } => {
             require_unshadowed(program, "list")?;
-            args.iter().try_for_each(|arg| check_runtime(arg, program))
+            args.iter()
+                .try_for_each(|arg| check_runtime_variant(arg, program, variants))
         }
-        Expr::Unary { expr, .. } => check_runtime(expr, program),
+        Expr::Unary { expr, .. } => check_runtime_variant(expr, program, variants),
         Expr::StructLiteral(fields) => fields
             .iter()
-            .try_for_each(|field| check_runtime(&field.value, program)),
-        _ => Ok(()),
+            .try_for_each(|field| check_runtime_variant(&field.value, program, variants)),
+        // Zero-payload variant default: the bare constructor spelling.
+        Expr::Ident(name) if variants.iter().any(|v| v == name) => Ok(()),
+        other => literal(other),
     }
 }
 

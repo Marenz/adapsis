@@ -37,6 +37,8 @@ mod admission_regression_tests;
 mod runtime_semantics_tests;
 #[cfg(test)]
 mod call_site_tests;
+#[cfg(test)]
+mod overflow_tests;
 
 use rustpython_parser::{ast as py, ast::Ranged, Parse};
 

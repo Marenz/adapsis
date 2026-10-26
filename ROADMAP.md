@@ -56,6 +56,16 @@
   refused by the native literal gate while the frontend accepts them — a known
   frontend/native policy inconsistency, deliberately not widened. Qualified-call
   over-refusal is recorded as a known safe-direction limitation.
+- Next authorized pair implemented. (1) Native literal gate widened ONLY for
+  shared/spawn defaults whose declared annotation is a union and whose tree shape
+  is data-only variant construction (literal payloads, `list(...)`): the slice3
+  walker still owns arity/type checking, nested calls stay refused, and the #95
+  function/variant declaration guards are untouched, so a variant default cannot
+  smuggle a same-named function. Records were already natively admitted. (2) #92:
+  `i64::MIN / -1` wraps to `i64::MIN` and `i64::MIN % -1` is `0` in tree, VM and
+  JIT via shared `checked_div`/`checked_rem` (JIT routes through runtime helpers);
+  zero divisors keep their previous error/trap behaviour. Pending combined gate
+  and re-freeze.
 - Earlier design note (superseded for slices 1-2 by the authorizations above): (1) exhaustive
   direct-call admission visitor and builtin-only IO-match exception; (2) scoped
   variant/function/value-reference classification, preserving authority-first
