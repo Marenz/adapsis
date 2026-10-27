@@ -228,7 +228,10 @@ impl Value {
         }
     }
 
-    fn is_truthy(&self) -> bool {
+    /// #90: the single definition of truthiness for `and`/`or`/`not`/conditions.
+    /// The tree walker, VM and JIT all consult this so tiers cannot drift.
+    /// `_ => true` deliberately covers List/Map/Set/Struct/Union/Attachment.
+    pub fn is_truthy(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
             Value::Int(n) => *n != 0,
@@ -1821,7 +1824,12 @@ pub(crate) fn eval_function_body(
                         .unwrap_or_else(|| "<top>".to_string())
                 });
                 let depth = FN_NAME_STACK.with(|s| s.borrow().len());
-                handle.update_snapshot(&fn_name, Some(stmt.id.clone()), depth, env.snapshot_bindings());
+                handle.update_snapshot(
+                    &fn_name,
+                    Some(stmt.id.clone()),
+                    depth,
+                    env.snapshot_bindings(),
+                );
             }
         }
         match &stmt.kind {
@@ -2205,11 +2213,13 @@ pub(crate) fn eval_function_body(
                 // its +shared variables. A bare name leaves current_module_name()
                 // as None and shared-var lookups fail with "undefined variable".
                 let spawn_fn_name = program.qualify_function_name(&call.callee);
-                io_tx.try_send(crate::coroutine::IoRequest::Spawn {
-                    function_name: spawn_fn_name,
-                    args,
-                    reply: reply_tx,
-                }).map_err(|e| anyhow::anyhow!("+spawn failed to send: {e}"))?;
+                io_tx
+                    .try_send(crate::coroutine::IoRequest::Spawn {
+                        function_name: spawn_fn_name,
+                        args,
+                        reply: reply_tx,
+                    })
+                    .map_err(|e| anyhow::anyhow!("+spawn failed to send: {e}"))?;
                 // If there's a binding, wait for the task ID
                 if let Some(b) = binding {
                     // Use try_recv in a loop since blocking_recv panics inside tokio runtime
@@ -2356,9 +2366,7 @@ fn source_add(
             ("timer".to_string(), Some(ms))
         }
         ast::SourceType::Channel => ("channel".to_string(), None),
-        ast::SourceType::Event(module, event) => {
-            (format!("event:{}.{}", module, event), None)
-        }
+        ast::SourceType::Event(module, event) => (format!("event:{}.{}", module, event), None),
     };
     let module_name = current_module_name(program, env, handler);
     let full_handler = if handler.contains('.') {
@@ -2368,16 +2376,16 @@ fn source_add(
     };
     if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let _ = handle.io_sender().blocking_send(
-            crate::coroutine::IoRequest::SourceAdd {
+        let _ = handle
+            .io_sender()
+            .blocking_send(crate::coroutine::IoRequest::SourceAdd {
                 module_name,
                 source_type: src_type_str,
                 interval_ms,
                 alias: alias.to_string(),
                 handler: full_handler,
                 reply: reply_tx,
-            },
-        );
+            });
         match reply_rx.blocking_recv() {
             Ok(Ok(_msg)) => {}
             Ok(Err(e)) => bail!("source add failed: {}", e),
@@ -2393,13 +2401,13 @@ fn source_remove(program: &ast::Program, env: &mut Env, alias: &str) -> Result<(
     let module_name = current_module_name(program, env, alias);
     if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let _ = handle.io_sender().blocking_send(
-            crate::coroutine::IoRequest::SourceRemove {
+        let _ = handle
+            .io_sender()
+            .blocking_send(crate::coroutine::IoRequest::SourceRemove {
                 module_name,
                 alias: alias.to_string(),
                 reply: reply_tx,
-            },
-        );
+            });
         match reply_rx.blocking_recv() {
             Ok(Ok(_msg)) => {}
             Ok(Err(e)) => bail!("source remove failed: {}", e),
@@ -2509,7 +2517,8 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                  `!eval Module.func(value1, value2)`. Named arguments like `func(key=value)` are not supported.".to_string()
             } else if lower.contains("is not a valid command") && lower.contains("!done") {
                 "Use `!done` (with the `!` prefix) to signal task completion. All Adapsis commands \
-                 start with `!` — bare words like `DONE` are not recognized.".to_string()
+                 start with `!` — bare words like `DONE` are not recognized."
+                    .to_string()
             } else {
                 String::new()
             };
@@ -2627,7 +2636,9 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                     let needle = &args[1];
                     Ok(Value::Bool(items.iter().any(|v| v.matches(needle))))
                 }
-                _ => bail!("contains expects (String, String), (List, value), (Map, key), or (Set, item)"),
+                _ => bail!(
+                    "contains expects (String, String), (List, value), (Map, key), or (Set, item)"
+                ),
             }
         }
         "regex_match" => {
@@ -2908,7 +2919,10 @@ fn eval_builtin_list(callee: &str, args: Vec<Value>) -> Result<Value> {
                     let idx = i as usize;
                     let mut new_items = items.as_ref().clone();
                     if idx > new_items.len() {
-                        bail!("insert: index {idx} out of bounds (len {})", new_items.len());
+                        bail!(
+                            "insert: index {idx} out of bounds (len {})",
+                            new_items.len()
+                        );
                     }
                     new_items.insert(idx, item);
                     Ok(Value::list(new_items))
@@ -3071,9 +3085,9 @@ fn eval_builtin_map(callee: &str, args: Vec<Value>) -> Result<Value> {
                 bail!("map_keys(map) expects 1 argument");
             }
             match &args[0] {
-                Value::Map(entries) => {
-                    Ok(Value::list(entries.iter().map(|(k, _)| k.clone()).collect()))
-                }
+                Value::Map(entries) => Ok(Value::list(
+                    entries.iter().map(|(k, _)| k.clone()).collect(),
+                )),
                 _ => bail!("map_keys expects Map"),
             }
         }
@@ -3082,9 +3096,9 @@ fn eval_builtin_map(callee: &str, args: Vec<Value>) -> Result<Value> {
                 bail!("map_values(map) expects 1 argument");
             }
             match &args[0] {
-                Value::Map(entries) => {
-                    Ok(Value::list(entries.iter().map(|(_, v)| v.clone()).collect()))
-                }
+                Value::Map(entries) => Ok(Value::list(
+                    entries.iter().map(|(_, v)| v.clone()).collect(),
+                )),
                 _ => bail!("map_values expects Map"),
             }
         }
@@ -3514,48 +3528,29 @@ pub fn eval_builtin_or_user(
             }
         }
         // String operations
-        "len" | "length"
-        | "error_suggest" | "failure_suggest"
-        | "concat"
-        | "to_string" | "str"
-        | "char_at"
-        | "substring" | "substr"
-        | "starts_with"
-        | "ends_with"
-        | "contains"
-        | "regex_match"
-        | "regex_replace"
-        | "index_of"
-        | "split"
-        | "trim"
-        | "json_get"
-        | "json_array_len"
-        | "json_escape"
-        | "home_dir"
-        | "base64_encode" => eval_builtin_string(callee, args),
+        "len" | "length" | "error_suggest" | "failure_suggest" | "concat" | "to_string" | "str"
+        | "char_at" | "substring" | "substr" | "starts_with" | "ends_with" | "contains"
+        | "regex_match" | "regex_replace" | "index_of" | "split" | "trim" | "json_get"
+        | "json_array_len" | "json_escape" | "home_dir" | "base64_encode" => {
+            eval_builtin_string(callee, args)
+        }
         // List operations
-        "list" | "push" | "get" | "join"
-        | "pop" | "remove" | "insert" | "reverse" | "sort" | "slice" => eval_builtin_list(callee, args),
+        "list" | "push" | "get" | "join" | "pop" | "remove" | "insert" | "reverse" | "sort"
+        | "slice" => eval_builtin_list(callee, args),
         // Map operations
-        "map" | "map_set" | "map_get" | "map_has" | "map_remove"
-        | "map_keys" | "map_values" | "map_entries" => eval_builtin_map(callee, args),
+        "map" | "map_set" | "map_get" | "map_has" | "map_remove" | "map_keys" | "map_values"
+        | "map_entries" => eval_builtin_map(callee, args),
         // Set operations
-        "set" | "set_add" | "set_remove" | "set_has" | "set_to_list" => eval_builtin_set(callee, args),
+        "set" | "set_add" | "set_remove" | "set_has" | "set_to_list" => {
+            eval_builtin_set(callee, args)
+        }
         // Math operations
-        "abs" | "sqrt" | "pow" | "div" | "rem" | "floor"
-        | "to_int" | "parse_int" | "int"
-        | "digit_value"
-        | "is_digit_char" => eval_builtin_math(callee, args),
+        "abs" | "sqrt" | "pow" | "div" | "rem" | "floor" | "to_int" | "parse_int" | "int"
+        | "digit_value" | "is_digit_char" => eval_builtin_math(callee, args),
         // Bitwise and numeric operations
-        "bit_and" | "bit_or" | "bit_xor" | "bit_not"
-        | "bit_shl" | "shl"
-        | "bit_shr" | "shr"
-        | "left_rotate" | "rotl"
-        | "to_hex"
-        | "char_code" | "ord"
-        | "from_char_code" | "chr"
-        | "u32_wrap"
-        | "max" | "min" => eval_builtin_bitwise(callee, args),
+        "bit_and" | "bit_or" | "bit_xor" | "bit_not" | "bit_shl" | "shl" | "bit_shr" | "shr"
+        | "left_rotate" | "rotl" | "to_hex" | "char_code" | "ord" | "from_char_code" | "chr"
+        | "u32_wrap" | "max" | "min" => eval_builtin_bitwise(callee, args),
         _ => {
             // Try to find the function in the program and call it
             if let Some(func) = program.get_function(callee) {
@@ -3857,10 +3852,7 @@ pub enum PureEvalContext {
 
 /// Evaluate a parser::Expr directly (for test case inputs/expected values).
 /// Evaluate a parser expression with access to the program (can call user functions).
-pub fn eval_parser_expr_with_program(
-    expr: &parser::Expr,
-    program: &ast::Program,
-) -> Result<Value> {
+pub fn eval_parser_expr_with_program(expr: &parser::Expr, program: &ast::Program) -> Result<Value> {
     eval_parser_expr_impl(expr, program, None, PureEvalContext::TestExpression)
 }
 
@@ -3920,7 +3912,11 @@ fn eval_parser_expr_impl(
                 func.effects
             ),
             PureEvalContext::InlineEval => {
-                let args = if func.params.is_empty() { "()" } else { "(...)" };
+                let args = if func.params.is_empty() {
+                    "()"
+                } else {
+                    "(...)"
+                };
                 bail!(
                     "cannot call `{name}`: it has side effects {:?} and this evaluation has no \
                      coroutine runtime. A running AdapsisOS dispatches such calls live — evaluate \
@@ -3956,7 +3952,12 @@ fn eval_parser_expr_impl(
     ) -> Result<Vec<Value>> {
         let mut result = Vec::with_capacity(args.len());
         for a in args {
-            result.push(eval_parser_expr_impl(a, program, env.as_deref_mut(), pure_ctx)?);
+            result.push(eval_parser_expr_impl(
+                a,
+                program,
+                env.as_deref_mut(),
+                pure_ctx,
+            )?);
         }
         Ok(result)
     }

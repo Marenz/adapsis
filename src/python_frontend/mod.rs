@@ -42,6 +42,8 @@ mod call_site_tests;
 mod overflow_tests;
 #[cfg(test)]
 mod builtin_signature_tests;
+#[cfg(test)]
+mod logical_tier_tests;
 
 use rustpython_parser::{ast as py, ast::Ranged, Parse};
 

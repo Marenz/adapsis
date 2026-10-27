@@ -56,6 +56,20 @@
   refused by the native literal gate while the frontend accepts them — a known
   frontend/native policy inconsistency, deliberately not widened. Qualified-call
   over-refusal is recorded as a known safe-direction limitation.
+- #90 tier semantics aligned (tree short-circuit normative). Truthiness is now a
+  single public `Value::is_truthy`; the VM's `pop_bool` delegates to it so
+  `AND`/`OR`/`NOT`/`BranchIf`/`BranchIfNot` share one definition (String/None/Err
+  rows are `.ax`-only since the Python frontend emits Bool). VM `AND`/`OR` compile
+  to short-circuit branches via a new `ToBool` opcode plus the existing
+  Jump/BranchIf/BranchIfNot patching; the JIT emits branch + result variable for
+  both ops (compiler.rs `compile_expr`, the And/Or arm; it previously used
+  `band`/`bor` with both operands eagerly compiled). Differential tests assert
+  tree/VM/JIT agreement on result, lenient operand types, a skipped rhs error
+  (division by zero), a skipped rhs recursion, and — the load-bearing one —
+  identical IoRequest count and order for a mocked rhs, including ZERO requests
+  when short-circuited. The obsolete "VM/JIT trap on eager rhs" characterization
+  tests were inverted to assert agreement. Frontend call-free relaxation (item 4)
+  is deliberately NOT done this round.
 - Builtin signature completeness (#86): new `python_frontend/builtin_signatures.rs`
   gives every pure BUILTINS name and alias a checked arity/result signature
   (grounded in the runtime's own `expects N argument` guards and return values).

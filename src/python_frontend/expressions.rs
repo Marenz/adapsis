@@ -835,9 +835,19 @@ impl Expressions<'_, '_> {
                 ));
             }
             // `Ty::Unknown` in the catalog means "no type constraint" (the
-            // runtime accepts any value of the right shape), so those positions
-            // check arity only.
+            // runtime is unconstrained there, not "runtime accepts anything"),
+            // so those positions check arity only.
             for (expected, (_, actual)) in entry.params.iter().zip(values.iter()) {
+                if *expected == Ty::Named("@numeric".into()) {
+                    // Numeric-only parameter (Int or Float), matching the runtime.
+                    if !matches!(actual, Ty::Int | Ty::Float) {
+                        return Err(self.cx.at(
+                            c,
+                            format!("builtin {name} expects an int or float, got {actual:?}"),
+                        ));
+                    }
+                    continue;
+                }
                 if *expected != Ty::Unknown && !compatible(expected, actual) {
                     return Err(self.cx.at(
                         c,

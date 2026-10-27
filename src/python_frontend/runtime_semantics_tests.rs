@@ -1,5 +1,6 @@
-//! Diagnostic evidence for #86 admission decisions. These characterize current
-//! tier disagreements, not a choice of authoritative language semantics.
+//! #90 tier-equivalence evidence. Tree short-circuit is normative; these tests
+//! assert that the VM and JIT now AGREE with it (they previously characterized a
+//! disagreement, which is why several names still say "audit").
 use crate::{ast, compiler, coroutine, eval, parser, validator, vm};
 use eval::{Env, Value};
 use std::cell::RefCell;
@@ -36,18 +37,16 @@ fn division_program() -> ast::Program {
 }
 
 #[test]
-fn python_audit_boolean_rhs_error_tree_short_circuits_vm_does_not() {
+fn python_boolean_rhs_error_is_skipped_on_all_tiers() {
     let program = division_program();
     for (target, flag, expected) in [("conjunction", false, 0), ("disjunction", true, 1)] {
         let args = vec![Value::Bool(flag), Value::Int(0)];
         assert!(
             matches!(tree(&program, target, args.clone()).unwrap(), Value::Int(n) if n == expected)
         );
+        // #90: the VM now short-circuits too, so no division-by-zero error.
         assert!(
-            bytecode(&program, target, args)
-                .unwrap_err()
-                .to_string()
-                .contains("division by zero")
+            matches!(bytecode(&program, target, args).unwrap(), Value::Int(n) if n == expected)
         );
     }
     let mut jit = compiler::compile(&program).unwrap();
@@ -68,37 +67,24 @@ fn python_audit_boolean_rhs_error_tree_short_circuits_vm_does_not() {
     }
 }
 
-#[cfg(target_os = "linux")]
+/// #90: the JIT now short-circuits, so the skipped rhs division is never
+/// executed and must NOT trap. Previously this ran in a subprocess because the
+/// eager JIT trapped; the assertion is now in-process and positive.
 #[test]
-fn python_audit_jit_rhs_error_is_an_isolated_native_trap() {
-    use std::os::unix::process::ExitStatusExt;
-    const KEY: &str = "ADAPSIS_PARITY_JIT_TRAP_PROBE";
-    if let Ok(target) = std::env::var(KEY) {
-        assert!(matches!(target.as_str(), "conjunction" | "disjunction"));
-        let mut jit = compiler::compile(&division_program()).unwrap();
-        println!("JIT_PROBE_COMPILED");
-        // Never trap in the main test runner; the parent disables core dumps.
-        let flag = i64::from(target == "disjunction");
-        let _ = jit.call_i64(&target, &[flag, 0]);
-        panic!("expected the current JIT's eager RHS division to trap");
-    }
-    for target in ["conjunction", "disjunction"] {
-        let output = std::process::Command::new("prlimit")
-            .args(["--core=0", "--"])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", "python_frontend::runtime_semantics_tests::python_audit_jit_rhs_error_is_an_isolated_native_trap", "--nocapture"])
-            .env(KEY, target)
-            .output().unwrap();
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("JIT_PROBE_COMPILED"),
-            "{output:?}"
+fn python_jit_skips_short_circuited_rhs_error() {
+    let program = division_program();
+    let mut jit = compiler::compile(&program).unwrap();
+    for (target, flag, expected) in [("conjunction", false, 0), ("disjunction", true, 1)] {
+        assert_eq!(
+            jit.call_i64(target, &[flag as i64, 0]).unwrap(),
+            expected,
+            "{target} must skip the dividing rhs"
         );
-        assert!(output.status.signal().is_some(), "{target}: {output:?}");
     }
 }
 
 #[test]
-fn python_audit_boolean_io_count_order_and_normalized_result() {
+fn python_boolean_io_count_order_matches_short_circuit_across_tiers() {
     for (operator, left, expected, tree_count) in [
         ("AND", false, false, 1),
         ("OR", true, true, 1),
@@ -154,12 +140,14 @@ fn python_audit_boolean_io_count_order_and_normalized_result() {
         })
         .unwrap();
         assert!(matches!(result, Value::Bool(b) if b == expected));
-        assert_eq!(*calls.borrow(), ["left", "right"]);
+        // #90: the VM must consume exactly the same IoRequests, in the same
+        // order, as the tree walker — a short-circuited rhs is never requested.
+        assert_eq!(*calls.borrow(), ["left", "right"][..tree_count]);
     }
 }
 
 #[test]
-fn python_audit_empty_collection_and_result_truthiness_is_not_tier_portable() {
+fn python_empty_collection_and_result_truthiness_is_shared_across_tiers() {
     let program = program("+fn probe (value:Bool)->Bool\n  +return value AND true\n+end\n");
     // The raw execution APIs are deliberately supplied each Value category to
     // inspect their truthiness independently of frontend admission.
@@ -176,11 +164,9 @@ fn python_audit_empty_collection_and_result_truthiness_is_not_tier_portable() {
         assert!(
             matches!(tree(&program, "probe", vec![value.clone()]).unwrap(), Value::Bool(b) if b == truth)
         );
+        // #90: the VM now consumes the same truthiness definition.
         assert!(
-            bytecode(&program, "probe", vec![value])
-                .unwrap_err()
-                .to_string()
-                .contains("expected Bool")
+            matches!(bytecode(&program, "probe", vec![value]).unwrap(), Value::Bool(b) if b == truth)
         );
     }
 }

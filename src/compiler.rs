@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
@@ -234,11 +234,7 @@ extern "C" fn rt_string_eq(a_ptr: *const u8, a_len: i64, b_ptr: *const u8, b_len
     unsafe {
         let a = std::slice::from_raw_parts(a_ptr, a_len as usize);
         let b = std::slice::from_raw_parts(b_ptr, b_len as usize);
-        if a == b {
-            1
-        } else {
-            0
-        }
+        if a == b { 1 } else { 0 }
     }
 }
 
@@ -1046,6 +1042,57 @@ fn compile_expr(
         }
 
         ast::Expr::Binary { left, op, right } => {
+            // #90: AND/OR must short-circuit, matching the tree walker. Both
+            // operands reduce to I8 booleans, so a branch plus a result variable
+            // carries the value without emitting rhs code on the skipped path.
+            if matches!(op, ast::BinaryOp::And | ast::BinaryOp::Or) {
+                let is_or = matches!(op, ast::BinaryOp::Or);
+                let lhs = compile_expr(ctx, left, types::I8)?;
+                // Result variable written on both paths.
+                let result = Variable::new(*ctx.var_counter as usize);
+                *ctx.var_counter += 1;
+                ctx.builder.declare_var(result, types::I8);
+
+                let rhs_block = ctx.builder.create_block();
+                let end_block = ctx.builder.create_block();
+                if is_or {
+                    // lhs true -> result true, skip rhs.
+                    let short_block = ctx.builder.create_block();
+                    ctx.builder
+                        .ins()
+                        .brif(lhs, short_block, &[], rhs_block, &[]);
+                    ctx.builder.switch_to_block(short_block);
+                    ctx.builder.seal_block(short_block);
+                    let one = ctx.builder.ins().iconst(types::I8, 1);
+                    ctx.builder.def_var(result, one);
+                    ctx.builder.ins().jump(end_block, &[]);
+                } else {
+                    // lhs false -> result false, skip rhs.
+                    let short_block = ctx.builder.create_block();
+                    let not_lhs = {
+                        let one = ctx.builder.ins().iconst(types::I8, 1);
+                        ctx.builder.ins().bxor(lhs, one)
+                    };
+                    ctx.builder
+                        .ins()
+                        .brif(not_lhs, short_block, &[], rhs_block, &[]);
+                    ctx.builder.switch_to_block(short_block);
+                    ctx.builder.seal_block(short_block);
+                    let zero = ctx.builder.ins().iconst(types::I8, 0);
+                    ctx.builder.def_var(result, zero);
+                    ctx.builder.ins().jump(end_block, &[]);
+                }
+
+                ctx.builder.switch_to_block(rhs_block);
+                ctx.builder.seal_block(rhs_block);
+                let rhs = compile_expr(ctx, right, types::I8)?;
+                ctx.builder.def_var(result, rhs);
+                ctx.builder.ins().jump(end_block, &[]);
+
+                ctx.builder.switch_to_block(end_block);
+                ctx.builder.seal_block(end_block);
+                return Ok(ctx.builder.use_var(result));
+            }
             // Check for string comparison
             let is_str = is_string_ast_expr(left) || is_string_ast_expr(right);
             if is_str && matches!(op, ast::BinaryOp::Equal | ast::BinaryOp::NotEqual) {
@@ -1139,18 +1186,16 @@ fn compile_expr(
                     // #92: runtime helpers wrap i64::MIN / -1 and i64::MIN % -1
                     // identically to the tree walker and VM.
                     ast::BinaryOp::Div => {
-                        let f = ctx.module.declare_func_in_func(
-                            ctx.runtime_funcs.int_div_id,
-                            ctx.builder.func,
-                        );
+                        let f = ctx
+                            .module
+                            .declare_func_in_func(ctx.runtime_funcs.int_div_id, ctx.builder.func);
                         let call = ctx.builder.ins().call(f, &[lhs, rhs]);
                         Ok(ctx.builder.inst_results(call)[0])
                     }
                     ast::BinaryOp::Mod => {
-                        let f = ctx.module.declare_func_in_func(
-                            ctx.runtime_funcs.int_rem_id,
-                            ctx.builder.func,
-                        );
+                        let f = ctx
+                            .module
+                            .declare_func_in_func(ctx.runtime_funcs.int_rem_id, ctx.builder.func);
                         let call = ctx.builder.ins().call(f, &[lhs, rhs]);
                         Ok(ctx.builder.inst_results(call)[0])
                     }
@@ -1554,9 +1599,7 @@ mod tests {
         assert!(!is_compilable_type(&ast::Type::TaggedUnion(
             "Color".to_string()
         )));
-        assert!(!is_compilable_type(&ast::Type::Struct(
-            "Point".to_string()
-        )));
+        assert!(!is_compilable_type(&ast::Type::Struct("Point".to_string())));
     }
 
     // ═════════════════════════════════════════════════════════════════════

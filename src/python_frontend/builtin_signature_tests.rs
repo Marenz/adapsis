@@ -122,9 +122,11 @@ fn python_builtin_catalog_rejects_wrong_arity_and_types() {
         "def f(n: int) -> int:\n    return substring(n, 0, 1)\n",
         "argument expects Str, got Int",
     );
+    // `contains` accepts a collection haystack at runtime, so an Int haystack is
+    // not a frontend type error; the wrong *result* use is what fails.
     reject(
         "def f(s: str) -> int:\n    return contains(s, 1)\n",
-        "argument expects Str, got Int",
+        "type mismatch",
     );
     reject(
         "def f(n: int) -> int:\n    return is_digit_char(n)\n",
@@ -178,8 +180,6 @@ fn python_builtin_catalog_reaches_every_alias_through_lowering() {
         ("bit_shl", "shl"),
         ("rotl", "left_rotate"),
     ] {
-        let alias_src = format!("def f(x: int) -> int:\n    return 1\n");
-        let _ = alias_src;
         let a = lower_module(
             &format!("def f(v: int) -> int:\n    return {alias}(v)\n"),
             "AliasProbe",
@@ -198,4 +198,49 @@ fn python_builtin_catalog_reaches_every_alias_through_lowering() {
             );
         }
     }
+}
+
+#[test]
+fn python_builtin_catalog_models_collection_contains_and_numeric_helpers() {
+    // Runtime `contains` forms: (String,String), (List,value), (Map,key), (Set,item).
+    for (annotation, value) in [
+        ("list[int]", "[1, 2]"),
+        ("Map[str, int]", "map()"),
+        ("Set[int]", "set()"),
+    ] {
+        let source = format!("def f(v: {annotation}) -> bool:\n    return contains(v, {value})\n");
+        assert!(
+            lower_module(&source, "ContainsProbe").is_ok(),
+            "{annotation}"
+        );
+    }
+    // sqrt/floor accept Int OR Float and reject strings.
+    assert!(lower_module("def f(n: int) -> float:\n    return sqrt(n)\n", "NumProbe").is_ok());
+    assert!(
+        lower_module(
+            "def f(n: float) -> float:\n    return sqrt(n)\n",
+            "NumProbe"
+        )
+        .is_ok()
+    );
+    assert!(lower_module("def f(n: float) -> int:\n    return floor(n)\n", "NumProbe").is_ok());
+    reject(
+        "def f(s: str) -> float:\n    return sqrt(s)\n",
+        "expects an int or float",
+    );
+    reject(
+        "def f(s: str) -> int:\n    return floor(s)\n",
+        "expects an int or float",
+    );
+    // join's list argument is unconstrained in the catalog (the runtime accepts
+    // only a List, but the frontend cannot prove list-ness from `Unknown`), so
+    // this is a known fail-open row, not a frontend refusal.
+    assert!(
+        lower_module(
+            "def f(s: str) -> str:\n    return join(s, ',')\n",
+            "NumProbe"
+        )
+        .is_ok(),
+        "join list-ness is runtime-enforced, not frontend-enforced"
+    );
 }

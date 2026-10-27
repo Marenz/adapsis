@@ -92,8 +92,10 @@ pub enum Op {
     Return,
     /// Unconditional jump to instruction at the given offset.
     Jump(usize),
+    /// Pop any value and push `Value::Bool(is_truthy())`. #90: keeps VM boolean
+    /// control flow on the same truthiness definition as the tree walker.
+    ToBool,
     /// Pop a boolean; if true, jump to the given offset.
-    /// Reserved for future compiler output.
     #[allow(dead_code)]
     BranchIf(usize),
     /// Pop a boolean; if false, jump to the given offset.
@@ -195,7 +197,7 @@ pub struct CompiledFunction {
 // Bytecode Compiler: AST FunctionDecl → CompiledFunction
 // ═══════════════════════════════════════════════════════════════════════
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::HashMap;
 
 use crate::ast;
@@ -575,6 +577,12 @@ impl<'a> Compiler<'a> {
             }
 
             ast::Expr::Binary { left, op, right } => {
+                // #90: AND/OR short-circuit exactly like the tree walker.
+                match op {
+                    ast::BinaryOp::And => return self.compile_logical(left, right, false),
+                    ast::BinaryOp::Or => return self.compile_logical(left, right, true),
+                    _ => {}
+                }
                 self.compile_expr(left)?;
                 self.compile_expr(right)?;
                 let vm_op = match op {
@@ -589,8 +597,10 @@ impl<'a> Compiler<'a> {
                     ast::BinaryOp::LessThanOrEqual => Op::Lte,
                     ast::BinaryOp::GreaterThan => Op::Gt,
                     ast::BinaryOp::GreaterThanOrEqual => Op::Gte,
-                    ast::BinaryOp::And => Op::And,
-                    ast::BinaryOp::Or => Op::Or,
+                    // Handled by compile_logical above; unreachable here.
+                    ast::BinaryOp::And | ast::BinaryOp::Or => {
+                        unreachable!("AND/OR compile via short-circuit path")
+                    }
                 };
                 self.emit(vm_op);
             }
@@ -615,6 +625,35 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::MakeStruct { type_id, field_ids });
             }
         }
+        Ok(())
+    }
+
+    /// #90: emit short-circuit `AND`/`OR`. Semantics match the tree walker:
+    /// evaluate lhs; if it decides the result, skip rhs entirely and push the
+    /// deciding Bool; otherwise evaluate rhs and push its truthiness.
+    fn compile_logical(&mut self, left: &ast::Expr, right: &ast::Expr, is_or: bool) -> Result<()> {
+        self.compile_expr(left)?;
+        self.emit(Op::ToBool);
+        // Copy the lhs decision to leave one result on the stack.
+        self.emit(Op::Dup);
+        let short_jump = if is_or {
+            let at = self.here();
+            self.emit(Op::BranchIf(0)); // lhs true -> result true, skip rhs
+            at
+        } else {
+            let at = self.here();
+            self.emit(Op::BranchIfNot(0)); // lhs false -> result false, skip rhs
+            at
+        };
+        // rhs path: discard the duplicated lhs Bool, evaluate rhs, push truthiness.
+        self.emit(Op::Pop);
+        self.compile_expr(right)?;
+        self.emit(Op::ToBool);
+        let end_jump = self.here();
+        self.emit(Op::Jump(0));
+        let past = self.here();
+        self.patch(short_jump, past);
+        self.patch(end_jump, past);
         Ok(())
     }
 
@@ -848,7 +887,9 @@ fn run_loop(
                         if *b == 0 {
                             bail!("division by zero");
                         }
-                        state.stack.push(Value::Int(crate::eval::checked_div(*a, *b)));
+                        state
+                            .stack
+                            .push(Value::Int(crate::eval::checked_div(*a, *b)));
                     }
                     (Value::Float(a), Value::Float(b)) => {
                         state.stack.push(Value::Float(a / b));
@@ -873,7 +914,9 @@ fn run_loop(
                         if *b == 0 {
                             bail!("modulo by zero");
                         }
-                        state.stack.push(Value::Int(crate::eval::checked_rem(*a, *b)));
+                        state
+                            .stack
+                            .push(Value::Int(crate::eval::checked_rem(*a, *b)));
                     }
                     _ => bail!("Mod: unsupported types"),
                 }
@@ -1020,6 +1063,10 @@ fn run_loop(
                 state.locals.truncate(frame.locals_base);
                 state.stack.push(val);
             }
+            Op::ToBool => {
+                let value = pop_stack(&mut state.stack)?;
+                state.stack.push(Value::Bool(value.is_truthy()));
+            }
             Op::Jump(target) => {
                 state.ip = *target;
             }
@@ -1124,7 +1171,13 @@ fn run_loop(
             }
             Op::MatchVariant(variant_id, binding_count) => {
                 let val = pop_stack(&mut state.stack)?;
-                result_match::push_match(&val, *variant_id, *binding_count, interner, &mut state.stack);
+                result_match::push_match(
+                    &val,
+                    *variant_id,
+                    *binding_count,
+                    interner,
+                    &mut state.stack,
+                );
             }
         }
     }
@@ -1138,12 +1191,11 @@ fn pop_stack(stack: &mut Vec<Value>) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("vm: stack underflow"))
 }
 
+/// #90: boolean consumption for Not / BranchIf / BranchIfNot. Delegates to the
+/// shared `Value::is_truthy` so statement-level conditionals accept exactly the
+/// values the tree walker does (Bool, Int, String, None, Err, collections).
 fn pop_bool(stack: &mut Vec<Value>) -> Result<bool> {
-    match pop_stack(stack)? {
-        Value::Bool(b) => Ok(b),
-        Value::Int(n) => Ok(n != 0), // truthy: non-zero
-        other => bail!("vm: expected Bool, got {other}"),
-    }
+    Ok(pop_stack(stack)?.is_truthy())
 }
 
 /// Binary arithmetic on Int or Float values.
@@ -1243,10 +1295,12 @@ mod tests {
         // Should have: LoadLocal(x), PushInt(2), Mul, StoreLocal(result), LoadLocal(result), Return
         assert!(compiled.bytecode.iter().any(|op| matches!(op, Op::Mul)));
         assert!(compiled.bytecode.iter().any(|op| matches!(op, Op::Return)));
-        assert!(compiled
-            .bytecode
-            .iter()
-            .any(|op| matches!(op, Op::PushInt(2))));
+        assert!(
+            compiled
+                .bytecode
+                .iter()
+                .any(|op| matches!(op, Op::PushInt(2)))
+        );
     }
 
     #[test]
@@ -1432,10 +1486,16 @@ mod tests {
         let program = build_program(source);
         let func = program.get_function("make_point").unwrap();
         let compiled = compile_function(func, &program).expect("compilation failed");
-        let point_id = compiled.interner.get("Point").expect("Point should be interned");
-        assert!(compiled.bytecode.iter().any(|op| {
-            matches!(op, Op::MakeStruct { type_id, .. } if *type_id == point_id)
-        }));
+        let point_id = compiled
+            .interner
+            .get("Point")
+            .expect("Point should be interned");
+        assert!(
+            compiled
+                .bytecode
+                .iter()
+                .any(|op| { matches!(op, Op::MakeStruct { type_id, .. } if *type_id == point_id) })
+        );
 
         let value = execute(&compiled, vec![], &program).expect("execution failed");
         match value {
@@ -1617,14 +1677,18 @@ mod tests {
         assert_eq!(compiled.local_names[0], "a");
         assert_eq!(compiled.local_names[1], "b");
         // LoadLocal(0) for a, LoadLocal(1) for b
-        assert!(compiled
-            .bytecode
-            .iter()
-            .any(|op| matches!(op, Op::LoadLocal(0))));
-        assert!(compiled
-            .bytecode
-            .iter()
-            .any(|op| matches!(op, Op::LoadLocal(1))));
+        assert!(
+            compiled
+                .bytecode
+                .iter()
+                .any(|op| matches!(op, Op::LoadLocal(0)))
+        );
+        assert!(
+            compiled
+                .bytecode
+                .iter()
+                .any(|op| matches!(op, Op::LoadLocal(1)))
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════
