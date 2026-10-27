@@ -65,7 +65,12 @@ numeric types; comparisons require matching known primitive types (numeric
 ordering only). Typed string + is supported. and/or require total, call-free,
 known bool operands because runtime tiers disagree on short-circuiting.
 len requires a known list/str/Map/Set; annotate unresolved call results before
-typed operations. Unknown is not proof of operand compatibility. div(a, b) and
+typed operations. Unknown is not proof of operand compatibility. Runtime builtins
+are checked against a fixed signature catalog covering every pure BUILTINS entry
+and its aliases (arity, and element types where the runtime enforces them); an
+uncatalogued builtin keeps an unknown result type. `str(x)`/`int(x)`/`float(x)`/
+`bool(x)`/`list(x)` remain Python coercions and are rejected — use `to_string(x)`
+and list literals. div(a, b) and
 rem(a, b) are frontend operator helpers; Python / and % are rejected.
 
 Native tests are data-only literal assertions. Exact literal equality, contains

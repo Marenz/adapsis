@@ -10,6 +10,7 @@ mod parity;
 mod printer;
 mod runtime_arguments;
 mod call_sites;
+mod builtin_signatures;
 mod surface;
 mod shared_default;
 mod references;
@@ -39,6 +40,8 @@ mod runtime_semantics_tests;
 mod call_site_tests;
 #[cfg(test)]
 mod overflow_tests;
+#[cfg(test)]
+mod builtin_signature_tests;
 
 use rustpython_parser::{ast as py, ast::Ranged, Parse};
 

@@ -13,14 +13,21 @@ pub(super) fn literal(expr: &Expr) -> Result<(), String> {
     }
 }
 
+/// Strict form used by every runtime_targets position (test/evaluate inputs and
+/// expected values, non-shared defaults). It passes an empty `variants` slice,
+/// which selects the strict arm in `check_runtime_variant`: those positions rely
+/// on the parse-time `authored::literal` gate AND this check agreeing, so a
+/// non-list call must be refused here too, not merely at parse time.
 pub(super) fn check_runtime(expr: &Expr, program: &ast::Program) -> Result<(), String> {
     check_runtime_variant(expr, program, &[])
 }
 
-/// Variant-aware runtime check. `variants` is empty everywhere except the shared
-/// default position for a union annotation, where the caller supplies that
-/// union's own constructor spellings. Admitted variant calls are data-only, so
-/// their arguments recurse under the same rule; `list` keeps its shadow check.
+/// Variant-aware runtime check. `variants` is empty in every non-shared position
+/// (which makes this behave exactly like the strict `literal()` gate, including
+/// refusing any non-`list` call), and non-empty only for a shared default whose
+/// annotation is a union — the caller supplies THAT union's own constructor
+/// spellings. Admitted variant calls are data-only, so their arguments recurse
+/// under the same rule; `list` keeps its shadow check.
 pub(super) fn check_runtime_variant(
     expr: &Expr,
     program: &ast::Program,
@@ -31,7 +38,8 @@ pub(super) fn check_runtime_variant(
             args.iter()
                 .try_for_each(|arg| check_runtime_variant(arg, program, variants))
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Ident(name) if name == "list") =>
+        {
             require_unshadowed(program, "list")?;
             args.iter()
                 .try_for_each(|arg| check_runtime_variant(arg, program, variants))
@@ -42,6 +50,10 @@ pub(super) fn check_runtime_variant(
             .try_for_each(|field| check_runtime_variant(&field.value, program, variants)),
         // Zero-payload variant default: the bare constructor spelling.
         Expr::Ident(name) if variants.iter().any(|v| v == name) => Ok(()),
+        // Non-call leaves fall through to `literal()`, which is the original
+        // strict behaviour for non-shared positions. The widening is the two
+        // variant arms above, and only when the caller supplies a non-empty
+        // `variants` set from the shared-default position.
         other => literal(other),
     }
 }
@@ -115,5 +127,63 @@ fn contains_list(expr: &Expr) -> bool {
         Expr::StructLiteral(fields) => fields.iter().any(|field| contains_list(&field.value)),
         Expr::Unary { expr, .. } => contains_list(expr),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod strict_contract_tests {
+    use super::*;
+    use crate::parser::parse_single_expr;
+
+    /// #95 follow-up (a): `check_runtime` is the STRICT form. A non-list call must
+    /// be refused even when the argument happens to be a literal. This was red
+    /// before the guard because arm 2 accepted every call shape.
+    #[test]
+    fn strict_check_runtime_refuses_non_list_call() {
+        let expr = parse_single_expr("helper(2)").unwrap();
+        let program = ast::Program::default();
+        assert!(
+            check_runtime(&expr, &program).is_err(),
+            "non-list call must be refused"
+        );
+    }
+
+    #[test]
+    fn strict_check_runtime_still_admits_list_construction() {
+        let expr = parse_single_expr("list(1, 2)").unwrap();
+        let program = ast::Program::default();
+        assert!(check_runtime(&expr, &program).is_ok());
+    }
+
+    /// The variant-aware form keeps admitting an annotation-union constructor
+    /// while still refusing an unrelated call.
+    #[test]
+    fn variant_form_admits_only_the_supplied_constructors() {
+        let program = ast::Program::default();
+        let variants = vec!["Leaf".to_string(), "Empty".to_string()];
+        assert!(
+            check_runtime_variant(&parse_single_expr("Leaf(7)").unwrap(), &program, &variants)
+                .is_ok()
+        );
+        assert!(
+            check_runtime_variant(&parse_single_expr("Empty").unwrap(), &program, &variants)
+                .is_ok()
+        );
+        assert!(
+            check_runtime_variant(
+                &parse_single_expr("helper(2)").unwrap(),
+                &program,
+                &variants
+            )
+            .is_err()
+        );
+        assert!(
+            check_runtime_variant(
+                &parse_single_expr("Leaf(compute())").unwrap(),
+                &program,
+                &variants
+            )
+            .is_err()
+        );
     }
 }

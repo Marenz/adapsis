@@ -108,6 +108,14 @@ impl Checker<'_> {
                     // a data-only default whose callee is a variant of its own
                     // declared union. `variants` is empty otherwise, so every
                     // other call stays a strict literal error.
+                    // Two-pass contract (maintainers): the SAME `variants` set is
+                    // supplied to both passes, so a cross-union or foreign
+                    // constructor is refused identically before and after the
+                    // program snapshot exists. Shape validation is byte-for-byte
+                    // the same rule; the Some pass only adds the `list` shadow
+                    // lookup, which needs a program. Neither pass can widen the
+                    // other: `variants` comes from the frontend catalog, never
+                    // from the program being installed.
                     let variants = self.annotation_variants(decl).unwrap_or_default();
                     match self.program {
                         Some((program, _)) => super::super::literals::check_runtime_variant(

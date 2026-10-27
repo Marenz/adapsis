@@ -56,12 +56,35 @@
   refused by the native literal gate while the frontend accepts them — a known
   frontend/native policy inconsistency, deliberately not widened. Qualified-call
   over-refusal is recorded as a known safe-direction limitation.
+- Builtin signature completeness (#86): new `python_frontend/builtin_signatures.rs`
+  gives every pure BUILTINS name and alias a checked arity/result signature
+  (grounded in the runtime's own `expects N argument` guards and return values).
+  Audit tests assert catalog-to-registry agreement, full alias reachability, and
+  no uncatalogued reachable pure builtin. Gaps found and fixed: `home_dir` was
+  missing entirely; `map`/`set`/`concat`/`Ok`/`Err`/`Some` are special-cased
+  outside the catalog by design. `str` is an Adapsis alias for `to_string` but
+  stays rejected in Python source as a coercion (documented, not silently
+  rebound). IO builtins are outside this catalog: they are await-validated by
+  `call_sites.rs`. Reviewer follow-up (a) was initially reported as done but was
+  comment-only: `check_runtime_variant`'s fallthrough call arm accepted ANY
+  non-list call, so `check_runtime` was permissive despite the strict contract in
+  its comment. Now that arm matches only the literal `list` builtin, so an empty
+  or non-matching `variants` set makes every non-list call fall through to
+  `literal()`. Unreachable in production (parse-time `authored::literal`
+  pre-gates those positions) but the ordered hardening is real, with unit tests.
 - Next authorized pair implemented. (1) Native literal gate widened ONLY for
-  shared/spawn defaults whose declared annotation is a union and whose tree shape
-  is data-only variant construction (literal payloads, `list(...)`): the slice3
-  walker still owns arity/type checking, nested calls stay refused, and the #95
-  function/variant declaration guards are untouched, so a variant default cannot
-  smuggle a same-named function. Records were already natively admitted. (2) #92:
+  shared-variable defaults whose declared annotation is a union and whose tree
+  shape is data-only variant construction (literal payloads, `list(...)`; a
+  zero-payload variant uses the bare constructor spelling). Spawn bindings have no
+  defaults and are not part of this widening. The slice3 walker still owns
+  arity/type checking, nested calls stay refused, and the #95 function/variant
+  declaration guards are untouched, so a variant default cannot smuggle a
+  same-named function. Records were already natively admitted. The validator now
+  union-reclassifies `+shared` annotations like function signatures, which also
+  corrects `.ax` written through the same path (previously a union-typed shared
+  var persisted as `Struct(name)`). Inherited caveat: the shared arm resolves the
+  annotation by bare name, so a pre-existing bare union-name ambiguity is treated
+  the same way as elsewhere in the frontend rather than being resolved here. (2) #92:
   `i64::MIN / -1` wraps to `i64::MIN` and `i64::MIN % -1` is `0` in tree, VM and
   JIT via shared `checked_div`/`checked_rem` (JIT routes through runtime helpers);
   zero divisors keep their previous error/trap behaviour. Pending combined gate

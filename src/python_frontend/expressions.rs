@@ -808,17 +808,54 @@ impl Expressions<'_, '_> {
                 ));
             }
         }
-        let result = if matches!(name, "len" | "length") {
-            if values.len() != 1 {
-                return Err(self.cx.at(c, "len expects one argument"));
+        // Catalogued builtins: arity and (where known) element types come from
+        // one authoritative table; anything uncatalogued keeps `Ty::Unknown`
+        // unless a declared signature applies. `concat`/`http_get`/`read_file`
+        // are handled explicitly below because their typing is special.
+        let catalog_entry = if sig.is_none() {
+            super::builtin_signatures::lookup(name)
+        } else {
+            None
+        };
+        let result = if let Some(entry) = catalog_entry {
+            if entry.params.len() != values.len() {
+                // `len` keeps its long-standing wording; other builtins use the
+                // generic catalog message.
+                return Err(self.cx.at(
+                    c,
+                    if matches!(name, "len" | "length") {
+                        "len expects one argument".to_string()
+                    } else {
+                        format!(
+                            "builtin {name} expects exactly {} argument(s), received {}",
+                            entry.params.len(),
+                            values.len()
+                        )
+                    },
+                ));
             }
-            if !matches!(
-                &values[0].1,
-                Ty::List(_) | Ty::Str | Ty::Map(_, _) | Ty::Set(_)
-            ) {
-                return Err(self.cx.at(c, "len expects a statically known list, str, Map, or Set; unsupported or unresolved argument type — annotate an unresolved call result first"));
+            // `Ty::Unknown` in the catalog means "no type constraint" (the
+            // runtime accepts any value of the right shape), so those positions
+            // check arity only.
+            for (expected, (_, actual)) in entry.params.iter().zip(values.iter()) {
+                if *expected != Ty::Unknown && !compatible(expected, actual) {
+                    return Err(self.cx.at(
+                        c,
+                        format!("builtin {name} argument expects {expected:?}, got {actual:?}"),
+                    ));
+                }
             }
-            Ty::Int
+            // `len` is the one catalogued builtin whose runtime rejects known
+            // non-collection types, so its element type is validated explicitly.
+            if name == "len" || name == "length" {
+                if !matches!(
+                    &values[0].1,
+                    Ty::List(_) | Ty::Str | Ty::Map(_, _) | Ty::Set(_)
+                ) {
+                    return Err(self.cx.at(c, "len expects a statically known list, str, Map, or Set; unsupported or unresolved argument type — annotate an unresolved call result first"));
+                }
+            }
+            entry.result.clone()
         } else if name == "concat" {
             if values.len() < 2 || values.iter().any(|(_, t)| *t != Ty::Str) {
                 return Err(self.cx.at(c, "concat requires at least two str-compatible arguments; implicit coercion is unsupported"));
@@ -1030,10 +1067,14 @@ pub(super) fn reject_unsafe_builtin(
     c: &py::ExprCall,
     name: &str,
 ) -> Result<(), Diagnostic> {
+    // These spellings are Python's own constructors/coercions. `str` is also an
+    // Adapsis runtime alias for `to_string`, but inside Python source it must keep
+    // Python's coercion meaning, so it is rejected here rather than silently
+    // rebinding to a different semantics. Use `to_string(x)` explicitly.
     if matches!(name, "int" | "float" | "bool" | "str" | "list") {
         return Err(cx.at(
             c,
-            "Python constructors/coercions are unsupported; use typed values and list literals",
+            "Python constructors/coercions are unsupported; use typed values, list literals, and to_string(x)",
         ));
     }
     Ok(())
