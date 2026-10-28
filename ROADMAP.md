@@ -2,7 +2,64 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Latest uncommitted runtime slice — narrow #98 repair, awaiting review
+### Current pending slice — #82 dispatch admission, baseline `a2551b7`
+
+- Manager checkpoint `a2551b7` contains the previously accepted compiler, partial
+  port evidence and narrow #98 repair. This new slice changes production only in
+  `vm/await_admission.rs` plus its declaration and first-line check in
+  `vm::compile_function`. The check runs before Compiler construction, argument
+  slot allocation or root bytecode emission; no VM instruction has executed.
+- An iterative worklist exhaustively visits executable StatementKind/Expr slots:
+  call arguments (including nested calls), let/set/return/yield values, call/
+  spawn/await targets, checks, branch conditions/both bodies, while/each
+  conditions/iterators/bodies, match subjects/all arms, record values, field bases,
+  unary/binary operands, source timer expressions and emitted event payloads.
+  Source handler names are future-registration metadata, not immediate calls.
+  A reachable Await resolving to a user function produces a categorical compile
+  error selecting the existing tree path before execution. Unknown targets and
+  builtin-only graphs retain their existing behavior.
+- Function identity is a pointer used solely as a visited-set key within the
+  borrowed immutable snapshot: no dereference, persistent cache or cross-revision
+  reuse. The supplied root is scanned directly even if owned outside/unregistered
+  in Program; callees resolve through the original spelling and `get_function`.
+  Same-named functions in different modules are distinct identities. SCCs terminate;
+  caller-module-first rewriting is forbidden. False-positive graph edges for
+  builtin/variant collisions may conservatively choose tree, never redirect calls.
+- `eval_async_function`/CoroutineHandle/`io_performed`/continuation and replay
+  guards are untouched. Whole-root admission prevents an earlier builtin effect
+  being executed before discovering a transitive user await. Tests cover exact
+  request order/count before/after IO and in nested arguments, child failure with
+  no later effect/replay, original mocks/stubs, guest denial before mocks/requests,
+  and bound turn identity. These do not certify every historical permission issue.
+- Normal frozen-wrapper dispatch now matches the existing explicit tree diagnostic
+  for both bare and qualified targets: one request then bare String on success;
+  one request then `index_of expects (String, String)` for transport Err. Only
+  normal-route Rust test expectations changed; source fixture/provenance bytes and
+  direct-tree diagnostics are preserved. Wrapper unboxing/error handling, #97,
+  and the Python Result-returning-user-await restriction are **not** changed.
+- Performance tradeoff: any syntactically reachable user Await, even in an untaken
+  branch, makes the invocation use tree (including pure async user calls). A
+  synthetic 128-function recursive SCC with repeated edges visits **1025 work
+  items**; **1000 scans took 23971 µs** in the final author targeted release test
+  (~24 µs/scan, with test counters). This is only synthetic scan cost, **not** a
+  production latency benchmark. Lazy compiles may repeat scans; no global cache.
+- Author targeted: user-await 13/13, port 13/13, existing VM 41/41, native call-site
+  8/8, scoped 20/20 and unchanged no-user-await post-IO division/no-replay 1/1.
+  Single final full gate: **1785 passed, strict corpus alone failed, 2 ignored;
+  CLI 5/5**. Log `tool_1834efc94001YdvI1XigmzXSvF`. Corpus remains 54/573 with
+  **116/58/399**, other buckets zero. This slice awaits independent review.
+- Review inputs: new `vm/await_admission.rs`, `vm/await_admission/tests.rs`,
+  `vm/await_admission/tests/dispatch.rs`; two integration lines in `vm.rs` and
+  the normal-route wrapper assertions. Current wrapper Rust test blob (recorded
+  now after this change): `6ada414dd8737af07be8ccb60b9b951f415a0a43`; the older
+  authored-hash table below is the prior checkpoint, not a claim of current bytes.
+  No writer commit, push, deployment, live IO or frontend policy relaxation.
+- Correction to an earlier binder report: `eval::input_to_vm_args` is
+  **pub(crate)**, not private, but accepts named fields rather than lower_tests'
+  multi-argument `_index` carriers. The richer canonical tree binder is private.
+  The existing tested port adapter is unchanged in this dispatch slice.
+
+### Accepted checkpoint `a2551b7` — narrow #98 repair
 
 - `vm/equality.rs` routes only differing Value variants, excluding Int↔Float
   numeric pairs, through the tree's shared `Value::matches` and its negation.
@@ -30,9 +87,30 @@
   No attribution for 113→116. `git diff --check` clean.
 - New untracked `src/vm/equality.rs` must accompany the cumulative untracked
   compiler/port evidence files at review. No commit/push/deployment. Narrow #98
-  repair awaits independent acceptance; the preceding port slice was accepted
+  repair received independent bounded ACCEPT (VM 47/47 and port 13/13); the preceding port slice was accepted
   only as RED evidence, not as a complete functional port. #82 dispatch design
   is next after this review, based on the preserved wrapper diagnostics.
+
+### Authored port evidence hashes — recorded now, 2026-10-28
+
+These are Git blob hashes computed from the **current authored working-tree
+files**, after the bounded #98 review. They are not a claim that these new files
+existed in baseline `05d85cc` or any earlier historical checkpoint. The source
+provenance hashes in the port manifest separately identify the frozen originals.
+Paths below are relative to `tests/fixtures/telegram-python-port/` unless noted:
+
+| Authored file | Git blob |
+|---|---|
+| `manifest.json` | `9346a60cdf9ffa3407e8216b1aed501b80b839d6` |
+| `origin/TelegramBot.ax` | `617280c450eb209ab3b38d8405ef4c7427bee2f3` |
+| `origin/TgFormat.ax` | `a95ac4d862f69822d7617ef7300f01a0e78bf33e` |
+| `python/TelegramBot.py` | `4281f8934c8957e5da14455602e3996c4f704c47` |
+| `python/TgFormat.py` | `00e5b1e58312c235885d278e8a9cba17a1baf1b7` |
+| `python/test_telegram_bot.py` | `0fd159ab44d1444b064a679af0d9a4e4eb2cf9c4` |
+| `python/test_tg_format.py` | `61aa42fc491640f34cd2c05e914002f6b5b91068` |
+| `src/python_frontend/telegram_port_tests.rs` (repo-relative) | `8b43c5142f8169bb6b763216f4f3820e68b01e28` |
+| `src/python_frontend/telegram_port_tests/io_contracts.rs` (repo-relative) | `2db7a4837269ce27460184078bedb9098669ddee` |
+| `src/python_frontend/telegram_port_tests/wrapper_contract.rs` (repo-relative) | `87313e911ca403c1a0b3d5594837d8b9b4beabcb` |
 
 ### Accepted earlier checkpoint — first partial port, RED evidence gate
 

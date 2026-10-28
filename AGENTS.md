@@ -176,8 +176,16 @@ Function evaluation goes through up to three tiers (fastest first):
      (unresolved identifiers), `+spawn`, `+yield`, `+source`/`+event`.
      Bare identifiers only compile to variant constructors if they're declared
      union variants — anything else is a compile error (fallback signal).
-   - Async fallback rule: only safe BEFORE any IO has been performed.
-     `eval_async_function` tracks this; never re-run a function after IO.
+  - Async fallback rule: only safe BEFORE any IO has been performed.
+    `eval_async_function` tracks this; never re-run a function after IO.
+  - `vm/await_admission.rs` preflights the supplied root and its statically
+    reachable calls before bytecode emission. Any user-function Await forces
+    pre-execution tree fallback, including a transitive await after earlier IO.
+    Iterative executable-AST traversal and per-snapshot function identity prevent
+    cycles/name collisions; do not replace this with caller-module-first lookup
+    or a cached decision across Program revisions. Unknown/builtin-only awaits
+    retain existing behavior. `io_performed` and post-effect replay guards stay
+    unchanged; never reset them to recover from a partially executed user await.
    - Dedicated `Value::Ok`/`Value::Err` matching is handled by
      `vm/result_match.rs` (#93): push the inner value/error String before the
      match Bool so the existing reverse-order binding stores consume it correctly.
@@ -599,10 +607,12 @@ replaces that branch with one composer.
   and mixed-numeric comparison behavior is unchanged; numeric coercion, unordered
   Float Neq and unsupported aggregate equality remain #90/#86 residuals. The
   frontend json_get String signature remains an unresolved catalog mismatch.
-  #82 wrapper diagnostics separately pin user-await dispatch failing with zero
-  requests on the normal async path (bare AND qualified), while explicit tree
-  diagnostics reach Ok-unwrapping/Err-consumer behavior. Direct-tree success is
-  not normal-dispatch evidence. IO contract fixtures use in-memory IoRequest
+  #82's original wrapper checkpoint pinned normal user-await dispatch failing
+  with zero requests (bare AND qualified). The pending admission fix now chooses
+  tree before execution, so normal dispatch reaches the same one-request success
+  or still-broken Err-consumer behavior as the preserved direct-tree diagnostic.
+  It does not change Result wrapping or the frontend Result-user-await guard.
+  Direct-tree success alone is not normal-dispatch evidence. IO contract fixtures use in-memory IoRequest
   replies, not the real Runtime IO loop or live services.
   Frontend type catalog keys and resolved Named types retain declaration owners
   internally (`Owner.Type`); parser/Python emission preserves the original bare

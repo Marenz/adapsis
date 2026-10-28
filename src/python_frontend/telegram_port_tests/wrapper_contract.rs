@@ -131,15 +131,9 @@ fn telegram_port_http_post_wrapper_boundary_observation() {
                     eval::set_shared_program(None);
                     let requests = responder.join().unwrap();
                     println!("WRAPPER_OBSERVATION direct_tree={direct_tree} qualified={qualified} parts={parts} fail={fail} requests={} result={result:?}", requests.len());
-                    if parts && !direct_tree {
-                        assert_eq!(requests.len(), 0);
-                        assert!(result.unwrap_err().to_string().contains(if qualified {
-                            "unknown await operation: TelegramBot.send_message_part"
-                        } else {
-                            "unknown await operation: send_message_part"
-                        }));
-                        continue;
-                    }
+                    // #82 dispatch admission now chooses tree BEFORE execution
+                    // for the normal route too. Result/error wrapping itself is
+                    // unchanged: transport Err still fails at the consumer.
                     assert_eq!(requests.len(), 1);
                     if !parts {
                         match result.unwrap() {

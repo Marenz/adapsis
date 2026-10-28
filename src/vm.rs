@@ -17,6 +17,7 @@ use crate::intern::{InternedId, StringInterner};
 use std::sync::Arc;
 mod result_match;
 mod equality;
+mod await_admission;
 
 /// A single bytecode instruction.
 #[derive(Debug, Clone)]
@@ -212,6 +213,7 @@ pub fn compile_function(
     func: &ast::FunctionDecl,
     program: &ast::Program,
 ) -> Result<CompiledFunction> {
+    await_admission::check(func, program)?;
     let mut compiler = Compiler::new(program);
 
     // Allocate parameter slots first (slot 0..N-1)
