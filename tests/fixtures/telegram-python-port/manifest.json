@@ -1,7 +1,8 @@
 {
   "status": "partial",
   "full_port_complete": false,
-  "observed_runtime_status": {
+  "implementation_baseline": "e5337b02c676aeb7648d7cc7f36fdc58373b67dc",
+  "historical_first_slice_observed_status": {
     "TelegramBot": {"tree_cases_per_origin": 28, "direct_vm_passes_per_origin": 25, "direct_vm_failures_per_origin": 3, "direct_vm_gate": "red, no exemptions"},
     "TgFormat": {"tree_cases_per_origin": 7, "direct_vm_passes_per_origin": 7},
     "wrapper_normal_dispatch": "user await fails before request (bare and qualified)",
@@ -17,8 +18,8 @@
       "origin": "origin/TelegramBot.ax",
       "python": "python/TelegramBot.py",
       "tests": "python/test_telegram_bot.py",
-      "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response"],
-      "pending": ["parse_id_list", "init", "is_admin", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "extract_sender_name", "describe_update_kind", "speaker_principal", "source_metadata", "process_update", "is_allowed", "handle_group", "handle_group_attachment", "handle_admin_dm", "handle_admin_dm_attachment", "handle_user_dm", "handle_user_dm_attachment", "telegram_file_path", "telegram_file_error_message", "transcribe_voice", "transcription_upload_response", "send_message", "send_reply", "send_reply_with_attachment", "send_audio_file", "extract_reply", "send_message_body", "send_message_part", "send_message_parts"],
+      "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata"],
+      "pending": ["init", "is_admin", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "describe_update_kind", "process_update", "is_allowed", "handle_group", "handle_group_attachment", "handle_admin_dm", "handle_admin_dm_attachment", "handle_user_dm", "handle_user_dm_attachment", "telegram_file_path", "telegram_file_error_message", "transcribe_voice", "transcription_upload_response", "send_message", "send_reply", "send_reply_with_attachment", "send_audio_file", "extract_reply", "send_message_body", "send_message_part", "send_message_parts"],
       "ledger": {
         "extract_chat_id": "unchanged function AST including doc",
         "extract_user_id": "unchanged function AST including doc",
@@ -29,8 +30,13 @@
         "format_sender": "unchanged function AST including doc",
         "is_admin_in": "unchanged function AST including doc",
         "telegram_response_ok": "unchanged function AST including doc",
-        "telegram_file_path_response": "unchanged function AST including doc"
+        "telegram_file_path_response": "unchanged function AST including doc",
+        "parse_id_list": "unchanged function AST including doc",
+        "extract_sender_name": "unchanged function AST including doc",
+        "speaker_principal": "qualify extract_user_id to TelegramBot.extract_user_id; otherwise exact function AST including doc",
+        "source_metadata": "qualify four local call targets to TelegramBot; otherwise exact function AST including doc"
       },
+      "qualified_call_sites": {"speaker_principal": 1, "source_metadata": 4},
       "pending_non_function_surface": ["module doc", "shared declarations", "startup", "route", "original stored tests"],
       "pending_reviewed_transformations": ["qualified local calls", "issue #91 voice control-flow repair (not yet authored/reviewed)", "await-bind-then-return", "issue #94 builtin-await-bind-then-match"]
     },
@@ -41,21 +47,37 @@
       "origin": "origin/TgFormat.ax",
       "python": "python/TgFormat.py",
       "tests": "python/test_tg_format.py",
-      "implemented": ["escape_html", "apply_inline", "tag"],
-      "pending": ["code_wrap", "code_segments", "inline_code", "convert_line", "convert_lines", "markdown_to_html", "pre_wrap", "split_parts", "split_for_telegram", "parts_preview", "sample_lines", "sample_join7", "sample_join2", "sample_pre", "sample_pre_join"],
+      "implemented": ["escape_html", "apply_inline", "tag", "code_wrap", "code_segments", "inline_code", "convert_line", "convert_lines", "markdown_to_html", "pre_wrap", "split_parts", "split_for_telegram", "parts_preview", "sample_lines", "sample_join7", "sample_join2", "sample_pre", "sample_pre_join"],
+      "pending": [],
       "ledger": {
         "escape_html": "unchanged function AST including doc",
         "apply_inline": "unchanged function AST including doc",
-        "tag": "unchanged function AST including doc"
+        "tag": "unchanged function AST including doc",
+        "code_wrap": "qualify local calls; otherwise exact function AST including doc",
+        "code_segments": "qualify local calls; Python rem(i,2) lowers to unchanged Mod AST",
+        "inline_code": "qualify local calls; otherwise exact function AST including doc",
+        "convert_line": "qualify local calls; otherwise exact function AST including doc",
+        "convert_lines": "qualify local calls; otherwise exact function AST including doc",
+        "markdown_to_html": "qualify local calls; Python [] lowers to unchanged list() AST",
+        "pre_wrap": "qualify local calls; otherwise exact function AST including doc",
+        "split_parts": "qualify local calls; otherwise exact function AST including doc",
+        "split_for_telegram": "qualify local calls; Python [] lowers to unchanged list() AST",
+        "parts_preview": "qualify local calls; otherwise exact function AST including doc",
+        "sample_lines": "unchanged function AST including doc",
+        "sample_join7": "unchanged function AST including doc",
+        "sample_join2": "unchanged function AST including doc",
+        "sample_pre": "qualify local calls; otherwise exact function AST including doc",
+        "sample_pre_join": "qualify local calls; otherwise exact function AST including doc"
       },
-      "pending_non_function_surface": ["module doc", "original stored tests"],
-      "pending_reviewed_transformations": ["qualified local calls"]
+      "qualified_call_sites": {"code_wrap": 2, "code_segments": 4, "inline_code": 1, "convert_line": 7, "convert_lines": 10, "markdown_to_html": 2, "pre_wrap": 2, "split_parts": 5, "split_for_telegram": 1, "parts_preview": 1, "sample_pre": 1, "sample_pre_join": 1},
+      "pending_non_function_surface": ["original stored tests"],
+      "pending_reviewed_transformations": []
     }
   ],
   "fixture_level_transformations": [
     "Partial origin files contain only listed implemented functions; omitted functions are not stubbed.",
     "TelegramBot selected-function declaration order follows the implemented list, not the full original module order.",
-    "Selected function bodies and docs stay exact; module docs/shared/lifecycle/routes/original tests remain explicitly pending.",
+    "Only ledgered local call qualification changes selected function ASTs; original function docs stay exact. TgFormat module doc is now included unchanged; other pending surfaces are listed per module.",
     "Paired tests are new literal-data assertions, not a claim of preserving original redacted test expectations."
   ]
 }

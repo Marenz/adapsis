@@ -73,3 +73,73 @@ def telegram_file_path_response(file_info: str) -> str:
     if description != "":
         return concat("ERROR: ", description)
     return "ERROR: Telegram getFile returned no file path"
+
+def parse_id_list(raw: str) -> str:
+    """Normalize an ID file into a comma-separated ID string: accepts newline- and/or comma-separated IDs, trims whitespace, skips blank lines and # comments. Returns empty string if the file yields nothing (caller decides the fallback)."""
+    lines: list[str] = split(raw, "\n")
+    out: str = ""
+    i: int = 0
+    n: int = len(lines)
+    while i < n:
+        line: str = get(lines, i)
+        cells: list[str] = split(line, ",")
+        j: int = 0
+        m: int = len(cells)
+        while j < m:
+            tok: str = trim(get(cells, j))
+            if tok != "":
+                if starts_with(tok, "#") == False:
+                    if out == "":
+                        out = tok
+                    else:
+                        out = concat(out, concat(",", tok))
+            j = j + 1
+        i = i + 1
+    return out
+
+def extract_sender_name(payload: str) -> str:
+    """The sender's display name: first+last, falling back to username, else empty. Shared by source_metadata and the group sender prefix so the name the model reads inline can never drift from the name recorded for provenance."""
+    first_name: str = json_get(payload, "message.from.first_name")
+    last_name: str = json_get(payload, "message.from.last_name")
+    username: str = json_get(payload, "message.from.username")
+    speaker_name: str = first_name
+    if last_name != "":
+        speaker_name = concat(first_name, " ", last_name)
+    if speaker_name == "":
+        speaker_name = username
+    return speaker_name
+
+def speaker_principal(payload: str) -> str:
+    """The sender's stable Ladybug principal. This is the ONLY identity channel: the model-facing [user:...] prefix is prose and must never be parsed back into an identity, because its format changes whenever the display format changes."""
+    user_id: int = TelegramBot.extract_user_id(payload)
+    if user_id == 0:
+        return ""
+    return concat("telegram:user:", to_string(user_id))
+
+def source_metadata(payload: str) -> str:
+    """Preserve Telegram message identity, timestamp, speaker principal/display name and attachment file id/name/MIME/duration/size for Ladybug provenance. speaker_id is what the runtime resolves the principal from."""
+    message_id: str = to_string(json_get(payload, "message.message_id"))
+    attachment_ref: str = TelegramBot.extract_image_file_id(payload)
+    if attachment_ref == "":
+        attachment_ref = TelegramBot.extract_video_file_id(payload)
+    if attachment_ref == "":
+        attachment_ref = json_get(payload, "message.voice.file_id")
+    attachment_name: str = json_get(payload, "message.video.file_name")
+    if attachment_name == "":
+        attachment_name = json_get(payload, "message.document.file_name")
+    attachment_mime: str = json_get(payload, "message.video.mime_type")
+    if attachment_mime == "":
+        attachment_mime = json_get(payload, "message.document.mime_type")
+    attachment_duration: str = ""
+    if json_get(payload, "message.video.duration") != "":
+        attachment_duration = to_string(json_get(payload, "message.video.duration"))
+    attachment_size: str = ""
+    if json_get(payload, "message.video.file_size") != "":
+        attachment_size = to_string(json_get(payload, "message.video.file_size"))
+    if attachment_size == "":
+        if json_get(payload, "message.document.file_size") != "":
+            attachment_size = to_string(json_get(payload, "message.document.file_size"))
+    speaker_name: str = TelegramBot.extract_sender_name(payload)
+    speaker_id: str = TelegramBot.speaker_principal(payload)
+    created_at_ms: int = to_int(to_string(json_get(payload, "message.date"))) * 1000
+    return concat('{"message_id":"', json_escape(message_id), '","speaker_id":"', json_escape(speaker_id), '","speaker_name":"', json_escape(speaker_name), '","created_at_ms":', to_string(created_at_ms), ',"attachment_ref":"', json_escape(attachment_ref), '","attachment_name":"', json_escape(attachment_name), '","attachment_mime":"', json_escape(attachment_mime), '","attachment_duration_seconds":"', json_escape(attachment_duration), '","attachment_size_bytes":"', json_escape(attachment_size), '"}')

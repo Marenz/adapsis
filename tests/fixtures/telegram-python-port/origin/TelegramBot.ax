@@ -65,3 +65,69 @@
     +return concat("ERROR: ", description)
   +return "ERROR: Telegram getFile returned no file path"
 +doc "Extract a getFile path or preserve Telegram's JSON error description when HTTP 400 bodies are returned as ordinary response text."
++fn parse_id_list (raw:String)->String
+  +let lines:List<String> = split(raw, "\n")
+  +let out:String = ""
+  +let i:Int = 0
+  +let n:Int = len(lines)
+  +while i<n
+    +let line:String = get(lines, i)
+    +let cells:List<String> = split(line, ",")
+    +let j:Int = 0
+    +let m:Int = len(cells)
+    +while j<m
+      +let tok:String = trim(get(cells, j))
+      +if tok!=""
+        +if starts_with(tok, "#")==false
+          +if out==""
+            +set out = tok
+          +else
+            +set out = concat(out, concat(",", tok))
+      +set j = j+1
+    +set i = i+1
+  +return out
++doc "Normalize an ID file into a comma-separated ID string: accepts newline- and/or comma-separated IDs, trims whitespace, skips blank lines and # comments. Returns empty string if the file yields nothing (caller decides the fallback)."
++fn extract_sender_name (payload:String)->String
+  +let first_name:String = json_get(payload, "message.from.first_name")
+  +let last_name:String = json_get(payload, "message.from.last_name")
+  +let username:String = json_get(payload, "message.from.username")
+  +let speaker_name:String = first_name
+  +if last_name!=""
+    +set speaker_name = concat(first_name, " ", last_name)
+  +if speaker_name==""
+    +set speaker_name = username
+  +return speaker_name
++doc "The sender's display name: first+last, falling back to username, else empty. Shared by source_metadata and the group sender prefix so the name the model reads inline can never drift from the name recorded for provenance."
++fn speaker_principal (payload:String)->String
+  +let user_id:Int = TelegramBot.extract_user_id(payload)
+  +if user_id==0
+    +return ""
+  +return concat("telegram:user:", to_string(user_id))
++doc "The sender's stable Ladybug principal. This is the ONLY identity channel: the model-facing [user:...] prefix is prose and must never be parsed back into an identity, because its format changes whenever the display format changes."
++fn source_metadata (payload:String)->String
+  +let message_id:String = to_string(json_get(payload, "message.message_id"))
+  +let attachment_ref:String = TelegramBot.extract_image_file_id(payload)
+  +if attachment_ref==""
+    +set attachment_ref = TelegramBot.extract_video_file_id(payload)
+  +if attachment_ref==""
+    +set attachment_ref = json_get(payload, "message.voice.file_id")
+  +let attachment_name:String = json_get(payload, "message.video.file_name")
+  +if attachment_name==""
+    +set attachment_name = json_get(payload, "message.document.file_name")
+  +let attachment_mime:String = json_get(payload, "message.video.mime_type")
+  +if attachment_mime==""
+    +set attachment_mime = json_get(payload, "message.document.mime_type")
+  +let attachment_duration:String = ""
+  +if json_get(payload, "message.video.duration")!=""
+    +set attachment_duration = to_string(json_get(payload, "message.video.duration"))
+  +let attachment_size:String = ""
+  +if json_get(payload, "message.video.file_size")!=""
+    +set attachment_size = to_string(json_get(payload, "message.video.file_size"))
+  +if attachment_size==""
+    +if json_get(payload, "message.document.file_size")!=""
+      +set attachment_size = to_string(json_get(payload, "message.document.file_size"))
+  +let speaker_name:String = TelegramBot.extract_sender_name(payload)
+  +let speaker_id:String = TelegramBot.speaker_principal(payload)
+  +let created_at_ms:Int = to_int(to_string(json_get(payload, "message.date")))*1000
+  +return concat("{\"message_id\":\"", json_escape(message_id), "\",\"speaker_id\":\"", json_escape(speaker_id), "\",\"speaker_name\":\"", json_escape(speaker_name), "\",\"created_at_ms\":", to_string(created_at_ms), ",\"attachment_ref\":\"", json_escape(attachment_ref), "\",\"attachment_name\":\"", json_escape(attachment_name), "\",\"attachment_mime\":\"", json_escape(attachment_mime), "\",\"attachment_duration_seconds\":\"", json_escape(attachment_duration), "\",\"attachment_size_bytes\":\"", json_escape(attachment_size), "\"}")
++doc "Preserve Telegram message identity, timestamp, speaker principal/display name and attachment file id/name/MIME/duration/size for Ladybug provenance. speaker_id is what the runtime resolves the principal from."

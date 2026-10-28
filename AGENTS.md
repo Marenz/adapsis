@@ -597,7 +597,8 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (10/42 TelegramBot and 3/18 TgFormat functions initially). Its source hashes,
+  (now 14/42 TelegramBot and 18/18 TgFormat functions; module/stored-test and
+  intake/delivery surfaces still incomplete). Its source hashes,
   per-function ledger and explicit pending inventory must stay distinct from the
   frozen parity corpus. Its originally RED direct-VM gate for #98 now passes
   with the pending narrow `vm/equality.rs` repair: differing Value variants except
@@ -614,6 +615,12 @@ replaces that branch with one composer.
   It does not change Result wrapping or the frontend Result-user-await guard.
   Direct-tree success alone is not normal-dispatch evidence. IO contract fixtures use in-memory IoRequest
   replies, not the real Runtime IO loop or live services.
+  Pure port expansion permits only ledgered local-call qualification, proved by
+  a test-only AST transform against frozen originals. Preserve original corpus
+  bytes and explicit pending inventory. #99 remains unresolved: plain/pre content
+  of 5000 characters stays one part at limit 3800, exceeding Telegram's documented
+  4096 cap. Do not describe that splitter as service-limit safe. Missing-ID/date
+  quoted-empty metadata behavior is likewise inherited, not a desired API contract.
   Frontend type catalog keys and resolved Named types retain declaration owners
   internally (`Owner.Type`); parser/Python emission preserves the original bare
   AST name. Function signature types carry the callee's owner, never the caller's.

@@ -2,7 +2,63 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — #82 dispatch admission, baseline `a2551b7`
+### Current pending slice — pure port closure expansion, baseline `e5337b0`
+
+- Fixtures/tests/docs only. **14/42 TelegramBot functions** and **18/18 TgFormat
+  functions** are now in the separate corrected-origin/Python pairs. Telegram's
+  added pure helpers are parse_id_list, extract_sender_name, speaker_principal,
+  source_metadata. TgFormat's module doc is included unchanged. No frontend or
+  runtime semantic edits, no send-path repair, no stubs and no frozen-corpus edits.
+- New test-only `telegram_port_tests/qualification.rs` applies only the approved
+  local-call qualification to cloned frozen function ASTs, then checks exact
+  equality ignoring typed NodeIds. Per-function site counts are ledgered and
+  verified: **37 TgFormat sites, 5 TelegramBot sites**. Corrected-origin↔Python
+  AST equality, print/re-lower and second-print byte identity pass. Qualification
+  intentionally changes source spelling/resolution; this is not frozen-source
+  parity or a production global name-normalization change.
+- Every implemented function has a paired assertion. **46 TelegramBot cases**
+  and **38 TgFormat cases** pass on both `.ax`/Python origins and tree/direct VM,
+  including code fences/HTML escaping, Unicode, split boundaries, ID-list loops,
+  media metadata and principal-from-from.id despite spoofed names/text prefixes.
+  VM result checks now use the existing Value comparator instead of potentially
+  ambiguous display-string equality. No existing accepted expectation was changed.
+- Two new characterizations preserve inherited quirks, not desirable contracts:
+  missing message_id becomes quoted-empty content because to_string uses Value
+  Display; missing date errors exactly `to_int: cannot parse '""' as integer`.
+  **[#99](../../issues/99)**: 5000 ASCII content characters remain one part at
+  limit 3800, plain (5000 raw characters) or pre-wrapped (5011 raw HTML characters).
+  Content alone exceeds the documented Telegram 4096 cap. Splitting is **not
+  service-limit safe**; no live Telegram rejection was measured or sourcefix made.
+- Targeted port **15/15**. Single final full gate **1787 passed, strict corpus
+  alone failed, 2 ignored; CLI 5/5**. Log `tool_18380c2f10017KYq3nwwlNt5B6`.
+  Frozen corpus remains 54 files/573 entries, **116/58/399**, other buckets zero;
+  no causal/per-entry 113→116 attribution. Full parity and deployment remain open.
+- Remaining: **28 TelegramBot functions**, its module doc/shared/startup/route
+  surfaces, original stored tests for both modules, full intake/takeover/media/
+  lifecycle/delivery integration. #91 voice repair still unimplemented. TgFormat
+  function coverage is not complete original-module surface coverage.
+- Send-error repair remains **design only**: explicit builtin Result match and
+  trusted app outcome tagging; success only actual parsed Bool true, one plain
+  fallback only actual Bool false. Uncertain transport/malformed/nonboolean status
+  or rejected plain fallback stops remaining chunks. This is a deliberate future
+  corrected-origin policy change. `to_string(json_get(...))` is not proof of sound
+  static typing; actual Bool/string/number/null/missing/malformed type-path tests
+  are required. No global user-Result-await loosening or exactly-once remote
+  delivery claim. Current send wrappers remain unchanged and still error on Err.
+- Authored now (not historical baseline proof): manifest blob
+  `b345d790bf9507a8de31972c4b3f460c2eea0fa3`;
+  Telegram origin/Python/tests blobs respectively
+  `1934b33dc355019d12d2470a396e70bde6e6f507`,
+  `99426da7d97dc7a5cbf589c506c1a77cfbabfcb0`,
+  `df9c957e03d4370e54e17821204c33be0622445f`;
+  TgFormat origin/Python/tests blobs respectively
+  `29894ad367edb5650f6b37f737c87e370200868e`,
+  `6125a46151eed1471f5b79ca373dd718149040f2`,
+  `149b15b438270d085e9c2b7fa667dddd59100b64`.
+  Frozen original blobs remain pinned/verified in the manifest. This slice awaits
+  independent review; manager owns the next checkpoint. No live IO/push/deploy.
+
+### Accepted checkpoint `e5337b0` — #82 dispatch admission, baseline `a2551b7`
 
 - Manager checkpoint `a2551b7` contains the previously accepted compiler, partial
   port evidence and narrow #98 repair. This new slice changes production only in
