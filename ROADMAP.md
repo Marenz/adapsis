@@ -2,7 +2,58 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — pure port closure expansion, baseline `e5337b0`
+### Current pending slice — corrected send-chain policy, baseline `862ccc2`
+
+- Fixtures/tests/docs only. TelegramBot now has **17/42 original functions**:
+  15 pure helpers plus repaired send_message_part/send_message_parts. New
+  `TgSendAttempt` is an application union with Sent/Rejected/Uncertain variants,
+  each carrying String; it is not Result and does not change runtime unwrapping.
+  The original sanitized empty telegram_token shared declaration is copied
+  exactly; tests inject only `fixture-token` in isolated state and intercept IO.
+- The two repaired functions deliberately change return type (String→union),
+  effects (`io,fail,async`), control flow and docs, preserving input parameters.
+  `semantic_repairs` records these separately from qualification-only changes.
+  Corrected-origin/Python whole-program AST equality, print/re-lower/second-print
+  identity, union schema and runtime-argument validation all pass with the existing
+  frontend. No runtime/permission/typing permissiveness or user-Result-await
+  relaxation was introduced. Earlier frozen-wrapper tests are untouched.
+- Builtin http_post Result is explicitly matched. Only actual parsed Bool true
+  yields Sent; Bool false yields Rejected and authorizes **one** plain fallback.
+  Any non-Sent after that optional fallback terminates remaining chunks; failure
+  cannot be masked by later success. Transport/missing/nonboolean status yields
+  Uncertain. Malformed JSON raises a terminal parse error (not a uniform tag).
+  Empty/invalid index yields Uncertain with zero requests; forged legacy `last`
+  data cannot manufacture Sent. Outer await rebinding and empty wildcard-arm
+  execution are proven by actual normal-route tests, not just syntax inspection.
+- Tests invoke production `eval_async_function` on **both origins**, assert raw
+  Union results and exact URL/fake-token/body/header/order/count. Cases include
+  whitespace, Bool versus strings/numbers/null/objects/arrays/missing status,
+  malformed JSON on first/plain attempt, transport error containing `ok:true`,
+  second rejection/uncertainty, multiple chunks and early termination. These are
+  local synthetic attempts, **not exactly-once remote-delivery evidence**. All
+  chunks are explicit and short; #99 remains unfixed and no service-limit-safe
+  splitting is claimed. json_get's wrong static String catalog remains explicit;
+  the rendering discriminator is supported by runtime type-path tests only.
+- Targeted port **20/20**, including 5 new send-contract tests. Pure paired cases
+  are now **49 TelegramBot / 38 TgFormat**, passing both origins and tree/direct
+  VM; the two effectful functions have separately required normal IO coverage.
+  Single full gate **1792 passed, strict corpus alone failed, 2 ignored; CLI 5/5**.
+  Log `tool_183bdc377001I5xt3mp0AYgNsT`. Frozen corpus remains **116/58/399** over
+  54 files/573 entries, other buckets zero, no 113→116 causal attribution.
+- Remaining: **25 TelegramBot functions**, eight original shared declarations,
+  module doc/startup/route/original stored tests and higher send/reply/intake/media
+  integration; TgFormat original stored tests remain pending. #91 repair and full
+  port/deployment acceptance remain open. New untracked review inputs are
+  `telegram_port_tests/send_chain.rs` and `send_chain/runtime.rs`.
+- Current authored blobs (recorded now): manifest
+  `b2c45fada813ac94c8fb68c2dfc96f4f99cbf9d1`; Telegram origin
+  `f04115ffb50dd85be2f4b4562ca4a66c14b37d80`; Python
+  `a77449e0fbae33da057f765ba30c26d3522ad538`; paired tests
+  `fae6cf3542ac0092b6e813d4725f44040e711690`. Frozen originals/provenance untouched.
+  This bounded application-policy slice awaits independent review; manager owns
+  checkpointing. No live IO, credentials read, push or deployment.
+
+### Accepted checkpoint `862ccc2` — pure port closure expansion
 
 - Fixtures/tests/docs only. **14/42 TelegramBot functions** and **18/18 TgFormat
   functions** are now in the separate corrected-origin/Python pairs. Telegram's

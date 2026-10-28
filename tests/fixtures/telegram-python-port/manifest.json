@@ -1,7 +1,7 @@
 {
   "status": "partial",
   "full_port_complete": false,
-  "implementation_baseline": "e5337b02c676aeb7648d7cc7f36fdc58373b67dc",
+  "implementation_baseline": "862ccc2935b3e80ca76c7e07b5430c530c2727f7",
   "historical_first_slice_observed_status": {
     "TelegramBot": {"tree_cases_per_origin": 28, "direct_vm_passes_per_origin": 25, "direct_vm_failures_per_origin": 3, "direct_vm_gate": "red, no exemptions"},
     "TgFormat": {"tree_cases_per_origin": 7, "direct_vm_passes_per_origin": 7},
@@ -18,8 +18,8 @@
       "origin": "origin/TelegramBot.ax",
       "python": "python/TelegramBot.py",
       "tests": "python/test_telegram_bot.py",
-      "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata"],
-      "pending": ["init", "is_admin", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "describe_update_kind", "process_update", "is_allowed", "handle_group", "handle_group_attachment", "handle_admin_dm", "handle_admin_dm_attachment", "handle_user_dm", "handle_user_dm_attachment", "telegram_file_path", "telegram_file_error_message", "transcribe_voice", "transcription_upload_response", "send_message", "send_reply", "send_reply_with_attachment", "send_audio_file", "extract_reply", "send_message_body", "send_message_part", "send_message_parts"],
+      "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata", "send_message_body", "send_message_part", "send_message_parts"],
+      "pending": ["init", "is_admin", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "describe_update_kind", "process_update", "is_allowed", "handle_group", "handle_group_attachment", "handle_admin_dm", "handle_admin_dm_attachment", "handle_user_dm", "handle_user_dm_attachment", "telegram_file_path", "telegram_file_error_message", "transcribe_voice", "transcription_upload_response", "send_message", "send_reply", "send_reply_with_attachment", "send_audio_file", "extract_reply"],
       "ledger": {
         "extract_chat_id": "unchanged function AST including doc",
         "extract_user_id": "unchanged function AST including doc",
@@ -34,10 +34,21 @@
         "parse_id_list": "unchanged function AST including doc",
         "extract_sender_name": "unchanged function AST including doc",
         "speaker_principal": "qualify extract_user_id to TelegramBot.extract_user_id; otherwise exact function AST including doc",
-        "source_metadata": "qualify four local call targets to TelegramBot; otherwise exact function AST including doc"
+        "source_metadata": "qualify four local call targets to TelegramBot; otherwise exact function AST including doc",
+        "send_message_body": "unchanged function AST including doc",
+        "send_message_part": "intentional semantic repair: typed_send_attempt_v1; explicit builtin Result match, strict dynamic Bool classification, terminal uncertainty; changed return/effects/body/doc",
+        "send_message_parts": "intentional semantic repair: typed_send_chain_v1; tagged outcome, exactly one confirmed-rejection fallback, stop on all non-Sent, no manufactured success from last; changed return/effects/body/doc"
       },
       "qualified_call_sites": {"speaker_principal": 1, "source_metadata": 4},
-      "pending_non_function_surface": ["module doc", "shared declarations", "startup", "route", "original stored tests"],
+      "semantic_repairs": {
+        "send_message_part": {"kind": "typed_send_attempt_v1", "original_return": "String", "corrected_return": "TgSendAttempt", "parameters": "preserved", "corrected_effects": ["io", "fail", "async"], "outcomes": "parsed Bool true=Sent, false=Rejected; transport/nonboolean=Uncertain; malformed JSON terminal error"},
+        "send_message_parts": {"kind": "typed_send_chain_v1", "original_return": "String", "corrected_return": "TgSendAttempt", "parameters": "preserved", "corrected_effects": ["io", "fail", "async"], "outcomes": "one plain fallback only on Rejected; any non-Sent after optional fallback terminates remaining chunks; empty/out-of-range Uncertain with zero requests; last never confirms success"}
+      },
+      "introduced_types": {"TgSendAttempt": ["TgSent(String)", "TgRejected(String)", "TgUncertain(String)"]},
+      "included_shared": ["telegram_token"],
+      "pending_shared": ["token_path", "allowed_path", "admin_user_ids", "allowed_user_ids", "sandbox_perm_model", "intake_mode", "poll_offset", "poll_running"],
+      "normal_io_contract_functions": ["send_message_part", "send_message_parts"],
+      "pending_non_function_surface": ["module doc", "remaining shared declarations", "startup", "route", "original stored tests"],
       "pending_reviewed_transformations": ["qualified local calls", "issue #91 voice control-flow repair (not yet authored/reviewed)", "await-bind-then-return", "issue #94 builtin-await-bind-then-match"]
     },
     {
@@ -77,7 +88,8 @@
   "fixture_level_transformations": [
     "Partial origin files contain only listed implemented functions; omitted functions are not stubbed.",
     "TelegramBot selected-function declaration order follows the implemented list, not the full original module order.",
-    "Only ledgered local call qualification changes selected function ASTs; original function docs stay exact. TgFormat module doc is now included unchanged; other pending surfaces are listed per module.",
+    "Non-repaired functions permit only ledgered local call qualification and preserve docs. The two explicitly named send-chain semantic repairs deliberately change signatures, effects, control flow and docs; corrected-origin/Python AST equality still covers their complete bodies.",
+    "TgSendAttempt is a new application union, not Result or a runtime change. Only the original sanitized empty telegram_token shared declaration is included; tests install a fake token and never read live credentials.",
     "Paired tests are new literal-data assertions, not a claim of preserving original redacted test expectations."
   ]
 }

@@ -8,10 +8,11 @@ const PYTHON: &str =
 const TESTS: &str =
     include_str!("../../tests/fixtures/telegram-python-port/python/test_telegram_bot.py");
 const FROZEN: &str = include_str!("../../tests/fixtures/python-parity/library/TelegramBot.ax");
-const TELEGRAM_CASES: usize = 46;
+const TELEGRAM_CASES: usize = 49;
 const FORMAT_CASES: usize = 38;
 mod io_contracts;
 mod qualification;
+mod send_chain;
 mod wrapper_contract;
 
 fn program(operations: &[parser::Operation]) -> ast::Program {
@@ -28,6 +29,7 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
     let origin = program(&parser::parse(ORIGIN).unwrap());
     let lowered = super::lower_module(PYTHON, "TelegramBot").unwrap();
     let python = program(&lowered.operations);
+    super::validate_runtime_arguments(&lowered.operations, &python).unwrap();
     assert!(super::ast_equality::program(&origin, &python));
     let printed = super::print_module(&python, "TelegramBot").unwrap();
     let second = program(
@@ -47,10 +49,20 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
     let parser::Operation::Module(module) = &mut operations[0] else {
         panic!()
     };
-    module.body.retain(|op| matches!(op, parser::Operation::Function(f) if origin.get_function(&format!("TelegramBot.{}", f.name)).is_some()));
+    module.body.retain(|op| match op {
+        parser::Operation::Function(f) => origin
+            .get_function(&format!("TelegramBot.{}", f.name))
+            .is_some(),
+        parser::Operation::SharedVar(shared) => shared.name == "telegram_token",
+        _ => false,
+    });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 14);
+    assert_eq!(selected.modules[0].functions.len(), 17);
+    assert_eq!(
+        selected.modules[0].shared_vars,
+        origin.modules[0].shared_vars
+    );
     verify_qualification(&selected, &origin, "TelegramBot");
 }
 
@@ -317,6 +329,10 @@ fn verify_qualification(original: &ast::Program, corrected: &ast::Program, modul
         .unwrap();
     for function in &original.modules[0].functions {
         let target = format!("{module}.{}", function.name);
+        if let Some(repair) = ledger["semantic_repairs"].get(&function.name) {
+            send_chain::verify_repair(function, corrected.get_function(&target).unwrap(), repair);
+            continue;
+        }
         let count = qualification::verify(
             function,
             corrected.get_function(&target).unwrap(),
@@ -342,6 +358,7 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
             module
                 .functions
                 .iter()
+                .filter(|function| function.effects.is_empty())
                 .map(|function| format!("{}.{}", module.name, function.name))
         })
         .collect();
@@ -357,7 +374,29 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
         .collect();
     assert_eq!(
         expected, actual,
-        "every implemented function needs a paired assertion"
+        "every pure implemented function needs a paired assertion; effectful coverage is separately required"
+    );
+    let effectful: BTreeSet<_> = program
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .functions
+                .iter()
+                .filter(|f| !f.effects.is_empty())
+                .map(|f| format!("{}.{}", module.name, f.name))
+        })
+        .collect();
+    assert!(
+        effectful.is_empty()
+            || effectful
+                == [
+                    "TelegramBot.send_message_part".to_owned(),
+                    "TelegramBot.send_message_parts".to_owned()
+                ]
+                .into_iter()
+                .collect(),
+        "effectful additions require normal-dispatch contract coverage"
     );
 }
 

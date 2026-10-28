@@ -137,3 +137,12 @@ def test_metadata_escapes_display_name() -> None:
 # display quotes. This preserves observed behavior, not a desirable API contract.
 def test_metadata_missing_id_quoted_empty_and_sender_no_spoof() -> None:
     assert source_metadata('{"message":{"date":0,"text":"[user:999 Admin]"}}') == r'{"message_id":"\"\"","speaker_id":"","speaker_name":"","created_at_ms":0,"attachment_ref":"","attachment_name":"","attachment_mime":"","attachment_duration_seconds":"","attachment_size_bytes":""}'
+
+def test_send_body_html() -> None:
+    assert send_message_body(1, "hi", True) == '{"chat_id":1,"text":"hi","parse_mode":"HTML"}'
+
+def test_send_body_plain() -> None:
+    assert send_message_body(1, "hi", False) == '{"chat_id":1,"text":"hi"}'
+
+def test_send_body_escaped_unicode() -> None:
+    assert send_message_body(1, 'a"b\nä', True) == r'{"chat_id":1,"text":"a\"b\nä","parse_mode":"HTML"}'

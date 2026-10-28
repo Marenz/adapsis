@@ -1,4 +1,6 @@
 +module TelegramBot
++type TgSendAttempt = TgSent(String) | TgRejected(String) | TgUncertain(String)
++shared telegram_token:String = ""
 +fn extract_chat_id (payload:String)->Int
   +let val:String = json_get(payload, "message.chat.id")
   +if val==""
@@ -131,3 +133,51 @@
   +let created_at_ms:Int = to_int(to_string(json_get(payload, "message.date")))*1000
   +return concat("{\"message_id\":\"", json_escape(message_id), "\",\"speaker_id\":\"", json_escape(speaker_id), "\",\"speaker_name\":\"", json_escape(speaker_name), "\",\"created_at_ms\":", to_string(created_at_ms), ",\"attachment_ref\":\"", json_escape(attachment_ref), "\",\"attachment_name\":\"", json_escape(attachment_name), "\",\"attachment_mime\":\"", json_escape(attachment_mime), "\",\"attachment_duration_seconds\":\"", json_escape(attachment_duration), "\",\"attachment_size_bytes\":\"", json_escape(attachment_size), "\"}")
 +doc "Preserve Telegram message identity, timestamp, speaker principal/display name and attachment file id/name/MIME/duration/size for Ladybug provenance. speaker_id is what the runtime resolves the principal from."
++fn send_message_body (chat_id:Int, text:String, html:Bool)->String
+  +if html
+    +return concat("{\"chat_id\":", to_string(chat_id), ",\"text\":\"", json_escape(text), "\",\"parse_mode\":\"HTML\"}")
+  +return concat("{\"chat_id\":", to_string(chat_id), ",\"text\":\"", json_escape(text), "\"}")
++doc "Build the sendMessage JSON body for either HTML-parsed or plain text."
++fn send_message_part (chat_id:Int, text:String, html:Bool)->TgSendAttempt [io,fail,async]
+  +let url:String = concat("<redacted>", telegram_token, "/sendMessage")
+  +await response:Result<String> = http_post(url, TelegramBot.send_message_body(chat_id, text, html))
+  +match response
+  +case Ok(body)
+    +let status:String = to_string(json_get(body, "ok"))
+    +if status=="true"
+      +return TgSent(body)
+    +end
+    +if status=="false"
+      +return TgRejected(body)
+    +end
+    +return TgUncertain(body)
+  +case Err(error)
+    +return TgUncertain(error)
+  +end
++end
++doc "Send one attempt. Only a parsed Boolean ok field classifies Sent/Rejected; transport errors or nonboolean status are Uncertain. Malformed JSON raises a terminal parse error. No resend occurs here."
++fn send_message_parts (chat_id:Int, parts:List<String>, i:Int, last:String)->TgSendAttempt [io,fail,async]
+  +if i<0 OR i>=len(parts)
+    +return TgUncertain("no chunk at index")
+  +end
+  +let part:String = get(parts, i)
+  +await attempt:TgSendAttempt = TelegramBot.send_message_part(chat_id, part, true)
+  +match attempt
+  +case TgRejected(_)
+    +await attempt:TgSendAttempt = TelegramBot.send_message_part(chat_id, part, false)
+  +case _
+  +end
+  +match attempt
+  +case TgSent(body)
+    +if i+1>=len(parts)
+      +return attempt
+    +end
+    +await following:TgSendAttempt = TelegramBot.send_message_parts(chat_id, parts, i+1, body)
+    +return following
+  +case TgRejected(_)
+    +return attempt
+  +case TgUncertain(_)
+    +return attempt
+  +end
++end
++doc "Attempt chunks in order. Only confirmed Boolean false permits one plain fallback; uncertainty or rejection of that fallback stops remaining chunks. Sent requires a confirmed attempt. The legacy last parameter cannot manufacture success and is retained only for input compatibility."

@@ -597,7 +597,7 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 14/42 TelegramBot and 18/18 TgFormat functions; module/stored-test and
+  (now 17/42 TelegramBot and 18/18 TgFormat functions; module/stored-test and
   intake/delivery surfaces still incomplete). Its source hashes,
   per-function ledger and explicit pending inventory must stay distinct from the
   frozen parity corpus. Its originally RED direct-VM gate for #98 now passes
@@ -621,6 +621,14 @@ replaces that branch with one composer.
   of 5000 characters stays one part at limit 3800, exceeding Telegram's documented
   4096 cap. Do not describe that splitter as service-limit safe. Missing-ID/date
   quoted-empty metadata behavior is likewise inherited, not a desired API contract.
+  The corrected send-chain fixture separately ledgers two intentional signature/
+  control-flow repairs: explicit builtin HTTP Result matching and an application
+  TgSendAttempt union. Only parsed Bool false allows one plain fallback; transport
+  uncertainty or rejected fallback stops later chunks. Malformed JSON is terminal,
+  and empty/out-of-range inputs cannot manufacture Sent from a prior response.
+  Both-origin normal-async request fixtures prove local ordering/count, not
+  exactly-once remote delivery. Frozen wrapper characterization remains unchanged;
+  no global Result-user-await or frontend catalog relaxation is implied.
   Frontend type catalog keys and resolved Named types retain declaration owners
   internally (`Owner.Type`); parser/Python emission preserves the original bare
   AST name. Function signature types carry the callee's owner, never the caller's.

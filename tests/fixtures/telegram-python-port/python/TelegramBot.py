@@ -1,3 +1,11 @@
+@union
+class TgSendAttempt:
+    TgSent: tuple[str]
+    TgRejected: tuple[str]
+    TgUncertain: tuple[str]
+
+telegram_token: str = ""
+
 def extract_chat_id(payload: str) -> int:
     """Extract chat ID from Telegram webhook payload"""
     val: str = json_get(payload, "message.chat.id")
@@ -143,3 +151,48 @@ def source_metadata(payload: str) -> str:
     speaker_id: str = TelegramBot.speaker_principal(payload)
     created_at_ms: int = to_int(to_string(json_get(payload, "message.date"))) * 1000
     return concat('{"message_id":"', json_escape(message_id), '","speaker_id":"', json_escape(speaker_id), '","speaker_name":"', json_escape(speaker_name), '","created_at_ms":', to_string(created_at_ms), ',"attachment_ref":"', json_escape(attachment_ref), '","attachment_name":"', json_escape(attachment_name), '","attachment_mime":"', json_escape(attachment_mime), '","attachment_duration_seconds":"', json_escape(attachment_duration), '","attachment_size_bytes":"', json_escape(attachment_size), '"}')
+
+def send_message_body(chat_id: int, text: str, html: bool) -> str:
+    """Build the sendMessage JSON body for either HTML-parsed or plain text."""
+    if html:
+        return concat('{"chat_id":', to_string(chat_id), ',"text":"', json_escape(text), '","parse_mode":"HTML"}')
+    return concat('{"chat_id":', to_string(chat_id), ',"text":"', json_escape(text), '"}')
+
+@effects("io", "fail")
+async def send_message_part(chat_id: int, text: str, html: bool) -> TgSendAttempt:
+    """Send one attempt. Only a parsed Boolean ok field classifies Sent/Rejected; transport errors or nonboolean status are Uncertain. Malformed JSON raises a terminal parse error. No resend occurs here."""
+    url: str = concat("<redacted>", telegram_token, "/sendMessage")
+    response: Result[str] = await http_post(url, TelegramBot.send_message_body(chat_id, text, html))
+    match response:
+        case Ok(body):
+            status: str = to_string(json_get(body, "ok"))
+            if status == "true":
+                return TgSent(body)
+            if status == "false":
+                return TgRejected(body)
+            return TgUncertain(body)
+        case Err(error):
+            return TgUncertain(error)
+
+@effects("io", "fail")
+async def send_message_parts(chat_id: int, parts: list[str], i: int, last: str) -> TgSendAttempt:
+    """Attempt chunks in order. Only confirmed Boolean false permits one plain fallback; uncertainty or rejection of that fallback stops remaining chunks. Sent requires a confirmed attempt. The legacy last parameter cannot manufacture success and is retained only for input compatibility."""
+    if i < 0 or i >= len(parts):
+        return TgUncertain("no chunk at index")
+    part: str = get(parts, i)
+    attempt: TgSendAttempt = await TelegramBot.send_message_part(chat_id, part, True)
+    match attempt:
+        case TgRejected(_):
+            attempt: TgSendAttempt = await TelegramBot.send_message_part(chat_id, part, False)
+        case _:
+            pass
+    match attempt:
+        case TgSent(body):
+            if i + 1 >= len(parts):
+                return attempt
+            following: TgSendAttempt = await TelegramBot.send_message_parts(chat_id, parts, i + 1, body)
+            return following
+        case TgRejected(_):
+            return attempt
+        case TgUncertain(_):
+            return attempt

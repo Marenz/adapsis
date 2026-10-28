@@ -1,4 +1,4 @@
-# TelegramBot Python port — partial, pure dependency closure
+# TelegramBot Python port — partial corrected-origin program
 
 This is a separate port work area, not a replacement for the frozen
 `tests/fixtures/python-parity` corpus. The original corpus and manifest are
@@ -7,19 +7,24 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 14 of 42 functions.** The original pure subset plus
-  `parse_id_list`, `extract_sender_name`, `speaker_principal`, `source_metadata`.
+- **TelegramBot: 17 of 42 original functions.** Fifteen pure helpers plus the
+  explicitly repaired `send_message_part` and `send_message_parts` IO functions.
+  A new application outcome union and the original sanitized empty token shared
+  declaration support this bounded send-chain port.
 - **TgFormat: all 18 functions**, including Markdown/code-block conversion,
   splitting, preview and sample helpers. This is function coverage, not full
   original-module parity or service-limit-safe delivery.
-- Only approved local-call qualification changes frozen function ASTs: **37 call
+- Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Corrected origins and Python lowering compare exact structures
+  unchanged. Two separately ledgered semantic repairs deliberately change return
+  types/effects/control flow/docs; these are not qualification-only equivalence.
+  Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
-  are checked. Every implemented function must have a paired assertion.
+  are checked. Every pure function has paired assertions; the two IO functions
+  have separately enforced normal-dispatch contracts on both origins.
 - TgFormat's module doc is now included unchanged. TelegramBot's module doc,
-  shared state, lifecycle/routes and original tests remain **pending**, as do
+  remaining shared state, lifecycle/routes and original tests remain **pending**, as do
   TgFormat's original stored tests.
   Paired Python tests are newly authored literal cases; redacted original test
   expectations are not reinterpreted. The selected TelegramBot declaration order
@@ -34,13 +39,13 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently passes **15 tests**. No failure allowlist or
+This focused command currently passes **20 tests**. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
 
 | Subset | Tree per origin | Direct VM per origin |
 |---|---:|---:|
-| TelegramBot (46 literal cases) | 46 pass | 46 pass |
+| TelegramBot pure helpers (49 literal cases) | 49 pass | 49 pass |
 | TgFormat (38 literal cases) | 38 pass | 38 pass |
 
 Both corrected `.ax` and Python-lowered origins have the same results. The first
@@ -121,14 +126,14 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current pure-expansion release gate: **1787 passed, strict original-corpus parity
-alone failed, 2 ignored; CLI 5/5**. Targeted `telegram_port`: **15 passed**.
+Current send-chain release gate: **1792 passed, strict original-corpus parity
+alone failed, 2 ignored; CLI 5/5**. Targeted `telegram_port`: **20 passed**.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **28 TelegramBot pending functions**; TgFormat has
+The manifest explicitly lists **25 TelegramBot pending functions**; TgFormat has
 no pending functions but its original stored-test surface remains pending.
 Still required: full corrected-origin provenance/review and whole-module paired
 structural/idempotence gates, integration of the pure metadata/principal helpers
@@ -138,16 +143,42 @@ attachments, startup/poll/shared/spawn behavior, plus representative error paths
 The partial tests here do not close #86, certify deployment, or imply the original
 frozen TelegramBot fixture passed its separate parity gate.
 
-## Send-error repair — design only, not implemented
+## Corrected send-chain policy — implemented in this partial port
 
-The proposed corrected-origin repair explicitly matches the builtin HTTP Result
-and uses trusted application outcome tags. Only an actual parsed Boolean
-`ok:false` may trigger one plain-text fallback; actual Boolean true means success.
-Transport uncertainty, malformed/missing/nonboolean status, or rejection of the
-plain fallback must stop remaining chunks. Never infer retry permission from an
-untrusted text sentinel, or infer exactly-once remote delivery from mock counts.
-The current `json_get` catalog mismatch remains explicit: any proposed
-`to_string(json_get(...))` discriminator requires actual type-path tests rather
-than a static-typing claim. This policy changes corrected-origin behavior and
-needs separate ledger/request-order review. No send-path or runtime changes are
-included in this pure-function expansion.
+The two corrected functions return `TgSendAttempt`, an application union with
+`TgSent(String)`, `TgRejected(String)` and `TgUncertain(String)`, and declare
+`[io,fail,async]`. Their original parameters are retained, but return type,
+effects, control flow and docs deliberately differ from the frozen originals.
+`semantic_repairs` records that separately from local-call qualification.
+The unchanged frozen-wrapper characterization above remains as historical evidence.
+
+The leaf explicitly matches the **builtin** `http_post` Result. Only a parsed
+Boolean true constructs Sent; only Boolean false constructs Rejected. Transport
+Err and nonboolean/missing status construct Uncertain. Malformed JSON raises a
+terminal parse error rather than a uniform union outcome. No retry occurs in the
+leaf. The chain attempts HTML first, permits one plain fallback only on Rejected,
+then stops remaining chunks on any non-Sent outcome. Earlier failure is not
+masked by later success. Empty/out-of-range input returns Uncertain with zero
+requests; the legacy `last` argument cannot manufacture success.
+
+Both `.ax` and Python origins execute through production `eval_async_function`
+with intercepted IoRequests, not only a direct-tree diagnostic route. Tests cover
+real Bool versus strings/numbers/null/objects/arrays/missing/malformed status,
+whitespace, multiple chunks, exact HTML/plain ordering, second rejection,
+transport errors (including text containing `ok:true`), outer await rebinding,
+empty wildcard-arm execution and zero-request invalid indices. Raw return values
+must be the application Union, not an unwrapped Result or String.
+
+The token default is empty and identical to the sanitized original declaration.
+Tests install only `fixture-token` in isolated runtime state and intercept every
+request. No live credential read, actual network operation or remote-delivery
+experiment occurs. Local attempt counts **do not establish exactly-once remote
+delivery**; transport uncertainty may follow an already delivered request.
+
+`to_string(json_get(body,"ok"))` is a tested dynamic discriminator, **not sound
+static JSON typing**: the existing catalog mismatch remains unresolved. Its
+runtime type-path tests ensure JSON strings `"true"`/`"false"` cannot impersonate
+Booleans. No frontend/runtime permissive changes or global user-Result-await
+relaxation were made. The higher `send_message`/reply/inbound integrations remain
+pending, and #99 is deliberately unfixed: retry fixtures use explicit short chunks
+and do not certify service-limit-safe splitting.
