@@ -1,0 +1,20 @@
++module TgFormat
++fn escape_html (text:String)->String
+  +let amp:String = regex_replace("&", "&amp;", text)
+  +let lt:String = regex_replace("<", "&lt;", amp)
+  +return regex_replace(">", "&gt;", lt)
++doc "HTML-escape ampersand, less-than and greater-than so user text can never inject a tag. Runs first; every later step appends tags after this point, so generated tags are never re-escaped."
++fn apply_inline (s:String)->String
+  +let links:String = regex_replace("\\[([^\\]]+)\\]\\(([^)]+)\\)", "<a href=\"$2\">$1</a>", s)
+  +let spoiler:String = regex_replace("\\|\\|(.+?)\\|\\|", "<tg-spoiler>$1</tg-spoiler>", links)
+  +let strike:String = regex_replace("~~(.+?)~~", "<s>$1</s>", spoiler)
+  +let bold1:String = regex_replace("\\*\\*(.+?)\\*\\*", "<b>$1</b>", strike)
+  +let bold2:String = regex_replace("__(.+?)__", "<b>$1</b>", bold1)
+  +let ital1:String = regex_replace("\\*(.+?)\\*", "<i>$1</i>", bold2)
+  +return regex_replace("_(.+?)_", "<i>$1</i>", ital1)
++doc "Apply inline Markdown to an already-escaped segment that is not inside a code span. Longest delimiters first - double asterisk before single, double underscore before single - so bold never degrades into italics. Emits only Telegram-allowed tags."
++fn tag (name:String, closing:Bool)->String
+  +if closing
+    +return concat("</", name, ">")
+  +return concat("<", name, ">")
++doc "Build an HTML tag from separate pieces. The source never contains a literal closing code or pre tag, because the runtime stops reading this code block at the first closing code fence it sees anywhere in the payload - including inside a string."

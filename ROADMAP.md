@@ -1,6 +1,242 @@
 # AdapsisOS Roadmap
 
-## Recovery — Python parity #86 (2026-10-26, red)
+## Recovery — Python parity #86 (current: 2026-10-28, red)
+
+### Latest uncommitted runtime slice — narrow #98 repair, awaiting review
+
+- `vm/equality.rs` routes only differing Value variants, excluding Int↔Float
+  numeric pairs, through the tree's shared `Value::matches` and its negation.
+  `matches` is minimally `pub(crate)`. VM same-family/mixed-numeric `binary_cmp`
+  and all ordered opcodes are unchanged. No empty-string special case, json_get
+  coercion, frontend typing change or JIT change was introduced.
+- New both-order heterogeneous Eq/Neq matrix covers Int/String (empty and numeric
+  text), Float/String, Bool/String, None/String, Ok/Err/Union versus String and
+  Bool/Int. Same-type scalar controls and ordered mixed-type errors remain.
+  Existing residuals are deliberately characterized separately: VM Int↔Float
+  equality coercion differs from tree; NaN/identical-infinity Neq remains unequal
+  between tiers; same-family Result/Union/None equality remains unsupported in VM.
+  These #90/#86 residuals prevent a claim of full equality parity.
+- **Unmodified port assertions now pass:** TelegramBot **28/28 on both origins
+  and both tree/direct VM**, TgFormat 7/7 likewise. The first-slice RED gate was
+  not exempted or rewritten. Frozen originals, port `.ax`/Python/test files and
+  manifest remain byte-identical. Their README/observed-status metadata preserve
+  the earlier RED-evidence checkpoint; this recovery header records the current
+  pending runtime correction. Frontend json_get's String catalog mismatch remains
+  unresolved; #82 user-await/wrapper behavior is unchanged.
+- Targeted equality 3/3, port 13/13, existing VM 41/41. Final author
+  `cargo test --release --no-fail-fast`: **1772 passed, strict corpus alone failed,
+  2 ignored; CLI 5/5**. Full log `tool_18326f8420017vJBiGyyjCQ0pJ`.
+  Corpus remains **116/58/399** across 54 files/573 entries; other buckets zero.
+  No attribution for 113→116. `git diff --check` clean.
+- New untracked `src/vm/equality.rs` must accompany the cumulative untracked
+  compiler/port evidence files at review. No commit/push/deployment. Narrow #98
+  repair awaits independent acceptance; the preceding port slice was accepted
+  only as RED evidence, not as a complete functional port. #82 dispatch design
+  is next after this review, based on the preserved wrapper diagnostics.
+
+### Accepted earlier checkpoint — first partial port, RED evidence gate
+
+- Tests/fixtures/docs plus minimal test-module wiring only; the independently
+  accepted compiler slice below was preserved. Separate files under
+  `tests/fixtures/telegram-python-port/` contain **10/42 TelegramBot functions**
+  and **3/18 TgFormat functions**, `.ax`/Python pairs, literal paired tests,
+  README and manifest. Exact source Git blob hashes and baseline are pinned;
+  implemented/pending sets account for every original function, with a
+  per-function transformation ledger. Frozen corpus files/manifest are untouched.
+- Selected bodies/docs exactly match their frozen function ASTs. Corrected partial
+  origin→Python AST equality and print/re-lower/second-print identity pass. Source
+  declaration selection/order and new test-data provenance are disclosed. No
+  stubs, #91 voice repair or full module/shared/lifecycle/route port is hidden.
+- **[#98](../../issues/98): keep direct-VM port gate RED.** All 28 TelegramBot
+  tree cases pass on each origin; direct VM passes 25 and fails cases 1/3/4:
+  numeric chat/sender IDs compared to empty String. Actual `json_get` scalar
+  variants are String/Int/Float/Bool (null/object/array have String encodings),
+  unlike the String catalog declaration. Both source origins fail identically;
+  no coercion, ignore list or source rewrite hides this runtime discrepancy.
+  TgFormat's 7 cases pass both origins and both tested tiers.
+- Six contract tests cover production CoroutineHandle requests/replies and actual
+  JSON variants using in-memory replies, with no real file/sleep/network/provider
+  work. This is valid-call runtime contract evidence, **not complete frontend IO
+  signature/arity support**. Missing IO table entries remain a #86 gap.
+- **[#82](../../issues/82): wrapper diagnostic corrected and pinned.** Normal
+  `eval_async_function(send_message_parts)` emits zero requests and fails unknown
+  user-await operation for both bare and qualified targets. It is not a
+  qualification-only bug. Qualification-only test-copy changes are inverse-AST
+  verified. Explicit direct-tree diagnostic reaches the boundary: successful
+  `send_message_part` returns Ok(String), user await unwraps it, caller succeeds
+  after one request; transport Err remains wrapped and caller fails at `index_of`
+  after one request, before fallback send. Normal-dispatch success is not claimed.
+- Final author gate: **1768 passed, 2 failed, 2 ignored; CLI 5/5**. Failures are
+  the unchanged strict corpus and explicit direct-VM port gate. Targeted port
+  tests **12 passed / 1 failed**. Full log: `tool_1831c9387001ynVtLFOgkJ2K6P`.
+  Strict corpus remains 54/573, **116 verified / 58 invalid / 399 unsupported**,
+  other status buckets zero, still no causal/per-entry 113→116 attribution.
+- New untracked review inputs: `src/python_frontend/telegram_port_tests.rs`, its
+  `io_contracts.rs` and `wrapper_contract.rs` children, and the whole separate
+  fixture directory. Include earlier untracked `compiler/truthiness.rs` and
+  `python_frontend/condition_tier_tests.rs` when reviewing the cumulative cut.
+  No commit/push/deployment/live IO. First port evidence awaits independent review;
+  full corrected-origin port, #86/#90/#96/#97/#98/#82 remain open.
+
+### Accepted compiler checkpoint — immutable normalization (uncommitted)
+
+- Built on the accepted NOT checkpoint below. All JIT Boolean consumers now use
+  one representation-aware normalization: AND/OR, NOT, Check, Branch and While.
+  Input evaluation is preserved even for always-truthy Float; branch results are
+  canonical I8. Identity-safe homogeneous scalar comparisons are admitted for
+  conditions; NOT retains its narrower binary/argument-call refusal contract.
+- Review correction: **Float Eq/Neq now refuse condition compilation**, including
+  nested conditions, rather than emitting IEEE equality for the runtime's epsilon
+  comparison. Near-equal finite values, signed zero, infinities from scalar calls
+  and NaN AST cases have explicit refusal coverage; finite epsilon fallback is
+  separately verified through the normal evaluator with `used_jit=false`.
+  Float ordered comparisons and Bool/Int Eq/Neq remain direct-JIT controls.
+  **OPEN #90 residual:** VM Neq uses `abs(a-b)>=EPS` while tree uses
+  `!(abs(a-b)<EPS)`; NaN/identical infinities therefore disagree. JIT refusal
+  does not fix that VM fallback discrepancy. Global float equality is unchanged.
+- Manager-approved exception preserves the two existing direct-JIT
+  `runtime_semantics_tests.rs` division-program gates: condition calls may take
+  exact Bool/Int/Float arguments, emitted recursively from proven values in
+  authored order. No String/unknown conversions or IO/async callees. Explicit
+  `[fail]` callees in the new argument-call path, including nested arguments,
+  refuse compilation until [#97](../../issues/97) is resolved. Zero-argument
+  fallible calls retain their existing **tier-specific trap characterization**;
+  a scalar signature alone does not prove the runtime returned wrapper/value,
+  and caller admission never certifies all callee internals.
+- Local/rebound/unknown conditions refuse compilation before execution, including
+  mutable-counter loops. The normal evaluator falls back to VM/tree; tests assert
+  the result and `used_jit=false`, not fake direct-JIT evidence. No mutable-binding
+  machinery or general compiler namespace refactor was added. Coarse admission
+  still accepts more shapes than final compilation.
+- Author final `cargo test --release --no-fail-fast`: **1756 passed, strict parity
+  alone failed, 2 ignored; CLI 5/5**. Corpus remains **116/58/399** (54 files,
+  573 entries; other status buckets zero), no 113→116 attribution. Full log
+  `tool_182f4ee0c0012k4GVf4G1AEFwc`. Targeted: condition tests 6/6, compiler 41/41,
+  VM 41/41, runtime semantics 7/7, logical 17/17, native no-replay 1/1. Final
+  `git diff --check` clean. Independent Astra ACCEPT followed, including release
+  build, condition 6/6 and direct refusal/ordered controls; no whole #90/#86 or
+  deployment acceptance follows from that bounded review.
+- New untracked files to include in review/durable cut: `src/compiler/truthiness.rs`
+  and `src/python_frontend/condition_tier_tests.rs`. #96 remains open; direct
+  nested-call tests use current-executable children with deadlines, not fallback.
+- **[#97](../../issues/97) author-observed bug, not intended semantics:**
+  `fail_bool()->Bool [fail]` fails a Check; caller `probe()->Int [io,async]`
+  then attempts `file_exists`. Normal `eval::eval_async_function` runs the VM:
+  caller performs **one subsequent effect**, whereas direct tree evaluation
+  aborts with **zero**. VM Check currently emits Err+Return from its callee frame;
+  the caller continues. `trusted_ax_failed_check_caller_effect_characterization`
+  pins this discrepancy separately from normalization correctness. It must not
+  be cited as acceptable failure propagation or all-tier parity. A separate
+  trusted `.ax` fixture verifies that an actual VM division error after one IO
+  request does not replay that request. Neither is evidence of JIT/Python IO
+  admission. No #82/#94 guards were loosened. #90 and #86 both remain open.
+
+### Current accepted-but-uncommitted checkpoint
+
+- Durable baseline: `05d85cc`. The pending frontend Boolean-admission/warning
+  cleanup plus narrow representation-safe JIT NOT slice has **independent Astra
+  ACCEPT**, including the subsequent String and scalar scratch-collision repairs.
+  Runtime code is frozen pending the next approved design; no commit, push or
+  deployment has been authorized here. Acceptance is **not** whole #90/#86 or
+  deployment acceptance. Full sanitized Python TelegramBot port is still absent.
+- Author final `cargo test --release --no-fail-fast`: **1750 passed, 1 strict
+  parity failure, 2 ignored; CLI 5/5**. Targeted logical suite **17/17**.
+  Final author log: `tool_182cd0c46001A7J44EJkArxih6` under the local OpenCode
+  tool-output directory. Reviewer independently passed release build and 17
+  logical tests, and direct CLI String/scalar collision cases returned **1/0**.
+- Corpus: **54 files / 573 entries; 116 verified, 58 invalid, 399 unsupported**;
+  input errors / AST mismatches / non-idempotent entries all zero. There is **no
+  verified per-entry or causal attribution for 113→116**. Zero AST mismatches
+  among admitted entries is not full feature coverage.
+- Current sessions/models (all explicitly confirmed `openai/gpt-6-astra`):
+  manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`;
+  author `ses_e8b17a23affedgH4V52JdwxNDL`;
+  independent reviewer `ses_e82647931ffewdBFqa9bGCmPIz`.
+  Earlier provider/reviewer history is historical, not current routing.
+- **Include new untracked `src/compiler/truthiness.rs`** in any later authorized
+  durable cut; ordinary tracked-file diff summaries omit it. It holds NOT's
+  proven-operand emission and mechanically extracted, still-unfixed AND/OR.
+- **#90 remains open:** AND/OR and Check/Branch/While normalization is the next
+  design-only bounded step. The NOT slice deliberately refuses binary operands,
+  argument-bearing calls and unproven/rebound values before execution, retaining
+  tree/VM fallback; zero-argument scalar callees are not globally certified.
+- **#96 remains open:** parallel-suite JIT relocation panic, documented below.
+  Child isolation of the regression avoids the observed interference; it does
+  not fix production relocation or establish its root cause.
+
+### Authorized next scopes — compiler slice, then TelegramBot port
+
+- Next #90 implementation is shared normalization for AND/OR and
+  Check/Branch/While using **representation-proven immutable** operands. Mutable
+  condition dependencies must refuse JIT compilation before execution and use
+  existing VM/tree fallback; no tracked mutable-binding write-path extension is
+  authorized. Inventory found no direct-JIT loop execution test: compiler.rs
+  `compilable_body_with_while` tests only coarse admission, and VM loop tests are
+  bytecode evidence. This distinction must remain explicit. Existing direct-JIT
+  short-circuit user-call tests in `runtime_semantics_tests.rs` must be retained.
+- Immediately after that bounded slice is frozen/handed to independent review,
+  the sole writer's priority becomes the TelegramBot port, ahead of optional JIT
+  work. [#86](../../issues/86) authorizes a **separate reviewed corrected sanitized
+  `.ax` origin plus complete paired Python port**, with provenance and an explicit
+  transformation ledger. The frozen parity corpus stays untouched; exact AST and
+  idempotence for the corrected origin form a separate port gate, never a claim
+  that the original fixture or whole parity gate passed. No runtime async or
+  permission guard loosening, new builtin, live Telegram/network/credentials or
+  deployment is authorized.
+- Concrete port transformations/blockers (line numbers reference the frozen
+  `tests/fixtures/python-parity/library/TelegramBot.ax`, not a live library):
+  1. Bare local calls throughout (`is_admin:64`, `process_update:234`, startup
+     `spawn poll_loop:21`, route `handle_update:25`) have no exact Python spelling
+     under `python_frontend/printer.rs`'s bare-call refusal. Qualify calls in the
+     **new corrected origin**, recording the deliberate dispatch/AST change.
+  2. Repair [#91](../../issues/91)'s malformed `transcribe_voice:410–425` nested
+     match/duplicate Err/out-of-scope `e` in that new origin. Original fixture
+     remains invalid; repair is not evidence its original AST was representable.
+  3. `send_message:442–445` and `send_message_parts:605–613` return async calls
+     directly. Rewrite to annotated await-bind-then-return in the new origin;
+     `python_frontend/call_sites.rs`'s async gate remains intact.
+  4. [#94](../../issues/94): `send_reply_with_attachment:457–466` directly matches
+     `http_upload` after awaiting `send_message`; `transcribe_voice:419` does so
+     after binary download. Use direct-builtin await-bind-then-match in the new
+     origin and test no replay after prior IO. Address #82 only if a concrete
+     port call awaits a Result-returning **user** function, not as a blanket
+     prerequisite for fallible IO builtins.
+  5. Verify actual IO arity/wrappers for startup `read_file`/`file_exists:13`,
+     `poll_once`/`http_get:84`, `process_update`/binary Attachment downloads:234,
+     takeover metadata/attachment overloads in `handle_*:323–375`, and
+     `send_message_part`/`http_post:596`. Pure `builtin_signatures.rs` inventory
+     does not establish these. Use `runtime_arguments.rs`, `call_sites.rs` and
+     production coroutine dispatch with trusted in-memory IoRequest responses.
+     Current IO typing is **not complete**: `expressions.rs` special-cases
+     `read_file -> String` and `http_get -> Result<String>`, while many required
+     IO results remain Unknown. `runtime_arguments.rs` checks exact user-call
+     arity but treats bare IO as builtin/effect checks, not a complete signature
+     table. Do not add broad Unknown acceptance or call this strict IO coverage.
+     Actual coroutine `http_post` returns Result<String>; frozen
+     `send_message_part:598` binds it as String, then its user-function result is
+     consumed by `send_message_parts:609–610`/`telegram_response_ok`. The first
+     port scope must test the actual direct-builtin wrapper **and intervening
+     user-await boundary** before diagnosing or changing that binding. It is not
+     an ignored result; do not silently unbox it or count a correction as original
+     AST parity. `llm_takeover` metadata overloads likewise require exact request
+     field assertions, not only an await-mode acceptance test.
+  6. Build missing complete Python source and paired tests: start with a port
+     skeleton, pure `extract_*`, `source_metadata:202`, `speaker_principal:191`,
+     `format_sender:140`, `telegram_response_ok:587` and TgFormat dependencies.
+     Then raw-update admin/guest/group routing through `process_update:234`,
+     takeover/callback binding, photo/video/voice flows, split/retry order
+     `send_message_parts:605`, and bounded startup/poll/shared/spawn coverage
+     `13,68–108`. Existing `bundled_modules_tests.rs` and `api/takeover_native`
+     are harness entrypoints, not substitutes for executing the Python port.
+- These port tasks can progress on tree/VM with trusted mocks; optional mutable
+  JIT support and open #96 relocation are **not** port prerequisites. Port code
+  must not be interleaved into the current compiler slice.
+
+### Historical recovery ledger — superseded snapshots, not current status
+
+The entries below retain intermediate measurements, rejected claims and later
+corrections. Words such as “current”, “awaiting review” or “not implemented” in
+this ledger refer to that earlier checkpoint; the header above is authoritative.
 
 - Full feature equality is **not achieved**. Last pre-foundational-fix gate:
   54 fixture files / 573 inventory entries; 114 verified, 58 invalid-program
@@ -56,7 +292,71 @@
   refused by the native literal gate while the frontend accepts them — a known
   frontend/native policy inconsistency, deliberately not widened. Qualified-call
   over-refusal is recorded as a known safe-direction limitation.
-- #90 tier semantics aligned (tree short-circuit normative). Truthiness is now a
+- Pending #90 frontend follow-through admits statically Bool call operands and
+  comparison expressions in `and`/`or`; the prior totality restriction was removed.
+  Python-source tests exercise recursion/division skipping and Bool calls in NOT
+  and conditions in tree/VM. The request-count fixture is **legacy `.ax` only**:
+  implicit async calls in Boolean operands are not supported Python evidence.
+  No async guard was relaxed. The previous 113→116 count observation has no
+  verified per-entry attribution to `05d85cc`; do not attribute all three to calls.
+- Pending narrow JIT NOT correction: Bool/Int zero-test; Float always truthy
+  (including ±0 and NaN), with operand evaluation preserved. Strings use length,
+  never pointer-nullness. Proven forms are literals and untouched, unambiguous
+  String ABI parameters; local/rebound strings and string-returning calls refuse
+  compilation before execution because their length tracking is not certified.
+  Direct compiled **Int-return wrappers** cover empty/nonempty/Unicode String,
+  Float zero/negative/nonzero/NaN and Bool/Int controls. A separately executed,
+  core-disabled child proves a Float-returning call's Check trap is not skipped.
+  NOT helpers live in `compiler/truthiness.rs`; the existing AND/OR IR was moved
+  there mechanically to keep compiler.rs under 2000 lines.
+  Review found a real scratch collision: String parameter `_last_str` had its
+  `_last_str_len` lookup overwritten by a subsequent literal. The correction
+  captures the immutable entry-block ABI length Value before parameter binding,
+  independently of the mutable name map; source rebinding still invalidates the
+  proof for the whole function. Both collision directions have exact compiled
+  Int-wrapper assertions. The older pure AND/OR test also now uses Int wrappers.
+  A second review reproduced the scalar equivalent (`_last_str_len:Int` shadowed
+  by literal scratch). The cohesive correction captures immutable scalar entry
+  Values too and emits admitted operands recursively without generic mutable-name
+  lookup: literals, untouched parameters, nested NOT and numeric negation.
+  Binary operands and argument-bearing calls now refuse JIT compilation, including
+  when nested; tree/VM can execute them through the existing pre-execution fallback.
+  Zero-argument scalar user calls resolve the actual signature and emit once;
+  their internals are not certified generally namespace-safe by this fix. No
+  generic compiler namespace refactor or new name blacklist was introduced.
+  Both scalar collision directions plus nested NOT/negation and diagnostic-bearing
+  safe refusal controls pass; original String/Float/error-evaluation tests remain.
+  Freeze checks after correction: logical suite **17/17**; full release **1750 passed, 1 strict
+  parity failure, 2 ignored**; CLI **5/5**. Current corpus: 54 files, 573 entries,
+  **116 verified / 58 invalid / 399 unsupported**, zero input errors, AST
+  mismatches or non-idempotent entries. Aggregate counts do not establish the
+  identity/cause of the three-entry increase. Test compilation still emits
+  existing warnings; the earlier zero-warning statement concerned non-test build.
+- **OPEN JIT relocation/concurrency evidence:** the first full parallel run of
+  the new scratch-collision nested-call regression panicked at
+  `cranelift-jit-0.119.1/src/compiled_blob.rs:56:80`, `Result::unwrap()` on
+  `TryFromIntError(())`, while its targeted run passed. That full run had 1747
+  passes, this failure and strict parity failure. The fixture now runs both exact
+  compiled results in the current test executable's isolated child, with a
+  60-second kill deadline; panic/nonzero/timeout fails the parent, and a completion
+  marker proves both directions ran. Isolation avoids this observed concurrent
+  allocation/relocation failure in the final run; it **does not fix or close**
+  the underlying JIT relocation issue. No production relocation code changed.
+- **OPEN #90 residual — next bounded priority after NOT acceptance:** JIT
+  AND/OR still branch on raw values, use XOR-one for the AND left condition, and
+  store an unnormalized RHS in an I8 result variable
+  (`compiler/truthiness.rs::compile_logical`). `compiler.rs::compile_statement`
+  Check/Branch/While likewise feed `compile_expr(..., I8)` straight to `brif`;
+  expected type does not convert a literal/identifier's actual representation.
+  Proposed minimal direct-JIT Int-return-wrapper repros: `if 2 AND true`,
+  `if true AND 2`, `if ""`, `if 0.0`, `check required 0.0`, and a bounded
+  `while ""` that immediately returns 1 if entered. Compare against tree/VM:
+  Int 2 is truthy, empty String false, **Float 0.0 true**. Run potentially invalid
+  IR/trap cases in isolated children. Shared normalization is not implemented in
+  this freeze, and all-tier truthiness/parity is **not closed**. String-return ABI
+  propagation, arbitrary local bindings and parser-expression evaluation also
+  require separate evidence; do not infer those from the narrow NOT tests.
+- #90 tree/VM semantics aligned for the covered operations. Truthiness is now a
   single public `Value::is_truthy`; the VM's `pop_bool` delegates to it so
   `AND`/`OR`/`NOT`/`BranchIf`/`BranchIfNot` share one definition (String/None/Err
   rows are `.ax`-only since the Python frontend emits Bool). VM `AND`/`OR` compile
@@ -64,12 +364,10 @@
   Jump/BranchIf/BranchIfNot patching; the JIT emits branch + result variable for
   both ops (compiler.rs `compile_expr`, the And/Or arm; it previously used
   `band`/`bor` with both operands eagerly compiled). Differential tests assert
-  tree/VM/JIT agreement on result, lenient operand types, a skipped rhs error
-  (division by zero), a skipped rhs recursion, and — the load-bearing one —
-  identical IoRequest count and order for a mocked rhs, including ZERO requests
-  when short-circuited. The obsolete "VM/JIT trap on eager rhs" characterization
-  tests were inverted to assert agreement. Frontend call-free relaxation (item 4)
-  is deliberately NOT done this round.
+  tree/VM agreement on skipped errors, recursion and mocked IO counts; direct JIT
+  coverage is narrower. The old claim that these establish general three-tier
+  parity was incorrect. Earlier eager-RHS characterization tests were inverted,
+  but the OPEN residual above still prevents closure.
 - Builtin signature completeness (#86): new `python_frontend/builtin_signatures.rs`
   gives every pure BUILTINS name and alias a checked arity/result signature
   (grounded in the runtime's own `expects N argument` guards and return values).

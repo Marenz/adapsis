@@ -954,8 +954,15 @@ impl Expressions<'_, '_> {
         let mut values = Vec::new();
         for value in &b.values {
             let (expr, ty) = self.lower(value)?;
-            if ty != Ty::Bool || !total_boolean_operand(&expr) {
-                return Err(self.cx.at(value, "and/or require total, call-free bool operands; runtime eager evaluation cannot emulate Python short-circuit calls"));
+            // #90: all three tiers now short-circuit identically, so a CALL
+            // operand is admissible. The static-Bool requirement stays: it is
+            // what makes the Boolean result provable, and non-Bool truthiness
+            // remains `.ax`-only.
+            if ty != Ty::Bool {
+                return Err(self.cx.at(
+                    value,
+                    "and/or operands must be statically bool; annotate the call result or use an explicit comparison",
+                ));
             }
             values.push(expr);
         }
@@ -1003,43 +1010,6 @@ impl Expressions<'_, '_> {
     }
 }
 
-pub(super) fn total_boolean_operand(e: &p::Expr) -> bool {
-    match e {
-        p::Expr::Bool(_)
-        | p::Expr::Int(_)
-        | p::Expr::Float(_)
-        | p::Expr::String(_)
-        | p::Expr::Ident(_) => true,
-        p::Expr::Unary {
-            op: p::UnaryOp::Not,
-            expr,
-        } => total_boolean_operand(expr),
-        p::Expr::Unary {
-            op: p::UnaryOp::Neg,
-            expr,
-        } => {
-            matches!(expr.as_ref(), p::Expr::Int(n) if *n >= 0)
-                || matches!(expr.as_ref(), p::Expr::Float(n) if n.is_finite())
-        }
-        // Integer arithmetic/negation can overflow, so it is not total either.
-        p::Expr::Binary { op, left, right }
-            if matches!(
-                op,
-                p::BinaryOp::Eq
-                    | p::BinaryOp::Neq
-                    | p::BinaryOp::Gt
-                    | p::BinaryOp::Lt
-                    | p::BinaryOp::Gte
-                    | p::BinaryOp::Lte
-                    | p::BinaryOp::And
-                    | p::BinaryOp::Or
-            ) =>
-        {
-            total_boolean_operand(left) && total_boolean_operand(right)
-        }
-        _ => false,
-    }
-}
 
 pub(super) fn direct_name(
     cx: &Context<'_>,

@@ -281,7 +281,7 @@ impl<'a> ModuleItem<'a> {
     fn from_stmt(
         cx: &Context<'_>,
         stmt: &'a py::Stmt,
-        types: &TypeCatalog,
+        _types: &TypeCatalog,
     ) -> Result<Self, Diagnostic> {
         if let py::Stmt::ClassDef(class) = stmt {
             return Ok(ModuleItem::Type(super::types::lower_type_decl(cx, class)?));

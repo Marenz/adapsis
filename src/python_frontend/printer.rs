@@ -101,6 +101,7 @@ pub fn print_type(program: &a::Program, target: &str) -> Result<String, Diagnost
     Ok(text)
 }
 
+#[cfg(test)]
 pub fn print_module(program: &a::Program, module_name: &str) -> Result<String, Diagnostic> {
     let error = |message: String| Diagnostic {
         module: module_name.into(),
@@ -356,6 +357,7 @@ impl<'a> Printer<'a> {
         Ok(out)
     }
 
+    #[cfg(test)]
     fn module(&mut self, m: &a::Module) -> Result<String, String> {
         self.env.clear();
         self.return_type = None;
@@ -408,6 +410,7 @@ impl<'a> Printer<'a> {
         Ok(out)
     }
 
+    #[cfg(test)]
     fn lifecycle_block(&self, name: &str, block: &a::LifecycleBlock) -> Result<String, String> {
         let mut out = String::new();
         let effects = effect_names(&block.effects)?;
@@ -425,6 +428,7 @@ impl<'a> Printer<'a> {
         Ok(out)
     }
 
+    #[cfg(test)]
     fn source_decorator(&self, source: &a::SourceDecl) -> Result<String, String> {
         let mut config = String::new();
         if !source.source_type.is_empty() {

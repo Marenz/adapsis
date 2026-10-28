@@ -5,9 +5,8 @@
 use super::{
     Context, Diagnostic,
     expressions::{Ty, compatible},
-    types::{self, TypeCatalog},
+    types::TypeCatalog,
 };
-use crate::parser as p;
 use rustpython_parser::ast as py;
 use std::collections::HashMap;
 

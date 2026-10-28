@@ -491,6 +491,7 @@ fn parse_tool(name: &str, arguments: &str) -> Result<ParsedTool, String> {
 /// size caps, op kinds, qualified-name format, injection-free lowering). It
 /// does **not** check target-module permissions or target existence. Batch
 /// callers should preflight every tool before executing any of them.
+#[allow(dead_code)] // Public structural validator; kept for external callers.
 pub fn validate_native_tool(name: &str, arguments: &str) -> Result<(), String> {
     parse_tool(name, arguments).map(|_| ())
 }

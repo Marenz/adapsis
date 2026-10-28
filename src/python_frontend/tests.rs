@@ -30,9 +30,11 @@ fn reject(source: &str, fragment: &str) -> Diagnostic {
 fn python_scalar_and_nested_local_calls_are_typed_and_qualified() {
     let source = "def inc(x: int) -> int:\n    return x + 1\n\ndef twice(x: int) -> int:\n    return inc(inc(x)) * 2\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered
-        .canonical_adapsis
-        .contains("Example.inc(Example.inc(x))"));
+    assert!(
+        lowered
+            .canonical_adapsis
+            .contains("Example.inc(Example.inc(x))")
+    );
     assert_eq!(evaluate(source, "Example.twice", "3"), "10");
     assert_eq!(lowered.source_map[1].line, 4);
 }
@@ -77,21 +79,42 @@ fn python_cross_module_calls_are_preserved_without_import_resolution() {
 }
 
 #[test]
-fn python_boolean_operators_reject_short_circuit_effect_changes() {
+fn python_boolean_operators_admit_call_operands_but_require_static_bool() {
     let source = "def ready(a: bool, b: bool) -> bool:\n    return a and not b\n";
     assert_eq!(evaluate(source, "Example.ready", "True, False"), "true");
     assert_eq!(
         evaluate(source, "Example.ready", "a=False, b=False"),
         "false"
     );
-    reject("def flag_check() -> bool:\n    return True\ndef f(flag: bool) -> bool:\n    return flag and flag_check()\n", "call-free");
+    // #90: a CALL operand is now admissible because every tier short-circuits.
+    let called = "def flag_check() -> bool:\n    return True\ndef f(flag: bool) -> bool:\n    return flag and flag_check()\n";
+    let lowered = lower_module(called, "Example").unwrap();
+    assert!(
+        lowered
+            .canonical_adapsis
+            .contains("flag AND Example.flag_check()")
+    );
+    assert_eq!(evaluate(called, "Example.f", "False"), "false");
+    assert_eq!(evaluate(called, "Example.f", "True"), "true");
+    // A call is also fine as a bare (negated / condition) operand.
+    assert!(lower_module("def probe() -> bool:\n    return True\ndef f(flag: bool) -> bool:\n    return not probe() or flag\n", "Example").is_ok());
+    // Static-Bool is still required: an Int operand is refused.
     reject(
         "def f(x: int) -> bool:\n    return x and True\n",
-        "call-free",
+        "statically bool",
+    );
+    // A comparison operand IS Bool (`x + 1 > 0`), so it is admitted; only a
+    // genuinely non-Bool operand is refused.
+    assert!(
+        lower_module(
+            "def f(x: int) -> bool:\n    return True or x + 1 > 0\n",
+            "Example"
+        )
+        .is_ok()
     );
     reject(
-        "def f(x: int) -> bool:\n    return True or x + 1 > 0\n",
-        "call-free",
+        "def f(x: int) -> bool:\n    return True or x\n",
+        "statically bool",
     );
 }
 
@@ -101,10 +124,12 @@ fn python_string_addition_lowers_to_concat_and_escapes_data() {
     let lowered = lower_module(source, "Example").unwrap();
     assert_eq!(lowered.operations.len(), 1);
     assert!(lowered.canonical_adapsis.contains("concat(prefix, name)"));
-    assert!(!lowered
-        .canonical_adapsis
-        .lines()
-        .any(|l| l == "!done" || l == "+module Evil"));
+    assert!(
+        !lowered
+            .canonical_adapsis
+            .lines()
+            .any(|l| l == "!done" || l == "+module Evil")
+    );
     assert_eq!(
         evaluate(source, "Example.greet", "'world'"),
         "\"hello\nworld\""
@@ -140,8 +165,14 @@ fn python_scope_restrictions_reject_escape_and_iteration_reuse() {
         "def f(flag: bool) -> int:\n    if flag:\n        local: int = 2\n    return local\n",
         "out-of-block",
     );
-    reject("def f(values: list[int]) -> int:\n    for item in values:\n        n: int = item\n    return item\n", "out-of-block");
-    reject("def f(values: list[int]) -> int:\n    item: int = 1\n    for item in values:\n        item = item + 1\n    return item\n", "shadows/reuses");
+    reject(
+        "def f(values: list[int]) -> int:\n    for item in values:\n        n: int = item\n    return item\n",
+        "out-of-block",
+    );
+    reject(
+        "def f(values: list[int]) -> int:\n    item: int = 1\n    for item in values:\n        item = item + 1\n    return item\n",
+        "shadows/reuses",
+    );
     reject(
         "def f() -> int:\n    value = 1\n    return value\n",
         "first assignment",
@@ -165,10 +196,12 @@ fn python_diagnostics_use_exact_source_line_and_column() {
     );
     assert_eq!((error.line, error.column), (1, 10));
     assert!(error.to_string().starts_with("Example:1:10:"));
-    assert!(lower_module("def broken(:", "Example")
-        .unwrap_err()
-        .message
-        .contains("Python syntax"));
+    assert!(
+        lower_module("def broken(:", "Example")
+            .unwrap_err()
+            .message
+            .contains("Python syntax")
+    );
 }
 
 #[test]
@@ -209,14 +242,18 @@ fn python_unsupported_forms_fail_explicitly() {
 fn python_integer_bounds_and_nonfinite_floats_are_checked() {
     assert!(lower_input("9223372036854775807").is_ok());
     assert!(lower_input("-9223372036854775807").is_ok());
-    assert!(lower_input("9223372036854775808")
-        .unwrap_err()
-        .message
-        .contains("64-bit"));
-    assert!(lower_input("-9223372036854775808")
-        .unwrap_err()
-        .message
-        .contains("Adapsis lexer"));
+    assert!(
+        lower_input("9223372036854775808")
+            .unwrap_err()
+            .message
+            .contains("64-bit")
+    );
+    assert!(
+        lower_input("-9223372036854775808")
+            .unwrap_err()
+            .message
+            .contains("Adapsis lexer")
+    );
     assert!(lower_input("1e999").is_err());
     assert!(lower_input("1e-30").unwrap().contains("0.000"));
 }
@@ -226,11 +263,19 @@ fn python_await_requires_explicit_effects_and_preserves_result_type() {
     let source = "@effects('io')\nasync def read(path: str) -> str:\n    text: str = await read_file(path)\n    return text\n";
     let lowered = lower_module(source, "Example").unwrap();
     assert!(lowered.canonical_adapsis.contains("[io, async]"));
-    assert!(lowered
-        .canonical_adapsis
-        .contains("+await text:String = read_file(path)"));
-    reject("async def read(path: str) -> str:\n    text: str = await read_file(path)\n    return text\n", "@effects('io')");
-    reject("@effects('io')\nasync def read(url: str) -> str:\n    text: str = await http_get(url)\n    return text\n", "type mismatch");
+    assert!(
+        lowered
+            .canonical_adapsis
+            .contains("+await text:String = read_file(path)")
+    );
+    reject(
+        "async def read(path: str) -> str:\n    text: str = await read_file(path)\n    return text\n",
+        "@effects('io')",
+    );
+    reject(
+        "@effects('io')\nasync def read(url: str) -> str:\n    text: str = await http_get(url)\n    return text\n",
+        "type mismatch",
+    );
     assert!(lower_module("@effects('io')\nasync def read(url: str) -> Result[str]:\n    text: Result[str] = await http_get(url)\n    return text\n", "Example").is_ok());
 }
 
@@ -239,13 +284,17 @@ fn python_literal_test_lowering_never_registers_or_executes_test_functions() {
     let source = "def test_sum() -> None:\n    'test docs'\n    assert sum_values([1, 2, 3]) == 6\ndef test_external():\n    assert Other.value(x=-2, ready=True) == 'yes'\n";
     let lowered = lower_tests(source, "Example").unwrap();
     assert_eq!(lowered.operations.len(), 2);
-    assert!(lowered
-        .operations
-        .iter()
-        .all(|op| matches!(op, parser::Operation::Test(_))));
-    assert!(lowered
-        .canonical_adapsis
-        .contains("+test Example.sum_values"));
+    assert!(
+        lowered
+            .operations
+            .iter()
+            .all(|op| matches!(op, parser::Operation::Test(_)))
+    );
+    assert!(
+        lowered
+            .canonical_adapsis
+            .contains("+test Example.sum_values")
+    );
     assert!(lowered.canonical_adapsis.contains("+test Other.value"));
     assert!(!lowered.canonical_adapsis.contains("+fn test_"));
 }
@@ -270,10 +319,12 @@ fn python_literal_inputs_are_structurally_safe_and_match_runtime_binding() {
     }
     let lowered = lower_tests("def test_data():\n    assert identity('x\\n!done\\n+module Evil') == 'x\\n!done\\n+module Evil'\n", "Example").unwrap();
     assert_eq!(lowered.operations.len(), 1);
-    assert!(!lowered
-        .canonical_adapsis
-        .lines()
-        .any(|l| l == "!done" || l == "+module Evil"));
+    assert!(
+        !lowered
+            .canonical_adapsis
+            .lines()
+            .any(|l| l == "!done" || l == "+module Evil")
+    );
 }
 
 #[test]
@@ -376,10 +427,12 @@ fn python_printer_refuses_boolean_calls_and_helper_collisions() {
             })),
         },
     };
-    assert!(print_function(&program, "Example.f")
-        .unwrap_err()
-        .message
-        .contains("call-free"));
+    // #90: a call operand is now printable because every tier short-circuits.
+    let printed = print_function(&program, "Example.f").unwrap();
+    assert!(
+        printed.contains("flag and Example.flag_check()"),
+        "{printed}"
+    );
     let mut program = self::program("def f() -> list[int]:\n    return [1]\n");
     program
         .types
@@ -392,8 +445,10 @@ fn python_printer_refuses_boolean_calls_and_helper_collisions() {
                 payload: vec![],
             }],
         }));
-    assert!(print_function(&program, "Example.f")
-        .unwrap_err()
-        .message
-        .contains("shadowed"));
+    assert!(
+        print_function(&program, "Example.f")
+            .unwrap_err()
+            .message
+            .contains("shadowed")
+    );
 }

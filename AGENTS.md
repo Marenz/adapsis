@@ -561,8 +561,49 @@ replaces that branch with one composer.
   compares exact ASTs ignoring only typed NodeId fields, and checks second-print
   byte identity. Do not count a fixture as covered merely because a function
   printer passed; unqualified call normalization is an AST difference.
-  #90 separately tracks tree-walker short-circuit vs VM/JIT eager Boolean
-  evaluation/truthiness; do not widen Boolean admission before that is resolved.
+  #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed
+  JIT immutable normalization slice shares one emitter across AND/OR, NOT and
+  Check/Branch/While. Local/rebound condition dependencies conservatively refuse
+  compilation, including mutable loops; normal eval then uses VM/tree fallback.
+  This does not establish general tier parity. Narrow JIT NOT
+  uses proven semantic representations: Float (including zero/NaN) is always
+  truthy, String tests length rather than pointer-nullness, and unproven string
+  locals/call results refuse compilation. Direct JIT tests must use Int-return
+  wrappers, not `call_i64` on I8 Bool returns. Do not claim general tier parity
+  from these narrow tests or relax async admission to manufacture IO evidence.
+  NOT operand emission captures immutable scalar/String-length entry SSA Values,
+  not mutable compiler scratch names, and recursively handles literals, untouched
+  parameters, NOT and numeric negation. Binary operands and argument-bearing
+  calls conservatively refuse JIT compilation before execution (tree/VM fallback).
+  Zero-argument scalar calls execute once; this does not certify their internals.
+  Condition-only policy additionally admits homogeneous scalar comparisons and
+  exact Bool/Int/Float user-call arguments through identity-safe recursive
+  emission (no generic scratch-name lookup). It refuses IO/async callees and
+  explicit `[fail]` argument callees, including nested arguments, pending #97.
+  #97 is a bug: failed VM Check returns an Err value from the callee and ordinary
+  callers can continue to subsequent effects, unlike tree failure/JIT trap.
+  Zero-argument fallible-call tests characterize existing tier-specific behavior,
+  not equivalent failure propagation. #96 JIT relocation remains open too.
+  Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
+  finite equality uses epsilon rather than IEEE equality. Ordered Float
+  comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
+  disagrees with tree already, so fallback is not a fix for that #90 residual.
+  A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
+  (10/42 TelegramBot and 3/18 TgFormat functions initially). Its source hashes,
+  per-function ledger and explicit pending inventory must stay distinct from the
+  frozen parity corpus. Its originally RED direct-VM gate for #98 now passes
+  with the pending narrow `vm/equality.rs` repair: differing Value variants except
+  Int/Float numeric pairs share tree `Value::matches` and negation. Port fixture
+  bytes/expectations were unchanged; their observed-status metadata preserves the
+  earlier RED checkpoint. Do not add exemptions or coerce the fixture. Same-family
+  and mixed-numeric comparison behavior is unchanged; numeric coercion, unordered
+  Float Neq and unsupported aggregate equality remain #90/#86 residuals. The
+  frontend json_get String signature remains an unresolved catalog mismatch.
+  #82 wrapper diagnostics separately pin user-await dispatch failing with zero
+  requests on the normal async path (bare AND qualified), while explicit tree
+  diagnostics reach Ok-unwrapping/Err-consumer behavior. Direct-tree success is
+  not normal-dispatch evidence. IO contract fixtures use in-memory IoRequest
+  replies, not the real Runtime IO loop or live services.
   Frontend type catalog keys and resolved Named types retain declaration owners
   internally (`Owner.Type`); parser/Python emission preserves the original bare
   AST name. Function signature types carry the callee's owner, never the caller's.

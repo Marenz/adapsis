@@ -1,0 +1,61 @@
+{
+  "status": "partial",
+  "full_port_complete": false,
+  "observed_runtime_status": {
+    "TelegramBot": {"tree_cases_per_origin": 28, "direct_vm_passes_per_origin": 25, "direct_vm_failures_per_origin": 3, "direct_vm_gate": "red, no exemptions"},
+    "TgFormat": {"tree_cases_per_origin": 7, "direct_vm_passes_per_origin": 7},
+    "wrapper_normal_dispatch": "user await fails before request (bare and qualified)",
+    "wrapper_direct_tree_diagnostic": "success unwraps; transport Err reaches index_of and fails"
+  },
+  "baseline_commit": "05d85cc2236af7179bff9b6e6d2fa1468fb4f3ce",
+  "frozen_manifest_git_blob": "2bb99a89ee5c3bae55fd528abf3ad875c1a45003",
+  "modules": [
+    {
+      "name": "TelegramBot",
+      "source": "tests/fixtures/python-parity/library/TelegramBot.ax",
+      "source_git_blob": "f51920a929ec914d70b84c084353461480dbc81a",
+      "origin": "origin/TelegramBot.ax",
+      "python": "python/TelegramBot.py",
+      "tests": "python/test_telegram_bot.py",
+      "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response"],
+      "pending": ["parse_id_list", "init", "is_admin", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "extract_sender_name", "describe_update_kind", "speaker_principal", "source_metadata", "process_update", "is_allowed", "handle_group", "handle_group_attachment", "handle_admin_dm", "handle_admin_dm_attachment", "handle_user_dm", "handle_user_dm_attachment", "telegram_file_path", "telegram_file_error_message", "transcribe_voice", "transcription_upload_response", "send_message", "send_reply", "send_reply_with_attachment", "send_audio_file", "extract_reply", "send_message_body", "send_message_part", "send_message_parts"],
+      "ledger": {
+        "extract_chat_id": "unchanged function AST including doc",
+        "extract_user_id": "unchanged function AST including doc",
+        "extract_chat_type": "unchanged function AST including doc",
+        "extract_text": "unchanged function AST including doc",
+        "extract_image_file_id": "unchanged function AST including doc",
+        "extract_video_file_id": "unchanged function AST including doc",
+        "format_sender": "unchanged function AST including doc",
+        "is_admin_in": "unchanged function AST including doc",
+        "telegram_response_ok": "unchanged function AST including doc",
+        "telegram_file_path_response": "unchanged function AST including doc"
+      },
+      "pending_non_function_surface": ["module doc", "shared declarations", "startup", "route", "original stored tests"],
+      "pending_reviewed_transformations": ["qualified local calls", "issue #91 voice control-flow repair (not yet authored/reviewed)", "await-bind-then-return", "issue #94 builtin-await-bind-then-match"]
+    },
+    {
+      "name": "TgFormat",
+      "source": "tests/fixtures/python-parity/library/TgFormat.ax",
+      "source_git_blob": "ec7fda3e9697240022c3063e1eea8a91aab95464",
+      "origin": "origin/TgFormat.ax",
+      "python": "python/TgFormat.py",
+      "tests": "python/test_tg_format.py",
+      "implemented": ["escape_html", "apply_inline", "tag"],
+      "pending": ["code_wrap", "code_segments", "inline_code", "convert_line", "convert_lines", "markdown_to_html", "pre_wrap", "split_parts", "split_for_telegram", "parts_preview", "sample_lines", "sample_join7", "sample_join2", "sample_pre", "sample_pre_join"],
+      "ledger": {
+        "escape_html": "unchanged function AST including doc",
+        "apply_inline": "unchanged function AST including doc",
+        "tag": "unchanged function AST including doc"
+      },
+      "pending_non_function_surface": ["module doc", "original stored tests"],
+      "pending_reviewed_transformations": ["qualified local calls"]
+    }
+  ],
+  "fixture_level_transformations": [
+    "Partial origin files contain only listed implemented functions; omitted functions are not stubbed.",
+    "TelegramBot selected-function declaration order follows the implemented list, not the full original module order.",
+    "Selected function bodies and docs stay exact; module docs/shared/lifecycle/routes/original tests remain explicitly pending.",
+    "Paired tests are new literal-data assertions, not a claim of preserving original redacted test expectations."
+  ]
+}

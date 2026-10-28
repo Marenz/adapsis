@@ -243,7 +243,7 @@ impl Value {
     }
 
     /// Check structural equality for test assertions.
-    fn matches(&self, other: &Value) -> bool {
+    pub(crate) fn matches(&self, other: &Value) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => (a - b).abs() < f64::EPSILON,

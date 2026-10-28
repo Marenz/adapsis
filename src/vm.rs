@@ -16,6 +16,7 @@ use crate::eval::Value;
 use crate::intern::{InternedId, StringInterner};
 use std::sync::Arc;
 mod result_match;
+mod equality;
 
 /// A single bytecode instruction.
 #[derive(Debug, Clone)]
@@ -65,9 +66,13 @@ pub enum Op {
     Gte,
 
     // ── Boolean logic ────────────────────────────────────────────────
-    /// Pop two booleans, push logical AND.
+    /// Pop two booleans, push logical AND. Retained for the dispatcher; the
+    /// compiler now emits short-circuit branches instead (#90).
+    #[allow(dead_code)]
     And,
-    /// Pop two booleans, push logical OR.
+    /// Pop two booleans, push logical OR. Retained for the dispatcher; the
+    /// compiler now emits short-circuit branches instead (#90).
+    #[allow(dead_code)]
     Or,
     /// Pop one boolean, push logical NOT.
     Not,
@@ -923,16 +928,8 @@ fn run_loop(
             }
 
             // ── Comparison ───────────────────────────────────────────
-            Op::Eq => binary_cmp(
-                &mut state.stack,
-                |a, b| a == b,
-                |a, b| (a - b).abs() < f64::EPSILON,
-            )?,
-            Op::Neq => binary_cmp(
-                &mut state.stack,
-                |a, b| a != b,
-                |a, b| (a - b).abs() >= f64::EPSILON,
-            )?,
+            Op::Eq => equality::compare(&mut state.stack, false)?,
+            Op::Neq => equality::compare(&mut state.stack, true)?,
             Op::Lt => binary_cmp(&mut state.stack, |a, b| a < b, |a, b| a < b)?,
             Op::Lte => binary_cmp(&mut state.stack, |a, b| a <= b, |a, b| a <= b)?,
             Op::Gt => binary_cmp(&mut state.stack, |a, b| a > b, |a, b| a > b)?,

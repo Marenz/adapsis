@@ -1,0 +1,67 @@
++module TelegramBot
++fn extract_chat_id (payload:String)->Int
+  +let val:String = json_get(payload, "message.chat.id")
+  +if val==""
+    +return 0
+  +return to_int(val)
++doc "Extract chat ID from Telegram webhook payload"
++fn extract_user_id (payload:String)->Int
+  +let val:String = json_get(payload, "message.from.id")
+  +if val==""
+    +return 0
+  +return to_int(val)
++doc "Extract sender user ID from Telegram webhook payload"
++fn extract_chat_type (payload:String)->String
+  +let val:String = json_get(payload, "message.chat.type")
+  +return val
++doc "Extract chat type (private/group/supergroup/channel) from Telegram webhook payload"
++fn extract_text (payload:String)->String
+  +let val:String = json_get(payload, "message.text")
+  +if val==""
+    +return json_get(payload, "message.caption")
+  +return val
++doc "Extract message text, falling back to a photo caption"
++fn extract_image_file_id (payload:String)->String
+  +let photos:String = json_get(payload, "message.photo")
+  +if photos!=""
+    +let n:Int = json_array_len(photos)
+    +if n>0
+      +let largest:String = json_get(photos, to_string(n-1))
+      +return json_get(largest, "file_id")
+  +let mime:String = json_get(payload, "message.document.mime_type")
+  +if starts_with(mime, "image/")
+    +return json_get(payload, "message.document.file_id")
+  +return ""
++doc "Extract an image file ID from either Telegram's largest photo variant or an image document."
++fn extract_video_file_id (payload:String)->String
+  +let file_id:String = json_get(payload, "message.video.file_id")
+  +if file_id!=""
+    +return file_id
+  +let mime:String = json_get(payload, "message.document.mime_type")
+  +if starts_with(mime, "video/")
+    +return json_get(payload, "message.document.file_id")
+  +return ""
++doc "Extract a video file ID from Telegram's message.video object or a document whose MIME type starts with video/."
++fn format_sender (user_id:Int, name:String, text:String)->String
+  +if name==""
+    +return concat("[user:", to_string(user_id), "] ", text)
+  +return concat("[user:", to_string(user_id), " ", name, "] ", text)
++doc "Build the sender-prefixed message the model sees in a group. The numeric id stays because it is stable and unspoofable; the display name is added because a model cannot address someone as @<number>, and pattern-matching a speaker from conversation history instead gets it wrong."
++fn is_admin_in (user_id:Int, ids:String)->Bool
+  +let uid_str:String = to_string(user_id)
+  +let needle:String = concat(",", concat(uid_str, ","))
+  +let haystack:String = concat(",", concat(ids, ","))
+  +return contains(haystack, needle)
++doc "Check if user_id is in comma-separated ID list (testable pure version)"
++fn telegram_response_ok (response:String)->Bool
+  +return index_of(response, "\"ok\":true")>=0
++doc "True only when Telegram explicitly reported success. A missing ok:true - bad entities, a malformed body or a transport failure - counts as failure so the caller can fall back."
++fn telegram_file_path_response (file_info:String)->String
+  +let file_path:String = json_get(file_info, "result.file_path")
+  +if file_path!=""
+    +return file_path
+  +let description:String = json_get(file_info, "description")
+  +if description!=""
+    +return concat("ERROR: ", description)
+  +return "ERROR: Telegram getFile returned no file path"
++doc "Extract a getFile path or preserve Telegram's JSON error description when HTTP 400 bodies are returned as ordinary response text."

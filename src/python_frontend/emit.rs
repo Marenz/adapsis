@@ -127,7 +127,6 @@ fn binary(op: &p::BinaryOp) -> Result<&'static str, String> {
         p::BinaryOp::Lte => "<=",
         p::BinaryOp::And => "AND",
         p::BinaryOp::Or => "OR",
-        _ => return Err("unsupported binary operator in canonical emitter".into()),
     })
 }
 

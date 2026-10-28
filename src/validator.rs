@@ -1646,6 +1646,7 @@ fn resolve_union_types_in_stmts(
 /// Public entry point for the Python printer: resolve union type references in a
 /// reconstructed statement list so the roundtrip comparison sees `TaggedUnion`
 /// names exactly as the live program does.
+#[cfg(test)]
 pub fn resolve_union_types_in_statement_list(
     stmts: &mut [ast::Statement],
     union_names: &std::collections::HashSet<String>,
@@ -1654,6 +1655,7 @@ pub fn resolve_union_types_in_statement_list(
 }
 
 /// Collect the set of declared union type names from the program.
+#[cfg(test)]
 pub fn union_type_names(program: &ast::Program) -> std::collections::HashSet<String> {
     collect_union_names(program)
 }

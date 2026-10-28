@@ -44,10 +44,15 @@ mod overflow_tests;
 mod builtin_signature_tests;
 #[cfg(test)]
 mod logical_tier_tests;
+#[cfg(test)]
+mod condition_tier_tests;
+#[cfg(test)]
+mod telegram_port_tests;
 
 use rustpython_parser::{ast as py, ast::Ranged, Parse};
 
 pub use printer::print_function;
+#[cfg(test)]
 pub use printer::print_module;
 pub use printer::print_type;
 pub use runtime_arguments::validate_runtime_arguments;
@@ -79,6 +84,7 @@ impl std::fmt::Display for Diagnostic {
 impl std::error::Error for Diagnostic {}
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Source diagnostics; consumed by tests and future IDE tooling.
 pub struct SourceSpan {
     pub operation_index: usize,
     pub start: usize,
@@ -88,6 +94,7 @@ pub struct SourceSpan {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `source_map` is diagnostic metadata.
 pub struct LoweredSource {
     pub operations: Vec<crate::parser::Operation>,
     pub canonical_adapsis: String,
