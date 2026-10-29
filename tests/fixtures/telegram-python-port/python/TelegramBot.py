@@ -196,3 +196,18 @@ async def send_message_parts(chat_id: int, parts: list[str], i: int, last: str) 
             return attempt
         case TgUncertain(_):
             return attempt
+
+@effects("io", "fail")
+async def send_message(chat_id: int, text: str) -> TgSendAttempt:
+    """Format and split text, then propagate the send-chain outcome unchanged without another retry. The inherited splitter is not service-limit safe (#99)."""
+    html: str = TgFormat.markdown_to_html(text)
+    parts: list[str] = TgFormat.split_for_telegram(html, 3800)
+    outcome: TgSendAttempt = await TelegramBot.send_message_parts(chat_id, parts, 0, "")
+    return outcome
+
+@effects("io", "fail")
+async def send_reply(chat_id_str: str, text: str) -> TgSendAttempt:
+    """Parse the destination and propagate the message outcome unchanged. This callable contract does not certify callback delivery acknowledgement."""
+    chat_id: int = to_int(chat_id_str)
+    outcome: TgSendAttempt = await TelegramBot.send_message(chat_id, text)
+    return outcome

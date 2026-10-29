@@ -11,6 +11,8 @@ pub(super) fn verify_repair(
     let kind = match original.name.as_str() {
         "send_message_part" => "typed_send_attempt_v1",
         "send_message_parts" => "typed_send_chain_v1",
+        "send_message" => "typed_send_message_v1",
+        "send_reply" => "typed_send_reply_v1",
         _ => panic!("new semantic repair requires explicit review"),
     };
     assert_eq!(ledger["kind"], kind);
@@ -38,9 +40,11 @@ pub(super) fn verify_repair(
 }
 
 fn programs() -> [ast::Program; 2] {
-    let origin = super::program(&parser::parse(super::ORIGIN).unwrap());
-    let lowered = super::super::lower_module(super::PYTHON, "TelegramBot").unwrap();
-    let python = super::program(&lowered.operations);
+    let mut origin = super::program(&parser::parse(super::ORIGIN).unwrap());
+    let lowered = super::lower_telegram(super::PYTHON);
+    let mut python = super::program(&lowered.operations);
+    super::attach_format(&mut origin, false);
+    super::attach_format(&mut python, true);
     super::super::validate_runtime_arguments(&lowered.operations, &python).unwrap();
     [origin, python]
 }
@@ -48,7 +52,12 @@ fn programs() -> [ast::Program; 2] {
 #[test]
 fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
     for program in programs() {
-        for name in ["send_message_part", "send_message_parts"] {
+        for name in [
+            "send_message_part",
+            "send_message_parts",
+            "send_message",
+            "send_reply",
+        ] {
             let function = program
                 .get_function(&format!("TelegramBot.{name}"))
                 .unwrap();
@@ -87,9 +96,14 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
     let entry = &manifest["modules"][0];
     assert_eq!(
         entry["normal_io_contract_functions"],
-        serde_json::json!(["send_message_part", "send_message_parts"])
+        serde_json::json!([
+            "send_message_part",
+            "send_message_parts",
+            "send_message",
+            "send_reply"
+        ])
     );
-    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 2);
+    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 4);
     assert_eq!(
         entry["introduced_types"],
         serde_json::json!({"TgSendAttempt":["TgSent(String)","TgRejected(String)","TgUncertain(String)"]})

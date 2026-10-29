@@ -181,3 +181,16 @@
   +end
 +end
 +doc "Attempt chunks in order. Only confirmed Boolean false permits one plain fallback; uncertainty or rejection of that fallback stops remaining chunks. Sent requires a confirmed attempt. The legacy last parameter cannot manufacture success and is retained only for input compatibility."
++fn send_message (chat_id:Int, text:String)->TgSendAttempt [io,fail,async]
+  +let html:String = TgFormat.markdown_to_html(text)
+  +let parts:List<String> = TgFormat.split_for_telegram(html, 3800)
+  +await outcome:TgSendAttempt = TelegramBot.send_message_parts(chat_id, parts, 0, "")
+  +return outcome
++end
++doc "Format and split text, then propagate the send-chain outcome unchanged without another retry. The inherited splitter is not service-limit safe (#99)."
++fn send_reply (chat_id_str:String, text:String)->TgSendAttempt [io,fail,async]
+  +let chat_id:Int = to_int(chat_id_str)
+  +await outcome:TgSendAttempt = TelegramBot.send_message(chat_id, text)
+  +return outcome
++end
++doc "Parse the destination and propagate the message outcome unchanged. This callable contract does not certify callback delivery acknowledgement."

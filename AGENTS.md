@@ -597,7 +597,7 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 17/42 TelegramBot and 18/18 TgFormat functions; module/stored-test and
+  (now 19/42 TelegramBot and 18/18 TgFormat functions; module/stored-test and
   intake/delivery surfaces still incomplete). Its source hashes,
   per-function ledger and explicit pending inventory must stay distinct from the
   frozen parity corpus. Its originally RED direct-VM gate for #98 now passes
@@ -629,6 +629,12 @@ replaces that branch with one composer.
   Both-origin normal-async request fixtures prove local ordering/count, not
   exactly-once remote delivery. Frozen wrapper characterization remains unchanged;
   no global Result-user-await or frontend catalog relaxation is implied.
+  The higher corrected send_message/send_reply callers propagate the app outcome
+  unchanged with no additional retry; combined-module tests include TgFormat.
+  This is not callback acknowledgement certification: #104 tracks generic spawned
+  callbacks treating any evaluator Ok (including app Rejected/Uncertain unions)
+  as Completed and then notified. Do not parse formatted strings or hardcode
+  Telegram tags in generic runtime code to hide that integration gap.
   Frontend type catalog keys and resolved Named types retain declaration owners
   internally (`Owner.Type`); parser/Python emission preserves the original bare
   AST name. Function signature types carry the callee's owner, never the caller's.

@@ -24,19 +24,46 @@ fn program(operations: &[parser::Operation]) -> ast::Program {
     program
 }
 
+fn format_operations() -> Vec<parser::Operation> {
+    parser::parse(include_str!(
+        "../../tests/fixtures/telegram-python-port/origin/TgFormat.ax"
+    ))
+    .unwrap()
+}
+
+fn lower_telegram(source: &str) -> super::LoweredSource {
+    super::lower_module_with_program(source, "TelegramBot", &program(&format_operations())).unwrap()
+}
+
+fn attach_format(program: &mut ast::Program, python: bool) {
+    let operations = if python {
+        super::lower_module(
+            include_str!("../../tests/fixtures/telegram-python-port/python/TgFormat.py"),
+            "TgFormat",
+        )
+        .unwrap()
+        .operations
+    } else {
+        format_operations()
+    };
+    for operation in operations {
+        validator::apply_and_validate(program, &operation).unwrap();
+    }
+    program.rebuild_function_index();
+}
+
 #[test]
 fn telegram_port_pure_origin_and_python_exact_roundtrip() {
-    let origin = program(&parser::parse(ORIGIN).unwrap());
-    let lowered = super::lower_module(PYTHON, "TelegramBot").unwrap();
-    let python = program(&lowered.operations);
+    let mut origin = program(&parser::parse(ORIGIN).unwrap());
+    let lowered = lower_telegram(PYTHON);
+    let mut python = program(&lowered.operations);
+    attach_format(&mut origin, false);
+    attach_format(&mut python, true);
     super::validate_runtime_arguments(&lowered.operations, &python).unwrap();
     assert!(super::ast_equality::program(&origin, &python));
     let printed = super::print_module(&python, "TelegramBot").unwrap();
-    let second = program(
-        &super::lower_module(&printed, "TelegramBot")
-            .unwrap()
-            .operations,
-    );
+    let mut second = program(&lower_telegram(&printed).operations);
+    attach_format(&mut second, true);
     assert!(super::ast_equality::program(&python, &second));
     assert_eq!(
         super::print_module(&second, "TelegramBot").unwrap(),
@@ -58,7 +85,7 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
     });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 17);
+    assert_eq!(selected.modules[0].functions.len(), 19);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
@@ -130,7 +157,7 @@ fn run_paired(
 #[test]
 fn telegram_port_paired_pure_cases_run_both_origins_and_tiers() {
     let origin = program(&parser::parse(ORIGIN).unwrap());
-    let lowered = super::lower_module(PYTHON, "TelegramBot").unwrap();
+    let lowered = lower_telegram(PYTHON);
     let python = program(&lowered.operations);
     let tests = super::lower_tests(TESTS, "TelegramBot").unwrap();
     super::validate_runtime_arguments(&tests.operations, &python).unwrap();
@@ -149,11 +176,7 @@ fn telegram_port_paired_pure_cases_run_both_origins_and_tiers() {
 #[test]
 fn telegram_port_paired_pure_tree_gate() {
     let origin = program(&parser::parse(ORIGIN).unwrap());
-    let python = program(
-        &super::lower_module(PYTHON, "TelegramBot")
-            .unwrap()
-            .operations,
-    );
+    let python = program(&lower_telegram(PYTHON).operations);
     let tests = super::lower_tests(TESTS, "TelegramBot").unwrap();
     assert_eq!(
         run_paired(&origin, &tests.operations, false).0,
@@ -392,7 +415,9 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
             || effectful
                 == [
                     "TelegramBot.send_message_part".to_owned(),
-                    "TelegramBot.send_message_parts".to_owned()
+                    "TelegramBot.send_message_parts".to_owned(),
+                    "TelegramBot.send_message".to_owned(),
+                    "TelegramBot.send_reply".to_owned()
                 ]
                 .into_iter()
                 .collect(),
@@ -403,11 +428,7 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
 #[test]
 fn telegram_port_metadata_missing_timestamp_preserves_source_error() {
     let origin = program(&parser::parse(ORIGIN).unwrap());
-    let python = program(
-        &super::lower_module(PYTHON, "TelegramBot")
-            .unwrap()
-            .operations,
-    );
+    let python = program(&lower_telegram(PYTHON).operations);
     for program in [&origin, &python] {
         let args = vec![eval::Value::string("{}")];
         for result in [

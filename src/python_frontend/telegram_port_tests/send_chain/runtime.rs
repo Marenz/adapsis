@@ -5,6 +5,7 @@ use crate::{
     parser,
     session::RuntimeState,
 };
+mod reply_closure;
 
 #[derive(Clone, Copy, Debug)]
 enum Reply {
@@ -35,6 +36,7 @@ impl Drop for StateGuard {
 fn respond(
     mut receiver: tokio::sync::mpsc::Receiver<IoRequest>,
     replies: Vec<Reply>,
+    destination: i64,
 ) -> Vec<Attempt> {
     let mut replies = replies.into_iter();
     let mut attempts = Vec::new();
@@ -51,7 +53,7 @@ fn respond(
         assert_eq!(url, "<redacted>fixture-token/sendMessage");
         assert_eq!(content_type, "application/json");
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(body["chat_id"], 7);
+        assert_eq!(body["chat_id"], destination);
         let html = if let Some(mode) = body.get("parse_mode") {
             assert_eq!(mode, "HTML");
             true
@@ -82,6 +84,16 @@ fn normal(
     input: &str,
     replies: Vec<Reply>,
 ) -> (Outcome, Vec<Attempt>) {
+    normal_destination(program, target, input, replies, 7)
+}
+
+fn normal_destination(
+    program: &ast::Program,
+    target: &str,
+    input: &str,
+    replies: Vec<Reply>,
+    destination: i64,
+) -> (Outcome, Vec<Attempt>) {
     crate::intern::set_display_interner(&program.shared_interner);
     let state = RuntimeState::default();
     state.shared_vars.insert(
@@ -92,7 +104,7 @@ fn normal(
     eval::set_shared_program(Some(std::sync::Arc::new(program.clone())));
     let _guard = StateGuard;
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
-    let responder = std::thread::spawn(move || respond(receiver, replies));
+    let responder = std::thread::spawn(move || respond(receiver, replies, destination));
     // The production normal async entry, not a direct-tree diagnostic route.
     let result = eval::eval_async_function(
         program,

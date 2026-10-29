@@ -2,7 +2,48 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — corrected send-chain policy, baseline `862ccc2`
+### Current pending slice — two-function reply closure, baseline `b3cf08e`
+
+- Fixtures/tests/docs only: add send_message and send_reply, bringing TelegramBot
+  to **19/42 original functions** (15 pure, 4 IO), with **23 functions pending**.
+  Both preserve parameters but deliberately change return to TgSendAttempt and
+  effects to io/fail/async, explicitly await their qualified callee and propagate
+  the outcome unchanged. Changes are separately ledgered semantic repairs; no
+  additional retry or runtime/frontend/permission change is introduced.
+- send_message retains the exact existing TgFormat formatting and 3800 split
+  limit; #99 is not fixed or certified. send_reply preserves destination parsing.
+  Combined-module production signatures, exact whole-program AST equality and
+  print/re-lower/idempotence pass; Python runtime fixtures lower both TelegramBot
+  and TgFormat from Python, rather than substituting the `.ax` dependency.
+- Both-origin normal eval_async_function fixtures assert exact HTML/body/headers,
+  negative and leading-zero destinations, Sent/Rejected/Uncertain propagation,
+  confirmed-rejection fallback order, no caller retries, malformed terminal errors
+  and zero requests for empty text/invalid destination. Only short inputs and
+  fake token/intercepted requests are used. Existing frozen wrapper fixture and
+  frozen corpus are unchanged; no exactly-once remote delivery claim follows.
+- **[#104](../../issues/104) remains an integration blocker.** Read-only source
+  inspection: main.rs spawned-task paths near 1373/1783 turn every evaluator
+  Ok(val) into Completed(format!(val)); await_spawned_callback_with_timeout50–76
+  accepts all Completed values; optional callback dispatch129–131 returns
+  `notified`. Tagged Rejected/Uncertain would be misclassified as success there.
+  This slice certifies callable outcome propagation only, **not callback delivery
+  acknowledgement**. Dispatcher/routing edits are out of scope; later design must
+  be transport-independent/legacy-compatible, not parse formatted strings or
+  hardcode Telegram tags in the generic runtime.
+- Targeted port **22/22**. One full gate **1794 passed, strict corpus alone failed,
+  2 ignored; CLI 5/5**. Log `tool_189f1b88b001aPvQjLSfFWbeRq`. Corpus remains
+  **116/58/399** over 54 files/573 entries, other buckets zero; no 113→116
+  attribution. New review file:
+  `telegram_port_tests/send_chain/runtime/reply_closure.rs`.
+- Authored current manifest/origin/Python blobs respectively:
+  `9825305b5c72096fec8ea65bf9fab5f85cab795c`,
+  `352e9a45e95e969da5479baef7340e5af3215bac`,
+  `a4cf09e55a087f3d98c93f8073b7c5b976ffb631`.
+  Routing/media/lifecycle, remaining shared declarations and original stored-test
+  surfaces remain pending; #91 repair is separate. Manager owns checkpoint after
+  independent review. No live IO, writer commit, push or deployment.
+
+### Accepted checkpoint `b3cf08e` — corrected send-chain policy
 
 - Fixtures/tests/docs only. TelegramBot now has **17/42 original functions**:
   15 pure helpers plus repaired send_message_part/send_message_parts. New
