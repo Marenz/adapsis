@@ -152,3 +152,30 @@ def test_file_error_large_photo() -> None:
 
 def test_file_error_transport() -> None:
     assert telegram_file_error_message("ERROR: timeout", "video") == "I could not download that video. Please send it again."
+def test_intake_validate() -> None:
+    assert intake_validate('{"message":{"chat":{"id":1,"type":"private"},"from":{"id":7},"date":0}}') == ""
+def test_intake_validate_missing() -> None:
+    assert intake_validate('{}') == "invalid required object"
+
+def test_intake_validate_fields() -> None:
+    assert intake_validate_fields('{}') == ""
+def test_intake_validate_fields_wrong_kind() -> None:
+    assert intake_validate_fields('{"message":{"text":false}}') == "invalid optional string"
+
+def test_intake_validate_media() -> None:
+    assert intake_validate_media('{}') == ""
+def test_intake_validate_media_bad_photo() -> None:
+    assert intake_validate_media('{"message":{"photo":[{}]}}') == "invalid selected photo id"
+
+def test_describe_update_kind() -> None:
+    assert describe_update_kind('{}') == ""
+def test_describe_update_kind_document() -> None:
+    assert describe_update_kind('{"message":{"document":{"file_name":"notes.pdf"}}}') == "user sent a file (notes.pdf) which I cannot read"
+def test_describe_update_kind_sticker() -> None:
+    assert describe_update_kind('{"message":{"sticker":{"file_id":"st","emoji":"😀"}}}') == "user sent a sticker 😀"
+def test_describe_update_kind_location() -> None:
+    assert describe_update_kind('{"message":{"location":{"latitude":52.5}}}') == "user shared a location"
+def test_describe_update_kind_poll() -> None:
+    assert describe_update_kind('{"message":{"poll":{"question":"What?"}}}') == "user sent a poll: What?"
+def test_describe_update_kind_video_note() -> None:
+    assert describe_update_kind('{"message":{"video_note":{"file_id":"vn"}}}') == "user sent a video note which I cannot watch"

@@ -2,7 +2,37 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — two voice helpers, baseline `3c10387`
+### Current pending slice — original-name intake, baseline `016711a`
+
+- Two originals process_update+describe_update_kind→33/42;9pending. Three NEW
+  pure validators separately inventoried with existing NEWtextentry (37total).
+  No dispatcher/new shared declarations needed. Already-reviewed helper/entry
+  implementations unchanged; original description helper exactAST/doc preserved.
+- Explicit stricter consumed-field preflight: required objects/intidentity/date,
+  bounds incl date<=9223372036854775, optionalmessage_id int/missing compatibility,
+  strings/media containers/selected IDs/numericmetadata; emptyphoto fallthrough,
+  invalid lower-priority consumed fields defer0IO. Floatlatitude and harmless
+  unusedaudio.duration allowed. MalformedJSON terminal0IO; authorization beforeIO.
+- Preserve valid input text/caption/image/video/voice/fallback precedence, exact
+  structured principal/context/profile/metadata/callback construction. Return
+  TgTextTurn/[fail] propagates outcomes; getFile guidance delivery means only
+  guidanceattempt, not mediaprocessing success. Binaryerror terminal/noretry.
+  Original awaited-call arguments proved modulo qualification and folded identical
+  group/supergroup dispatch; no false whole-source equivalence claim.
+- Five named tests directly invoke originalprocess_update on bothorigins, no driver:
+  raw6modes×3chattypes×2roles×5outcomes; precedence/metadata, malformed/unauth0IO,
+  fallback kinds, terminal failures/guidance. Exact ordered requests, memorybytes/
+  MIME/name, no unexpected replay.63Telegram purecases incl6NEWvalidator cases,
+  38TgFormat; targeted43/43. Onefullgate1822passed/strictparity1failed/2ignored;
+  CLI5/5; log `tool_18affd088001GxvfTWvM8k1QIH`.
+- Authored manifest/origin/Python blobs:
+  `215be83f8cef91b3aab10d17c198a6853885ce16`,
+  `16f0835665972f9a3dcc6ba37aa46f19db92364d`,
+  `4dfecc6054b135a10c37923d69542d2c76d202b4`.
+  Frozen for independent review; no commit/liveIO/deployment. Outbound attachments,
+  webhook/poll/lifecycle, #99splitting/#104callbackACK remain separate.
+
+### Accepted checkpoint `016711a` — two voice helpers
 
 - Fixtures/tests/docs only;31/42originals+1NEWtextentry,11originalspending.
   transcribe_voice is an intentional #91 authored control-flow repair, not inferred
@@ -25,7 +55,7 @@
   `73812273798591049536755bfb9be391c9b77432`,
   `2597eb267b35aac54c11f074f8aecbfda7db02ff`,
   `7a1a205585e04bb4fcdd2a571722bc379381a00a`.
-  Frozen pending independent review; manager checkpoints, no writer commit/deploy.
+  Accepted and checkpointed at016711a; no deployment.
 
 ### Accepted checkpoint `3c10387` — media acquisition/handlers
 

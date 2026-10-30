@@ -7,11 +7,13 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 31 of 42 original functions, plus one new partial entry.**
-  Sixteen literal-paired pure helpers, one trusted-Result pure helper,
-  two shared-state authorization helpers and twelve
+- **TelegramBot: 33 of 42 original functions, plus four introduced functions.**
+  Seventeen literal-paired original pure helpers, one trusted-Result pure helper,
+  two shared-state authorization helpers and thirteen
   IO functions are separately covered. `process_text_update` is NEW and is not
-  counted among the original 42; original `process_update` remains pending.
+  counted among the original 42. Three NEW pure intake validators are also counted
+  separately. Original-name `process_update` is now integrated as an explicit
+  stricter semantic repair, not equivalence to the frozen source.
   A new application outcome union and the original sanitized empty token shared
   declaration support this bounded send-chain port.
 - **TgFormat: all 18 functions**, including Markdown/code-block conversion,
@@ -20,7 +22,7 @@ per-function transformation ledger, implemented and pending inventories.
 - Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Thirteen separately ledgered semantic repairs deliberately change return
+  unchanged. Fourteen separately ledgered semantic repairs deliberately change return
   types/effects/control flow/docs; these are not qualification-only equivalence.
   Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
@@ -34,7 +36,7 @@ per-function transformation ledger, implemented and pending inventories.
   is intentionally different and recorded. There are no placeholder functions.
 - The #91 voice repair is explicitly authored in this partial fixture; the
   malformed frozen function is not treated as an equivalent source program.
-  Original `process_update` integration remains pending.
+  Its integration through original-name `process_update` is covered below.
 
 ## Measured gates
 
@@ -42,14 +44,14 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **38 passing tests**, including the original
+This focused command currently has **43 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
 
 | Subset | Tree per origin | Direct VM per origin |
 |---|---:|---:|
-| TelegramBot pure helpers (51 literal cases) | 51 pass | 51 pass |
+| TelegramBot originals + introduced validators (63 literal cases) | 63 pass | 63 pass |
 | TgFormat (38 literal cases) | 38 pass | 38 pass |
 
 Both corrected `.ax` and Python-lowered origins have the same results. The first
@@ -130,21 +132,21 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current voice-slice release gate: **1817 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current intake-slice release gate: **1822 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**38 passed**. This remains partial routing evidence, not deployment certification.
+**43 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **11 TelegramBot pending original functions**; TgFormat has
+The manifest explicitly lists **9 TelegramBot pending original functions**; TgFormat has
 no pending functions but its original stored-test surface remains pending.
 Still required: full corrected-origin provenance/review and whole-module paired
-structural/idempotence gates, integration of the pure metadata/principal helpers
-into raw-update admin/guest/group routing, takeover bindings, photo/video/voice
-paths, integration of splitting with delivery/retry and
-attachments, startup/poll/shared/spawn behavior, plus representative error paths.
+structural/idempotence gates, outbound attachments, webhook/poll dispatch and
+startup/shared/spawn behavior. Raw-update text/photo/video/voice callable routing
+is covered by the bounded corrected-origin integration below; deployed callbacks,
+polling and lifecycle are not thereby certified.
 The partial tests here do not close #86, certify deployment, or imply the original
 frozen TelegramBot fixture passed its separate parity gate.
 
@@ -262,8 +264,58 @@ source. Only the port's original-AST equivalence subset omits malformed
 test replaces that impossible equivalence claim. It remains explicitly in the
 original-function inventory and the complete corrected-origin/Python AST and
 idempotence gate. Manifest categories require named actual helper/IO tests.
-This does not integrate original `process_update`, caller metadata/context routing,
-or callback acknowledgement. Full-gate log: `tool_18ae802c4001WxBSoBgqxiBBzD`.
+That voice-only checkpoint did not integrate original `process_update` or caller
+metadata/context routing; the subsequent intake slice does. Callback acknowledgement
+remains separate. Voice gate log: `tool_18ae802c4001WxBSoBgqxiBBzD`.
+
+## Original-name intake integration — bounded corrected-source policy
+
+`process_update(payload)` is now called directly by both-origin normal async
+tests, without a synthetic driver. `describe_update_kind` is the only additional
+original dependency; it preserves its exact original AST/doc and has paired
+tree/direct-VM tests. `extract_update_id`, `handle_update`, polling/lifecycle and
+outbound attachment functions remain pending. No shared declarations were added:
+the existing token/admin/allow-list/profile slots suffice.
+
+Three introduced pure validators keep every function below 100 lines. They are
+not counted among the 42 originals. The deliberate conservative preflight checks
+required message/chat/from objects, represented integer chat/sender/date and bounds,
+supported String chat type, optional integer message_id and consumed String fields.
+Date is capped at 9223372036854775 before multiplication by 1000. Missing message_id
+retains inherited quoted-empty metadata. Media containers and selected IDs are
+validated; empty photo arrays may fall through, while null/wrong-container/invalid
+selected items defer with zero IO. Malformed lower-priority consumed fields also
+defer. Consumed duration/size fields require nonnegative integers; latitude permits
+integer or Float, and harmless unconsumed fields such as audio.duration are ignored.
+Malformed JSON is a terminal error before IO. Authorization precedes acquisition
+and takeover; structured from.id remains the authority channel.
+
+Valid-input precedence remains text over caption, last photo variant over image
+document, image over video, native video over video document, and voice only when
+text/caption are empty and no image/video is selected. Captionless photos remain
+empty; captionless video keeps its exact original placeholder. Voice failure
+placeholders continue as text, while JSON/binary outer errors stop execution.
+Fallback descriptions use the unchanged original helper. Original awaited-call
+argument sets are checked modulo local qualification and folded identical
+group/supergroup branches; this does not claim whole original AST equivalence.
+
+Return/effects intentionally become `TgTextTurn [io,fail,async]`: handler outcomes
+propagate rather than becoming `"ok"`. getFile-error guidance returns
+`TgDeliveryAttempt(actual_send_outcome)`, meaning **guidance attempted**, not media
+processed. Binary failures add no guidance/retry. Every previously reviewed helper
+and the separate NEW text entry remain unchanged.
+
+Five named integration tests cover raw text/photo/image-document/video/video-document/
+voice across private/group/supergroup and admin/non-admin, exact context/profile/
+callback/principal/metadata, selection/caption/transcript precedence, no-reply and
+Sent/Rejected/Uncertain results, strict preflight/unauthorized zero IO, fallback
+descriptions and terminal failures/guidance. Exact normal request sequences are:
+text `takeover` (+HTML/optional plain); image/video `getFile,binary,takeover`
+(+delivery); voice `getFile,binary,upload,takeover` (+delivery). Errors stop at the
+appropriate boundary; three-byte memory Attachment bytes/name/MIME are asserted.
+The tests run no live ASR/network/files/provider calls. #99 size safety and #104
+callback acknowledgement remain uncertified. Full gate:
+`tool_18affd088001GxvfTWvM8k1QIH`.
 
 ## Higher callable reply closure and callback blocker #104
 

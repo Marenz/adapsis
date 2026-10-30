@@ -624,7 +624,8 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 31/42 original TelegramBot functions plus a separate partial text entry,
+  (now 33/42 original TelegramBot functions plus a separate partial text entry
+  and three separately inventoried pure intake validators,
   and 18/18 TgFormat functions; module/stored-test and
   intake/delivery surfaces still incomplete). Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
@@ -633,16 +634,26 @@ replaces that branch with one composer.
   takeover and reply requests with tiny memory-backed Attachments; no Runtime IO
   loop or live service is used. Lookup keeps String/error-String results through
   an explicit builtin Result binding; attachment handlers preserve takeover
-  prefixes and propagate TgTextTurn without added retries. Original process_update,
-  and outbound attachments remain pending; #99/#104 remain open. The two-function
+  prefixes and propagate TgTextTurn without added retries. Outbound attachments
+  remain pending; #99/#104 remain open. Original-name process_update now integrates
+  text/photo/video/voice through normal async both-origin raw-payload tests without
+  a driver. It deliberately adds conservative consumed-field preflight, including
+  represented int IDs/date and date<=9223372036854775, before authorization/IO;
+  optional message_id remains missing-compatible, latitude allows int/Float, and
+  unconsumed harmless metadata is ignored. Malformed lower-priority consumed media
+  also defers0IO; empty photo arrays retain fallthrough. Existing helper bodies and
+  NEW text entry stay unchanged. TgTextTurn propagates handler outcomes; getFile
+  guidance returns a delivery attempt, not media-processing success. Awaited-call
+  arguments retain original spelling modulo qualification/folded duplicate group
+  dispatch. describe_update_kind preserves exact original AST. Poll/webhook/lifecycle
+  remain pending; no deployed or callback ACK certification follows. The two-function
   voice helper slice is an explicit #91 authored repair, not equivalence to the
   malformed frozen transcribe_voice. Its getFile Result error is scoped to the
   outer arm; path and transcript require nonempty JSON Strings, malformed JSON
   and binary outer errors terminate, and upload Result passes intact to the pure
   helper. Trusted Result helper tests use tree/direct VM on both origins without
   weakening Python literal policy; normal async tests assert 1/2/3 ordered requests
-  and memory-backed audio bytes/name/MIME. Original process_update/context routing
-  integration remains pending. Strict global corpus is unchanged; only the port's
+  and memory-backed audio bytes/name/MIME. Strict global corpus is unchanged; only the port's
   original-equivalence subset handles the malformed function through a separately
   named repair gate, while original inventory and corrected full AST gates include it.
   Its source hashes,

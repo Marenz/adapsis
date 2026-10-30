@@ -8,9 +8,10 @@ const PYTHON: &str =
 const TESTS: &str =
     include_str!("../../tests/fixtures/telegram-python-port/python/test_telegram_bot.py");
 const FROZEN: &str = include_str!("../../tests/fixtures/python-parity/library/TelegramBot.ax");
-const TELEGRAM_CASES: usize = 51;
+const TELEGRAM_CASES: usize = 63;
 const FORMAT_CASES: usize = 38;
 mod io_contracts;
+mod intake;
 mod media;
 mod qualification;
 mod routing;
@@ -96,7 +97,7 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
     });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 30);
+    assert_eq!(selected.modules[0].functions.len(), 32);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
@@ -368,7 +369,9 @@ fn verify_qualification(original: &ast::Program, corrected: &ast::Program, modul
     for function in &original.modules[0].functions {
         let target = format!("{module}.{}", function.name);
         if let Some(repair) = ledger["semantic_repairs"].get(&function.name) {
-            if repair["kind"] == "transcript_kind_guard_v1" {
+            if repair["kind"] == "typed_intake_v1" {
+                intake::verify_repair(function, corrected.get_function(&target).unwrap());
+            } else if repair["kind"] == "transcript_kind_guard_v1" {
                 voice::verify_helper(function, corrected.get_function(&target).unwrap());
             } else if repair["kind"] == "file_path_await_v1" {
                 media::verify_file_path(function, corrected.get_function(&target).unwrap());
@@ -459,7 +462,8 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
                     "TelegramBot.handle_group_attachment".to_owned(),
                     "TelegramBot.handle_admin_dm_attachment".to_owned(),
                     "TelegramBot.handle_user_dm_attachment".to_owned(),
-                    "TelegramBot.transcribe_voice".to_owned()
+                    "TelegramBot.transcribe_voice".to_owned(),
+                    "TelegramBot.process_update".to_owned()
                 ]
                 .into_iter()
                 .collect(),

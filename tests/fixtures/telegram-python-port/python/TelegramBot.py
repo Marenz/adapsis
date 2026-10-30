@@ -16,6 +16,219 @@ admin_user_ids: str = "<redacted>"
 allowed_user_ids: str = ""
 sandbox_perm_model: str = "family"
 
+def intake_validate(payload: str) -> str:
+    objects: list[str] = ["message", "message.chat", "message.from"]
+    i: int = 0
+    while i < len(objects):
+        object_path: str = get(objects, i)
+        if json_kind(payload, object_path) != "object":
+            return "invalid required object"
+        i = i + 1
+    ints: list[str] = ["message.chat.id", "message.from.id", "message.date"]
+    i = 0
+    while i < len(ints):
+        int_path: str = get(ints, i)
+        if json_kind(payload, int_path) != "int":
+            return "invalid required integer"
+        i = i + 1
+    if to_int(json_get(payload, "message.chat.id")) == 0 or to_int(json_get(payload, "message.from.id")) <= 0:
+        return "invalid identity bounds"
+    date: int = to_int(json_get(payload, "message.date"))
+    if date < 0 or date > 9223372036854775:
+        return "invalid timestamp bounds"
+    if json_kind(payload, "message.chat.type") != "string":
+        return "invalid chat type"
+    kind: str = json_get(payload, "message.chat.type")
+    if kind != "private" and kind != "group" and kind != "supergroup":
+        return "unsupported chat type"
+    objects = ["video", "voice", "document", "sticker", "video_note", "audio", "animation", "contact", "location", "poll"]
+    i = 0
+    while i < len(objects):
+        object_key: str = get(objects, i)
+        kind = json_kind(payload, concat("message.", object_key))
+        if kind != "missing" and kind != "object":
+            return "invalid media object"
+        i = i + 1
+    kind = json_kind(payload, "message.photo")
+    if kind != "missing" and kind != "array":
+        return "invalid photo array"
+    error: str = TelegramBot.intake_validate_fields(payload)
+    if error != "":
+        return error
+    return TelegramBot.intake_validate_media(payload)
+
+def intake_validate_fields(payload: str) -> str:
+    kind: str = ""
+    strings: list[str] = ["text", "caption", "from.first_name", "from.last_name", "from.username", "document.file_name", "document.mime_type", "document.file_id", "video.file_name", "video.mime_type", "video.file_id", "voice.file_id", "sticker.file_id", "sticker.emoji", "video_note.file_id", "audio.file_id", "animation.file_id", "contact.phone_number", "poll.question"]
+    i: int = 0
+    while i < len(strings):
+        string_key: str = get(strings, i)
+        kind = json_kind(payload, concat("message.", string_key))
+        if kind != "missing" and kind != "string":
+            return "invalid optional string"
+        i = i + 1
+    kind = json_kind(payload, "message.message_id")
+    if kind != "missing" and kind != "int":
+        return "invalid message id"
+    numbers: list[str] = ["video.duration", "video.file_size", "document.file_size"]
+    i = 0
+    while i < len(numbers):
+        number_key: str = get(numbers, i)
+        path: str = concat("message.", number_key)
+        kind = json_kind(payload, path)
+        if kind != "missing":
+            if kind != "int":
+                return "invalid numeric metadata"
+            if to_int(json_get(payload, path)) < 0:
+                return "negative numeric metadata"
+        i = i + 1
+    kind = json_kind(payload, "message.location.latitude")
+    if kind != "missing" and kind != "int" and kind != "float":
+        return "invalid location latitude"
+    return ""
+
+def intake_validate_media(payload: str) -> str:
+    path: str = ""
+    if json_kind(payload, "message.photo") == "array":
+        photos: str = json_get(payload, "message.photo")
+        count: int = json_array_len(photos)
+        if count > 0:
+            path = concat("message.photo.", to_string(count - 1))
+            if json_kind(payload, path) != "object":
+                return "invalid selected photo"
+            path = concat(path, ".file_id")
+            if json_kind(payload, path) != "string":
+                return "invalid selected photo id"
+            if json_get(payload, path) == "":
+                return "empty selected photo id"
+    native: list[str] = ["video", "voice"]
+    i: int = 0
+    while i < len(native):
+        native_key: str = get(native, i)
+        path = concat("message.", native_key)
+        if json_kind(payload, path) == "object":
+            path = concat(path, ".file_id")
+            if json_kind(payload, path) != "string":
+                return "missing selected media id"
+            if json_get(payload, path) == "":
+                return "empty selected media id"
+        i = i + 1
+    mime: str = json_get(payload, "message.document.mime_type")
+    if starts_with(mime, "image/") or starts_with(mime, "video/"):
+        if json_kind(payload, "message.document.file_id") != "string":
+            return "missing selected document id"
+        if json_get(payload, "message.document.file_id") == "":
+            return "empty selected document id"
+    return ""
+
+def describe_update_kind(payload: str) -> str:
+    """Describe a message that carries no text, image or voice, so it can be announced instead of silently dropped. A dropped update is invisible to the model, which then truthfully but uselessly reports an empty message. Returns empty only when the update has no recognisable content at all."""
+    doc_name: str = json_get(payload, "message.document.file_name")
+    if doc_name != "":
+        return concat("user sent a file (", doc_name, ") which I cannot read")
+    doc_id: str = json_get(payload, "message.document.file_id")
+    if doc_id != "":
+        return "user sent a file which I cannot read"
+    sticker: str = json_get(payload, "message.sticker.file_id")
+    if sticker != "":
+        return concat("user sent a sticker ", json_get(payload, "message.sticker.emoji"))
+    video: str = json_get(payload, "message.video.file_id")
+    if video != "":
+        return "user sent a video"
+    video_note: str = json_get(payload, "message.video_note.file_id")
+    if video_note != "":
+        return "user sent a video note which I cannot watch"
+    audio: str = json_get(payload, "message.audio.file_id")
+    if audio != "":
+        return "user sent an audio file which I cannot hear"
+    animation: str = json_get(payload, "message.animation.file_id")
+    if animation != "":
+        return "user sent a GIF which I cannot watch"
+    contact: str = json_get(payload, "message.contact.phone_number")
+    if contact != "":
+        return "user shared a contact"
+    location: str = json_get(payload, "message.location.latitude")
+    if location != "":
+        return "user shared a location"
+    poll: str = json_get(payload, "message.poll.question")
+    if poll != "":
+        return concat("user sent a poll: ", poll)
+    return ""
+
+@effects("io", "fail")
+async def process_update(payload: str) -> TgTextTurn:
+    error: str = TelegramBot.intake_validate(payload)
+    if error != "":
+        return TgDeferred(error)
+    text: str = TelegramBot.extract_text(payload)
+    chat_id: int = TelegramBot.extract_chat_id(payload)
+    user_id: int = TelegramBot.extract_user_id(payload)
+    chat_type: str = TelegramBot.extract_chat_type(payload)
+    admin: bool = TelegramBot.is_admin(user_id)
+    allowed: bool = TelegramBot.is_allowed(user_id)
+    if admin == False and allowed == False:
+        return TgIgnored("unauthorized sender")
+    metadata: str = TelegramBot.source_metadata(payload)
+    sender_name: str = TelegramBot.extract_sender_name(payload)
+    voice_file_id: str = json_get(payload, "message.voice.file_id")
+    photo_file_id: str = TelegramBot.extract_image_file_id(payload)
+    video_file_id: str = TelegramBot.extract_video_file_id(payload)
+    if photo_file_id != "":
+        file_path: str = await TelegramBot.telegram_file_path(photo_file_id)
+        if starts_with(file_path, "ERROR: "):
+            delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, TelegramBot.telegram_file_error_message(file_path, "photo"))
+            return TgDeliveryAttempt(delivery)
+        if file_path == "":
+            delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, "I could not download that photo. Please try sending it again.")
+            return TgDeliveryAttempt(delivery)
+        download_url: str = concat("<redacted>", telegram_token, "/", file_path)
+        photo: Attachment = await http_get_binary(download_url)
+        if chat_type == "group" or chat_type == "supergroup":
+            outcome: TgTextTurn = await TelegramBot.handle_group_attachment(chat_id, user_id, sender_name, text, admin, photo, metadata)
+            return outcome
+        if admin:
+            outcome: TgTextTurn = await TelegramBot.handle_admin_dm_attachment(chat_id, user_id, text, photo, metadata)
+            return outcome
+        outcome: TgTextTurn = await TelegramBot.handle_user_dm_attachment(chat_id, user_id, text, photo, metadata)
+        return outcome
+    if video_file_id != "":
+        file_path: str = await TelegramBot.telegram_file_path(video_file_id)
+        if starts_with(file_path, "ERROR: "):
+            delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, TelegramBot.telegram_file_error_message(file_path, "video"))
+            return TgDeliveryAttempt(delivery)
+        if file_path == "":
+            delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, "I could not download that video. Please send it again as a video or video document.")
+            return TgDeliveryAttempt(delivery)
+        download_url: str = concat("<redacted>", telegram_token, "/", file_path)
+        video: Attachment = await http_get_binary(download_url)
+        if text == "":
+            text = "[user sent a video; the original is available to video_stabilize()]"
+        if chat_type == "group" or chat_type == "supergroup":
+            outcome: TgTextTurn = await TelegramBot.handle_group_attachment(chat_id, user_id, sender_name, text, admin, video, metadata)
+            return outcome
+        if admin:
+            outcome: TgTextTurn = await TelegramBot.handle_admin_dm_attachment(chat_id, user_id, text, video, metadata)
+            return outcome
+        outcome: TgTextTurn = await TelegramBot.handle_user_dm_attachment(chat_id, user_id, text, video, metadata)
+        return outcome
+    if text == "":
+        if voice_file_id != "":
+            spoken: str = await TelegramBot.transcribe_voice(voice_file_id)
+            text = spoken
+    if text == "":
+        kind: str = TelegramBot.describe_update_kind(payload)
+        if kind == "":
+            return TgIgnored("no recognisable content")
+        text = concat("[", kind, "]")
+    if chat_type == "group" or chat_type == "supergroup":
+        outcome: TgTextTurn = await TelegramBot.handle_group(chat_id, user_id, sender_name, text, admin, metadata)
+        return outcome
+    if admin:
+        outcome: TgTextTurn = await TelegramBot.handle_admin_dm(chat_id, user_id, text, metadata)
+        return outcome
+    outcome: TgTextTurn = await TelegramBot.handle_user_dm(chat_id, user_id, text, metadata)
+    return outcome
+
 def transcription_upload_response(response: Result[str]) -> str:
     """Extract a transcript from a successful ASR response while preserving the voice placeholder for HTTP/transport failures."""
     match response:
