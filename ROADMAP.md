@@ -2,7 +2,45 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — partial text-routing evidence, baseline `d9b8a5f`
+### Current pending slice — #105 json_kind primitive, baseline `a731d12`
+
+- Pure `json_kind(json,path)->String`, exact two String arguments, no aliases/IO:
+  closed missing/null/bool/int/float/string/array/object labels. Extracted
+  `eval/json.rs` shares one unchanged resolver with json_get, preserving its
+  scalar conversions, missing/null/aggregate outputs and error text. Oversized
+  eval/mod.rs and builtins.rs shrink; JSON registry constants live in a leaf.
+- Exact legacy path grammar retained: empty dot components ignored/root, usize
+  components (including +0/00) index arrays even on objects; other/overflowing
+  numeric components are literal keys. No new bracket/escape syntax or malformed
+  String-path error. Wrong container/out-of-bounds is missing. Argument type/arity
+  and malformed JSON are actionable evaluator errors.
+- `int` means represented signed-i64. Represented u64 above i64 returns Err;
+  finite serde floating representation is float, including 1.0/-0.0 and oversized
+  integer lexemes rounded into floats. Parser overflow errors; no lexical-precision
+  guarantee, dependency or serde-feature change. json_get behavior is unchanged.
+- New accurate frontend `(str,str)->str` signature, registry metadata, legacy and
+  native prompt guidance and Python example docs. Tests cover type/presence
+  collision pairs, root/path/index/key quirks, min/max i64/u64 overflow/rounded
+  floats/exponent overflow, invalid JSON/arguments, unchanged get outputs, no IO,
+  Python exact roundtrip and native mutate/test/inspect/evaluate with hidden-state
+  canary and authorization denial. No port heuristic adoption or fixture edits.
+- Native protocol limitation explicitly pinned: evaluator Err is rendered in
+  `eval_results` as `= Err(json_kind...)` while `has_errors=false`; this is NOT a
+  correctly flagged error status or a successful kind String. Program snapshots
+  remain unchanged. The legacy mutation_results vector also carries eval reports,
+  so emptiness of that vector is not a mutation test. Generic protocol untouched.
+- Targeted json_kind **7/7**, json_get regressions **5/5**, frontend catalog **7/7**,
+  registry **42/42**. Single full gate **1808 passed, 2 failed, 2 ignored; CLI5/5**.
+  Failures are unchanged corpus and deliberately retained #105 port presence gate.
+  Log `tool_18a4a8d3c001x6vHUIJ7ODvyoG`. Corpus54/573 remains **116/58/399**,
+  other buckets zero, no causal113→116 attribution. No deployment/port-completion
+  claim; adoption is a separate subsequent scope after primitive review/checkpoint.
+- New untracked review files: eval/json.rs +json/tests.rs, builtins/json.rs,
+  python_frontend/json_kind_tests.rs, api/native_tools/json_kind_tests.rs.
+  Frozen/port fixtures and their tests are byte-unchanged from a731d12. Manager
+  owns checkpoint after independent review; no writer commit/push/liveIO/deploy.
+
+### Accepted checkpoint `a731d12` — partial text-routing RED evidence
 
 - Five more original functions: is_admin/is_allowed and the three text handlers.
   **24/42 originals** now have fixtures; **18 originals remain pending**.

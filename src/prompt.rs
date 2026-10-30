@@ -215,6 +215,29 @@ Modules can define startup/shutdown blocks and manage event sources:
 - List literals: list(1, 2, 3) — NOT [1,2,3]. There is no [...] syntax.
 - List access: get(mylist, 0) returns the element at index 0. No bracket indexing.
 
+### JSON presence and type
+
+`json_kind(json:String, path:String) -> String` is pure (no `+await`). It returns
+exactly `missing`, `null`, `bool`, `int`, `float`, `string`, `array`, or `object`.
+Use it when `json_get` would erase presence/type, for example missing versus an
+empty String or null versus the String "null":
+```
++fn has_photo (payload:String)->Bool [fail]
+  +return json_kind(payload, "message.photo")!="missing"
++end
+```
+It shares json_get's path rules: dot-separated keys; empty components ignored
+(empty/all-dot path selects root); usize-like components, including `+0`/`00`,
+are array indices even on objects; other components are literal object keys.
+There is no bracket/escape syntax. Wrong containers/out-of-bounds are missing,
+not path syntax errors. Invalid JSON, non-String arguments and wrong arity fail.
+`int` means represented signed-i64. Represented u64 above i64 fails; finite serde
+floating representation is `float`, including 1.0 and oversized integer lexemes
+rounded by serde. Parser numeric overflow fails. This is not lexical precision.
+`json_get` is unchanged and its values are still polymorphic; json_kind does not
+coerce them. In the Python subset the helper is also `(str, str) -> str`:
+`return json_kind(payload, "message.photo") != "missing"` (no await/import).
+
 ### Edit Operations
 !replace function_name.s1            — replace statement 1 of a function
   +check age input.age>=0 AND input.age<=150 ~err_age_range

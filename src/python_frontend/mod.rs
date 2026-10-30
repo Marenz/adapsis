@@ -43,6 +43,8 @@ mod overflow_tests;
 #[cfg(test)]
 mod builtin_signature_tests;
 #[cfg(test)]
+mod json_kind_tests;
+#[cfg(test)]
 mod logical_tier_tests;
 #[cfg(test)]
 mod condition_tier_tests;

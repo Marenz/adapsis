@@ -1,5 +1,6 @@
 //! Builtin function registry.
 //! Single source of truth for all builtin names and their descriptions.
+mod json;
 
 /// A builtin function entry.
 pub struct Builtin {
@@ -490,27 +491,10 @@ pub static BUILTINS: &[Builtin] = &[
         category: BuiltinCategory::Conversion,
     },
     // JSON
-    Builtin {
-        name: "json_get",
-        aliases: &[],
-        short: "extract value from JSON string by key path",
-        long: "Extracts a value from a JSON String using a dot-separated key path such as `user.name` or `items.0`. Missing keys or invalid JSON fail; objects and arrays are returned as JSON Strings.",
-        category: BuiltinCategory::String,
-    },
-    Builtin {
-        name: "json_array_len",
-        aliases: &[],
-        short: "get length of JSON array",
-        long: "Parses a JSON String that must be a top-level array and returns its length as Int. Invalid JSON or non-array input fails.",
-        category: BuiltinCategory::String,
-    },
-    Builtin {
-        name: "json_escape",
-        aliases: &[],
-        short: "escape string for use in JSON value",
-        long: "Escapes backslashes, quotes, and common control characters for safe insertion into JSON string values. It returns only the escaped contents, not surrounding quotes.",
-        category: BuiltinCategory::String,
-    },
+    json::GET,
+    json::KIND,
+    json::ARRAY_LEN,
+    json::ESCAPE,
 ];
 
 /// IO builtins (used with +await).

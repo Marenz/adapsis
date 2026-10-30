@@ -9,6 +9,7 @@ use crate::compiler::CompiledProgram;
 use crate::intern::{self, InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
+mod json;
 
 /// Cache for JIT-compiled programs, keyed by session revision.
 /// When the revision matches, the compiled module is reused instead of recompiling.
@@ -2715,50 +2716,8 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             let home = std::env::var("HOME").unwrap_or_default();
             Ok(Value::string(home.trim_end_matches('/').to_string()))
         }
-        "json_get" => {
-            if args.len() != 2 {
-                bail!("json_get(json, key_path) expects 2 arguments");
-            }
-            match (&args[0], &args[1]) {
-                (Value::String(json_str), Value::String(path)) => {
-                    let parsed: serde_json::Value = serde_json::from_str(json_str)
-                        .map_err(|e| anyhow!("json_get: invalid JSON: {e}"))?;
-                    let mut current = &parsed;
-                    for key in path.split('.') {
-                        if key.is_empty() {
-                            continue;
-                        }
-                        let next = if let Ok(idx) = key.parse::<usize>() {
-                            current.get(idx)
-                        } else {
-                            current.get(key)
-                        };
-                        match next {
-                            Some(v) => current = v,
-                            None => return Ok(Value::string("")),
-                        }
-                    }
-                    // Return the value as a string, stripping quotes from string values
-                    match current {
-                        serde_json::Value::String(s) => Ok(Value::string(s.clone())),
-                        serde_json::Value::Number(n) => {
-                            if let Some(i) = n.as_i64() {
-                                Ok(Value::Int(i))
-                            } else if let Some(f) = n.as_f64() {
-                                Ok(Value::Float(f))
-                            } else {
-                                Ok(Value::string(n.to_string()))
-                            }
-                        }
-                        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
-                        serde_json::Value::Null => Ok(Value::string("null")),
-                        // Arrays and objects are returned as JSON strings
-                        other => Ok(Value::string(other.to_string())),
-                    }
-                }
-                _ => bail!("json_get expects (String, String)"),
-            }
-        }
+        "json_get" => json::get(&args),
+        "json_kind" => json::kind(&args),
         "json_array_len" => {
             if args.len() != 1 {
                 bail!("json_array_len(json) expects 1 argument");
@@ -3531,7 +3490,7 @@ pub fn eval_builtin_or_user(
         "len" | "length" | "error_suggest" | "failure_suggest" | "concat" | "to_string" | "str"
         | "char_at" | "substring" | "substr" | "starts_with" | "ends_with" | "contains"
         | "regex_match" | "regex_replace" | "index_of" | "split" | "trim" | "json_get"
-        | "json_array_len" | "json_escape" | "home_dir" | "base64_encode" => {
+        | "json_kind" | "json_array_len" | "json_escape" | "home_dir" | "base64_encode" => {
             eval_builtin_string(callee, args)
         }
         // List operations

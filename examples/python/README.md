@@ -100,6 +100,37 @@ modules. This protects installed Python after later `.ax` changes. Narrower
 helper-specific usability is deferred to [#83](https://github.com/Marenz/adapsis/issues/83);
 the broad safe check is intentional in this first release.
 
+## Pure JSON presence/type queries
+
+`json_kind(payload: str, path: str) -> str` is a pure builtin; do not await it.
+Its closed labels are `missing`, `null`, `bool`, `int`, `float`, `string`, `array`,
+`object`. It can distinguish missing from present-empty and null from a String
+containing `null`, without changing `json_get`'s existing polymorphic results.
+
+```python
+@effects("fail")
+def value_kind(payload: str, path: str) -> str:
+    return json_kind(payload, path)
+```
+
+Both helpers share the same existing path resolver: dot-separated components,
+empty components ignored (empty/all-dot path is root), `usize`-like components
+are array indices including `+0`/`00`, otherwise literal object keys. Numeric
+object keys therefore do not become addressable via array-like components.
+No bracket/escape grammar is added. Wrong containers/out-of-bounds are `missing`;
+wrong argument type/arity and malformed JSON are errors.
+
+`int` requires serde's represented signed-i64 integer. Represented u64 above
+i64 errors; finite floating representation is `float`, including 1.0/-0.0 and
+oversized integer lexemes serde rounded into floats. Parser overflow errors.
+This deliberately does not claim lexical numeric precision. The pending text
+port's heuristics are not replaced merely by adding this primitive.
+
+Native evaluate currently renders an evaluated failure as `Err(json_kind...)`
+even when its aggregate `has_errors` remains false. Such output is an error, not
+one of the eight valid kind Strings; the primitive does not repair that existing
+native status-reporting limitation.
+
 ## Direct IO match runtime limitation (#94)
 
 The no-await direct builtin `match http_get(url):` form is admitted by the

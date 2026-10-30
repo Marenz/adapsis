@@ -28,6 +28,8 @@ mod python_call_site_tests;
 mod python_reference_tests;
 #[path = "python_shared_tests.rs"]
 mod python_shared_tests;
+#[path = "json_kind_tests.rs"]
+mod json_kind_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

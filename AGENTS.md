@@ -198,6 +198,31 @@ Function evaluation goes through up to three tiers (fastest first):
 Tests (`+test`) always run the tree-walker with mock-only coroutine handles.
 Spawned tasks (task_id set) always use the tree-walker (snapshot tracking).
 
+## Pure JSON presence/type helper (#105)
+
+`json_kind(json:String, path:String) -> String` is pure, exact arity two, no aliases
+or await. Closed labels: missing/null/bool/int/float/string/array/object.
+`eval/json.rs` owns the ONE path resolver used by json_kind and the extracted
+json_get implementation. Preserve legacy rules: empty dot components ignored
+(empty/all-dot path = root), usize-like segments index arrays including +0/00,
+other segments are object keys, overflowing numeric path segments fall back to
+keys, no bracket/escape syntax. Wrong container/out-of-bounds means missing;
+there is no newly invented malformed-String-path rejection.
+
+`int` requires represented signed-i64. Represented u64 > i64 errors; finite serde
+floating representation is float, including 1.0/-0.0 and oversized integer lexemes
+that serde rounded into floats. Parser overflow/malformed JSON/type/arity error
+without panic. No lexical-number precision claim or serde feature change.
+json_get's polymorphic output/sentinels remain unchanged; its old frontend String
+catalog entry is not made sound by this new helper. The new helper's catalog is
+accurate `(str,str)->str`; JSON registry metadata lives in `builtins/json.rs`.
+
+Native evaluate currently renders evaluated failures as `Err(json_kind...)`
+while `has_errors` can remain false. Tests pin categorical Err versus valid-kind
+Strings and unchanged Program snapshots, not a correctly flagged native status.
+This primitive slice does NOT adopt it in the text-entry fixture: the existing
+#105 presence gate remains RED until a separately reviewed port change.
+
 ## Key Adapsis Commands
 ```
 +module Name          — switch module context (all +fn/+type after go here)
