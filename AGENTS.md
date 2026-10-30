@@ -624,7 +624,7 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 29/42 original TelegramBot functions plus a separate partial text entry,
+  (now 31/42 original TelegramBot functions plus a separate partial text entry,
   and 18/18 TgFormat functions; module/stored-test and
   intake/delivery surfaces still incomplete). Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
@@ -634,7 +634,18 @@ replaces that branch with one composer.
   loop or live service is used. Lookup keeps String/error-String results through
   an explicit builtin Result binding; attachment handlers preserve takeover
   prefixes and propagate TgTextTurn without added retries. Original process_update,
-  voice and outbound attachments remain pending; #99/#104 remain open. Its source hashes,
+  and outbound attachments remain pending; #99/#104 remain open. The two-function
+  voice helper slice is an explicit #91 authored repair, not equivalence to the
+  malformed frozen transcribe_voice. Its getFile Result error is scoped to the
+  outer arm; path and transcript require nonempty JSON Strings, malformed JSON
+  and binary outer errors terminate, and upload Result passes intact to the pure
+  helper. Trusted Result helper tests use tree/direct VM on both origins without
+  weakening Python literal policy; normal async tests assert 1/2/3 ordered requests
+  and memory-backed audio bytes/name/MIME. Original process_update/context routing
+  integration remains pending. Strict global corpus is unchanged; only the port's
+  original-equivalence subset handles the malformed function through a separately
+  named repair gate, while original inventory and corrected full AST gates include it.
+  Its source hashes,
   per-function ledger and explicit pending inventory must stay distinct from the
   frozen parity corpus. Its originally RED direct-VM gate for #98 now passes
   with the pending narrow `vm/equality.rs` repair: differing Value variants except

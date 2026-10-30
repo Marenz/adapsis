@@ -7,8 +7,9 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 29 of 42 original functions, plus one new partial entry.**
-  Sixteen direct-VM pure helpers, two shared-state authorization helpers and eleven
+- **TelegramBot: 31 of 42 original functions, plus one new partial entry.**
+  Sixteen literal-paired pure helpers, one trusted-Result pure helper,
+  two shared-state authorization helpers and twelve
   IO functions are separately covered. `process_text_update` is NEW and is not
   counted among the original 42; original `process_update` remains pending.
   A new application outcome union and the original sanitized empty token shared
@@ -19,7 +20,7 @@ per-function transformation ledger, implemented and pending inventories.
 - Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Eleven separately ledgered semantic repairs deliberately change return
+  unchanged. Thirteen separately ledgered semantic repairs deliberately change return
   types/effects/control flow/docs; these are not qualification-only equivalence.
   Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
@@ -31,9 +32,9 @@ per-function transformation ledger, implemented and pending inventories.
   Paired Python tests are newly authored literal cases; redacted original test
   expectations are not reinterpreted. The selected TelegramBot declaration order
   is intentionally different and recorded. There are no placeholder functions.
-- The #91 voice repair has **not** been authored. It needs explicit control-flow
-  review before inclusion. Qualification/async-await transformations of the full
-  corrected origin are likewise pending.
+- The #91 voice repair is explicitly authored in this partial fixture; the
+  malformed frozen function is not treated as an equivalent source program.
+  Original `process_update` integration remains pending.
 
 ## Measured gates
 
@@ -41,7 +42,7 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **35 passing tests**, including the original
+This focused command currently has **38 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
@@ -129,15 +130,15 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current media-slice release gate: **1814 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current voice-slice release gate: **1817 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**35 passed**. This remains partial routing evidence, not deployment certification.
+**38 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **13 TelegramBot pending original functions**; TgFormat has
+The manifest explicitly lists **11 TelegramBot pending original functions**; TgFormat has
 no pending functions but its original stored-test surface remains pending.
 Still required: full corrected-origin provenance/review and whole-module paired
 structural/idempotence gates, integration of the pure metadata/principal helpers
@@ -211,10 +212,58 @@ success, plain-fallback success, double rejection and transport uncertainty.
 Lookup errors/missing paths, malformed JSON, binary failure and takeover failure
 stop later requests. No runtime IO loop, network, credentials or live chat is used.
 
-This is not original `process_update` parity, voice/outbound attachment support,
-remote delivery proof or callback acknowledgement (#104). The #91 voice repair
-and #99 splitting limits remain unresolved. Full-gate output:
+This media checkpoint is not original `process_update` parity, voice/outbound
+attachment support, remote delivery proof or callback acknowledgement (#104).
+The subsequent voice helper slice below does not resolve #99 splitting limits.
+Media checkpoint full-gate output:
 `tool_18ad87056001s1tyPm13lmCcNP`.
+
+## Voice helper slice — explicit #91 repair
+
+`transcribe_voice` now explicitly awaits getFile's builtin Result and assigns
+its transport error to the outer Err arm, preserving the exact getFile-failed
+placeholder. This is an intentional authored decision for the malformed original
+nested match (duplicate Err/out-of-scope e), not inferred AST equivalence.
+The function preserves its parameter, String return, URL construction, ASR URL,
+multipart field `file` and empty extras; it adds `[fail]`. File path must be a
+nonempty JSON String or the existing no-file placeholder is returned.
+
+The binary download still returns a bare Attachment or an outer error. Its error
+terminates execution before upload. Upload's actual builtin Result is passed intact
+to `transcription_upload_response`; there is no fabricated Ok wrapping or retry.
+The helper preserves its signature, doc and original branches, adding only a
+`json_kind` String guard before extraction (proved by inverse AST comparison).
+Missing, wrong-kind or empty transcript returns the existing transcription-failed
+placeholder. Malformed JSON is terminal. Legitimate Strings `null`, `{}`, `[]`,
+Unicode and newlines are preserved.
+
+`telegram_port_voice_helper_trusted_results` runs 17 Rust-constructed Result inputs
+through both tree and direct VM on both origins; no Python literal restriction is
+relaxed. `telegram_port_voice_normal_async_contracts` runs 34 cases per origin
+through normal async dispatch, checking exact ordered requests and outcomes:
+
+| Outcome | Requests |
+|---|---|
+| getFile transport error → getFile-failed placeholder | getFile (1) |
+| path absent/wrong-kind/empty → no-file placeholder | getFile (1) |
+| malformed getFile JSON → terminal error | getFile (1) |
+| binary failure → terminal outer error | getFile, binary (2) |
+| valid transcript → unchanged String | getFile, binary, upload (3) |
+| upload transport error or absent/wrong-kind/empty text → failure placeholder | getFile, binary, upload (3) |
+| malformed ASR JSON → terminal error | getFile, binary, upload (3) |
+
+Tests assert three-byte memory-backed audio/ogg `voice.ogg` passes unchanged to
+HttpUploadBytes, along with URL/field/extras and no extra request. They run no real
+ASR, network, filesystem IO, takeover or message delivery.
+
+The strict global corpus/manifest are unchanged and still report invalid original
+source. Only the port's original-AST equivalence subset omits malformed
+`transcribe_voice`; its separately named authored-repair source/signature/ledger
+test replaces that impossible equivalence claim. It remains explicitly in the
+original-function inventory and the complete corrected-origin/Python AST and
+idempotence gate. Manifest categories require named actual helper/IO tests.
+This does not integrate original `process_update`, caller metadata/context routing,
+or callback acknowledgement. Full-gate log: `tool_18ae802c4001WxBSoBgqxiBBzD`.
 
 ## Higher callable reply closure and callback blocker #104
 

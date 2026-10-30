@@ -5,6 +5,34 @@
 +shared admin_user_ids:String = "<redacted>"
 +shared allowed_user_ids:String = ""
 +shared sandbox_perm_model:String = "family"
++fn transcription_upload_response (response:Result<String>)->String
+  +match response
+  +case Ok(body)
+    +if json_kind(body, "text")!="string"
+      +return "[voice message - transcription failed]"
+    +let transcript:String = json_get(body, "text")
+    +if transcript==""
+      +return "[voice message - transcription failed]"
+    +return transcript
+  +case Err(e)
+    +return "[voice message - transcription failed]"
++doc "Extract a transcript from a successful ASR response while preserving the voice placeholder for HTTP/transport failures."
++fn transcribe_voice (file_id:String)->String [io,fail,async]
+  +let file_url:String = concat("<redacted>", telegram_token, "/getFile?file_id=", file_id)
+  +await file_response:Result<String> = http_get(file_url)
+  +match file_response
+  +case Ok(file_info)
+    +if json_kind(file_info, "result.file_path")!="string"
+      +return "[voice message - could not get file]"
+    +let file_path:String = json_get(file_info, "result.file_path")
+    +if file_path==""
+      +return "[voice message - could not get file]"
+    +let download_url:String = concat("<redacted>", telegram_token, "/", file_path)
+    +await audio:Attachment = http_get_binary(download_url)
+    +await upload_response:Result<String> = http_upload("http://127.0.0.1:8090/transcribe", audio, "file", "")
+    +return TelegramBot.transcription_upload_response(upload_response)
+  +case Err(e)
+    +return concat("[voice message - getFile failed: ", e, "]")
 +fn extract_chat_id (payload:String)->Int
   +let val:String = json_get(payload, "message.chat.id")
   +if val==""

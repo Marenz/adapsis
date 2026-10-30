@@ -16,6 +16,7 @@ mod qualification;
 mod routing;
 mod send_chain;
 mod wrapper_contract;
+mod voice;
 
 fn program(operations: &[parser::Operation]) -> ast::Program {
     let mut program = ast::Program::default();
@@ -79,7 +80,9 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
         panic!()
     };
     module.body.retain(|op| match op {
-        parser::Operation::Function(f) => origin
+        // #91 malformed original cannot be validated as a function. Its explicit
+        // authored repair has a separate source/signature/ledger gate in voice.rs.
+        parser::Operation::Function(f) => f.name != "transcribe_voice" && origin
             .get_function(&format!("TelegramBot.{}", f.name))
             .is_some(),
         parser::Operation::SharedVar(shared) => [
@@ -93,7 +96,7 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
     });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 29);
+    assert_eq!(selected.modules[0].functions.len(), 30);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
@@ -365,7 +368,9 @@ fn verify_qualification(original: &ast::Program, corrected: &ast::Program, modul
     for function in &original.modules[0].functions {
         let target = format!("{module}.{}", function.name);
         if let Some(repair) = ledger["semantic_repairs"].get(&function.name) {
-            if repair["kind"] == "file_path_await_v1" {
+            if repair["kind"] == "transcript_kind_guard_v1" {
+                voice::verify_helper(function, corrected.get_function(&target).unwrap());
+            } else if repair["kind"] == "file_path_await_v1" {
                 media::verify_file_path(function, corrected.get_function(&target).unwrap());
             } else if repair["kind"] == "text_handler_v1"
                 || repair["kind"] == "attachment_handler_v1"
@@ -408,6 +413,7 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
                 .filter(|function| {
                     function.effects.is_empty()
                         && !routing::SHARED_FUNCTIONS.contains(&function.name.as_str())
+                        && function.name != "transcription_upload_response"
                 })
                 .map(|function| format!("{}.{}", module.name, function.name))
         })
@@ -452,7 +458,8 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
                     "TelegramBot.telegram_file_path".to_owned(),
                     "TelegramBot.handle_group_attachment".to_owned(),
                     "TelegramBot.handle_admin_dm_attachment".to_owned(),
-                    "TelegramBot.handle_user_dm_attachment".to_owned()
+                    "TelegramBot.handle_user_dm_attachment".to_owned(),
+                    "TelegramBot.transcribe_voice".to_owned()
                 ]
                 .into_iter()
                 .collect(),

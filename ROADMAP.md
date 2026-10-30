@@ -2,7 +2,32 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — media acquisition/handlers, baseline `3f81a9e`
+### Current pending slice — two voice helpers, baseline `3c10387`
+
+- Fixtures/tests/docs only;31/42originals+1NEWtextentry,11originalspending.
+  transcribe_voice is an intentional #91 authored control-flow repair, not inferred
+  equivalence to malformed duplicate-Err/out-of-scope-e source. Explicit getFile
+  Result binding/outer error placeholder, [fail], actual upload Result passed intact
+  to transcription_upload_response. Both file_path and text require nonempty
+  JSON Strings; wrongkind/missing returns existing placeholders, legitimate
+  null/{} /[] Strings preserved. JSON parse and binary outer errors are terminal.
+- Helper inverse-guard proof preserves all remaining original AST/signature/doc.
+  Strict global corpus unchanged/still invalid; only the port original-equivalence
+  subset handles malformed transcribe_voice through a separate authored-repair
+  gate. It remains in original inventory and full corrected/Python AST/idempotence.
+  Named coverage enforced: trusted Result helper17cases/tree+VM/bothorigins;
+  normal async34cases/origin checking exact1/2/3requests and no fourth/retry.
+  Lookup failures stop1, download failure stops2, upload outcomes finish3; no
+  live ASR/network/files, caller/process_update/context/takeover integration.
+- Targeted38/38; single fullgate1817passed/strictparity1failed/2ignored;CLI5/5.
+  Log `tool_18ae802c4001WxBSoBgqxiBBzD`. #99/#104 remain open. Current authored
+  manifest/origin/Python blobs:
+  `73812273798591049536755bfb9be391c9b77432`,
+  `2597eb267b35aac54c11f074f8aecbfda7db02ff`,
+  `7a1a205585e04bb4fcdd2a571722bc379381a00a`.
+  Frozen pending independent review; manager checkpoints, no writer commit/deploy.
+
+### Accepted checkpoint `3c10387` — media acquisition/handlers
 
 - Fixtures/tests/docs only: adds telegram_file_path, telegram_file_error_message
   and three attachment handlers. **29/42 originals plus1NEW text entry**, 13
@@ -27,7 +52,7 @@
   `832b2641358270dbad9e58963348481d0cd1cadc`,
   `f04b14733900e2a9fabc70125e945840a14139a7`,
   `ad6ab3c68f1f5bf83f8587091ce7e7bae10561cd`.
-  Await independent review/checkpoint; no writer commit/push/deployment.
+  Accepted and checkpointed at3c10387; no deployment.
 
 ### Accepted checkpoint `3f81a9e` — #105 NEW-entry adoption
 

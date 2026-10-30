@@ -16,6 +16,37 @@ admin_user_ids: str = "<redacted>"
 allowed_user_ids: str = ""
 sandbox_perm_model: str = "family"
 
+def transcription_upload_response(response: Result[str]) -> str:
+    """Extract a transcript from a successful ASR response while preserving the voice placeholder for HTTP/transport failures."""
+    match response:
+        case Ok(body):
+            if json_kind(body, "text") != "string":
+                return "[voice message - transcription failed]"
+            transcript: str = json_get(body, "text")
+            if transcript == "":
+                return "[voice message - transcription failed]"
+            return transcript
+        case Err(e):
+            return "[voice message - transcription failed]"
+
+@effects("io", "fail")
+async def transcribe_voice(file_id: str) -> str:
+    file_url: str = concat("<redacted>", telegram_token, "/getFile?file_id=", file_id)
+    file_response: Result[str] = await http_get(file_url)
+    match file_response:
+        case Ok(file_info):
+            if json_kind(file_info, "result.file_path") != "string":
+                return "[voice message - could not get file]"
+            file_path: str = json_get(file_info, "result.file_path")
+            if file_path == "":
+                return "[voice message - could not get file]"
+            download_url: str = concat("<redacted>", telegram_token, "/", file_path)
+            audio: Attachment = await http_get_binary(download_url)
+            upload_response: Result[str] = await http_upload("http://127.0.0.1:8090/transcribe", audio, "file", "")
+            return TelegramBot.transcription_upload_response(upload_response)
+        case Err(e):
+            return concat("[voice message - getFile failed: ", e, "]")
+
 def extract_chat_id(payload: str) -> int:
     """Extract chat ID from Telegram webhook payload"""
     val: str = json_get(payload, "message.chat.id")
