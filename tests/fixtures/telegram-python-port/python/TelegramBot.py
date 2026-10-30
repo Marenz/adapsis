@@ -266,19 +266,24 @@ async def handle_user_dm(chat_id: int, user_id: int, text: str, metadata: str) -
 
 @effects("io", "fail")
 async def process_text_update(payload: str) -> TgTextTurn:
-    """NEW partial text-only entry, not process_update parity. Dynamic identity guards reject coerced IDs/date before authorization; JSON-looking text and known nonempty media values defer. Present-empty media presence is unresolved and the gate remains RED. Structured from.id determines authority; callback acknowledgement is not certified."""
-    raw_chat: str = json_get(payload, "message.chat.id")
-    chat_id: int = to_int(raw_chat)
-    if contains([raw_chat], chat_id) == False or chat_id == 0:
+    """NEW partial text-only entry, not process_update parity. json_kind validates exact ID/date/text/chat types and media presence before conversion, authorization and IO. Any present media defers; legitimate JSON-looking Strings remain text. Structured from.id determines authority; callback acknowledgement is not certified."""
+    if json_kind(payload, "message.chat.id") != "int":
         return TgIgnored("invalid chat id")
-    raw_user: str = json_get(payload, "message.from.id")
-    user_id: int = to_int(raw_user)
-    if contains([raw_user], user_id) == False or user_id <= 0:
+    chat_id: int = to_int(json_get(payload, "message.chat.id"))
+    if chat_id == 0:
+        return TgIgnored("invalid chat id")
+    if json_kind(payload, "message.from.id") != "int":
         return TgIgnored("invalid sender id")
-    raw_date: str = json_get(payload, "message.date")
-    date: int = to_int(raw_date)
-    if contains([raw_date], date) == False or date < 0:
+    user_id: int = to_int(json_get(payload, "message.from.id"))
+    if user_id <= 0:
+        return TgIgnored("invalid sender id")
+    if json_kind(payload, "message.date") != "int":
         return TgIgnored("invalid date")
+    date: int = to_int(json_get(payload, "message.date"))
+    if date < 0:
+        return TgIgnored("invalid date")
+    if json_kind(payload, "message.chat.type") != "string":
+        return TgIgnored("unsupported chat type")
     chat_type: str = TelegramBot.extract_chat_type(payload)
     if contains(["private", "group", "supergroup"], chat_type) == False:
         return TgIgnored("unsupported chat type")
@@ -286,16 +291,17 @@ async def process_text_update(payload: str) -> TgTextTurn:
     i: int = 0
     while i < len(media):
         media_key: str = get(media, i)
-        if json_get(payload, concat("message.", media_key)) != "":
+        if json_kind(payload, concat("message.", media_key)) != "missing":
             return TgDeferred("media path pending")
         i = i + 1
+    text_kind: str = json_kind(payload, "message.text")
+    if text_kind == "missing":
+        return TgIgnored("no text")
+    if text_kind != "string":
+        return TgDeferred("non-string text")
     text: str = json_get(payload, "message.text")
     if text == "":
         return TgIgnored("no text")
-    if starts_with(to_string(text), '"') == False:
-        return TgDeferred("non-string text")
-    if text == "null" or starts_with(text, "{") or starts_with(text, "["):
-        return TgDeferred("ambiguous JSON-looking text")
     admin: bool = TelegramBot.is_admin(user_id)
     allowed: bool = TelegramBot.is_allowed(user_id)
     if admin == False and allowed == False:

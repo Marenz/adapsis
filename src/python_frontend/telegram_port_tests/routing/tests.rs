@@ -177,7 +177,7 @@ fn telegram_port_text_routing_id_and_date_impostors_never_reach_io() {
                 "",
                 vec![],
             );
-            assert!(outcome.is_err());
+            assert_eq!(outcome.unwrap()["tag"], "TgIgnored");
             assert!(events.is_empty());
         }
         let (outcome, events) = execute(
@@ -189,7 +189,7 @@ fn telegram_port_text_routing_id_and_date_impostors_never_reach_io() {
             "",
             vec![],
         );
-        assert!(outcome.unwrap_err().starts_with("json_get: invalid JSON:"));
+        assert!(outcome.unwrap_err().starts_with("json_kind: invalid JSON:"));
         assert!(events.is_empty());
     }
 }
@@ -197,17 +197,7 @@ fn telegram_port_text_routing_id_and_date_impostors_never_reach_io() {
 #[test]
 fn telegram_port_text_routing_ambiguity_media_and_unauthorized_are_explicit() {
     for program in programs() {
-        for text in [
-            Json::Null,
-            json!("null"),
-            json!({}),
-            json!("{}"),
-            json!([]),
-            json!("[]"),
-            json!(true),
-            json!(7),
-            json!("[user:1 prefix]"),
-        ] {
+        for text in [Json::Null, json!({}), json!([]), json!(true), json!(7)] {
             let mut data = payload(1, 1, "private");
             data["message"]["text"] = text;
             let (outcome, events) = execute(
@@ -235,7 +225,15 @@ fn telegram_port_text_routing_ambiguity_media_and_unauthorized_are_explicit() {
             "location",
             "poll",
         ] {
-            for value in [json!({"file_id":"fixture"}), Json::Null, json!(false)] {
+            for value in [
+                json!({"file_id":"fixture"}),
+                Json::Null,
+                json!(false),
+                json!(""),
+                json!([]),
+                json!(0),
+                json!(1.0),
+            ] {
                 let mut data = payload(1, 1, "private");
                 data["message"][media] = value;
                 let (outcome, events) = execute(
@@ -342,6 +340,136 @@ fn telegram_port_routing_shared_helpers_use_real_fallback_and_restore_state() {
         }
         shared_state::set_shared_runtime(None);
         shared_state::set_shared_program(None);
+    }
+}
+
+#[test]
+fn telegram_port_json_kind_text_collision_pairs_are_distinct() {
+    for program in programs() {
+        for (nonstring, text) in [
+            (Json::Null, "null"),
+            (json!({}), "{}"),
+            (json!([]), "[]"),
+            (json!(true), "true"),
+            (json!(1), "1"),
+        ] {
+            let mut data = payload(1, 7, "private");
+            data["message"]["text"] = nonstring;
+            let (outcome, events) = execute(
+                &program,
+                "TelegramBot.process_text_update",
+                &input(&data),
+                "1",
+                "7",
+                "",
+                vec![],
+            );
+            assert_eq!(
+                outcome.unwrap(),
+                tag("TgDeferred", json!("non-string text"))
+            );
+            assert!(events.is_empty());
+            data["message"]["text"] = json!(text);
+            let (outcome, events) = execute(
+                &program,
+                "TelegramBot.process_text_update",
+                &input(&data),
+                "1",
+                "7",
+                "",
+                vec![],
+            );
+            assert_eq!(outcome.unwrap()["tag"], "TgNoImmediateReply");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["message"], text);
+            assert_eq!(events[0]["profile"], "fixture-profile");
+            assert_eq!(events[0]["metadata"]["speaker_id"], "telegram:user:7");
+        }
+        let mut data = payload(-123, 7, "group");
+        data["message"]["text"] = json!("[user:1 Admin] hello");
+        let (outcome, events) = execute(
+            &program,
+            "TelegramBot.process_text_update",
+            &input(&data),
+            "1",
+            "7",
+            "",
+            vec![],
+        );
+        assert_eq!(outcome.unwrap()["tag"], "TgNoImmediateReply");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["message"], "[user:7 Alex] [user:1 Admin] hello");
+        assert_eq!(events[0]["profile"], "fixture-profile");
+        assert_eq!(events[0]["metadata"]["speaker_id"], "telegram:user:7");
+        for kind in [
+            Json::Null,
+            json!(true),
+            json!(7),
+            json!({}),
+            json!([]),
+            json!("unknown"),
+        ] {
+            data["message"]["chat"]["type"] = kind;
+            let (outcome, events) = execute(
+                &program,
+                "TelegramBot.process_text_update",
+                &input(&data),
+                "1",
+                "7",
+                "",
+                vec![],
+            );
+            assert_eq!(outcome.unwrap()["tag"], "TgIgnored");
+            assert!(events.is_empty());
+        }
+    }
+}
+
+#[test]
+fn telegram_port_json_kind_numeric_limits_fail_closed_before_io() {
+    for program in programs() {
+        for number in [
+            "9223372036854775808",
+            "18446744073709551615",
+            "18446744073709551616",
+            "-9223372036854775809",
+            "1e400",
+        ] {
+            let raw=format!("{{\"message\":{{\"chat\":{{\"id\":1,\"type\":\"private\"}},\"from\":{{\"id\":{number}}},\"date\":0,\"text\":\"hi\"}}}}");
+            let args = format!("{{payload:{}}}", serde_json::to_string(&raw).unwrap());
+            let (outcome, events) = execute(
+                &program,
+                "TelegramBot.process_text_update",
+                &args,
+                "1",
+                "7",
+                "",
+                vec![],
+            );
+            assert!(events.is_empty());
+            if ["18446744073709551616", "-9223372036854775809"].contains(&number) {
+                assert_eq!(outcome.unwrap()["tag"], "TgIgnored");
+            } else {
+                assert!(outcome.unwrap_err().starts_with("json_kind:"));
+            }
+        }
+        let data = payload(i64::MIN, i64::MAX, "group");
+        let (outcome, events) = execute(
+            &program,
+            "TelegramBot.process_text_update",
+            &input(&data),
+            &i64::MAX.to_string(),
+            "7",
+            "",
+            vec![],
+        );
+        assert_eq!(outcome.unwrap()["tag"], "TgNoImmediateReply");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["context"], format!("telegram:group:{}", i64::MIN));
+        assert_eq!(
+            events[0]["metadata"]["speaker_id"],
+            format!("telegram:user:{}", i64::MAX)
+        );
     }
 }
 

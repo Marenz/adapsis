@@ -220,8 +220,10 @@ accurate `(str,str)->str`; JSON registry metadata lives in `builtins/json.rs`.
 Native evaluate currently renders evaluated failures as `Err(json_kind...)`
 while `has_errors` can remain false. Tests pin categorical Err versus valid-kind
 Strings and unchanged Program snapshots, not a correctly flagged native status.
-This primitive slice does NOT adopt it in the text-entry fixture: the existing
-#105 presence gate remains RED until a separately reviewed port change.
+Primitive and port adoption are separate checkpoints. The NEW text-entry fixture
+now uses json_kind before conversion/auth/IO; the original #105 presence assertions
+pass without exemptions. This is not a change to original process_update or a
+general fix of json_get's static catalog.
 
 ## Key Adapsis Commands
 ```
@@ -662,11 +664,12 @@ replaces that branch with one composer.
   as Completed and then notified. Do not parse formatted strings or hardcode
   Telegram tags in generic runtime code to hide that integration gap.
   The partial process_text_update fixture is NEW, not original process_update
-  parity. #105 intentionally keeps its presence gate RED: missing and present-empty
-  media both become json_get String("") and present-empty wrongly reaches takeover.
-  Do not exempt the gate or add raw-JSON heuristics. Existing dynamic ID identity
-  guards and conservative JSON-looking-text deferrals are temporary, explicitly
-  non-static safeguards pending a separately reviewed type/presence primitive.
+  parity. #105's original RED gate is preserved and now passes after adopting
+  json_kind only in that NEW entry. IDs/date require int; chat.type/text require
+  string before conversion/auth/IO. Present media defers even when empty/null/false;
+  legitimate Strings null/{} /[] /prefix-leading are accepted as text. List identity
+  and prefix/rendering type heuristics were removed, not widened. Keep the original
+  helpers/handlers and the full 11-key presence regression intact; no exemptions.
   Shared authorization helpers use tested normal tree fallback, not direct-VM
   parity; fake state must be restored. Neither routing fixtures nor returned
   NoImmediateReply/DeliveryAttempt certify callback acknowledgement (#104).

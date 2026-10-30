@@ -240,20 +240,29 @@
 +end
 +doc "Preserve sandboxed DM takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."
 +fn process_text_update (payload:String)->TgTextTurn [io,fail,async]
-  +let raw_chat:String = json_get(payload, "message.chat.id")
-  +let chat_id:Int = to_int(raw_chat)
-  +if contains(list(raw_chat), chat_id)==false OR chat_id==0
+  +if json_kind(payload, "message.chat.id")!="int"
     +return TgIgnored("invalid chat id")
   +end
-  +let raw_user:String = json_get(payload, "message.from.id")
-  +let user_id:Int = to_int(raw_user)
-  +if contains(list(raw_user), user_id)==false OR user_id<=0
+  +let chat_id:Int = to_int(json_get(payload, "message.chat.id"))
+  +if chat_id==0
+    +return TgIgnored("invalid chat id")
+  +end
+  +if json_kind(payload, "message.from.id")!="int"
     +return TgIgnored("invalid sender id")
   +end
-  +let raw_date:String = json_get(payload, "message.date")
-  +let date:Int = to_int(raw_date)
-  +if contains(list(raw_date), date)==false OR date<0
+  +let user_id:Int = to_int(json_get(payload, "message.from.id"))
+  +if user_id<=0
+    +return TgIgnored("invalid sender id")
+  +end
+  +if json_kind(payload, "message.date")!="int"
     +return TgIgnored("invalid date")
+  +end
+  +let date:Int = to_int(json_get(payload, "message.date"))
+  +if date<0
+    +return TgIgnored("invalid date")
+  +end
+  +if json_kind(payload, "message.chat.type")!="string"
+    +return TgIgnored("unsupported chat type")
   +end
   +let chat_type:String = TelegramBot.extract_chat_type(payload)
   +if contains(list("private", "group", "supergroup"), chat_type)==false
@@ -263,20 +272,21 @@
   +let i:Int = 0
   +while i<len(media)
     +let media_key:String = get(media, i)
-    +if json_get(payload, concat("message.", media_key))!=""
+    +if json_kind(payload, concat("message.", media_key))!="missing"
       +return TgDeferred("media path pending")
     +end
     +set i = i+1
   +end
+  +let text_kind:String = json_kind(payload, "message.text")
+  +if text_kind=="missing"
+    +return TgIgnored("no text")
+  +end
+  +if text_kind!="string"
+    +return TgDeferred("non-string text")
+  +end
   +let text:String = json_get(payload, "message.text")
   +if text==""
     +return TgIgnored("no text")
-  +end
-  +if starts_with(to_string(text), "\"")==false
-    +return TgDeferred("non-string text")
-  +end
-  +if text=="null" OR starts_with(text, "{") OR starts_with(text, "[")
-    +return TgDeferred("ambiguous JSON-looking text")
   +end
   +let admin:Bool = TelegramBot.is_admin(user_id)
   +let allowed:Bool = TelegramBot.is_allowed(user_id)
@@ -296,4 +306,4 @@
   +await outcome:TgTextTurn = TelegramBot.handle_user_dm(chat_id, user_id, text, metadata)
   +return outcome
 +end
-+doc "NEW partial text-only entry, not process_update parity. Dynamic identity guards reject coerced IDs/date before authorization; JSON-looking text and known nonempty media values defer. Present-empty media presence is unresolved and the gate remains RED. Structured from.id determines authority; callback acknowledgement is not certified."
++doc "NEW partial text-only entry, not process_update parity. json_kind validates exact ID/date/text/chat types and media presence before conversion, authorization and IO. Any present media defers; legitimate JSON-looking Strings remain text. Structured from.id determines authority; callback acknowledgement is not certified."

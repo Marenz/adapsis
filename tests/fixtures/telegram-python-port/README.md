@@ -41,8 +41,8 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **29 passing tests and one deliberate RED
-presence gate (#105)**. No failure allowlist or
+This focused command currently has **32 passing tests**, including the original
+presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
 
@@ -129,9 +129,9 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current routing-evidence release gate: **1801 passed, 2 failed, 2 ignored; CLI 5/5**.
-Failures are the frozen-corpus parity gate and new-entry presence gate. Targeted
-`telegram_port`: **29 passed, 1 failed**. This is incomplete routing evidence.
+Current kind-adoption release gate: **1811 passed, 1 failed, 2 ignored; CLI 5/5**.
+The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
+**32 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
@@ -210,7 +210,7 @@ legacy-compatible acknowledgement contract must not parse formatted strings or
 hardcode Telegram union tags in the generic runtime. The callable result tests
 above make no claim that uncertainty means delivered/notified.
 
-## Partial text routing — RED #105 evidence, not deployed policy
+## Partial text routing — #105 presence gate repaired, not full process_update
 
 The three text handlers preserve original context/profile/callback/metadata
 construction (an AST prefix check against frozen source proves it, allowing only
@@ -221,27 +221,28 @@ payload reference retains the canonical parser's Struct spelling while resolving
 to the declared TgSendAttempt union; runtime tests inspect the actual nested union.
 
 The NEW `process_text_update` is an intentionally narrower text-only fixture.
-It uses dynamic raw/candidate identity through List.contains before authorization:
-Bool true, integral Float1.0 and String"1" cannot become administrator Int1.
-Chat ID must be nonzero, sender positive, date explicitly nonnegative integer
-(including 0). Conversion failures propagate before IO. This is a tested runtime
-guard, **not sound static JSON typing**. A positive stub control verifies the
-validation guards run before authorization helpers.
+It now calls `json_kind` before conversion/authorization/IO. Chat/from/date must
+be represented signed-i64 `int`, with the previous nonzero-chat/positive-sender/
+nonnegative-date bounds; explicitly provided date 0 remains valid. Chat type and
+text require `string`. Bool true, integral Float1.0 and String"1" cannot become
+administrator Int1. Missing or wrong-kind fields are ignored/deferred before
+conversion; represented-u64 overflow or malformed JSON aborts before IO. Existing
+authorization rules and handler request construction are unchanged.
 
-Because json_get erases null/object/array type information into String, this
-partial fixture conservatively defers text equal `null` or beginning `{`/`[`.
-Legitimate same-looking Strings are also deferred. Bool/number text, unsupported
-chat types and known nonempty media values are rejected/deferred; empty/missing
-text is ignored. These are explicit NEW-entry restrictions, not changes to
-extract_text, original process_update, or original handler request semantics.
+The old List.contains raw/candidate guards and to_string/startswith text heuristics
+are removed ONLY from this NEW entry. Legitimate Strings `null`, `{}`, `[]` and
+prefix-leading text are now admitted; their non-String JSON counterparts defer.
+The enum membership check for supported String chat types remains. This deliberate
+adoption is ledgered separately, not described as original process_update parity
+or a general correction of json_get's still-polymorphic catalog entry.
 
-**#105 remains RED:** missing media key and present malformed media value `""`
-both become the identical String("") through json_get. The discriminating gate
-admits the absent case, but expects present-empty to defer with zero IO. All
-11 media keys × both origins currently produce **one intercepted takeover**
-instead of zero. The test remains failing without exemptions or raw-JSON regex
-heuristics. Neither this new entry nor raw-text routing is functionally complete
-or suitable for deployment.
+**The original #105 gate now passes unchanged:** absent media admits the text
+control, while present-empty media defers with zero IO for all **11 keys × both
+origins**. json_get still returns identical empty Strings in that diagnostic, but
+the entry uses json_kind's preserved presence. Every present supported media kind,
+including null/false/empty arrays/empty Strings, defers; primitive parse/range
+errors terminate without IO. There are no exemptions, regex scans or new heuristics.
+This does not implement attachment handling or complete original raw-update routing.
 
 Other normal-dispatch tests on both origins prove private/group/supergroup routing,
 sender-versus-chat distinction, exact structured principal/profile/reply arguments,
@@ -252,7 +253,8 @@ value tests; this is not direct-VM parity. Takeover responses are synthetic: no
 model, upstream Telegram authentication, remote delivery or callback execution is
 certified. #104 remains a separate deployment blocker.
 
-The accepted DESIGN ONLY follow-up is a pure presence/type query such as
-`json_kind`, reusing json_get's exact path resolver, preserving absent/null and
-integer/float/string distinctions, with specified malformed/out-of-range errors.
-No primitive/catalog/runtime implementation or new heuristic was added here.
+The primitive was independently accepted in `3e58e30`; this separate port adoption
+does not change it, json_get, runtime dispatch, aliases or frontend signatures.
+Tests retain original handlers/helpers, both-origin exact AST/idempotence and the
+unchanged pure gates; additional collision, huge-number and i64-edge controls run
+through the actual normal async entry. #91, #99 and #104 remain separate blockers.

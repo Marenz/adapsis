@@ -2,7 +2,39 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — #105 json_kind primitive, baseline `a731d12`
+### Current pending slice — #105 NEW-entry adoption, baseline `3e58e30`
+
+- Fixtures/tests/docs only. The introduced process_text_update entry now checks
+  exact json_kind labels before conversion/auth/IO: int chat/from/date with prior
+  value bounds, string chat.type/text, and every present media kind deferred.
+  Missing/wrong-kind IDs now return Ignored before to_int; primitive parse/u64
+  errors remain terminal/no IO. Integer date0 is accepted. No original function,
+  handler, runtime, catalog, primitive or permission rule changed.
+- Removed only the NEW-entry List.contains identity guard and text rendering/
+  prefix heuristics. Strings null/{} /[] /prefix-leading now reach the correct
+  structured principal/profile routing; non-String collision partners defer0IO.
+  Chat-type wrong kinds ignore0IO. Huge represented-u64 errors and serde-rounded
+  Float IDs ignore/error0IO, while signed-i64 edge IDs pass valid bounds.
+- **Original #105 presence gate GREEN with unchanged assertions:** all11media
+  keys ×2origins present-empty defer with zero IO; absent controls remain admitted.
+  The diagnostic still proves json_get alone erases absence/present-empty, so no
+  json_get semantic change is hidden. No exclusions, regexes or raw-JSON scans.
+- Targeted port **32/32**; exact combined AST/idempotence and existing routing,
+  profile, outcome/state-isolation and unchanged pure gates pass. One full gate
+  **1811 passed, strict corpus alone failed, 2 ignored; CLI5/5**. Log
+  `tool_18a63a9f0001dV4TpnBuPZYcrt`. Corpus54/573 remains **116/58/399**,
+  other buckets0. No original process_update parity or deployed/remote ACK claim.
+- Count remains **24/42 originals plus1NEW entry**, 18originalspending, TgFormat
+  18/18functions with other module surfaces pending. #91/#99/#104 remain separate.
+  Authored manifest/origin/Python blobs recorded now:
+  `bb40ae70239db2601b802c4de96e0209b2b2ea1d`,
+  `6feb6273874b8974a080bb8686293ba42422b9c9`,
+  `c8c6b1356686b8ea11b1445744403910e5793d54`.
+  Adoption is explicitly ledgered against3e58e30; primitive/frozen corpus/wrapper
+  code is unchanged. Await independent review/checkpoint; no writer commit,
+  push/liveIO/deployment.
+
+### Accepted checkpoint `3e58e30` — #105 json_kind primitive
 
 - Pure `json_kind(json,path)->String`, exact two String arguments, no aliases/IO:
   closed missing/null/bool/int/float/string/array/object labels. Extracted

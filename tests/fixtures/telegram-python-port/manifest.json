@@ -1,7 +1,7 @@
 {
   "status": "partial",
   "full_port_complete": false,
-  "implementation_baseline": "d9b8a5f97cd311b2aeb3d0d726cf645edc8532ef",
+  "implementation_baseline": "3e58e30377d2ebba803740f21be742fd85b38306",
   "historical_first_slice_observed_status": {
     "TelegramBot": {"tree_cases_per_origin": 28, "direct_vm_passes_per_origin": 25, "direct_vm_failures_per_origin": 3, "direct_vm_gate": "red, no exemptions"},
     "TgFormat": {"tree_cases_per_origin": 7, "direct_vm_passes_per_origin": 7},
@@ -20,7 +20,8 @@
       "tests": "python/test_telegram_bot.py",
       "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata", "send_message_body", "send_message_part", "send_message_parts", "send_message", "send_reply", "is_admin", "is_allowed", "handle_group", "handle_admin_dm", "handle_user_dm"],
       "pending": ["init", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "describe_update_kind", "process_update", "handle_group_attachment", "handle_admin_dm_attachment", "handle_user_dm_attachment", "telegram_file_path", "telegram_file_error_message", "transcribe_voice", "transcription_upload_response", "send_reply_with_attachment", "send_audio_file", "extract_reply"],
-      "introduced_functions": {"process_text_update": "NEW partial text-only entry, not process_update parity or counted among 42 originals. Exact dynamic raw/candidate identity, range/chat-type/media/text guards precede authorization/IO. JSON-looking String collisions conservatively defer; metadata retains structured from.id. #86/#98 typing boundary and #104 remain open."},
+      "introduced_functions": {"process_text_update": "NEW partial text-only entry, not process_update parity or counted among 42 originals. #105 adoption uses exact json_kind checks before conversion/auth/IO; represented int IDs/date retain bounds, chat.type/text require string, every present media kind defers. Legitimate JSON-looking Strings are admitted; metadata retains structured from.id. #104 and full process_update remain open."},
+      "introduced_function_repairs": {"process_text_update": {"kind":"json_kind_guard_adoption_v1","baseline":"3e58e30377d2ebba803740f21be742fd85b38306","removed":["List.contains raw/candidate ID/date identity guards","to_string and starts_with text-type heuristics"],"preserved":["ID/date value bounds","original authorization/context/profile rules","original handler request arguments","NoImmediateReply and nested DeliveryAttempt outcomes","all original helpers/handlers"],"changed":["missing IDs/date ignored before conversion instead of parse errors","present-empty media now deferred with zero IO","legitimate strings null/{} /[] /prefix-leading are admitted"],"limits":"json_kind represented-u64/parse overflow remains Err/no IO; no callback ACK or original process_update parity claim"}},
       "ledger": {
         "extract_chat_id": "unchanged function AST including doc",
         "extract_user_id": "unchanged function AST including doc",
@@ -74,7 +75,7 @@
         "telegram_port_text_routing_delivery_outcome_is_not_discarded": ["handle_group", "handle_admin_dm", "handle_user_dm", "process_text_update"],
         "telegram_port_present_empty_media_must_defer_red_gate": ["process_text_update"]
       },
-      "text_entry_gate_status": "RED: json_get erases missing versus present-empty media; no exemption or raw-JSON heuristic. Separate type/presence primitive required.",
+      "text_entry_gate_status": "#105 json_kind adoption: the original 11-key both-origin presence assertions are unchanged and must pass; no exemption, no regex, no list-identity/text-prefix workaround.",
       "pending_non_function_surface": ["module doc", "remaining shared declarations", "startup", "route", "original stored tests"],
       "pending_reviewed_transformations": ["qualified local calls", "issue #91 voice control-flow repair (not yet authored/reviewed)", "await-bind-then-return", "issue #94 builtin-await-bind-then-match"]
     },
