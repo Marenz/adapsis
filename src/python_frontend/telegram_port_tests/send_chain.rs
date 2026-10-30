@@ -67,9 +67,14 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             assert!(function.effects.contains(&ast::Effect::Async));
         }
         let module = &program.modules[0];
-        let [ast::TypeDecl::TaggedUnion(outcome)] = module.types.as_slice() else {
-            panic!("only the explicit application union is introduced")
-        };
+        let outcome = module
+            .types
+            .iter()
+            .find_map(|ty| match ty {
+                ast::TypeDecl::TaggedUnion(value) if value.name == "TgSendAttempt" => Some(value),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(outcome.name, "TgSendAttempt");
         assert_eq!(
             outcome
@@ -83,7 +88,7 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             .variants
             .iter()
             .all(|v| v.payload == [ast::Type::String]));
-        assert_eq!(module.shared_vars.len(), 1);
+        assert_eq!(module.shared_vars.len(), 4);
         assert_eq!(module.shared_vars[0].name, "telegram_token");
         assert!(
             matches!(eval::eval_expr_standalone(&program, &module.shared_vars[0].default).unwrap(), eval::Value::String(ref value) if value.is_empty())
@@ -100,12 +105,19 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             "send_message_part",
             "send_message_parts",
             "send_message",
-            "send_reply"
+            "send_reply",
+            "handle_group",
+            "handle_admin_dm",
+            "handle_user_dm",
         ])
     );
-    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 4);
+    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 7);
     assert_eq!(
-        entry["introduced_types"],
-        serde_json::json!({"TgSendAttempt":["TgSent(String)","TgRejected(String)","TgUncertain(String)"]})
+        entry["introduced_types"]["TgSendAttempt"],
+        serde_json::json!([
+            "TgSent(String)",
+            "TgRejected(String)",
+            "TgUncertain(String)"
+        ])
     );
 }

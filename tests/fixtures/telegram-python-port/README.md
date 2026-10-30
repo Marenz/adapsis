@@ -7,8 +7,10 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 19 of 42 original functions.** Fifteen pure helpers plus the
-  explicitly repaired send chain and its `send_message`/`send_reply` callers.
+- **TelegramBot: 24 of 42 original functions, plus one new partial entry.**
+  Fifteen direct-VM pure helpers, two shared-state authorization helpers and seven
+  IO functions are separately covered. `process_text_update` is NEW and is not
+  counted among the original 42; original `process_update` remains pending.
   A new application outcome union and the original sanitized empty token shared
   declaration support this bounded send-chain port.
 - **TgFormat: all 18 functions**, including Markdown/code-block conversion,
@@ -17,12 +19,12 @@ per-function transformation ledger, implemented and pending inventories.
 - Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Four separately ledgered semantic repairs deliberately change return
+  unchanged. Seven separately ledgered semantic repairs deliberately change return
   types/effects/control flow/docs; these are not qualification-only equivalence.
   Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
-  are checked. Every pure function has paired assertions; the four IO functions
-  have separately enforced normal-dispatch contracts on both origins.
+  are checked. Direct-VM pure functions retain paired assertions; shared-state,
+  IO and new-entry functions have separately enforced named normal-dispatch tests.
 - TgFormat's module doc is now included unchanged. TelegramBot's module doc,
   remaining shared state, lifecycle/routes and original tests remain **pending**, as do
   TgFormat's original stored tests.
@@ -39,7 +41,8 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently passes **22 tests**. No failure allowlist or
+This focused command currently has **29 passing tests and one deliberate RED
+presence gate (#105)**. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
 
@@ -126,14 +129,15 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current reply-closure release gate: **1794 passed, strict original-corpus parity
-alone failed, 2 ignored; CLI 5/5**. Targeted `telegram_port`: **22 passed**.
+Current routing-evidence release gate: **1801 passed, 2 failed, 2 ignored; CLI 5/5**.
+Failures are the frozen-corpus parity gate and new-entry presence gate. Targeted
+`telegram_port`: **29 passed, 1 failed**. This is incomplete routing evidence.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **23 TelegramBot pending functions**; TgFormat has
+The manifest explicitly lists **18 TelegramBot pending original functions**; TgFormat has
 no pending functions but its original stored-test surface remains pending.
 Still required: full corrected-origin provenance/review and whole-module paired
 structural/idempotence gates, integration of the pure metadata/principal helpers
@@ -205,3 +209,50 @@ No dispatcher or routing code is changed here. A later transport-independent,
 legacy-compatible acknowledgement contract must not parse formatted strings or
 hardcode Telegram union tags in the generic runtime. The callable result tests
 above make no claim that uncertainty means delivered/notified.
+
+## Partial text routing — RED #105 evidence, not deployed policy
+
+The three text handlers preserve original context/profile/callback/metadata
+construction (an AST prefix check against frozen source proves it, allowing only
+the existing format_sender qualification). They now return TgTextTurn:
+NoImmediateReply for empty model text, or DeliveryAttempt containing the exact
+TgSendAttempt. Failure is not discarded and no extra retry is added. The named
+payload reference retains the canonical parser's Struct spelling while resolving
+to the declared TgSendAttempt union; runtime tests inspect the actual nested union.
+
+The NEW `process_text_update` is an intentionally narrower text-only fixture.
+It uses dynamic raw/candidate identity through List.contains before authorization:
+Bool true, integral Float1.0 and String"1" cannot become administrator Int1.
+Chat ID must be nonzero, sender positive, date explicitly nonnegative integer
+(including 0). Conversion failures propagate before IO. This is a tested runtime
+guard, **not sound static JSON typing**. A positive stub control verifies the
+validation guards run before authorization helpers.
+
+Because json_get erases null/object/array type information into String, this
+partial fixture conservatively defers text equal `null` or beginning `{`/`[`.
+Legitimate same-looking Strings are also deferred. Bool/number text, unsupported
+chat types and known nonempty media values are rejected/deferred; empty/missing
+text is ignored. These are explicit NEW-entry restrictions, not changes to
+extract_text, original process_update, or original handler request semantics.
+
+**#105 remains RED:** missing media key and present malformed media value `""`
+both become the identical String("") through json_get. The discriminating gate
+admits the absent case, but expects present-empty to defer with zero IO. All
+11 media keys × both origins currently produce **one intercepted takeover**
+instead of zero. The test remains failing without exemptions or raw-JSON regex
+heuristics. Neither this new entry nor raw-text routing is functionally complete
+or suitable for deployment.
+
+Other normal-dispatch tests on both origins prove private/group/supergroup routing,
+sender-versus-chat distinction, exact structured principal/profile/reply arguments,
+name/text spoof controls, immediate Sent/Rejected/Uncertain propagation, and
+isolated fake shared lists restored between cases. Authorization helpers explicitly
+fail direct VM compilation (shared variables unsupported) and pass normal fallback
+value tests; this is not direct-VM parity. Takeover responses are synthetic: no
+model, upstream Telegram authentication, remote delivery or callback execution is
+certified. #104 remains a separate deployment blocker.
+
+The accepted DESIGN ONLY follow-up is a pure presence/type query such as
+`json_kind`, reusing json_get's exact path resolver, preserving absent/null and
+integer/float/string distinctions, with specified malformed/out-of-range errors.
+No primitive/catalog/runtime implementation or new heuristic was added here.

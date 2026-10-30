@@ -12,6 +12,7 @@ const TELEGRAM_CASES: usize = 49;
 const FORMAT_CASES: usize = 38;
 mod io_contracts;
 mod qualification;
+mod routing;
 mod send_chain;
 mod wrapper_contract;
 
@@ -80,12 +81,18 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
         parser::Operation::Function(f) => origin
             .get_function(&format!("TelegramBot.{}", f.name))
             .is_some(),
-        parser::Operation::SharedVar(shared) => shared.name == "telegram_token",
+        parser::Operation::SharedVar(shared) => [
+            "telegram_token",
+            "admin_user_ids",
+            "allowed_user_ids",
+            "sandbox_perm_model",
+        ]
+        .contains(&shared.name.as_str()),
         _ => false,
     });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 19);
+    assert_eq!(selected.modules[0].functions.len(), 24);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
@@ -304,13 +311,17 @@ fn telegram_port_provenance_inventory_is_explicit_and_partial() {
             .join(module["origin"].as_str().unwrap());
         let origin =
             program(&parser::parse(&std::fs::read_to_string(origin_path).unwrap()).unwrap());
+        let mut implemented_and_new = done.clone();
+        if let Some(introduced) = module["introduced_functions"].as_object() {
+            implemented_and_new.extend(introduced.keys().map(String::as_str));
+        }
         assert_eq!(
             origin.modules[0]
                 .functions
                 .iter()
                 .map(|f| f.name.as_str())
                 .collect::<BTreeSet<_>>(),
-            done
+            implemented_and_new
         );
         assert_eq!(
             module["ledger"]
@@ -353,7 +364,15 @@ fn verify_qualification(original: &ast::Program, corrected: &ast::Program, modul
     for function in &original.modules[0].functions {
         let target = format!("{module}.{}", function.name);
         if let Some(repair) = ledger["semantic_repairs"].get(&function.name) {
-            send_chain::verify_repair(function, corrected.get_function(&target).unwrap(), repair);
+            if repair["kind"] == "text_handler_v1" {
+                routing::verify_handler(function, corrected.get_function(&target).unwrap(), repair);
+            } else {
+                send_chain::verify_repair(
+                    function,
+                    corrected.get_function(&target).unwrap(),
+                    repair,
+                );
+            }
             continue;
         }
         let count = qualification::verify(
@@ -381,7 +400,10 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
             module
                 .functions
                 .iter()
-                .filter(|function| function.effects.is_empty())
+                .filter(|function| {
+                    function.effects.is_empty()
+                        && !routing::SHARED_FUNCTIONS.contains(&function.name.as_str())
+                })
                 .map(|function| format!("{}.{}", module.name, function.name))
         })
         .collect();
@@ -417,7 +439,11 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
                     "TelegramBot.send_message_part".to_owned(),
                     "TelegramBot.send_message_parts".to_owned(),
                     "TelegramBot.send_message".to_owned(),
-                    "TelegramBot.send_reply".to_owned()
+                    "TelegramBot.send_reply".to_owned(),
+                    "TelegramBot.handle_group".to_owned(),
+                    "TelegramBot.handle_admin_dm".to_owned(),
+                    "TelegramBot.handle_user_dm".to_owned(),
+                    "TelegramBot.process_text_update".to_owned()
                 ]
                 .into_iter()
                 .collect(),

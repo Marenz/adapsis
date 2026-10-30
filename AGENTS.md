@@ -597,7 +597,8 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 19/42 TelegramBot and 18/18 TgFormat functions; module/stored-test and
+  (now 24/42 original TelegramBot functions plus a separate partial text entry,
+  and 18/18 TgFormat functions; module/stored-test and
   intake/delivery surfaces still incomplete). Its source hashes,
   per-function ledger and explicit pending inventory must stay distinct from the
   frozen parity corpus. Its originally RED direct-VM gate for #98 now passes
@@ -635,6 +636,15 @@ replaces that branch with one composer.
   callbacks treating any evaluator Ok (including app Rejected/Uncertain unions)
   as Completed and then notified. Do not parse formatted strings or hardcode
   Telegram tags in generic runtime code to hide that integration gap.
+  The partial process_text_update fixture is NEW, not original process_update
+  parity. #105 intentionally keeps its presence gate RED: missing and present-empty
+  media both become json_get String("") and present-empty wrongly reaches takeover.
+  Do not exempt the gate or add raw-JSON heuristics. Existing dynamic ID identity
+  guards and conservative JSON-looking-text deferrals are temporary, explicitly
+  non-static safeguards pending a separately reviewed type/presence primitive.
+  Shared authorization helpers use tested normal tree fallback, not direct-VM
+  parity; fake state must be restored. Neither routing fixtures nor returned
+  NoImmediateReply/DeliveryAttempt certify callback acknowledgement (#104).
   Frontend type catalog keys and resolved Named types retain declaration owners
   internally (`Owner.Type`); parser/Python emission preserves the original bare
   AST name. Function signature types carry the callee's owner, never the caller's.

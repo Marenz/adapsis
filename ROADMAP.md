@@ -2,7 +2,59 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — two-function reply closure, baseline `b3cf08e`
+### Current pending slice — partial text-routing evidence, baseline `d9b8a5f`
+
+- Five more original functions: is_admin/is_allowed and the three text handlers.
+  **24/42 originals** now have fixtures; **18 originals remain pending**.
+  `process_text_update` is a separately ledgered NEW partial entry, not counted
+  among 42 and not a replacement/stub for still-pending process_update. No runtime,
+  frontend, permission, callback dispatcher, original-corpus or wrapper changes.
+- Handlers return TgTextTurn: NoImmediateReply is not delivery success; nested
+  DeliveryAttempt preserves the exact TgSendAttempt. Exact AST prefix comparison
+  preserves original takeover context/profile/callback/metadata construction
+  (only format_sender qualification differs). Corrected-source/Python combined
+  AST and idempotence pass. Named union payload references retain their canonical
+  Struct spelling but resolve to the declared union; actual nested values pass.
+- Coverage is explicit: unchanged 49-case direct-VM pure gate, separate normal
+  shared-state contracts (with direct VM refusal controls and restored fake state),
+  original IO contracts and NEW-entry tests. Both-origin intercepted real
+  IoRequest::LlmTakeover tests verify private/group/supergroup, admin/allow-list
+  policy, sender != chat, structured from.id principal, forged name/embedded-prefix
+  controls, profiles/callback arguments, immediate outcome propagation and empty
+  reply behavior. No model, remote or callback execution/ACK is certified (#104).
+- NEW-entry dynamic guards use List.contains/Value::matches to prevent Bool true,
+  integral Float or numeric String becoming an administrator Int. Nonzero chat,
+  positive sender and explicit nonnegative integer date precede authorization.
+  Huge/nonnumeric/null/missing/object/array inputs fail/ignore before IO without
+  panic; date 0 is admitted. Stub positive controls prove guards precede auth
+  helpers. This depends on runtime identity semantics, not sound JSON static typing.
+- Text null/object/array values collapse into Strings in json_get. The explicitly
+  partial entry therefore conservatively defers text `null` or starting `{`/`[`,
+  including legitimate same-looking Strings. No equivalent change is made to
+  original extract_text/handlers. This heuristic is not a complete raw-text policy.
+- **[#105](../../issues/105) gate intentionally RED:** absent media and present
+  malformed `""` both yield identical json_get String(""). For **11 media keys ×
+  both origins**, present-empty currently emits **1 takeover versus required 0**.
+  The absent control is admitted. No exemption, regex workaround or narrower
+  success claim hides the failure; new entry must not be deployed.
+- Targeted port **29 passed / 1 failed**. One full gate **1801 passed, 2 failed,
+  2 ignored; CLI 5/5**. Failures: strict corpus and #105 presence gate. Log
+  `tool_18a249871001Lpi5gnJ40TGwiq`. Corpus unchanged 54/573, **116/58/399**,
+  other buckets zero. New review files: `telegram_port_tests/routing.rs` and
+  `routing/tests.rs`. Existing source/wrapper/pure expected values remain intact.
+- json_kind is **design accepted only**, not implemented: pure closed type labels,
+  same resolver/path semantics as json_get, absent vs null, actual signed-i64
+  integer vs Float, explicit malformed/path/out-of-range error behavior. A separate
+  reviewed primitive should replace NEW-entry identity/text heuristics and turn
+  the RED presence gate green; no generalized coercion or parallel resolver.
+- Authored manifest/origin/Python blobs recorded now:
+  `d265ace303facc296d39a27f10a1c902620bdbe9`,
+  `0b9503e9ed39bea2444bda76504f973dbb68842e`,
+  `bc0f301bed9b2ed23d29c2f60e1017f3afc6c649`.
+  #91/#99/#104 and full port/deployment remain separate. Await evidence review;
+  manager owns checkpointing. No live IO, credentials read, writer commit/push/deploy.
+
+### Accepted checkpoint `d9b8a5f` — two-function reply closure
 
 - Fixtures/tests/docs only: add send_message and send_reply, bringing TelegramBot
   to **19/42 original functions** (15 pure, 4 IO), with **23 functions pending**.

@@ -1,6 +1,10 @@
 +module TelegramBot
 +type TgSendAttempt = TgSent(String) | TgRejected(String) | TgUncertain(String)
++type TgTextTurn = TgNoImmediateReply(String) | TgDeliveryAttempt(TgSendAttempt) | TgIgnored(String) | TgDeferred(String)
 +shared telegram_token:String = ""
++shared admin_user_ids:String = "<redacted>"
++shared allowed_user_ids:String = ""
++shared sandbox_perm_model:String = "family"
 +fn extract_chat_id (payload:String)->Int
   +let val:String = json_get(payload, "message.chat.id")
   +if val==""
@@ -194,3 +198,102 @@
   +return outcome
 +end
 +doc "Parse the destination and propagate the message outcome unchanged. This callable contract does not certify callback delivery acknowledgement."
++fn is_admin (user_id:Int)->Bool
+  +return TelegramBot.is_admin_in(user_id, admin_user_ids)
++doc "Check if a user ID is in the admin list (uses shared admin_user_ids)"
++fn is_allowed (user_id:Int)->Bool
+  +return TelegramBot.is_admin_in(user_id, allowed_user_ids)
++doc "Check if a user ID is in the allow-list (allowed_user_ids); reuses the comma-boundary matcher."
++fn handle_group (chat_id:Int, user_id:Int, sender_name:String, text:String, admin:Bool, metadata:String)->TgTextTurn [io,fail,async]
+  +let ctx:String = concat("telegram:group:", to_string(chat_id))
+  +let sender:String = TelegramBot.format_sender(user_id, sender_name, text)
+  +let perm:String = ""
+  +if admin==false
+    +set perm = sandbox_perm_model
+  +end
+  +await reply:String = llm_takeover(ctx, sender, "TelegramBot.send_reply", to_string(chat_id), perm, metadata)
+  +if reply!=""
+    +await delivery:TgSendAttempt = TelegramBot.send_message(chat_id, reply)
+    +return TgDeliveryAttempt(delivery)
+  +end
+  +return TgNoImmediateReply("no immediate reply")
++end
++doc "Preserve group takeover arguments and wrap the immediate send outcome without discarding failure. Empty reply is not delivery acknowledgement; #104 remains open."
++fn handle_admin_dm (chat_id:Int, user_id:Int, text:String, metadata:String)->TgTextTurn [io,fail,async]
+  +let ctx:String = concat("telegram:", to_string(user_id))
+  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), "", metadata)
+  +if reply!=""
+    +await delivery:TgSendAttempt = TelegramBot.send_message(chat_id, reply)
+    +return TgDeliveryAttempt(delivery)
+  +end
+  +return TgNoImmediateReply("no immediate reply")
++end
++doc "Preserve admin DM takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."
++fn handle_user_dm (chat_id:Int, user_id:Int, text:String, metadata:String)->TgTextTurn [io,fail,async]
+  +let ctx:String = concat("telegram:user:", to_string(user_id))
+  +await reply:String = llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), sandbox_perm_model, metadata)
+  +if reply!=""
+    +await delivery:TgSendAttempt = TelegramBot.send_message(chat_id, reply)
+    +return TgDeliveryAttempt(delivery)
+  +end
+  +return TgNoImmediateReply("no immediate reply")
++end
++doc "Preserve sandboxed DM takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."
++fn process_text_update (payload:String)->TgTextTurn [io,fail,async]
+  +let raw_chat:String = json_get(payload, "message.chat.id")
+  +let chat_id:Int = to_int(raw_chat)
+  +if contains(list(raw_chat), chat_id)==false OR chat_id==0
+    +return TgIgnored("invalid chat id")
+  +end
+  +let raw_user:String = json_get(payload, "message.from.id")
+  +let user_id:Int = to_int(raw_user)
+  +if contains(list(raw_user), user_id)==false OR user_id<=0
+    +return TgIgnored("invalid sender id")
+  +end
+  +let raw_date:String = json_get(payload, "message.date")
+  +let date:Int = to_int(raw_date)
+  +if contains(list(raw_date), date)==false OR date<0
+    +return TgIgnored("invalid date")
+  +end
+  +let chat_type:String = TelegramBot.extract_chat_type(payload)
+  +if contains(list("private", "group", "supergroup"), chat_type)==false
+    +return TgIgnored("unsupported chat type")
+  +end
+  +let media:List<String> = list("photo", "video", "voice", "document", "audio", "animation", "sticker", "video_note", "contact", "location", "poll")
+  +let i:Int = 0
+  +while i<len(media)
+    +let media_key:String = get(media, i)
+    +if json_get(payload, concat("message.", media_key))!=""
+      +return TgDeferred("media path pending")
+    +end
+    +set i = i+1
+  +end
+  +let text:String = json_get(payload, "message.text")
+  +if text==""
+    +return TgIgnored("no text")
+  +end
+  +if starts_with(to_string(text), "\"")==false
+    +return TgDeferred("non-string text")
+  +end
+  +if text=="null" OR starts_with(text, "{") OR starts_with(text, "[")
+    +return TgDeferred("ambiguous JSON-looking text")
+  +end
+  +let admin:Bool = TelegramBot.is_admin(user_id)
+  +let allowed:Bool = TelegramBot.is_allowed(user_id)
+  +if admin==false AND allowed==false
+    +return TgIgnored("unauthorized sender")
+  +end
+  +let metadata:String = TelegramBot.source_metadata(payload)
+  +let sender_name:String = TelegramBot.extract_sender_name(payload)
+  +if chat_type=="group" OR chat_type=="supergroup"
+    +await outcome:TgTextTurn = TelegramBot.handle_group(chat_id, user_id, sender_name, text, admin, metadata)
+    +return outcome
+  +end
+  +if admin
+    +await outcome:TgTextTurn = TelegramBot.handle_admin_dm(chat_id, user_id, text, metadata)
+    +return outcome
+  +end
+  +await outcome:TgTextTurn = TelegramBot.handle_user_dm(chat_id, user_id, text, metadata)
+  +return outcome
++end
++doc "NEW partial text-only entry, not process_update parity. Dynamic identity guards reject coerced IDs/date before authorization; JSON-looking text and known nonempty media values defer. Present-empty media presence is unresolved and the gate remains RED. Structured from.id determines authority; callback acknowledgement is not certified."

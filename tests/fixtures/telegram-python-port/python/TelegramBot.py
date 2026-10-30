@@ -4,7 +4,17 @@ class TgSendAttempt:
     TgRejected: tuple[str]
     TgUncertain: tuple[str]
 
+@union
+class TgTextTurn:
+    TgNoImmediateReply: tuple[str]
+    TgDeliveryAttempt: tuple[TgSendAttempt]
+    TgIgnored: tuple[str]
+    TgDeferred: tuple[str]
+
 telegram_token: str = ""
+admin_user_ids: str = "<redacted>"
+allowed_user_ids: str = ""
+sandbox_perm_model: str = "family"
 
 def extract_chat_id(payload: str) -> int:
     """Extract chat ID from Telegram webhook payload"""
@@ -210,4 +220,93 @@ async def send_reply(chat_id_str: str, text: str) -> TgSendAttempt:
     """Parse the destination and propagate the message outcome unchanged. This callable contract does not certify callback delivery acknowledgement."""
     chat_id: int = to_int(chat_id_str)
     outcome: TgSendAttempt = await TelegramBot.send_message(chat_id, text)
+    return outcome
+
+def is_admin(user_id: int) -> bool:
+    """Check if a user ID is in the admin list (uses shared admin_user_ids)"""
+    return TelegramBot.is_admin_in(user_id, admin_user_ids)
+
+def is_allowed(user_id: int) -> bool:
+    """Check if a user ID is in the allow-list (allowed_user_ids); reuses the comma-boundary matcher."""
+    return TelegramBot.is_admin_in(user_id, allowed_user_ids)
+
+@effects("io", "fail")
+async def handle_group(chat_id: int, user_id: int, sender_name: str, text: str, admin: bool, metadata: str) -> TgTextTurn:
+    """Preserve group takeover arguments and wrap the immediate send outcome without discarding failure. Empty reply is not delivery acknowledgement; #104 remains open."""
+    ctx: str = concat("telegram:group:", to_string(chat_id))
+    sender: str = TelegramBot.format_sender(user_id, sender_name, text)
+    perm: str = ""
+    if admin == False:
+        perm = sandbox_perm_model
+    reply: str = await llm_takeover(ctx, sender, "TelegramBot.send_reply", to_string(chat_id), perm, metadata)
+    if reply != "":
+        delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, reply)
+        return TgDeliveryAttempt(delivery)
+    return TgNoImmediateReply("no immediate reply")
+
+@effects("io", "fail")
+async def handle_admin_dm(chat_id: int, user_id: int, text: str, metadata: str) -> TgTextTurn:
+    """Preserve admin DM takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."""
+    ctx: str = concat("telegram:", to_string(user_id))
+    reply: str = await llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), "", metadata)
+    if reply != "":
+        delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, reply)
+        return TgDeliveryAttempt(delivery)
+    return TgNoImmediateReply("no immediate reply")
+
+@effects("io", "fail")
+async def handle_user_dm(chat_id: int, user_id: int, text: str, metadata: str) -> TgTextTurn:
+    """Preserve sandboxed DM takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."""
+    ctx: str = concat("telegram:user:", to_string(user_id))
+    reply: str = await llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), sandbox_perm_model, metadata)
+    if reply != "":
+        delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, reply)
+        return TgDeliveryAttempt(delivery)
+    return TgNoImmediateReply("no immediate reply")
+
+@effects("io", "fail")
+async def process_text_update(payload: str) -> TgTextTurn:
+    """NEW partial text-only entry, not process_update parity. Dynamic identity guards reject coerced IDs/date before authorization; JSON-looking text and known nonempty media values defer. Present-empty media presence is unresolved and the gate remains RED. Structured from.id determines authority; callback acknowledgement is not certified."""
+    raw_chat: str = json_get(payload, "message.chat.id")
+    chat_id: int = to_int(raw_chat)
+    if contains([raw_chat], chat_id) == False or chat_id == 0:
+        return TgIgnored("invalid chat id")
+    raw_user: str = json_get(payload, "message.from.id")
+    user_id: int = to_int(raw_user)
+    if contains([raw_user], user_id) == False or user_id <= 0:
+        return TgIgnored("invalid sender id")
+    raw_date: str = json_get(payload, "message.date")
+    date: int = to_int(raw_date)
+    if contains([raw_date], date) == False or date < 0:
+        return TgIgnored("invalid date")
+    chat_type: str = TelegramBot.extract_chat_type(payload)
+    if contains(["private", "group", "supergroup"], chat_type) == False:
+        return TgIgnored("unsupported chat type")
+    media: list[str] = ["photo", "video", "voice", "document", "audio", "animation", "sticker", "video_note", "contact", "location", "poll"]
+    i: int = 0
+    while i < len(media):
+        media_key: str = get(media, i)
+        if json_get(payload, concat("message.", media_key)) != "":
+            return TgDeferred("media path pending")
+        i = i + 1
+    text: str = json_get(payload, "message.text")
+    if text == "":
+        return TgIgnored("no text")
+    if starts_with(to_string(text), '"') == False:
+        return TgDeferred("non-string text")
+    if text == "null" or starts_with(text, "{") or starts_with(text, "["):
+        return TgDeferred("ambiguous JSON-looking text")
+    admin: bool = TelegramBot.is_admin(user_id)
+    allowed: bool = TelegramBot.is_allowed(user_id)
+    if admin == False and allowed == False:
+        return TgIgnored("unauthorized sender")
+    metadata: str = TelegramBot.source_metadata(payload)
+    sender_name: str = TelegramBot.extract_sender_name(payload)
+    if chat_type == "group" or chat_type == "supergroup":
+        outcome: TgTextTurn = await TelegramBot.handle_group(chat_id, user_id, sender_name, text, admin, metadata)
+        return outcome
+    if admin:
+        outcome: TgTextTurn = await TelegramBot.handle_admin_dm(chat_id, user_id, text, metadata)
+        return outcome
+    outcome: TgTextTurn = await TelegramBot.handle_user_dm(chat_id, user_id, text, metadata)
     return outcome
