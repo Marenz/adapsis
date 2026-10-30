@@ -39,7 +39,7 @@ pub(super) fn verify_repair(
     assert!(!super::super::ast_equality::function(original, corrected));
 }
 
-fn programs() -> [ast::Program; 2] {
+pub(super) fn programs() -> [ast::Program; 2] {
     let mut origin = super::program(&parser::parse(super::ORIGIN).unwrap());
     let lowered = super::lower_telegram(super::PYTHON);
     let mut python = super::program(&lowered.operations);
@@ -109,9 +109,13 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             "handle_group",
             "handle_admin_dm",
             "handle_user_dm",
+            "telegram_file_path",
+            "handle_group_attachment",
+            "handle_admin_dm_attachment",
+            "handle_user_dm_attachment",
         ])
     );
-    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 7);
+    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 11);
     assert_eq!(
         entry["introduced_types"]["TgSendAttempt"],
         serde_json::json!([

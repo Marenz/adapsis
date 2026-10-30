@@ -624,9 +624,17 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 24/42 original TelegramBot functions plus a separate partial text entry,
+  (now 29/42 original TelegramBot functions plus a separate partial text entry,
   and 18/18 TgFormat functions; module/stored-test and
-  intake/delivery surfaces still incomplete). Its source hashes,
+  intake/delivery surfaces still incomplete). Media fixtures add file-path/error
+  helpers and three attachment handlers, using actual Attachment annotations.
+  The NEW test-only PortMediaDriver is excluded from original-function inventory
+  and source parity. Both-origin normal async tests intercept acquisition,
+  takeover and reply requests with tiny memory-backed Attachments; no Runtime IO
+  loop or live service is used. Lookup keeps String/error-String results through
+  an explicit builtin Result binding; attachment handlers preserve takeover
+  prefixes and propagate TgTextTurn without added retries. Original process_update,
+  voice and outbound attachments remain pending; #99/#104 remain open. Its source hashes,
   per-function ledger and explicit pending inventory must stay distinct from the
   frozen parity corpus. Its originally RED direct-VM gate for #98 now passes
   with the pending narrow `vm/equality.rs` repair: differing Value variants except

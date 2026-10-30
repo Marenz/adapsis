@@ -2,7 +2,34 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — #105 NEW-entry adoption, baseline `3e58e30`
+### Current pending slice — media acquisition/handlers, baseline `3f81a9e`
+
+- Fixtures/tests/docs only: adds telegram_file_path, telegram_file_error_message
+  and three attachment handlers. **29/42 originals plus1NEW text entry**, 13
+  originals pending; TgFormat remains18/18. NEW test-only PortMediaDriver is
+  excluded from inventory/source parity; original process_update remains pending.
+- Actual Attachment annotation/roundtrip admission passed without frontend changes.
+  File lookup explicitly awaits/matches builtin Result while retaining original
+  String/error-String contract (inverse AST proof); malformed JSON is terminal.
+  Attachment-handler takeover prefixes are preserved; nested TgTextTurn delivery
+  outcomes propagate without extra retry. Semantic repair ledger now11 functions.
+- Both-origin normal async fixtures intercept getFile/binary/takeover/reply requests,
+  checking private/group/supergroup × admin/non-admin × photo/video, metadata,
+  principal/profile/callback and tiny memory-backed Attachment bytes/name/MIME.
+  No-reply, HTML success, plain fallback success, rejection and uncertainty covered;
+  acquisition/parse/binary/takeover errors stop later requests. No live IO.
+- Targeted port **35/35**; pure cases51Telegram+38TgFormat per origin/tier;
+  exact combined AST/idempotence and source-fidelity checks pass. One full gate:
+  **1814 passed, strict corpus alone failed, 2 ignored; CLI5/5**, log
+  `tool_18ad87056001s1tyPm13lmCcNP`. Frozen corpus/runtime/old wrapper unchanged
+  against3f81a9e. No #91 voice, #99 splitting or #104 callback ACK resolution.
+- Current authored manifest/origin/Python blobs (not historical proofs):
+  `832b2641358270dbad9e58963348481d0cd1cadc`,
+  `f04b14733900e2a9fabc70125e945840a14139a7`,
+  `ad6ab3c68f1f5bf83f8587091ce7e7bae10561cd`.
+  Await independent review/checkpoint; no writer commit/push/deployment.
+
+### Accepted checkpoint `3f81a9e` — #105 NEW-entry adoption
 
 - Fixtures/tests/docs only. The introduced process_text_update entry now checks
   exact json_kind labels before conversion/auth/IO: int chat/from/date with prior
@@ -31,8 +58,7 @@
   `6feb6273874b8974a080bb8686293ba42422b9c9`,
   `c8c6b1356686b8ea11b1445744403910e5793d54`.
   Adoption is explicitly ledgered against3e58e30; primitive/frozen corpus/wrapper
-  code is unchanged. Await independent review/checkpoint; no writer commit,
-  push/liveIO/deployment.
+  code is unchanged. Accepted and checkpointed at3f81a9e.
 
 ### Accepted checkpoint `3e58e30` — #105 json_kind primitive
 

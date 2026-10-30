@@ -479,8 +479,8 @@ fn telegram_port_text_nested_union_and_coverage_categories() {
         let module = &program.modules[0];
         assert_eq!(
             module.functions.len(),
-            25,
-            "24 original functions plus ONE new entry"
+            30,
+            "29 original functions plus ONE new entry"
         );
         assert!(program.get_function("TelegramBot.process_update").is_none());
         let outcome = module
@@ -519,8 +519,8 @@ fn telegram_port_text_nested_union_and_coverage_categories() {
     ))
     .unwrap();
     let module = &manifest["modules"][0];
-    assert_eq!(module["implemented"].as_array().unwrap().len(), 24);
-    assert_eq!(module["pending"].as_array().unwrap().len(), 18);
+    assert_eq!(module["implemented"].as_array().unwrap().len(), 29);
+    assert_eq!(module["pending"].as_array().unwrap().len(), 13);
     assert_eq!(module["introduced_functions"].as_object().unwrap().len(), 1);
     assert_eq!(
         module["normal_shared_contract_functions"],

@@ -146,3 +146,9 @@ def test_send_body_plain() -> None:
 
 def test_send_body_escaped_unicode() -> None:
     assert send_message_body(1, 'a"b\nä', True) == r'{"chat_id":1,"text":"a\"b\nä","parse_mode":"HTML"}'
+
+def test_file_error_large_photo() -> None:
+    assert telegram_file_error_message("ERROR: file is too big", "photo") == "Telegram bots can only download files up to 20 MB. Please send a smaller photo."
+
+def test_file_error_transport() -> None:
+    assert telegram_file_error_message("ERROR: timeout", "video") == "I could not download that video. Please send it again."

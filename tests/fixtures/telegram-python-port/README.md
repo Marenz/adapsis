@@ -7,8 +7,8 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 24 of 42 original functions, plus one new partial entry.**
-  Fifteen direct-VM pure helpers, two shared-state authorization helpers and seven
+- **TelegramBot: 29 of 42 original functions, plus one new partial entry.**
+  Sixteen direct-VM pure helpers, two shared-state authorization helpers and eleven
   IO functions are separately covered. `process_text_update` is NEW and is not
   counted among the original 42; original `process_update` remains pending.
   A new application outcome union and the original sanitized empty token shared
@@ -19,7 +19,7 @@ per-function transformation ledger, implemented and pending inventories.
 - Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Seven separately ledgered semantic repairs deliberately change return
+  unchanged. Eleven separately ledgered semantic repairs deliberately change return
   types/effects/control flow/docs; these are not qualification-only equivalence.
   Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
@@ -41,14 +41,14 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **32 passing tests**, including the original
+This focused command currently has **35 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
 
 | Subset | Tree per origin | Direct VM per origin |
 |---|---:|---:|
-| TelegramBot pure helpers (49 literal cases) | 49 pass | 49 pass |
+| TelegramBot pure helpers (51 literal cases) | 51 pass | 51 pass |
 | TgFormat (38 literal cases) | 38 pass | 38 pass |
 
 Both corrected `.ax` and Python-lowered origins have the same results. The first
@@ -129,15 +129,15 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current kind-adoption release gate: **1811 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current media-slice release gate: **1814 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**32 passed**. This remains partial routing evidence, not deployment certification.
+**35 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **18 TelegramBot pending original functions**; TgFormat has
+The manifest explicitly lists **13 TelegramBot pending original functions**; TgFormat has
 no pending functions but its original stored-test surface remains pending.
 Still required: full corrected-origin provenance/review and whole-module paired
 structural/idempotence gates, integration of the pure metadata/principal helpers
@@ -183,9 +183,38 @@ delivery**; transport uncertainty may follow an already delivered request.
 static JSON typing**: the existing catalog mismatch remains unresolved. Its
 runtime type-path tests ensure JSON strings `"true"`/`"false"` cannot impersonate
 Booleans. No frontend/runtime permissive changes or global user-Result-await
-relaxation were made. The inbound/routing and attachment integrations remain
+relaxation were made. Full original intake and outbound attachment integration remain
 pending, and #99 is deliberately unfixed: retry fixtures use explicit short chunks
 and do not certify service-limit-safe splitting.
+
+## Media acquisition and attachment-handler checkpoint
+
+The five added originals are `telegram_file_path`, `telegram_file_error_message`,
+`handle_group_attachment`, `handle_admin_dm_attachment` and
+`handle_user_dm_attachment`. The error-message helper is unchanged and has two
+additional paired pure assertions. File lookup retains its String/error-String
+contract; it now explicitly awaits and matches the builtin Result. An inverse
+AST check proves only that ledgered transformation and helper qualification.
+Malformed JSON remains a terminal error. The attachment handlers retain the
+original takeover prefix and propagate TgTextTurn/nested send outcomes without
+an additional retry, matching the previously repaired text handlers.
+
+`media.rs` first checks real Attachment annotations through the existing frontend
+and canonical roundtrip. `media/runtime.rs` uses a NEW test-only
+`PortMediaDriver.run`, excluded from the original-function inventory and source
+parity claims. It joins file lookup, binary download, authorization and attachment
+handlers through normal async dispatch on both origins. Synthetic photo/video
+payloads cover private/group/supergroup contexts and admin/non-admin speakers.
+Assertions check request ordering, structured principal/profile/callback/metadata,
+three-byte memory-backed Attachment content/name/MIME, no immediate reply, first
+success, plain-fallback success, double rejection and transport uncertainty.
+Lookup errors/missing paths, malformed JSON, binary failure and takeover failure
+stop later requests. No runtime IO loop, network, credentials or live chat is used.
+
+This is not original `process_update` parity, voice/outbound attachment support,
+remote delivery proof or callback acknowledgement (#104). The #91 voice repair
+and #99 splitting limits remain unresolved. Full-gate output:
+`tool_18ad87056001s1tyPm13lmCcNP`.
 
 ## Higher callable reply closure and callback blocker #104
 

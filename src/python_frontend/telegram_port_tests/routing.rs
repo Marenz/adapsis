@@ -26,7 +26,7 @@ pub(super) fn verify_handler(
     let prefix = ledger["takeover_prefix_statements"].as_u64().unwrap() as usize;
     assert_eq!(
         prefix,
-        if original.name == "handle_group" {
+        if original.name == "handle_group" || original.name == "handle_group_attachment" {
             5
         } else {
             2
@@ -42,7 +42,10 @@ pub(super) fn verify_handler(
         "TelegramBot",
         &["format_sender".to_owned()].into_iter().collect(),
     );
-    assert_eq!(sites, usize::from(original.name == "handle_group"));
+    assert_eq!(
+        sites,
+        usize::from(original.name == "handle_group" || original.name == "handle_group_attachment")
+    );
 }
 
 fn programs() -> [ast::Program; 2] {
@@ -55,7 +58,7 @@ fn programs() -> [ast::Program; 2] {
     [ax, py]
 }
 
-struct StateGuard {
+pub(super) struct StateGuard {
     runtime: Option<session::SharedRuntime>,
     program: Option<Arc<ast::Program>>,
 }
@@ -66,7 +69,7 @@ impl Drop for StateGuard {
     }
 }
 
-fn install(program: &ast::Program, admins: &str, allowed: &str) -> StateGuard {
+pub(super) fn install(program: &ast::Program, admins: &str, allowed: &str) -> StateGuard {
     let guard = StateGuard {
         runtime: shared_state::get_shared_runtime(),
         program: shared_state::get_shared_program(),
@@ -88,7 +91,7 @@ fn install(program: &ast::Program, admins: &str, allowed: &str) -> StateGuard {
     guard
 }
 
-fn observed(value: Value) -> Json {
+pub(super) fn observed(value: Value) -> Json {
     match value {
         Value::Union { variant, payload } => {
             json!({"tag":crate::intern::resolve_display(variant),"payload":payload.into_iter().map(observed).collect::<Vec<_>>()})

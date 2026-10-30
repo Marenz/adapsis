@@ -1,7 +1,7 @@
 {
   "status": "partial",
   "full_port_complete": false,
-  "implementation_baseline": "3e58e30377d2ebba803740f21be742fd85b38306",
+  "implementation_baseline": "3f81a9e54170ca0977b615e05a67e28eb5afcc78",
   "historical_first_slice_observed_status": {
     "TelegramBot": {"tree_cases_per_origin": 28, "direct_vm_passes_per_origin": 25, "direct_vm_failures_per_origin": 3, "direct_vm_gate": "red, no exemptions"},
     "TgFormat": {"tree_cases_per_origin": 7, "direct_vm_passes_per_origin": 7},
@@ -18,8 +18,8 @@
       "origin": "origin/TelegramBot.ax",
       "python": "python/TelegramBot.py",
       "tests": "python/test_telegram_bot.py",
-      "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata", "send_message_body", "send_message_part", "send_message_parts", "send_message", "send_reply", "is_admin", "is_allowed", "handle_group", "handle_admin_dm", "handle_user_dm"],
-      "pending": ["init", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "describe_update_kind", "process_update", "handle_group_attachment", "handle_admin_dm_attachment", "handle_user_dm_attachment", "telegram_file_path", "telegram_file_error_message", "transcribe_voice", "transcription_upload_response", "send_reply_with_attachment", "send_audio_file", "extract_reply"],
+      "implemented": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata", "send_message_body", "send_message_part", "send_message_parts", "send_message", "send_reply", "is_admin", "is_allowed", "handle_group", "handle_admin_dm", "handle_user_dm", "telegram_file_path", "telegram_file_error_message", "handle_group_attachment", "handle_admin_dm_attachment", "handle_user_dm_attachment"],
+      "pending": ["init", "handle_update", "poll_loop", "poll_once", "dispatch_updates", "extract_update_id", "describe_update_kind", "process_update", "transcribe_voice", "transcription_upload_response", "send_reply_with_attachment", "send_audio_file", "extract_reply"],
       "introduced_functions": {"process_text_update": "NEW partial text-only entry, not process_update parity or counted among 42 originals. #105 adoption uses exact json_kind checks before conversion/auth/IO; represented int IDs/date retain bounds, chat.type/text require string, every present media kind defers. Legitimate JSON-looking Strings are admitted; metadata retains structured from.id. #104 and full process_update remain open."},
       "introduced_function_repairs": {"process_text_update": {"kind":"json_kind_guard_adoption_v1","baseline":"3e58e30377d2ebba803740f21be742fd85b38306","removed":["List.contains raw/candidate ID/date identity guards","to_string and starts_with text-type heuristics"],"preserved":["ID/date value bounds","original authorization/context/profile rules","original handler request arguments","NoImmediateReply and nested DeliveryAttempt outcomes","all original helpers/handlers"],"changed":["missing IDs/date ignored before conversion instead of parse errors","present-empty media now deferred with zero IO","legitimate strings null/{} /[] /prefix-leading are admitted"],"limits":"json_kind represented-u64/parse overflow remains Err/no IO; no callback ACK or original process_update parity claim"}},
       "ledger": {
@@ -46,7 +46,12 @@
         "is_allowed": "qualify is_admin_in; preserve shared allow-list rule and doc",
         "handle_group": "text_handler_v1: preserve exact takeover construction prefix; return explicit NoImmediateReply or nested DeliveryAttempt without discarding failure",
         "handle_admin_dm": "text_handler_v1: preserve exact takeover construction prefix; return explicit NoImmediateReply or nested DeliveryAttempt without discarding failure",
-        "handle_user_dm": "text_handler_v1: preserve exact takeover construction prefix; return explicit NoImmediateReply or nested DeliveryAttempt without discarding failure"
+        "handle_user_dm": "text_handler_v1: preserve exact takeover construction prefix; return explicit NoImmediateReply or nested DeliveryAttempt without discarding failure",
+        "telegram_file_path": "file_path_await_v1: explicit builtin Result await-bind-match and helper qualification; same URL/return/error-String contract, malformed JSON terminal",
+        "telegram_file_error_message": "unchanged function AST including doc",
+        "handle_group_attachment": "attachment_handler_v1: exact original takeover prefix incl Attachment; propagate immediate outcome instead of discarding it",
+        "handle_admin_dm_attachment": "attachment_handler_v1: exact original takeover prefix incl Attachment; propagate immediate outcome instead of discarding it",
+        "handle_user_dm_attachment": "attachment_handler_v1: exact original takeover prefix incl Attachment; propagate immediate outcome instead of discarding it"
       },
       "qualified_call_sites": {"speaker_principal": 1, "source_metadata": 4, "is_admin": 1, "is_allowed": 1},
       "semantic_repairs": {
@@ -56,25 +61,32 @@
         "send_reply": {"kind": "typed_send_reply_v1", "original_return": "String", "corrected_return": "TgSendAttempt", "parameters": "preserved", "corrected_effects": ["io", "fail", "async"], "outcomes": "preserve to_int destination parsing, explicit await-bind-return preserving all outcomes, no caller retry; #104 callback success classification remains open"},
         "handle_group": {"kind": "text_handler_v1", "original_return": "String", "corrected_return": "TgTextTurn", "parameters": "preserved", "takeover_prefix_statements": 5},
         "handle_admin_dm": {"kind": "text_handler_v1", "original_return": "String", "corrected_return": "TgTextTurn", "parameters": "preserved", "takeover_prefix_statements": 2},
-        "handle_user_dm": {"kind": "text_handler_v1", "original_return": "String", "corrected_return": "TgTextTurn", "parameters": "preserved", "takeover_prefix_statements": 2}
+        "handle_user_dm": {"kind": "text_handler_v1", "original_return": "String", "corrected_return": "TgTextTurn", "parameters": "preserved", "takeover_prefix_statements": 2},
+        "telegram_file_path": {"kind":"file_path_await_v1","original_return":"String","corrected_return":"String","parameters":"preserved","corrected_effects":["io","fail","async"],"qualification_sites":1},
+        "handle_group_attachment": {"kind":"attachment_handler_v1","original_return":"String","corrected_return":"TgTextTurn","parameters":"preserved","takeover_prefix_statements":5},
+        "handle_admin_dm_attachment": {"kind":"attachment_handler_v1","original_return":"String","corrected_return":"TgTextTurn","parameters":"preserved","takeover_prefix_statements":2},
+        "handle_user_dm_attachment": {"kind":"attachment_handler_v1","original_return":"String","corrected_return":"TgTextTurn","parameters":"preserved","takeover_prefix_statements":2}
       },
       "introduced_types": {"TgSendAttempt": ["TgSent(String)", "TgRejected(String)", "TgUncertain(String)"], "TgTextTurn": ["TgNoImmediateReply(String)", "TgDeliveryAttempt(TgSendAttempt)", "TgIgnored(String)", "TgDeferred(String)"]},
       "included_shared": ["telegram_token", "admin_user_ids", "allowed_user_ids", "sandbox_perm_model"],
       "pending_shared": ["token_path", "allowed_path", "intake_mode", "poll_offset", "poll_running"],
       "normal_shared_contract_functions": ["is_admin", "is_allowed"],
-      "direct_vm_paired_functions": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata", "send_message_body"],
-      "normal_io_contract_functions": ["send_message_part", "send_message_parts", "send_message", "send_reply", "handle_group", "handle_admin_dm", "handle_user_dm"],
+      "direct_vm_paired_functions": ["extract_chat_id", "extract_user_id", "extract_chat_type", "extract_text", "extract_image_file_id", "extract_video_file_id", "format_sender", "is_admin_in", "telegram_response_ok", "telegram_file_path_response", "parse_id_list", "extract_sender_name", "speaker_principal", "source_metadata", "send_message_body", "telegram_file_error_message"],
+      "normal_io_contract_functions": ["send_message_part", "send_message_parts", "send_message", "send_reply", "handle_group", "handle_admin_dm", "handle_user_dm", "telegram_file_path", "handle_group_attachment", "handle_admin_dm_attachment", "handle_user_dm_attachment"],
       "new_entry_contract_functions": ["process_text_update"],
       "contract_tests": {
-        "telegram_port_paired_pure_cases_run_both_origins_and_tiers": "all direct_vm_paired_functions, unchanged 49 cases",
+        "telegram_port_paired_pure_cases_run_both_origins_and_tiers": "all direct_vm_paired_functions, 51 cases",
         "telegram_port_routing_shared_helpers_use_real_fallback_and_restore_state": ["is_admin", "is_allowed"],
         "telegram_port_send_leaf_strict_runtime_bool_and_union_contract_both_origins": ["send_message_part"],
         "telegram_port_send_chain_attempt_order_and_terminal_failures_both_origins": ["send_message_parts"],
         "telegram_port_reply_closure_formats_and_propagates_without_caller_retry": ["send_message", "send_reply"],
         "telegram_port_text_routing_raw_payload_context_principal_and_profile": ["handle_group", "handle_admin_dm", "handle_user_dm", "process_text_update"],
         "telegram_port_text_routing_delivery_outcome_is_not_discarded": ["handle_group", "handle_admin_dm", "handle_user_dm", "process_text_update"],
-        "telegram_port_present_empty_media_must_defer_red_gate": ["process_text_update"]
+        "telegram_port_present_empty_media_must_defer_red_gate": ["process_text_update"],
+        "telegram_port_media_normal_acquisition_and_handler_outcomes": ["telegram_file_path", "handle_group_attachment", "handle_admin_dm_attachment", "handle_user_dm_attachment"],
+        "telegram_port_media_acquisition_failures_stop_later_requests": ["telegram_file_path"]
       },
+      "test_only_drivers": {"PortMediaDriver.run":"Constructed only inside Rust tests, lowered separately on each origin; obtains memory Attachment via real builtin dispatch and invokes target handler. Not an implemented-original function, not process_update parity, not an installed route."},
       "text_entry_gate_status": "#105 json_kind adoption: the original 11-key both-origin presence assertions are unchanged and must pass; no exemption, no regex, no list-identity/text-prefix workaround.",
       "pending_non_function_surface": ["module doc", "remaining shared declarations", "startup", "route", "original stored tests"],
       "pending_reviewed_transformations": ["qualified local calls", "issue #91 voice control-flow repair (not yet authored/reviewed)", "await-bind-then-return", "issue #94 builtin-await-bind-then-match"]

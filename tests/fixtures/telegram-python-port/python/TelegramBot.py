@@ -316,3 +316,54 @@ async def process_text_update(payload: str) -> TgTextTurn:
         return outcome
     outcome: TgTextTurn = await TelegramBot.handle_user_dm(chat_id, user_id, text, metadata)
     return outcome
+
+@effects("io", "fail")
+async def telegram_file_path(file_id: str) -> str:
+    """Preserve the original getFile path/error-String contract using explicit builtin Result binding and matching. Malformed JSON remains terminal; no binary download occurs here."""
+    file_url: str = concat("<redacted>", telegram_token, "/getFile?file_id=", file_id)
+    response: Result[str] = await http_get(file_url)
+    match response:
+        case Ok(file_info):
+            return TelegramBot.telegram_file_path_response(file_info)
+        case Err(e):
+            return concat("ERROR: ", e)
+
+def telegram_file_error_message(error: str, kind: str) -> str:
+    """Turn Telegram getFile failures into user-facing guidance, including the platform's 20 MB bot-download cap."""
+    if contains(error, "file is too big"):
+        return concat("Telegram bots can only download files up to 20 MB. Please send a smaller ", concat(kind, "."))
+    return concat("I could not download that ", concat(kind, ". Please send it again."))
+
+@effects("io", "fail")
+async def handle_group_attachment(chat_id: int, user_id: int, sender_name: str, text: str, admin: bool, attachment: Attachment, metadata: str) -> TgTextTurn:
+    """Preserve the group attachment takeover request and propagate immediate delivery outcome without another retry. Callback acknowledgement remains unverified (#104)."""
+    ctx: str = concat("telegram:group:", to_string(chat_id))
+    sender: str = TelegramBot.format_sender(user_id, sender_name, text)
+    perm: str = ""
+    if admin == False:
+        perm = sandbox_perm_model
+    reply: str = await llm_takeover(ctx, sender, "TelegramBot.send_reply", to_string(chat_id), perm, attachment, metadata)
+    if reply != "":
+        delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, reply)
+        return TgDeliveryAttempt(delivery)
+    return TgNoImmediateReply("no immediate reply")
+
+@effects("io", "fail")
+async def handle_admin_dm_attachment(chat_id: int, user_id: int, text: str, attachment: Attachment, metadata: str) -> TgTextTurn:
+    """Preserve admin attachment takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."""
+    ctx: str = concat("telegram:", to_string(user_id))
+    reply: str = await llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), "", attachment, metadata)
+    if reply != "":
+        delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, reply)
+        return TgDeliveryAttempt(delivery)
+    return TgNoImmediateReply("no immediate reply")
+
+@effects("io", "fail")
+async def handle_user_dm_attachment(chat_id: int, user_id: int, text: str, attachment: Attachment, metadata: str) -> TgTextTurn:
+    """Preserve sandboxed attachment takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."""
+    ctx: str = concat("telegram:user:", to_string(user_id))
+    reply: str = await llm_takeover(ctx, text, "TelegramBot.send_reply", to_string(chat_id), sandbox_perm_model, attachment, metadata)
+    if reply != "":
+        delivery: TgSendAttempt = await TelegramBot.send_message(chat_id, reply)
+        return TgDeliveryAttempt(delivery)
+    return TgNoImmediateReply("no immediate reply")
