@@ -94,6 +94,13 @@ one function that calls existing functions, without resending its entire module.
 Python source inspection also excludes unauthorized signatures and can truthfully
 refuse a wrapper whose referenced signatures are unavailable to the caller.
 
+Names that read as Python execution escapes (`eval`, `exec`, `open`, `getattr`, `setattr`,
+`delattr`, `globals`, `locals`, `compile`, `vars`, `import`, and anything containing `__`)
+are rejected everywhere. `input` is the one exception, and only as a *binding*: it may be a
+parameter, local, loop target, match capture or the base of a field access. It is still
+rejected as a callee (`input(x)`), function, type, member, shared-variable, annotation or
+attribute name, so it can shadow but never call Python's stdin builtin.
+
 Python execution/inspection conservatively rejects current builtin-name collisions
 (both pure and IO registries, including aliases), even in otherwise authorized
 modules. This protects installed Python after later `.ax` changes. Narrower

@@ -185,7 +185,7 @@ fn sub_pattern(
         py::Pattern::MatchAs(aspat) if aspat.pattern.is_none() => {
             if let Some(name) = &aspat.name {
                 let name = name.as_str();
-                if !super::identifier(name) || super::forbidden(name)
+                if !super::identifier(name) || super::forbidden_binding(name)
                     || super::reserved_positional_name(name) || super::reserved_helper_name(name)
                     || crate::builtins::is_builtin(name) || name == cx.module
                     || matches!(name, "int" | "float" | "bool" | "str" | "Result" | "effects") {
@@ -228,7 +228,7 @@ fn expression(
             Ok(())
         }
         py::Expr::Name(name)
-            if super::identifier(name.id.as_str()) && !super::forbidden(name.id.as_str()) =>
+            if super::identifier(name.id.as_str()) && !super::forbidden_binding(name.id.as_str()) =>
         {
             Ok(())
         }
@@ -334,7 +334,7 @@ fn attribute_access(
     }
     match attribute.value.as_ref() {
         py::Expr::Name(n) => {
-            if !super::identifier(n.id.as_str()) || super::forbidden(n.id.as_str()) {
+            if !super::identifier(n.id.as_str()) || super::forbidden_binding(n.id.as_str()) {
                 return Err(cx.at(attribute, "unsupported field access base"));
             }
             Ok(())

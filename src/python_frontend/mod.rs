@@ -22,6 +22,8 @@ mod top_level_tests;
 #[cfg(test)]
 mod top_level_function_tests;
 #[cfg(test)]
+mod input_binding_tests;
+#[cfg(test)]
 mod tests_print;
 #[cfg(test)]
 mod tests_print_tests;
@@ -238,6 +240,16 @@ fn identifier(name: &str) -> bool {
 
 fn reserved_positional_name(name: &str) -> bool {
     name.strip_prefix('_').is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit()))
+}
+
+/// Names that may not be BOUND (parameter, local, match capture, value or field-access
+/// base): the full `forbidden` list minus `input`. `input` is Python's stdin builtin, not
+/// an execution escape, and is a perfectly ordinary Adapsis identifier; as a value name
+/// it can only shadow the builtin, which the non-executing frontend never calls. It stays
+/// in `forbidden` for every other role: a callee (`input(x)` must never lower), function,
+/// type, member, shared-variable, annotation and attribute names.
+fn forbidden_binding(name: &str) -> bool {
+    name != "input" && forbidden(name)
 }
 
 fn forbidden(name: &str) -> bool {

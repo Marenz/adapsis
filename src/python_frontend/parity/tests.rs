@@ -475,7 +475,7 @@ fn python_parity_whole_programs_roundtrip_top_level_and_module_declarations() {
 #[test]
 fn python_parity_whole_program_reports_the_first_unprintable_member() {
     // An unprintable top-level member keeps the program Unsupported with ITS reason.
-    let entries = kind_entries("+fn f (input:Int)->Int\n  +return input\n+end\n", "program");
+    let entries = kind_entries("+fn f (eval:Int)->Int\n  +return eval\n+end\n", "program");
     assert_eq!(entries[0].1, Status::Unsupported);
     assert!(entries[0].2.contains("top-level function f"), "{entries:?}");
     let entries = kind_entries("+type Env = vars:Int, other:Int\n", "program");
@@ -527,4 +527,17 @@ fn python_parity_whole_program_text_is_stable_across_a_rebuild() {
     // The empty surface prints and lowers to nothing (module-only programs).
     let (types, functions, text) = top_level::lower_all(&program(MODULE_F)).unwrap();
     assert!(types.is_empty() && functions.is_empty() && text.is_empty());
+}
+
+#[test]
+fn python_parity_input_parameter_functions_verify_at_both_scopes() {
+    // G2: `input` is a legal binding name, so these roundtrip exactly.
+    let top = "+fn size (input:String)->Int\n  +let n:Int = len(input)\n  +return n\n+end\n";
+    let entries = kind_entries(top, "function");
+    assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
+    let module = format!("+module M\n{top}");
+    let entries = kind_entries(&module, "function");
+    assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
+    let entries = kind_entries(&module, "program");
+    assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
 }

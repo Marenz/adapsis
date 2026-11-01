@@ -2,7 +2,33 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — A3+B2 (whole programs + module-less stored tests), baseline `58b6999`
+### Current pending slice — G2 (`input` as a binding name), baseline `762de63`
+
+- PRODUCTION frontend change (native mutate/test/inspect, `adapsis test --language python`),
+  owner-approved. `mod.rs::forbidden_binding(name)` = `forbidden` minus `input`, used at
+  exactly five binding sites: parameters (`lower.rs::ordinary_args`), locals/loop targets
+  (`Lower::bind`), match captures, value names and field-access bases (`surface.rs`).
+  Every other role keeps full `forbidden`: callee (`direct_name`), function, type, member,
+  shared-variable, annotation and attribute names. `input` is Python's stdin builtin, not an
+  execution escape, and not an Adapsis builtin; the non-executing frontend can only shadow
+  it. The A3 test exemplar for "unprintable member" moved from `input` to `eval`.
+- Strict PARITY before -> after (54 files / 573 entries): verified 291 -> 298 (+7),
+  unsupported 224 -> 217, invalid 58, mismatches 0, non-idempotent 0. Entry diff: 30 entries
+  changed, no Verified entry lost. 7 `function` Unsupported -> Verified (adapsis_in_adapsis
+  parse_atom/parse_let/parse_return, expr_parser parse/calc/parse_atom, Peer.eval_payload);
+  23 stay Unsupported with a NEW next reason: 18 functions and 5 programs now stop on
+  pseudo-field access (G1, deferred behind #114). Identical to the earlier read-only probe.
+- Evidence: 7 frontend tests (`input_binding_tests.rs`: bindings at every site through the
+  free and the native entry, callable refusal bound/unbound, an existing `.ax` `+fn input`
+  never callable qualified or bare, function/type/member/shared/annotation/attribute
+  refusals, other escape names unchanged, `input=` test keyword, `.ax` print roundtrip),
+  2 native tests (`python_input_name_tests.rs`: mutate+test+evaluate+inspect with an `input`
+  parameter and local; five refusals leave the program unchanged), 1 harness test. 13
+  mutations (each of the 5 sites, exemption widened to `eval`, and exemption leaking into
+  each of callee/function/type/member/shared/annotation/attribute) each fail the intended
+  tests; files restored and verified.
+
+### Accepted slice — A3+B2 (whole programs + module-less stored tests), baseline `58b6999`
 
 - `#[cfg(test)]` / harness only; no runtime, validator, native-tool, fixture, `lower.rs`,
   `expressions.rs`, `types.rs` or `printer.rs` change; `success()` untouched.

@@ -708,7 +708,7 @@ pub(super) fn ordinary_args(
         ));
     }
     if let Some(arg) = args.args.iter().find(|arg| {
-        !super::identifier(arg.def.arg.as_str()) || super::forbidden(arg.def.arg.as_str())
+        !super::identifier(arg.def.arg.as_str()) || super::forbidden_binding(arg.def.arg.as_str())
     }) {
         return Err(cx.at(&arg.def, "unsupported/unsafe parameter identifier"));
     }
@@ -862,7 +862,7 @@ impl Lower<'_, '_> {
             return Ok(());
         }
         if !super::identifier(name)
-            || super::forbidden(name)
+            || super::forbidden_binding(name)
             || crate::builtins::is_builtin(name)
             || super::reserved_helper_name(name)
             || self.signatures.contains_key(name)
