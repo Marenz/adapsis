@@ -15,6 +15,11 @@
   No live Telegram smoke message sent. sleek and edox not deployed.
 - Follow-ups filed: #112 (/api/tasks exposes token prefix), #113 (route message under
   library-error category).
+- 2026-11-01 ~20:10: llm-gateway alias `deepseek-v4-flash` repointed from
+  `deepseek/deepseek-v4-flash` (DeepSeek balance ~$0.38) to
+  `deepinfra/deepseek-ai/DeepSeek-V4-Flash` (owner-approved). Direct and alias test
+  requests returned 200; gateway and adapsis services active. Backup:
+  `~/.config/llm-gateway/config.json.bak-20261101-deepinfra`.
 
 
 Release 2026-11-01 combines work/native-tools a4ab092 and work/issue-87-88 e28fe29
