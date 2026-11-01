@@ -4,9 +4,16 @@
 use super::{equality, same_text, Check, Status};
 use crate::{ast, python_frontend};
 
-fn rest_without(program: &ast::Program, name: &str) -> ast::Program {
+fn rest_without_type(program: &ast::Program, name: &str) -> ast::Program {
     let mut rest = program.clone();
     rest.types.retain(|t| t.name() != name);
+    rest
+}
+
+fn rest_without_function(program: &ast::Program, name: &str) -> ast::Program {
+    let mut rest = program.clone();
+    rest.functions.retain(|f| f.name != name);
+    rest.rebuild_function_index();
     rest
 }
 
@@ -27,7 +34,7 @@ pub(super) fn check_type(program: &ast::Program, name: &str) -> Check {
     ))?;
     let text = python_frontend::print_toplevel_type(program, name)
         .map_err(|e| (Status::Unsupported, e.to_string()))?;
-    let rest = rest_without(program, name);
+    let rest = rest_without_type(program, name);
     let fresh = rebuilt(&text, &rest)?;
     let candidate = fresh
         .types
@@ -51,6 +58,52 @@ pub(super) fn check_type(program: &ast::Program, name: &str) -> Check {
     let candidate = again.types.iter().find(|t| t.name() == name).unwrap();
     if !equality::ty(original, candidate) {
         return Err((Status::AstMismatch, "second lowering changed type".into()));
+    }
+    Ok(())
+}
+
+pub(super) fn check_function(program: &ast::Program, name: &str) -> Check {
+    let original = program.functions.iter().find(|f| f.name == name).ok_or((
+        Status::InvalidProgram,
+        "top-level function missing after validation".into(),
+    ))?;
+    let text = python_frontend::print_toplevel_function(program, name)
+        .map_err(|e| (Status::Unsupported, e.to_string()))?;
+    let rest = rest_without_function(program, name);
+    let fresh = rebuilt(&text, &rest)?;
+    let candidate = fresh.functions.iter().find(|f| f.name == name).ok_or((
+        Status::AstMismatch,
+        "function missing after re-lowering".into(),
+    ))?;
+    if !equality::function(original, candidate) {
+        return Err((
+            Status::AstMismatch,
+            format!(
+                "{} changed (only typed NodeIds ignored)",
+                equality::function_difference(original, candidate)
+            ),
+        ));
+    }
+    // Second print from the re-lowered declaration, then a second lowering.
+    let mut second_catalog = program.clone();
+    for slot in second_catalog
+        .functions
+        .iter_mut()
+        .filter(|f| f.name == name)
+    {
+        *slot = candidate.clone();
+    }
+    second_catalog.rebuild_function_index();
+    let second = python_frontend::print_toplevel_function(&second_catalog, name)
+        .map_err(|e| (Status::Unsupported, e.to_string()))?;
+    same_text(&text, &second)?;
+    let again = rebuilt(&second, &rest)?;
+    let candidate = again.functions.iter().find(|f| f.name == name).unwrap();
+    if !equality::function(original, candidate) {
+        return Err((
+            Status::AstMismatch,
+            "second lowering changed function".into(),
+        ));
     }
     Ok(())
 }

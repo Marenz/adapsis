@@ -46,15 +46,18 @@ fn python_parity_inventories_top_level_functions_types_tests_and_commands() {
         "+type Record = id:Int\n+fn f ()->Int\n  +return 1\n+end\n+test f\n  +with -> expect 1\n!eval f\n",
     );
     let report = run(fixture.path());
-    // Module-less TYPES now have a real (owner "") surface; everything else stays open.
-    assert!(
-        report
-            .entries
-            .iter()
-            .any(|entry| entry.kind == "type" && entry.status == Status::Verified),
-        "{report:?}"
-    );
-    for kind in ["function", "Test", "Eval", "program"] {
+    // Module-less TYPES (A1) and FUNCTIONS (A2) have a real (owner "") surface; stored
+    // tests, commands and whole programs stay open.
+    for kind in ["type", "function"] {
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|entry| entry.kind == kind && entry.status == Status::Verified),
+            "{kind}: {report:?}"
+        );
+    }
+    for kind in ["Test", "Eval", "program"] {
         assert!(
             report
                 .entries

@@ -140,12 +140,11 @@ fn collision_rules_refuse_ambiguous_type_declarations() {
         ("@union\nclass Shape:\n    Point: tuple[int]\n    Dot: tuple[()]\n\n@dataclass\nclass Point:\n    x: int\n", "", "collides with a"),
         // Not type declarations at all.
         ("shared_counter: int = 0\n", "", "shared variables belong to a module"),
-        ("def f() -> int:\n    return 1\n", "", "top-level functions are not supported"),
-        ("async def f() -> int:\n    return 1\n", "", "top-level functions are not supported"),
+        // (Top-level functions are A2: see top_level_function_tests.rs.)
         ("\"module doc\"\n", "", "may only contain @dataclass/@union type declarations"),
         ("import os\n", "", "may only contain @dataclass/@union type declarations"),
         ("x = 1\n", "", "shared variables belong to a module"),
-        ("", "", "at least one type declaration"),
+        ("", "", "at least one type or function declaration"),
     ] {
         let message = refused(source, ax);
         assert!(message.contains(needle), "{source:?}: {message}");

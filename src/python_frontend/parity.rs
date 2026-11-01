@@ -460,10 +460,7 @@ fn check_function(program: &ast::Program, target: &str) -> Check {
     let module = target.rsplit_once('.').map_or("", |(module, _)| module);
     scope::check_function(program, module, original).map_err(|e| (Status::InvalidProgram, e))?;
     let Some((module, _)) = target.rsplit_once('.') else {
-        return Err((
-            Status::Unsupported,
-            "production Python function printer/lowerer has no top-level scope surface".into(),
-        ));
+        return top_level::check_function(program, target);
     };
     let text =
         super::print_function(program, target).map_err(|e| (Status::Unsupported, e.to_string()))?;

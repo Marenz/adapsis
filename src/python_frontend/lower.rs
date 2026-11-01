@@ -640,6 +640,43 @@ impl<'a> Definition<'a> {
     }
 }
 
+/// Test-only (see `top_level.rs`): lower module-less `def`/`async def` declarations.
+/// `signatures` must hold qualified `Module.f` keys for module functions and BARE keys
+/// for top-level functions only; the submitted functions are added under bare keys after
+/// a first pass, so recursion, mutual recursion and forward references resolve. The
+/// caller supplies the scope-specific collision rule through `check_name`.
+#[cfg(test)]
+pub(super) fn toplevel_functions(
+    cx: &Context<'_>,
+    stmts: &[&py::Stmt],
+    mut signatures: HashMap<String, Signature>,
+    types: &TypeCatalog,
+    check_name: &dyn Fn(&py::Stmt, &str) -> Result<(), Diagnostic>,
+) -> Result<Vec<p::FunctionDecl>, Diagnostic> {
+    let mut defs = Vec::new();
+    for stmt in stmts {
+        let def = Definition::from_stmt(cx, stmt)?;
+        if is_lifecycle(def.name) {
+            return Err(cx.at(def.stmt, format!("{} blocks belong to a module; a top-level function cannot use that name", def.name)));
+        }
+        if def.route.is_some() || def.source.is_some() {
+            return Err(cx.at(def.stmt, "@route/@source declarations belong to a module; a top-level function cannot carry them"));
+        }
+        check_name(stmt, def.name)?;
+        defs.push(def);
+    }
+    let mut declared = HashSet::new();
+    for def in &defs {
+        let signature = def.signature(cx, types)?;
+        if !declared.insert(def.name) {
+            return Err(cx.at(def.stmt, format!("duplicate function {}; submit it only once", def.name)));
+        }
+        signatures.insert(def.name.to_owned(), signature);
+    }
+    let shared = HashMap::new();
+    defs.iter().map(|def| def.lower(cx, &signatures, types, &shared)).collect()
+}
+
 fn is_lifecycle(name: &str) -> bool {
     matches!(name, "startup" | "shutdown")
 }

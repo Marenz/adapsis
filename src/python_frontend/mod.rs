@@ -20,6 +20,8 @@ mod top_level;
 #[cfg(test)]
 mod top_level_tests;
 #[cfg(test)]
+mod top_level_function_tests;
+#[cfg(test)]
 mod tests_print;
 #[cfg(test)]
 mod tests_print_tests;
@@ -80,7 +82,7 @@ pub(crate) fn lower_toplevel(source: &str, program: &crate::ast::Program) -> Res
     top_level::lower(source, program)
 }
 #[cfg(test)]
-pub(crate) use printer::print_toplevel_type;
+pub(crate) use printer::{print_toplevel_function, print_toplevel_type};
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {

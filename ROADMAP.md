@@ -2,7 +2,56 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — A1 (module-less type surface, owner ""), baseline `d1ae977`
+### Current pending slice — A2 (module-less functions, owner ""), baseline `5057d8a`
+
+- `#[cfg(test)]` surface only; no authority model, never reachable from native tools or any
+  runtime path. `success()` untouched; frozen corpus untouched.
+- `top_level.rs::lower` now also accepts annotated `def`/`async def` (types and functions mix,
+  emitted in source order). Signatures: qualified `Module.f` keys for module functions
+  (unchanged `collect_signatures`) plus BARE keys for top-level functions only
+  (`collect_toplevel_signatures`, plus the submitted functions after a first pass, so
+  recursion, mutual recursion and forward references resolve). A bare callee that is not a
+  top-level function is refused ("unknown local callable"); module functions stay reachable
+  qualified only, even though `Program::get_function` would fall back to the first module.
+  An unresolvable qualified callee is refused at the top level (module behavior unchanged).
+- Only non-test-surface edit: `expressions.rs::call` now decides `Target::User` from
+  "bare name with a signature" (`local_user`) instead of `resolved.contains('.')`, and builds
+  `resolved` with `types::owned_name` (bare at owner ""; identical to the old
+  `Module.name` for every module, whose name is non-empty). Printer: a bare user call is
+  printable only at owner "" and only for a real `program.functions` entry
+  (`toplevel_callee`, `cfg!(test)`), and `param_type_hints` has the matching bare branch;
+  module printing keeps refusing every unqualified non-builtin call. `lower.rs` gained one
+  `#[cfg(test)]` fn (`toplevel_functions`); `printer.rs::collect_signatures` was refactored
+  through the shared `function_signature` helper (behavior-neutral).
+- Declaration collision rules (explicit messages): builtin/alias/IO builtin, frontend helper,
+  Python-reserved/forbidden names (existing `Definition::from_stmt`), `startup`/`shutdown`,
+  `@route`/`@source`, duplicate in the submission, existing top-level function, module name,
+  ANY union variant (existing or submitted) and ANY type name. Two unions sharing a variant
+  stay accepted; using it is reported at the use site ("ambiguous union variant").
+  Local bindings named like a top-level function are refused by the existing bind rule.
+- Harness `parity/top_level.rs::check_function`: print -> lower into the program WITHOUT the
+  function -> `equality::function` -> second print byte-identical -> second lowering equal.
+  `print_toplevel_function` picks `program.functions` only.
+- Strict PARITY before -> after (same 54 files / 573 entries): verified 207 -> 251 (+44),
+  unsupported 308 -> 264, invalid 58, mismatches 0, non-idempotent 0. 44 function entries
+  moved Unsupported -> Verified; the other 43 top-level function entries stay Unsupported
+  with concrete reasons instead of "no top-level scope surface": `input` parameter (G2) 24,
+  pseudo-field access (G1) 10, anonymous struct literal (G3) 4, json_get typing (G4) 3, shared
+  `Some` ambiguity (G5) 2. The probe predicted ~43 (44 measured; the cause of the
+  one-entry difference was not investigated).
+  Programs (A3) and top-level stored tests (B2) are untouched.
+- Evidence: 13 new unit tests (`top_level_function_tests.rs`: unwrapped ops, recursion on
+  tree and VM, mutual recursion + forward reference, call of an earlier submission, struct
+  literal argument hint through a bare callee, types+functions order, qualified/unknown
+  callees, a 15-case name-collision matrix plus duplicates/decorators/binding, shared
+  variants, effect/await rules for bare user calls, module regression: module-local bare
+  calls still qualified/refused and a module function still cannot print a bare call).
+  15 mutations (printer owner guard, top-level-function guard, hints, `Target::User`, resolved
+  qualification, dotted-callee guard, bare signatures, every collision rule, lifecycle,
+  decorators, duplicate, type catalog) each fail exactly the targeted test(s); every file
+  restored and verified.
+
+### Accepted slice — A1 (module-less type surface, owner ""), baseline `d1ae977`
 
 - `#[cfg(test)]` only; no runtime, validator, native-tool, fixture, `lower.rs`, `types.rs` or
   `expressions.rs` change, parity.rs `success()` untouched. Only non-test source touched:
