@@ -604,16 +604,15 @@ fn same_text(first: &str, second: &str) -> Check {
 }
 
 fn check_program(program: &ast::Program) -> Check {
-    if !program.functions.is_empty() || !program.types.is_empty() {
-        return Err((
-            Status::Unsupported,
-            "whole-program printer/lowerer lacks top-level scope".into(),
-        ));
-    }
-    if program.modules.is_empty() {
+    let has_top_level = !program.functions.is_empty() || !program.types.is_empty();
+    if !has_top_level && program.modules.is_empty() {
         return Err((Status::Unsupported, "no represented declarations".into()));
     }
     let mut rebuilt_program = ast::Program::default();
+    let (top_types, top_functions, top_text) = top_level::lower_all(program)?;
+    // Order matters only for validation: module bodies may use top-level types, and a
+    // top-level function may call module functions qualified.
+    build_into(&mut rebuilt_program, &top_types).map_err(|e| (Status::Unsupported, e))?;
     let mut texts = Vec::new();
     for module in &program.modules {
         check_module(program, &module.name)?;
@@ -625,6 +624,7 @@ fn check_program(program: &ast::Program) -> Check {
             .map_err(|e| (Status::Unsupported, e))?;
         texts.push(text);
     }
+    build_into(&mut rebuilt_program, &top_functions).map_err(|e| (Status::Unsupported, e))?;
     if !equality::program(program, &rebuilt_program) {
         return Err((Status::AstMismatch, "aggregate program changed".into()));
     }
@@ -632,6 +632,9 @@ fn check_program(program: &ast::Program) -> Check {
         let second = super::print_module(&rebuilt_program, &module.name)
             .map_err(|e| (Status::Unsupported, e.to_string()))?;
         same_text(&text, &second)?;
+    }
+    if has_top_level {
+        same_text(&top_text, &top_level::print_all(&rebuilt_program)?)?;
     }
     Ok(())
 }

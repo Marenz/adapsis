@@ -178,3 +178,86 @@ fn printed_text_is_stable_and_readable() {
         "def test_case_1() -> None:\n    assert f(a=1, b=[\"x\"]) == \"ok\"\n\ndef test_case_2() -> None:\n    assert f(7) == Err(err_x)\n"
     );
 }
+
+#[test]
+fn keyword_shorthand_negative_constants_are_refused_with_the_111_reason() {
+    for source in [
+        "+with a=-1 -> expect 1",
+        "+with a=-1.5 -> expect 1",
+        "+with a=-0.0 -> expect 1",
+        "+with a=1 b=-2 -> expect 1",
+    ] {
+        let reason = refused(&format!("+test f\n  {source}\n"));
+        assert!(
+            reason.starts_with("case 1: ") && reason.contains("(#111)"),
+            "{source}: {reason}"
+        );
+    }
+    // A hand-built negative constant anywhere (list item, expectation, double sign) is
+    // refused the same way: no Python spelling lowers back to it.
+    let mut test = parse_block("+test f\n  +with 1 -> expect 1\n");
+    test.cases[0].expected = p::Expr::Int(-1);
+    assert!(tests_print::print_block(&test)
+        .unwrap_err()
+        .contains("(#111)"));
+    test.cases[0].expected = p::Expr::Int(1);
+    test.cases[0].input = p::Expr::Call {
+        callee: Box::new(p::Expr::Ident("list".into())),
+        args: vec![p::Expr::Float(-2.0)],
+    };
+    assert!(tests_print::print_block(&test)
+        .unwrap_err()
+        .contains("(#111)"));
+    test.cases[0].input = p::Expr::Unary {
+        op: p::UnaryOp::Neg,
+        expr: Box::new(p::Expr::Int(-1)),
+    };
+    assert!(tests_print::print_block(&test)
+        .unwrap_err()
+        .contains("(#111)"));
+}
+
+#[test]
+fn every_other_negative_spelling_still_roundtrips_identically() {
+    for source in [
+        "+with {a: -1} -> expect -2",
+        "+with -3 -> expect -2.25",
+        "+with {_0: -1, _1: 2} -> expect 0",
+        "+with a=list(-1, 2) -> expect 0",
+        "+with {a: -1.5, b: -2} -> expect 0",
+    ] {
+        roundtrip(&format!("+test f\n  {source}\n"));
+    }
+}
+
+#[test]
+fn module_less_test_lowering_keeps_the_runtime_target_string() {
+    let text = "def test_case_1() -> None:\n    assert f(1) == 1\n\ndef test_case_2() -> None:\n    assert M.f(2) == 2\n\ndef test_case_3() -> None:\n    assert contains(f(3), \"x\")\n";
+    let lowered = super::lower_tests_toplevel(text).unwrap();
+    let names: Vec<_> = lowered
+        .operations
+        .iter()
+        .map(|op| match op {
+            p::Operation::Test(t) => t.function_name.clone(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(names, ["f", "M.f", "f"]);
+    assert!(
+        lowered.canonical_adapsis.contains("+test f")
+            && !lowered.canonical_adapsis.contains("+module")
+    );
+    // Module lowering is unchanged: bare targets are qualified, dotted ones kept.
+    let lowered = lower_tests(text, "M").unwrap();
+    let names: Vec<_> = lowered
+        .operations
+        .iter()
+        .map(|op| match op {
+            p::Operation::Test(t) => t.function_name.clone(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(names, ["M.f", "M.f", "M.f"]);
+    // The module-name check still guards the public entry point.
+    assert!(lower_tests(text, "").is_err());
+}

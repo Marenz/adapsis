@@ -107,3 +107,53 @@ pub(super) fn check_function(program: &ast::Program, name: &str) -> Check {
     }
     Ok(())
 }
+
+/// The whole module-less surface as ONE Python submission: types in program order, then
+/// functions in program order (so recursion, mutual recursion and forward references
+/// resolve inside a single lowering). Empty when the program has none.
+pub(super) fn print_all(program: &ast::Program) -> Result<String, (Status, String)> {
+    let mut parts = Vec::new();
+    for ty in &program.types {
+        parts.push(
+            python_frontend::print_toplevel_type(program, ty.name())
+                .map_err(|e| (Status::Unsupported, e.to_string()))?,
+        );
+    }
+    for function in &program.functions {
+        parts.push(
+            python_frontend::print_toplevel_function(program, &function.name)
+                .map_err(|e| (Status::Unsupported, e.to_string()))?,
+        );
+    }
+    Ok(parts.join("\n"))
+}
+
+/// Print and lower all module-less declarations against the program WITHOUT them (the
+/// validator's own duplicate rule stays in force). Returns the type operations, the
+/// function operations (to be applied after the modules) and the printed text.
+pub(super) fn lower_all(
+    program: &ast::Program,
+) -> Result<
+    (
+        Vec<crate::parser::Operation>,
+        Vec<crate::parser::Operation>,
+        String,
+    ),
+    (Status, String),
+> {
+    let text = print_all(program)?;
+    if text.is_empty() {
+        return Ok((Vec::new(), Vec::new(), text));
+    }
+    let mut rest = program.clone();
+    rest.types.clear();
+    rest.functions.clear();
+    rest.rebuild_function_index();
+    let lowered = python_frontend::lower_toplevel(&text, &rest)
+        .map_err(|e| (Status::Unsupported, e.to_string()))?;
+    let (types, functions) = lowered
+        .operations
+        .into_iter()
+        .partition(|op| matches!(op, crate::parser::Operation::Type(_)));
+    Ok((types, functions, text))
+}

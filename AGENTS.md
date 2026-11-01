@@ -618,8 +618,8 @@ replaces that branch with one composer.
   `tests_lower`: print, lower, Debug-equal per case, second print byte-identical, with the
   session's bare-name target rule (session.rs:636-641) required to name the same function
   as the module-qualified lowering. The Python test-data policy is unchanged (no records,
-  variants, calls, Result inputs), top-level blocks stay unsupported until a module-less
-  scope surface exists, and `success()` is untouched. Module-less TYPES (A1) have a
+  variants, calls, Result inputs), top-level blocks use the module-less surface below, and
+  `success()` is untouched. Module-less TYPES (A1) have a
   `#[cfg(test)]`-only surface with the real empty owner (`top_level.rs`,
   `print_toplevel_type`): unwrapped `Operation::Type`s, type-vs-module and type-vs-variant
   collisions refused, shared/lifecycle/route/source not part of it. A2 adds module-less
@@ -631,7 +631,12 @@ replaces that branch with one composer.
   `types::owned_name`; do not return to `resolved.contains('.')`, which misclassifies owner
   "". The printer prints a bare user call only at owner "" for a real `program.functions`
   entry. It has no authority model and must never be exposed to native tools. Current
-  strict counts: 251 verified / 58 invalid / 264 unsupported (54 files, 573 entries); the
+  strict counts: 291 verified / 58 invalid / 224 unsupported (54 files, 573 entries). A3
+  verifies whole programs (top-level types/functions printed as one submission, rebuilt
+  between types and modules, `equality::program`) and B2 module-less stored tests (the
+  lowered target must equal the runtime string `get_function` resolves; module blocks keep
+  the #110 session rule). The test printer refuses negative numeric CONSTANT nodes (#111,
+  keyword shorthand only; `Unary Neg` spellings are exact). The
   remaining top-level function blockers are G1 pseudo-fields, G2 `input`, G3 anonymous
   struct literals, G4 json_get typing, G5 shared `Some` (owner decisions).
   #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed

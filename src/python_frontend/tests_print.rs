@@ -142,6 +142,13 @@ fn arguments(input: &p::Expr) -> Result<String, String> {
     Ok(parts.join(", "))
 }
 
+/// #111: the parser yields a single negative CONSTANT (`Int(-1)`, `Float(-1.5)`) only for
+/// keyword shorthand (`+with a=-1`); every other spelling (`{a:-1}`, positional, list
+/// items, expectations) is `Unary Neg` over a positive constant, which is also what the
+/// Python lowerer builds. A negative constant node therefore has no Python spelling that
+/// lowers back to it, and printing `-1` would silently change the AST.
+const NEGATIVE_CONSTANT: &str = "a negative numeric constant (keyword shorthand `name=-1`) has no exact Python form: Python lowers `-1` to a unary minus, a different AST (#111)";
+
 /// What `expressions::literal` accepts, printed back.
 fn literal(expr: &p::Expr) -> Result<String, String> {
     match expr {
@@ -150,21 +157,17 @@ fn literal(expr: &p::Expr) -> Result<String, String> {
         p::Expr::Int(n) if *n == i64::MIN => {
             Err("-9223372036854775808 cannot roundtrip through the Adapsis lexer".into())
         }
+        p::Expr::Int(n) if *n < 0 => Err(NEGATIVE_CONSTANT.into()),
         p::Expr::Int(n) => Ok(n.to_string()),
+        p::Expr::Float(f) if f.is_finite() && f.is_sign_negative() => Err(NEGATIVE_CONSTANT.into()),
         p::Expr::Float(f) if f.is_finite() => Ok(format!("{f:?}")),
         p::Expr::Float(_) => Err("non-finite float is not a test literal".into()),
         p::Expr::Unary {
             op: p::UnaryOp::Neg,
             expr,
         } => match expr.as_ref() {
-            inner @ (p::Expr::Int(_) | p::Expr::Float(_)) => {
-                let text = literal(inner)?;
-                if text.starts_with('-') {
-                    Err("double sign is not a test literal".into())
-                } else {
-                    Ok(format!("-{text}"))
-                }
-            }
+            // A negative inner constant (double sign) is refused by `literal` itself.
+            inner @ (p::Expr::Int(_) | p::Expr::Float(_)) => Ok(format!("-{}", literal(inner)?)),
             _ => Err("a sign is only supported on one numeric constant".into()),
         },
         p::Expr::Call { callee, args } if is_ident(callee, "list") => {

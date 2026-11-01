@@ -46,9 +46,9 @@ fn python_parity_inventories_top_level_functions_types_tests_and_commands() {
         "+type Record = id:Int\n+fn f ()->Int\n  +return 1\n+end\n+test f\n  +with -> expect 1\n!eval f\n",
     );
     let report = run(fixture.path());
-    // Module-less TYPES (A1) and FUNCTIONS (A2) have a real (owner "") surface; stored
-    // tests, commands and whole programs stay open.
-    for kind in ["type", "function"] {
+    // Module-less TYPES (A1), FUNCTIONS (A2), stored TESTS and whole PROGRAMS (A3/B2)
+    // have a real (owner "") surface; only runtime commands stay open.
+    for kind in ["type", "function", "Test"] {
         assert!(
             report
                 .entries
@@ -57,15 +57,19 @@ fn python_parity_inventories_top_level_functions_types_tests_and_commands() {
             "{kind}: {report:?}"
         );
     }
-    for kind in ["Test", "Eval", "program"] {
-        assert!(
-            report
-                .entries
-                .iter()
-                .any(|entry| entry.kind == kind && entry.status != Status::Verified),
-            "{kind}: {report:?}"
-        );
-    }
+    let program = report
+        .entries
+        .iter()
+        .find(|entry| entry.kind == "program" && entry.file == "examples/probe.ax")
+        .unwrap();
+    assert_eq!(program.status, Status::Verified, "{report:?}");
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "Eval" && entry.status != Status::Verified),
+        "{report:?}"
+    );
     assert!(!report.success());
 }
 
@@ -267,15 +271,10 @@ fn python_parity_module_test_blocks_are_compared_as_cases_not_skipped() {
         entries[0].1.starts_with("case 2: call to Some"),
         "{entries:?}"
     );
-    // Top-level blocks wait for the module-less scope surface.
+    // Module-less blocks use the owner-"" surface (B2).
     let entries =
         test_entries("+fn f (n:Int)->Int\n  +return n\n+end\n+test f\n  +with 1 -> expect 1\n");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].0, Status::Unsupported);
-    assert!(
-        entries[0].1.contains("top-level stored test"),
-        "{entries:?}"
-    );
+    assert_eq!(entries, [(Status::Verified, String::new())]);
 }
 
 #[test]
@@ -368,4 +367,164 @@ fn python_parity_top_level_types_use_the_empty_owner_surface() {
     // Module types are untouched by the top-level path.
     let entries = type_entries("+module M\n+type P = x:Int\n+fn f ()->Int\n  +return 1\n+end\n");
     assert_eq!(entries[0].0, "M.P");
+}
+
+fn kind_entries(source: &str, kind: &str) -> Vec<(String, Status, String)> {
+    let fixture = corpus(source);
+    run(fixture.path())
+        .entries
+        .into_iter()
+        .filter(|entry| entry.kind == kind && entry.file == "examples/probe.ax")
+        .map(|entry| (entry.target, entry.status, entry.detail))
+        .collect()
+}
+
+const TOP_F: &str = "+fn f (n:Int)->Int\n  +return n\n+end\n";
+
+#[test]
+fn python_parity_top_level_test_blocks_keep_the_runtime_target_string() {
+    // Literal, keyword, matcher and Err forms; one entry per block.
+    let source = format!(
+        "{TOP_F}+test f\n  +with 1 -> expect 1\n  +with n=2 -> expect 2\n  +with {{n: -3}} -> expect -3\n  +with 4 -> expect contains(\"4\")\n"
+    );
+    assert_eq!(kind_entries(&source, "Test").len(), 1);
+    assert_eq!(kind_entries(&source, "Test")[0].1, Status::Verified);
+    // One inexpressible case keeps the whole block unsupported and names the case.
+    let entries = kind_entries(
+        &format!("{TOP_F}+test f\n  +with Some(1) -> expect 1\n"),
+        "Test",
+    );
+    assert_eq!(entries[0].1, Status::Unsupported);
+    assert!(
+        entries[0].2.starts_with("case 1: call to Some"),
+        "{entries:?}"
+    );
+    // A test for a function nobody declares is a source defect.
+    let entries = kind_entries(
+        &format!("{TOP_F}+test missing\n  +with 1 -> expect 1\n"),
+        "Test",
+    );
+    assert_eq!(entries[0].1, Status::InvalidProgram);
+    assert!(
+        entries[0].2.contains("undeclared function `missing`"),
+        "{entries:?}"
+    );
+    // A dotted target stays dotted; a bare target that only a MODULE defines is the
+    // string the runtime resolves through Program::get_function, so it is exact too.
+    let module = "+module T\n+fn g (n:Int)->Int\n  +return n\n+end\n";
+    for target in ["T.g", "g"] {
+        let entries = kind_entries(
+            &format!("{module}+test {target}\n  +with 1 -> expect 1\n"),
+            "Test",
+        );
+        assert_eq!(entries[0].1, Status::Verified, "{target}: {entries:?}");
+    }
+    // The session-rule refusal (#110) is MODULE-scoped and unchanged: a module block
+    // `+test g` runs a same-named TOP-LEVEL `g`, while the module lowering targets T.g.
+    let source =
+        format!("+fn g (n:Int)->Int\n  +return n\n+end\n{module}+test g\n  +with 1 -> expect 1\n");
+    let entries = kind_entries(&source, "Test");
+    assert_eq!(entries[0].1, Status::Unsupported, "{entries:?}");
+    assert!(entries[0].2.contains("(#110)"), "{entries:?}");
+}
+
+#[test]
+fn python_parity_keyword_shorthand_negatives_are_unsupported_never_mismatched() {
+    // #111: `name=-1` parses to Int(-1); Python's `-1` lowers to Unary Neg.
+    for case in ["n=-1", "n=-1.5", "n=-0.0"] {
+        let source = format!("{TOP_F}+test f\n  +with {case} -> expect 1\n");
+        let entries = kind_entries(&source, "Test");
+        assert_eq!(entries[0].1, Status::Unsupported, "{case}: {entries:?}");
+        assert!(entries[0].2.contains("(#111)"), "{case}: {entries:?}");
+        // Module-scoped blocks share the printer, so they are refused the same way.
+        let source = format!("{MODULE_F}+test f\n  +with {case} -> expect 1\n");
+        let entries = kind_entries(&source, "Test");
+        assert_eq!(entries[0].1, Status::Unsupported, "{case}: {entries:?}");
+    }
+    // Every other spelling of a negative stays exact.
+    for case in [
+        "{n: -1}",
+        "-1",
+        "{_0: -1, _1: 2}",
+        "n=list(-1)",
+        "{n: -1.5}",
+    ] {
+        let source = format!("{TOP_F}+test f\n  +with {case} -> expect -2\n");
+        let entries = kind_entries(&source, "Test");
+        assert_eq!(entries[0].1, Status::Verified, "{case}: {entries:?}");
+    }
+}
+
+#[test]
+fn python_parity_whole_programs_roundtrip_top_level_and_module_declarations() {
+    // Types + mutually recursive functions + a module using a top-level type.
+    let source = "+type Point = x:Int, y:Int\n+fn is_even (n:Int)->Bool\n  +if n == 0\n    +return true\n  +end\n  +return is_odd(n - 1)\n+end\n+fn is_odd (n:Int)->Bool\n  +if n == 0\n    +return false\n  +end\n  +return is_even(n - 1)\n+end\n+module Geo\n+fn origin ()->Point\n  +return {x: 0, y: 0}\n+end\n";
+    let entries = kind_entries(source, "program");
+    assert_eq!(
+        entries,
+        [(String::new(), Status::Verified, String::new())],
+        "{entries:?}"
+    );
+    // Top-level only, and module only (unchanged behavior), also verify.
+    let entries = kind_entries(&format!("{TOP_F}"), "program");
+    assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
+    let entries = kind_entries(MODULE_F, "program");
+    assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
+}
+
+#[test]
+fn python_parity_whole_program_reports_the_first_unprintable_member() {
+    // An unprintable top-level member keeps the program Unsupported with ITS reason.
+    let entries = kind_entries("+fn f (input:Int)->Int\n  +return input\n+end\n", "program");
+    assert_eq!(entries[0].1, Status::Unsupported);
+    assert!(entries[0].2.contains("top-level function f"), "{entries:?}");
+    let entries = kind_entries("+type Env = vars:Int, other:Int\n", "program");
+    assert_eq!(entries[0].1, Status::Unsupported);
+    assert!(entries[0].2.contains("top-level type Env"), "{entries:?}");
+    // A module that calls a top-level function bare is still unprintable: only owner ""
+    // may print a bare user call.
+    let entries = kind_entries(
+        "+fn leaf (n:Int)->Int\n  +return n\n+end\n+module M\n+fn g (n:Int)->Int\n  +return leaf(n)\n+end\n",
+        "program",
+    );
+    assert_eq!(entries[0].1, Status::Unsupported);
+    assert!(
+        entries[0].2.contains("unqualified user call leaf"),
+        "{entries:?}"
+    );
+}
+
+#[test]
+fn python_parity_lowered_test_target_must_equal_the_runtime_string() {
+    let text = "def test_case_1() -> None:\n    assert f(1) == 1\n";
+    assert!(test_blocks::lower(text, "", "f").is_ok());
+    assert!(test_blocks::lower(text, "M", "M.f").is_ok());
+    for (scope, wrong) in [("", "g"), ("", "M.f"), ("M", "f"), ("M", "N.f")] {
+        let err = test_blocks::lower(text, scope, wrong).unwrap_err();
+        assert_eq!(err.0, Status::AstMismatch, "{scope}/{wrong}");
+        assert!(err.1.contains("differs from"), "{err:?}");
+    }
+}
+
+#[test]
+fn python_parity_whole_program_text_is_stable_across_a_rebuild() {
+    let source = "+type Point = x:Int, y:Int\n+fn a (n:Int)->Int\n  +return b(n)\n+end\n+fn b (n:Int)->Int\n  +return n\n+end\n+module M\n+fn g (n:Int)->Int\n  +return n\n+end\n";
+    let original = program(source);
+    let (types, functions, text) = top_level::lower_all(&original).unwrap();
+    assert!(text.contains("class Point") && text.contains("def a(") && text.contains("def b("));
+    assert!(text.find("class Point").unwrap() < text.find("def a(").unwrap());
+    let mut rebuilt = ast::Program::default();
+    build_into(&mut rebuilt, &types).unwrap();
+    for module in &original.modules {
+        let printed = super::super::print_module(&original, &module.name).unwrap();
+        let lowered =
+            super::super::lower_module_with_program(&printed, &module.name, &original).unwrap();
+        build_into(&mut rebuilt, &lowered.operations).unwrap();
+    }
+    build_into(&mut rebuilt, &functions).unwrap();
+    assert!(equality::program(&original, &rebuilt));
+    assert_eq!(text, top_level::print_all(&rebuilt).unwrap());
+    // The empty surface prints and lowers to nothing (module-only programs).
+    let (types, functions, text) = top_level::lower_all(&program(MODULE_F)).unwrap();
+    assert!(types.is_empty() && functions.is_empty() && text.is_empty());
 }

@@ -76,6 +76,8 @@ pub(crate) use references::COLLISION as CONSTRUCTOR_ROLE_ERROR;
 pub(crate) use call_sites::runtime_shadowed;
 pub use type_bindings::check_native_type_bindings;
 pub use tests_lower::{lower_input, lower_tests};
+#[cfg(test)]
+pub(crate) use tests_lower::lower_tests_toplevel;
 /// Test-only: module-less (top-level) lowering/printing. See `top_level.rs`.
 #[cfg(test)]
 pub(crate) fn lower_toplevel(source: &str, program: &crate::ast::Program) -> Result<LoweredSource, Diagnostic> {

@@ -2,7 +2,49 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — A2 (module-less functions, owner ""), baseline `5057d8a`
+### Current pending slice — A3+B2 (whole programs + module-less stored tests), baseline `58b6999`
+
+- `#[cfg(test)]` / harness only; no runtime, validator, native-tool, fixture, `lower.rs`,
+  `expressions.rs`, `types.rs` or `printer.rs` change; `success()` untouched.
+- A3 `check_program`: top-level types + functions are printed as ONE module-less submission
+  (`parity/top_level.rs::print_all`: types in program order, then functions), lowered by
+  `lower_toplevel` against the program WITHOUT them, and rebuilt in the order top-level types
+  -> modules (unchanged `print_module`/`lower_module_with_program` path) -> top-level
+  functions. Then `equality::program` over the whole Program, the module reprints and the
+  top-level reprint must be byte-identical. Module-only programs are unchanged. Per-member
+  exactness is already enforced inside `print_toplevel_type/function`, so a failing member
+  surfaces its own reason as the program's reason.
+- B2 `parity/test_blocks.rs`: owner-"" blocks are exact BY CONSTRUCTION. The runtime runs
+  `+test name` against `name` verbatim (`Program::get_function`: top-level first, else the
+  first module), and the new test-only `tests_lower::lower_tests_toplevel` keeps a bare
+  target bare and a dotted target dotted (`qualify` now uses `types::owned_name`, identical
+  to the old `format!` for every module). The harness requires the target to exist
+  (InvalidProgram otherwise) and every lowered declaration to carry exactly the runtime
+  string (AstMismatch otherwise). Module-scoped blocks keep the session rule (#110).
+  `tests_lower.rs` is the one non-harness file touched (behavior-neutral refactor +
+  the cfg(test) entry). The Python test-data literal policy is unchanged.
+- #111: `tests_print::literal` refuses any NEGATIVE numeric constant node (`Int(<0)`,
+  sign-negative `Float`) with an explicit reason. The parser yields such a node only for
+  keyword shorthand (`+with a=-1`); `{a:-1}`, positional, list items and expectations are
+  `Unary Neg`, which Python's `-1` also lowers to. Without the refusal two corpus blocks
+  (`simple_syntax` #4, #5) are AstMismatch; with it they are Unsupported (#111).
+- Strict PARITY before -> after (same 54 files / 573 entries): verified 251 -> 291 (+40),
+  unsupported 264 -> 224, invalid 58, mismatches 0, non-idempotent 0. Entry-by-entry diff
+  (67 entries changed, none left Verified): 30 top-level `Test` Unsupported -> Verified,
+  10 `program` Unsupported -> Verified, 13 `Test` and 14 `program` stay Unsupported with a
+  concrete reason (test data outside the literal policy: `Some`, records, calls; `input`,
+  pseudo-field, anonymous-literal, `vars` blockers; unprintable module bare calls).
+- Evidence: 9 new unit/harness tests (6 in `parity/tests.rs`, 3 in
+  `tests_print_tests.rs`) plus 2 changed existing `parity/tests.rs` tests. 11 mutations (negative Int, negative Float, target existence,
+  target-string equality, module entry for owner "", `qualify`, top-level function rebuild,
+  top-level type rebuild, catalog keeping top-level functions, type ordering) each fail
+  the intended tests; files restored and verified. ONE surviving mutation, documented:
+  dropping the top-level REPRINT comparison in `check_program` is undetected because no
+  natural fixture produces a non-deterministic printer (the equivalent module check is
+  likewise covered only through `same_text` itself); `print_all` determinism across a
+  rebuild is asserted directly instead.
+
+### Accepted slice — A2 (module-less functions, owner ""), baseline `5057d8a`
 
 - `#[cfg(test)]` surface only; no authority model, never reachable from native tools or any
   runtime path. `success()` untouched; frozen corpus untouched.
