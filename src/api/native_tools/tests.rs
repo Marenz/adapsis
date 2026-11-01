@@ -30,6 +30,8 @@ mod python_reference_tests;
 mod python_shared_tests;
 #[path = "json_kind_tests.rs"]
 mod json_kind_tests;
+#[path = "json_valid_tests.rs"]
+mod json_valid_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

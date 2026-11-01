@@ -76,6 +76,7 @@ pub(super) fn catalog() -> &'static [BuiltinSig] {
             entry("trim", vec![s()], s()),
             entry("json_get", vec![s(), s()], s()),
             entry("json_kind", vec![s(), s()], s()),
+            entry("json_valid", vec![s()], b()),
             entry("json_array_len", vec![s()], i()),
             entry("json_escape", vec![s()], s()),
             entry("base64_encode", vec![s()], s()),

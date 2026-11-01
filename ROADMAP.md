@@ -2,7 +2,18 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — polling slice A, baseline `8c38ace`
+### Current pending slice — json_valid primitive, baseline `614051a`
+
+- Runtime/registry/catalog/prompt/docs/tests only; no Telegram fixture edits. Pure
+  total `json_valid(String)->Bool` == the shared serde parse step of json_get/json_kind/
+  json_array_len succeeds; not strict RFC 8259. serde's 128 recursion budget makes >127
+  nested containers false (clean Err->false, no stack overflow, incl. 100_000 brackets);
+  1e400 false; u64 max valid (validity != representability: json_kind still errors).
+  Arity/non-String error like json_kind. JIT refuses implicitly (no json_* lowering),
+  proven like json_kind; module functions are never JIT-compiled.
+- Adoption (poll_once guard only; dispatch_updates unchanged) is slice B.
+
+### Accepted checkpoint `614051a` — polling slice A (baseline `8c38ace`)
 
 - Fixtures/tests/docs only. Four originals: extract_update_id (unchanged AST/doc,
   original 42/0 cases), init (unchanged), handle_update (spawn-target qualification

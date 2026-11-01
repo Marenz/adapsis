@@ -131,6 +131,19 @@ even when its aggregate `has_errors` remains false. Such output is an error, not
 one of the eight valid kind Strings; the primitive does not repair that existing
 native status-reporting limitation.
 
+`json_valid(payload: str) -> bool` is a pure total builtin; do not await it. It is true
+iff the shared JSON parse step used by `json_get`/`json_kind`/`json_array_len`
+succeeds; it is **not strict RFC 8259**. Nesting deeper than 127 containers and
+non-finite numbers such as `1e400` are false. It never errors for any `str`:
+empty, truncated, BOM-prefixed, HTML or trailing-garbage text is simply `False`.
+Validity is not representability: `18446744073709551615` is valid while
+`json_kind` still errors on it. Wrong arity or a non-`str` argument is a lowering error.
+
+```python
+def usable(body: str) -> bool:
+    return json_valid(body)
+```
+
 ## Direct IO match runtime limitation (#94)
 
 The no-await direct builtin `match http_get(url):` form is admitted by the

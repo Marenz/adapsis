@@ -163,3 +163,165 @@ fn json_kind_invalid_arguments_and_json_get_regressions() {
         Value::Bool(false)
     ));
 }
+
+fn valid_of(text: &str) -> bool {
+    match valid(&[Value::string(text)]).expect("json_valid is total on String") {
+        Value::Bool(value) => value,
+        other => panic!("not Bool: {other}"),
+    }
+}
+
+fn nested(depth: usize) -> String {
+    format!("{}{}", "[".repeat(depth), "]".repeat(depth))
+}
+
+#[test]
+fn json_valid_accepts_what_the_shared_parser_accepts() {
+    for text in [
+        "{}",
+        "[]",
+        "0",
+        "-0",
+        "1.5",
+        "1e5",
+        "true",
+        "null",
+        r#""x""#,
+        r#""""#,
+        r#"{"a":[1,{"b":null}]}"#,
+        " \n\t\r{} \n",
+        r#"{"a":1,"a":2}"#,
+        r#"{"ä":"😀 \ud83d\ude00 \u00e4"}"#,
+        "123456789012345678901234567890",
+        "18446744073709551615",
+        "-9223372036854775809",
+        "1e-400",
+    ] {
+        assert!(valid_of(text), "{text}");
+    }
+    // serde_json decrements a 128 budget per container and fails at zero, so 127
+    // nested containers is the deepest accepted document.
+    assert!(valid_of(&nested(127)));
+}
+
+#[test]
+fn json_valid_rejects_malformed_text_without_erroring() {
+    let nul = "{\0}";
+    let bom = "\u{feff}{}";
+    for text in [
+        "",
+        "   ",
+        "\n\t",
+        "{",
+        "[1,",
+        r#"{"a":1,}"#,
+        "[1,]",
+        "{'a':1}",
+        "01",
+        "+1",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        ".5",
+        "1.",
+        "tru",
+        "{} x",
+        "1 2",
+        "// c\n{}",
+        "/* c */ {}",
+        "<html>bad gateway</html>",
+        r#"{"a":"unterminated"#,
+        r#"{"a":"bad \"#,
+        "\"raw\nnewline\"",
+        r#""\ud800""#,
+        r#""\u12""#,
+        bom,
+        nul,
+        "1e400",
+        "-1e400",
+    ] {
+        assert!(!valid_of(text), "{text:?}");
+    }
+    // Beyond serde_json's 128 limit the parser reports an error; it must not
+    // recurse, overflow the (test thread) stack or panic.
+    assert!(!valid_of(&nested(128)));
+    assert!(!valid_of(&nested(129)));
+    assert!(!valid_of(&"[".repeat(100_000)));
+    assert!(!valid_of(&format!(
+        "{}1{}",
+        "{\"a\":".repeat(100_000),
+        "}".repeat(100_000)
+    )));
+}
+
+#[test]
+fn json_valid_is_validity_not_representability_and_matches_the_shared_parse_step() {
+    // Valid JSON the representation-checking primitives still reject.
+    assert!(valid_of("18446744073709551615"));
+    assert!(kind(&args("18446744073709551615", ""))
+        .unwrap_err()
+        .to_string()
+        .contains("outside signed 64-bit range"));
+    // For every String: json_valid == false  <=>  all three parse-step users report
+    // "invalid JSON"; json_valid == true  =>  none of them fails at the parse step.
+    let nul = "{\0}".to_string();
+    let corpus = [
+        "",
+        "{",
+        "[1,",
+        "{} x",
+        "1e400",
+        "18446744073709551615",
+        "{}",
+        "[]",
+        "null",
+        "-0",
+        "\u{feff}{}",
+        nul.as_str(),
+        "<html></html>",
+        r#"{"a":[1]}"#,
+        "1e-400",
+    ];
+    let deep = nested(129);
+    for text in corpus.into_iter().chain([deep.as_str()]) {
+        let parse_failed = |result: anyhow::Result<Value>| {
+            result.is_err_and(|e| e.to_string().contains("invalid JSON"))
+        };
+        let get_failed = parse_failed(get(&args(text, "")));
+        let kind_failed = parse_failed(kind(&args(text, "")));
+        let len_failed = parse_failed(crate::eval::eval_builtin_string(
+            "json_array_len",
+            vec![Value::string(text)],
+        ));
+        let valid = valid_of(text);
+        assert_eq!(get_failed, kind_failed, "{text:?}");
+        assert_eq!(valid, !get_failed, "{text:?}");
+        // json_array_len also parse-fails exactly when json_valid is false (a valid
+        // non-array fails with a different, non-parse message).
+        assert_eq!(valid, !len_failed, "{text:?}");
+    }
+}
+
+#[test]
+fn json_valid_arity_and_argument_types_error_but_strings_never_do() {
+    for bad in [vec![], vec![Value::string("{}"), Value::string("")]] {
+        assert_eq!(
+            valid(&bad).unwrap_err().to_string(),
+            "json_valid(json) expects 1 argument"
+        );
+    }
+    for bad in [
+        Value::Int(1),
+        Value::Bool(true),
+        Value::None,
+        Value::Float(1.0),
+    ] {
+        assert_eq!(
+            valid(&[bad]).unwrap_err().to_string(),
+            "json_valid expects (String)"
+        );
+    }
+    for text in ["", "{", "ä", "\0", "1e400", &"[".repeat(1000)] {
+        assert!(valid(&[Value::string(text)]).is_ok());
+    }
+}

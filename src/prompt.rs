@@ -238,6 +238,16 @@ rounded by serde. Parser numeric overflow fails. This is not lexical precision.
 coerce them. In the Python subset the helper is also `(str, str) -> str`:
 `return json_kind(payload, "message.photo") != "missing"` (no await/import).
 
+`json_valid(json:String) -> Bool` is pure (no `+await`) and is true iff the shared
+JSON parse step used by json_get/json_kind/json_array_len succeeds; it is not strict
+RFC 8259. Nesting deeper than 127 containers (serde_json's recursion limit) and
+non-finite numbers like 1e400 are false. It never errors for any String: empty,
+truncated, BOM-prefixed, HTML or trailing-garbage text returns false. Validity is not
+representability: a u64 above i64::MAX is valid while json_kind still rejects it.
+Non-String arguments or wrong arity error. Python subset: `(str) -> bool`:
+`if not json_valid(body): return "bad body"`. Use it before json_get/json_kind when
+the input is untrusted and a parse failure must not abort the function.
+
 ### Edit Operations
 !replace function_name.s1            — replace statement 1 of a function
   +check age input.age>=0 AND input.age<=150 ~err_age_range

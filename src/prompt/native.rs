@@ -29,6 +29,14 @@ JSON/type/arity errors are not successful kind labels. This does not fix json_ge
 typing or grant authority to inspect anything outside the supplied JSON text.
 Example function body: return json_kind(payload, "message.photo")
 
+json_valid(payload) takes exactly one str and returns bool without IO or await. It is
+true iff the shared JSON parse step used by json_get/json_kind/json_array_len
+succeeds; it is not strict RFC 8259. Nesting deeper than 127 containers and
+non-finite numbers like 1e400 are false. It never errors for any str: empty,
+truncated, BOM-prefixed, HTML or trailing-garbage text returns false. Validity is not
+representability: a u64 above i64::MAX is valid but json_kind still rejects it.
+Non-str arguments or wrong arity error. Example: return json_valid(payload)
+
 ## Preferred workflow: typed Python source
 Use language="python" for mutate, test and evaluate, and format="python" for
 source inspection. This is a guarded Python-syntax frontend over the typed

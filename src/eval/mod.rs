@@ -2718,6 +2718,7 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
         }
         "json_get" => json::get(&args),
         "json_kind" => json::kind(&args),
+        "json_valid" => json::valid(&args),
         "json_array_len" => {
             if args.len() != 1 {
                 bail!("json_array_len(json) expects 1 argument");
@@ -3490,7 +3491,8 @@ pub fn eval_builtin_or_user(
         "len" | "length" | "error_suggest" | "failure_suggest" | "concat" | "to_string" | "str"
         | "char_at" | "substring" | "substr" | "starts_with" | "ends_with" | "contains"
         | "regex_match" | "regex_replace" | "index_of" | "split" | "trim" | "json_get"
-        | "json_kind" | "json_array_len" | "json_escape" | "home_dir" | "base64_encode" => {
+        | "json_kind" | "json_valid" | "json_array_len" | "json_escape" | "home_dir"
+        | "base64_encode" => {
             eval_builtin_string(callee, args)
         }
         // List operations

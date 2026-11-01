@@ -79,5 +79,20 @@ pub(super) fn kind(args: &[Value]) -> Result<Value> {
     Ok(Value::string(result))
 }
 
+/// `json_valid(text)`: true iff the parse step shared by json_get/json_kind/
+/// json_array_len succeeds. Total on String input -- malformed text, depth over
+/// serde_json's recursion limit (more than 127 nested containers) and non-finite numbers such as 1e400 are `false`, never
+/// an error. Validity is NOT representability: a represented u64 above i64::MAX is
+/// valid here while json_kind still rejects it. Arity/type errors match json_kind.
+pub(super) fn valid(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        bail!("json_valid(json) expects 1 argument");
+    }
+    let Value::String(text) = &args[0] else {
+        bail!("json_valid expects (String)");
+    };
+    Ok(Value::Bool(serde_json::from_str::<Json>(text).is_ok()))
+}
+
 #[cfg(test)]
 mod tests;

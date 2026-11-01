@@ -493,6 +493,7 @@ pub static BUILTINS: &[Builtin] = &[
     // JSON
     json::GET,
     json::KIND,
+    json::VALID,
     json::ARRAY_LEN,
     json::ESCAPE,
 ];

@@ -225,6 +225,19 @@ now uses json_kind before conversion/auth/IO; the original #105 presence asserti
 pass without exemptions. This is not a change to original process_update or a
 general fix of json_get's static catalog.
 
+`json_valid(json:String) -> Bool` (separate checkpoint) is pure, exact arity one, no
+aliases or await, in `eval/json.rs` + `builtins/json.rs`. Contract: true iff the shared
+JSON parse step used by json_get/json_kind/json_array_len succeeds; it is not strict
+RFC 8259. serde_json decrements a 128 budget per container, so nesting deeper than 127
+containers is false (a clean `Err`, never a stack overflow; nothing in this tree disables
+the limit) and non-finite numbers such as 1e400 are false. It never errors for any
+String (malformed, empty, truncated, BOM, NUL, HTML, trailing garbage); arity/non-String
+arguments error like json_kind. **Validity is not representability**: a represented u64
+above i64::MAX is valid while json_kind errors, so never route integer-ID validation
+through it. The JIT only compiles top-level functions and has no json_* lowering
+(`undefined function` refusal, same as json_kind); VM/tree share eval_builtin_or_user.
+Adoption in the Telegram port (poll_once guard) is a later checkpoint.
+
 ## Key Adapsis Commands
 ```
 +module Name          — switch module context (all +fn/+type after go here)
