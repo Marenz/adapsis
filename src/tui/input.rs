@@ -75,6 +75,10 @@ pub(crate) fn handle_key(state: &mut AppState, key: KeyEvent) -> Action {
     {
         return Action::Quit;
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+        state.show_thinking = !state.show_thinking;
+        return Action::None;
+    }
     if state.help_visible {
         if matches!(key.code, KeyCode::Esc | KeyCode::F(1)) {
             state.help_visible = false;
@@ -183,6 +187,22 @@ mod tests {
             Action::None
         );
         assert_eq!(state.composer.text(), "wait");
+    }
+
+    #[test]
+    fn ctrl_t_toggles_thinking_without_touching_the_composer() {
+        let mut state = AppState::new("local".to_string());
+        state.composer.insert_str("draft");
+        assert!(!state.show_thinking);
+        assert_eq!(
+            handle_key(&mut state, key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            Action::None
+        );
+        assert!(state.show_thinking);
+        assert_eq!(state.composer.text(), "draft");
+        handle_key(&mut state, key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(!state.show_thinking);
+        assert_eq!(state.composer.text(), "draft");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use reqwest::{Client, Response, StatusCode, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::error::Error;
-use std::io::{self, Write};
+use std::io;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
@@ -13,6 +13,9 @@ const MAX_SERVER_RETRY_DELAY: Duration = Duration::from_secs(15 * 60);
 
 mod native;
 mod tool_call;
+#[cfg(test)]
+#[path = "llm/logging_tests.rs"]
+mod logging_tests;
 
 #[allow(unused_imports)]
 pub use native::{NativeResponse, NativeStreamEvent, TurnRequest};
@@ -67,23 +70,67 @@ impl LlmError {
 
 impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Raw provider body may echo the prompt or reasoning, so `Display` is
+        // always error class + byte length only (#88) — this is what both the
+        // default journal entries and the user-facing apology show. The full
+        // body is available via `with_body()` for opt-in debugging.
         match self {
             Self::Api {
                 status,
                 body,
                 retry_after,
             } => {
-                write!(f, "LLM API error {status}: {}", body.chars().take(500).collect::<String>())?;
+                write!(f, "LLM API error {status} ({} byte body)", body.len())?;
                 if let Some(delay) = retry_after {
                     write!(f, " (retry after {}s)", delay.as_secs())?;
                 }
                 Ok(())
             }
-            Self::Transport { message, .. } => write!(f, "{message}"),
-            Self::Streaming(message) => write!(f, "{message}"),
-            Self::Decode(message) => write!(f, "{message}"),
+            Self::Transport { message, .. } => write!(f, "LLM transport error ({} detail bytes)", message.len()),
+            Self::Streaming(message) => write!(f, "LLM streaming error ({} detail bytes)", message.len()),
+            Self::Decode(message) => write!(f, "LLM decode error ({} detail bytes)", message.len()),
         }
     }
+}
+
+impl LlmError {
+    /// Full rendering including the provider body, for opt-in debugging only
+    /// (`ADAPSIS_LOG_CONTENT=1`). Never used for user-facing text.
+    pub fn with_body(&self) -> String {
+        match self {
+            Self::Api {
+                status,
+                body,
+                retry_after,
+            } => {
+                let mut rendered = format!(
+                    "LLM API error {status}: {}",
+                    body.chars().take(500).collect::<String>()
+                );
+                if let Some(delay) = retry_after {
+                    rendered.push_str(&format!(" (retry after {}s)", delay.as_secs()));
+                }
+                rendered
+            }
+            Self::Transport { message, .. } | Self::Streaming(message) | Self::Decode(message) => message.clone(),
+        }
+    }
+}
+
+/// Render an error for a journal/log site: class-only by default, or with the
+/// provider body when `ADAPSIS_LOG_CONTENT` is enabled (#88).
+pub fn render_error(error: &anyhow::Error) -> String {
+    if crate::logging::content() {
+        if let Some(llm_error) = error.downcast_ref::<LlmError>() {
+            return llm_error.with_body();
+        }
+    }
+    if let Some(LlmError::Api { status, body, .. }) = error.downcast_ref::<LlmError>() {
+        return format!("LLM API error {status} ({} byte body)", body.len());
+    }
+    // serde/regex/reqwest/anyhow messages are not safe metadata, even when the
+    // raw response body was removed by their constructor.
+    crate::logging::render("provider-error", &error.to_string())
 }
 
 impl std::error::Error for LlmError {}
@@ -478,6 +525,20 @@ impl OpenAiBackend {
     }
 
     async fn generate_streaming(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput> {
+        self.generate_streaming_into(http, request, io::stdout()).await
+    }
+
+    /// Streaming generation with a caller-supplied sink for the incremental
+    /// `[thinking]`/`[code]` echo. Content is written to the sink **only** when
+    /// `ADAPSIS_LOG_CONTENT` is set (issue #88); metadata (`[llm:usage]`,
+    /// `[llm:done]`) still goes to stderr. This indirection makes the gate
+    /// testable without capturing process stdout.
+    async fn generate_streaming_into(
+        &self,
+        http: &Client,
+        request: &LlmRequest,
+        mut sink: impl std::io::Write,
+    ) -> Result<LlmOutput> {
         let req = http
             .post(self.endpoint())
             .json(&self.request_body(request, true));
@@ -487,13 +548,13 @@ impl OpenAiBackend {
         let mut thinking_text = String::new();
         let mut content_text = String::new();
         let mut in_thinking = false;
-        let mut stdout = io::stdout();
         let mut usage: Option<TokenUsage> = None;
 
         let chunk_timeout = Duration::from_secs(120);
         let mut response = response;
         let mut chunk_count: u64 = 0;
         let stream_start = std::time::Instant::now();
+        let log_content = crate::logging::content();
         loop {
             let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
                 Ok(Ok(Some(chunk))) => chunk,
@@ -505,8 +566,10 @@ impl OpenAiBackend {
 
             for data in parser.feed(&chunk) {
                 if data == "[DONE]" {
-                    stdout.flush().ok();
-                    println!();
+                    if log_content {
+                        let _ = sink.write_all(b"\n");
+                    }
+                    sink.flush().ok();
                     let output = build_output_with_usage(thinking_text, content_text, usage);
                     if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
                         eprintln!("[llm:usage] {}", output.usage.summary());
@@ -515,7 +578,7 @@ impl OpenAiBackend {
                 }
 
                 let chunk: ChatCompletionChunk = serde_json::from_str(&data)
-                    .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to parse SSE chunk: {error}; chunk={data}"))))?;
+                    .map_err(|error| anyhow!(LlmError::Streaming(format!("failed to parse SSE chunk: {error}; chunk={} bytes", data.len()))))?;
                 if chunk.usage.is_some() {
                     usage = chunk.usage;
                 }
@@ -525,10 +588,14 @@ impl OpenAiBackend {
                         if !in_thinking {
                             in_thinking = true;
                             eprintln!("[llm:thinking] started (+{}ms, {} chunks)", stream_start.elapsed().as_millis(), chunk_count);
-                            print!("[thinking] ");
+                            if log_content {
+                                let _ = sink.write_all(b"[thinking] ");
+                            }
                         }
-                        print!("{reasoning}");
-                        stdout.flush().ok();
+                        if log_content {
+                            let _ = sink.write_all(reasoning.as_bytes());
+                            let _ = sink.flush();
+                        }
                         thinking_text.push_str(&reasoning);
                     }
 
@@ -536,19 +603,24 @@ impl OpenAiBackend {
                         if in_thinking {
                             in_thinking = false;
                             eprintln!("[llm:content] thinking done ({}chars), content starting (+{}ms)", thinking_text.len(), stream_start.elapsed().as_millis());
-                            println!();
-                            print!("[code] ");
+                            if log_content {
+                                let _ = sink.write_all(b"\n[code] ");
+                            }
                         }
-                        print!("{content}");
-                        stdout.flush().ok();
+                        if log_content {
+                            let _ = sink.write_all(content.as_bytes());
+                            let _ = sink.flush();
+                        }
                         content_text.push_str(&content);
                     }
                 }
             }
         }
 
-        stdout.flush().ok();
-        println!();
+        if log_content {
+            let _ = sink.write_all(b"\n");
+        }
+        sink.flush().ok();
         eprintln!("[llm:done] {} chunks in {}ms, thinking={}chars content={}chars", chunk_count, stream_start.elapsed().as_millis(), thinking_text.len(), content_text.len());
         let output = build_output_with_usage(thinking_text, content_text, usage);
         if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
@@ -846,10 +918,12 @@ where
 
     pub async fn generate(&self, messages: Vec<ChatMessage>) -> Result<LlmOutput> {
         info!("LLM request: {} messages, temp={}, max_tokens={}", messages.len(), self.temperature, self.max_tokens);
-        for (i, msg) in messages.iter().enumerate() {
-            let role = format!("{:?}", msg.role).to_lowercase();
-            let content = msg.content.debug_summary();
-            debug!("[msg {i}] {role} ({} chars):\n{}", content.len(), content);
+        if crate::logging::content() {
+            for (i, msg) in messages.iter().enumerate() {
+                let role = format!("{:?}", msg.role).to_lowercase();
+                let content = msg.content.debug_summary();
+                debug!("[msg {i}] {role} ({} chars):\n{}", content.len(), content);
+            }
         }
 
         let request = LlmRequest {
@@ -865,14 +939,16 @@ where
                 Ok(output) => {
                     info!("LLM response: thinking={} chars, code={} chars, text={} chars",
                         output.thinking.len(), output.code.len(), output.text.len());
-                    if !output.thinking.is_empty() {
-                        debug!("[thinking]:\n{}", output.thinking);
-                    }
-                    if !output.code.is_empty() {
-                        debug!("[code]:\n{}", output.code);
-                    }
-                    if !output.text.is_empty() {
-                        debug!("[text]:\n{}", output.text);
+                    if crate::logging::content() {
+                        if !output.thinking.is_empty() {
+                            debug!("[thinking]:\n{}", output.thinking);
+                        }
+                        if !output.code.is_empty() {
+                            debug!("[code]:\n{}", output.code);
+                        }
+                        if !output.text.is_empty() {
+                            debug!("[text]:\n{}", output.text);
+                        }
                     }
                     return Ok(output);
                 }
@@ -890,7 +966,11 @@ where
                             attempt + 2,
                             MAX_LLM_RETRIES,
                             delay.as_millis(),
-                            llm_error
+                            if crate::logging::content() {
+                                llm_error.with_body()
+                            } else {
+                                llm_error.to_string()
+                            }
                         );
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
@@ -950,7 +1030,7 @@ async fn stream_sse_to_channel(
             }
 
             let Ok(parsed) = serde_json::from_str::<ChatCompletionChunk>(&data) else {
-                warn!("failed to parse SSE chunk: {data}");
+                warn!("failed to parse SSE chunk ({} bytes)", data.len());
                 continue;
             };
             if parsed.usage.is_some() {
@@ -1561,5 +1641,84 @@ mod tests {
 
         assert_eq!(message.role, ChatRole::User);
         assert!(message.cache_control.is_none());
+    }
+
+    /// #88: streamed reasoning/content must not reach captured output by
+    /// default, and must when `ADAPSIS_LOG_CONTENT` is enabled.
+    #[tokio::test]
+    async fn streamed_completion_content_is_gated_by_log_content() {
+        if !crate::logging::tests::child() {
+            for enabled in [false, true] {
+                let captured = crate::logging::tests::capture(
+                    "llm::tests::streamed_completion_content_is_gated_by_log_content", enabled);
+                assert_eq!(captured.contains("SECRET_REASONING"), enabled);
+                assert_eq!(captured.contains("SECRET_CONTENT"), enabled);
+            }
+            return;
+        }
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(
+                |axum::Json(_body): axum::Json<serde_json::Value>| async {
+                    let body = concat!(
+                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"SECRET_REASONING\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"SECRET_CONTENT\"}}]}\n\n",
+                        "data: [DONE]\n\n",
+                    );
+                    ([(axum::http::header::CONTENT_TYPE, "text/event-stream")], body)
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let backend = OpenAiBackend::new(&url);
+        let request = LlmRequest {
+            messages: vec![ChatMessage::user("hi")],
+            temperature: -1.0,
+            max_tokens: 16,
+        };
+        let http = reqwest::Client::new();
+
+        let mut sink = Vec::new();
+        let output = backend.generate_streaming_into(&http, &request, &mut sink).await.unwrap();
+        assert!(output.thinking.contains("SECRET_REASONING"));
+        let rendered = String::from_utf8(sink).unwrap();
+        assert_eq!(rendered.contains("SECRET_REASONING"), crate::logging::content());
+        if crate::logging::content() { assert!(rendered.ends_with('\n')); }
+        print!("{rendered}");
+        server.abort();
+    }
+
+    /// #88: provider error bodies are class + byte length by default, and the
+    /// full body only with opt-in (via `render_error`/`with_body`).
+    #[test]
+    fn provider_error_body_is_metadata_only_by_default() {
+        if !crate::logging::tests::child() {
+            for enabled in [false, true] {
+                let captured = crate::logging::tests::capture(
+                    "llm::tests::provider_error_body_is_metadata_only_by_default", enabled);
+                assert_eq!(captured.contains("SECRET_PROVIDER_BODY"), enabled);
+            }
+            return;
+        }
+        let err = anyhow!(LlmError::Api {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "SECRET_PROVIDER_BODY".to_string(),
+            retry_after: Some(Duration::from_secs(3)),
+        });
+        // Display (used by the user-facing apology and default logs) is
+        // class-only regardless of the opt-in flag.
+        let rendered = err.to_string();
+        assert!(!rendered.contains("SECRET_PROVIDER_BODY"), "{rendered}");
+        assert!(rendered.contains("500"), "{rendered}");
+        assert!(rendered.contains("byte body"), "{rendered}");
+        assert!(rendered.contains("retry after 3s"), "{rendered}");
+        let full = crate::llm::render_error(&err);
+        assert_eq!(full.contains("SECRET_PROVIDER_BODY"), crate::logging::content());
+        eprintln!("{full}");
+        // The user-facing Display stays class-only even under opt-in.
+        assert!(!err.to_string().contains("SECRET_PROVIDER_BODY"));
     }
 }

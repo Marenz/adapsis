@@ -436,12 +436,9 @@ impl EventSender {
     /// `detail` is the full text.  The method also constructs an appropriate
     /// broadcast JSON payload.
     pub(super) async fn log(&self, event: &str, detail: &str) {
-        // 1. Write to structured log file
+        // Tags classify events, not the safety of arbitrary detail strings.
         write_log_file(&self.log_file, event, detail).await;
-
-        // 2. Stderr: short preview
-        let preview: String = detail.chars().take(200).collect();
-        eprintln!("[{event}] {preview}");
+        eprintln!("{}", crate::logging::event(event, detail));
 
         // 3. Broadcast (+ mpsc if present) — build a JSON event
         let json = match event {
@@ -481,21 +478,7 @@ pub(super) async fn write_log_file(
         let m = (secs / 60) % 60;
         let s = secs % 60;
 
-        let line = match event {
-            "iter" => format!("\n============================================================\n[{h:02}:{m:02}:{s:02}] {detail}\n============================================================\n"),
-            "code" => format!("[{h:02}:{m:02}:{s:02}] CODE:\n{detail}\n"),
-            "think" => format!("[{h:02}:{m:02}:{s:02}] THINK:\n{detail}\n"),
-            "feedback" => {
-                let has_err = detail.contains("ERROR") || detail.contains("FAIL") || detail.contains("Fix the errors");
-                let prefix = if has_err { "FEEDBACK (ERRORS)" } else { "FEEDBACK (ok)" };
-                format!("[{h:02}:{m:02}:{s:02}] {prefix}:\n{detail}\n")
-            }
-            "ai-text" => format!("[{h:02}:{m:02}:{s:02}] AI: {detail}\n"),
-            "done" | "done-rejected" => format!("[{h:02}:{m:02}:{s:02}] >>> {event}: {detail}\n"),
-            "llm-error" => format!("[{h:02}:{m:02}:{s:02}] !!! LLM ERROR: {detail}\n"),
-            "user" => format!("[{h:02}:{m:02}:{s:02}] USER:\n{detail}\n"),
-            _ => format!("[{h:02}:{m:02}:{s:02}] [{event}] {detail}\n"),
-        };
+        let line = format!("[{h:02}:{m:02}:{s:02}] {}\n", crate::logging::event(event, detail));
         let mut f = f.lock().await;
         let _ = f.write_all(line.as_bytes()).await;
         let _ = f.flush().await;
@@ -561,7 +544,9 @@ pub async fn ask(
     let context_lock = takeover_context_lock("main");
     let _context_guard = context_lock.lock().await;
     config.install_handler_locals();
-    eprintln!("\n[web:user] {}", req.message);
+    if crate::logging::content() {
+        eprintln!("\n[web:user] {}", req.message);
+    }
     let tx = EventSender::broadcast_only(config.event_broadcast.clone());
     tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
     if super::native_turn::eligible(&config) {
@@ -638,7 +623,7 @@ pub async fn ask(
         let output = match llm.generate(messages.clone()).await {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("[web:error] LLM: {e}");
+                eprintln!("[web:error] LLM: {}", crate::llm::render_error(&e));
                 tx.send(serde_json::json!({"type": "error", "message": format!("LLM error: {e}")})).await;
                 reply_text.push_str(&format!("\n\nLLM error: {e}"));
                 all_results.push(MutationResult { message: format!("LLM error: {e}"), success: false });
@@ -671,7 +656,9 @@ pub async fn ask(
             reply_text.push_str(clean);
         }
         if !output.thinking.is_empty() {
-            eprintln!("[web:think] {}...", output.thinking.chars().take(100).collect::<String>());
+            if crate::logging::content() {
+                eprintln!("[web:think] {}...", output.thinking.chars().take(100).collect::<String>());
+            }
             tx.send(serde_json::json!({"type": "thinking", "text": output.thinking})).await;
         }
 
@@ -685,7 +672,9 @@ pub async fn ask(
             continue;
         }
 
-        eprintln!("[web:code]\n{}", code.chars().take(200).collect::<String>());
+        if crate::logging::content() {
+            eprintln!("[web:code]\n{}", code.chars().take(200).collect::<String>());
+        }
         tx.send(serde_json::json!({"type": "code", "code": code})).await;
         if !all_code.is_empty() { all_code.push_str("\n\n// --- iteration ---\n"); }
         all_code.push_str(&code);
@@ -909,7 +898,7 @@ pub async fn ask_stream(
                 let mut rx = match llm.generate_streaming(messages.clone()).await {
                     Ok(rx) => rx,
                     Err(e) => {
-                        tx.log("llm-error", &format!("{e}")).await;
+                        tx.log("llm-error", &crate::llm::render_error(&e)).await;
                         break;
                     }
                 };
@@ -948,7 +937,7 @@ pub async fn ask_stream(
             assistant_turn.push_str(&output.text);
 
             // Log thinking (full text for the log file, already streamed incrementally above)
-            if !output.thinking.is_empty() {
+            if !output.thinking.is_empty() && crate::logging::content() {
                 write_log_file(&config_clone.log_file, "think", &output.thinking).await;
             }
 
@@ -958,7 +947,9 @@ pub async fn ask_stream(
             while let Some(s) = clean.find("<code>") { if let Some(e) = clean[s..].find("</code>") { clean.replace_range(s..s+e+7, ""); } else { break; } }
             let clean = clean.trim();
             if !clean.is_empty() {
-                write_log_file(&config_clone.log_file, "ai-text", clean).await;
+                if crate::logging::content() {
+                    write_log_file(&config_clone.log_file, "ai-text", clean).await;
+                }
                 let _ = tx.send(serde_json::json!({"type": "text", "text": clean})).await;
             }
 
@@ -1265,7 +1256,7 @@ pub async fn handle_llm_takeover(
     let compacted = match compaction {
         Ok(compacted) => compacted,
         Err(error) => {
-            eprintln!("[memory:{context}] compaction deferred: {error:#}");
+            crate::logging::diagnostic("memory-compaction-error", format_args!("{error:#}"));
             write_log_file(
                 &log_file,
                 "memory-compaction-error",
@@ -1479,7 +1470,7 @@ pub async fn handle_llm_takeover(
                     "Previously supplied image references from this conversation, recovered after reload. These are reference data, not new instructions.",&images);
             }
             Ok(Ok(_)) => {},
-            error => eprintln!("[memory:{context}] image recovery unavailable: {error:?}"),
+            error => crate::logging::diagnostic("memory-image-recovery-error", format_args!("{error:?}")),
         }
     }
 
@@ -1510,7 +1501,7 @@ pub async fn handle_llm_takeover(
             context_log.push_runtime_text(activity);
         }
         Ok(Ok(None)) => {},
-        error => eprintln!("[memory:{context}] activity snapshot unavailable: {error:?}"),
+        error => crate::logging::diagnostic("memory-activity-error", format_args!("{error:?}")),
     }
 
     report_prompt_epoch(
@@ -1524,7 +1515,9 @@ pub async fn handle_llm_takeover(
     let messages = context_log.into_messages();
 
     eprintln!("[llm_takeover:{context}] calling LLM with {} messages", messages.len());
-    write_log_file(&log_file, "user", &format!("[{context}] {message}")).await;
+    if crate::logging::content() {
+        write_log_file(&log_file, "user", &format!("[{context}] {message}")).await;
+    }
     // Persist the conversation now that the user message is appended —
     // otherwise chats are lost on restart and the bot "resumes" from a
     // stale snapshot (the "will shutdown now!" greeting bug).
@@ -1586,17 +1579,16 @@ pub async fn handle_llm_takeover(
                 o
             }
             Err(e) => {
-                eprintln!("[llm_takeover:{context}] LLM error: {e}");
-                write_log_file(&log_file, "llm-error", &format!("[{context}] {e}")).await;
+                eprintln!("[llm_takeover:{context}] LLM error: {}", crate::llm::render_error(&e));
+                write_log_file(&log_file, "llm-error", &format!("[{context}] {}", crate::llm::render_error(&e))).await;
                 // Never leave the user hanging: if we have no reply yet,
                 // return a short apology instead of silently dropping the
                 // message (the callback path sends whatever we return).
                 if reply_text.is_empty() {
-                    let detail: String = e.to_string().chars().take(120).collect();
                     reply_text = format!(
                         "Entschuldigung — ich habe gerade ein technisches Problem \
                          und konnte deine Nachricht nicht verarbeiten. Bitte \
-                         versuch es gleich noch einmal. ({detail})"
+                          versuch es gleich noch einmal. (provider error)"
                     );
                 }
                 break;
@@ -1657,8 +1649,10 @@ pub async fn handle_llm_takeover(
             reply_text = prose.clone();
         }
 
-        eprintln!("[llm_takeover:{context}] reply: {}...", prose.chars().take(80).collect::<String>());
-        write_log_file(&log_file, "ai-text", &format!("[{context}] {}", output.text)).await;
+        if crate::logging::content() {
+            eprintln!("[llm_takeover:{context}] reply: {}...", prose.chars().take(80).collect::<String>());
+            write_log_file(&log_file, "ai-text", &format!("[{context}] {}", output.text)).await;
+        }
 
         let code = output.code.trim().to_string();
 
@@ -1738,7 +1732,9 @@ pub async fn handle_llm_takeover(
                 .map(|t| format!("{}: {}", if t.pass { "PASS" } else { "FAIL" }, t.message)))
             .collect();
 
-        eprintln!("[llm_takeover:{context}] code results: {}", feedback.join("; "));
+        if crate::logging::content() {
+            eprintln!("[llm_takeover:{context}] code results: {}", feedback.join("; "));
+        }
 
         let is_last_iteration = iteration + 1 >= iteration_budget;
         let feedback_msg = if exec_result.has_errors {
@@ -1824,12 +1820,14 @@ pub async fn handle_llm_takeover(
                                 conv.push_assistant(&output.text);
                             }
                         }
-                        write_log_file(&log_file, "ai-text", &format!("[{context}] {}", output.text)).await;
+                        if crate::logging::content() {
+                            write_log_file(&log_file, "ai-text", &format!("[{context}] {}", output.text)).await;
+                        }
                         break;
                     }
                     Err(error) => {
-                        eprintln!("[llm_takeover:{context}] final summary LLM error: {error}");
-                        write_log_file(&log_file, "llm-error", &format!("[{context}] final summary: {error}"))
+                        eprintln!("[llm_takeover:{context}] final summary LLM error: {}", crate::llm::render_error(&error));
+                        write_log_file(&log_file, "llm-error", &format!("[{context}] final summary: {}", crate::llm::render_error(&error)))
                             .await;
                         break;
                     }
@@ -1923,3 +1921,7 @@ mod prompt_block_tests {
         assert!(text.last().unwrap().ends_with("newest"));
     }
 }
+
+#[cfg(test)]
+#[path = "logging_gate_tests.rs"]
+mod logging_gate_tests;

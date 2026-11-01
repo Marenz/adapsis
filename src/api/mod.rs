@@ -141,7 +141,9 @@ pub struct AppConfig {
     pub message_queue: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     /// Maximum iterations per AI request
     pub max_iterations: usize,
-    /// Opt-in native tool protocol for eligible HTTP ask/ask-stream turns only.
+    /// Opt-in native tool protocol for eligible HTTP/takeover turns. Legacy is
+    /// default pending capability parity (#89); explicit --legacy-tools wins
+    /// over --native-tools. Ineligible turns retain whole-turn legacy routing.
     pub native_tools: bool,
     /// JSONL training data log — one entry per iteration with input/output/outcome
     pub training_log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
@@ -209,7 +211,7 @@ pub async fn mutate(
     State(config): State<AppConfig>,
     Json(req): Json<MutateRequest>,
 ) -> Json<MutateResponse> {
-    eprintln!("[web:mutate] {}", req.source.chars().take(100).collect::<String>());
+    crate::logging::diagnostic("web-mutate", &req.source);
     let base_program = config.program.read().await.clone();
     let mut program = base_program.clone();
     let mut runtime = config.runtime.read().unwrap().clone();
@@ -308,7 +310,7 @@ pub async fn eval_fn(
 
     // Handle inline expression evaluation (e.g. "1 + 2", "concat(\"a\", \"b\")")
     if let Some(ref expr_str) = req.expression {
-        eprintln!("[web:eval] inline: {expr_str}");
+        crate::logging::diagnostic("web-eval-inline", expr_str);
         let expr_str = expr_str.trim();
         if expr_str.is_empty() {
             let response = EvalResponse {
@@ -418,7 +420,7 @@ pub async fn eval_fn(
         }
     }
 
-    eprintln!("[web:eval] {} {}", req.function, req.input);
+    crate::logging::diagnostic("web-eval", format_args!("{} {}", req.function, req.input));
 
     // Parse input directly instead of reconstructing "!eval fn input" source
     // which breaks when the input contains unescaped quotes or special chars.
@@ -1181,7 +1183,7 @@ pub async fn opencode_task(
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[web:opencode:err] {e}");
+            crate::logging::diagnostic("opencode-error", &e);
             tx.send(serde_json::json!({"type": "opencode_error", "exit_code": -1, "message": format!("Failed to run opencode: {e}")})).await;
             return Json(OpenCodeResponse {
                 stdout: String::new(),
@@ -1245,7 +1247,7 @@ pub async fn opencode_task(
     };
 
     eprintln!("[web:opencode] exit={code} text={}chars tools={}", summary.len(), tool_results.len());
-    if !summary.is_empty() {
+    if !summary.is_empty() && crate::logging::content() {
         eprintln!("[web:opencode:text] {}", summary.chars().take(300).collect::<String>());
     }
 
@@ -1398,7 +1400,7 @@ async fn session_eval(
 
     // Handle inline expression evaluation
     if let Some(ref expr_str) = req.expression {
-        eprintln!("[session:{session_id}:eval] inline: {expr_str}");
+        crate::logging::diagnostic("session-eval-inline", expr_str);
         let expr_str = expr_str.trim();
         if expr_str.is_empty() {
             return Json(EvalResponse {
@@ -1470,7 +1472,7 @@ async fn session_eval(
         }
     }
 
-    eprintln!("[session:{session_id}:eval] {} {}", req.function, req.input);
+    crate::logging::diagnostic("session-eval", format_args!("{} {}", req.function, req.input));
 
     // Parse input
     let input_expr = if req.input.trim().is_empty() {
@@ -1538,7 +1540,7 @@ async fn session_mutate(
 
     let mut program = program_lock.lock().await;
 
-    eprintln!("[session:{session_id}:mutate] {}", req.source.chars().take(100).collect::<String>());
+    crate::logging::diagnostic("session-mutate", &req.source);
 
     match parser::parse(&req.source) {
         Ok(ops) => {
@@ -1748,7 +1750,7 @@ async fn adapsis_route_dispatch(
                 .into_response()
         }
         Ok(Err(e)) => {
-            eprintln!("[webhook] handler error in {handler_fn_for_log}: {e:#}");
+            crate::logging::diagnostic("webhook-handler-error", format_args!("{handler_fn_for_log}: {e:#}"));
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("handler error: {e:#}"),
@@ -1756,7 +1758,7 @@ async fn adapsis_route_dispatch(
                 .into_response()
         }
         Err(e) => {
-            eprintln!("[webhook] task panic in {handler_fn_for_log}: {e}");
+            crate::logging::diagnostic("webhook-task-error", format_args!("{handler_fn_for_log}: {e}"));
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("task error: {e}"),
@@ -1778,7 +1780,9 @@ async fn inject_message(
     Json(req): Json<InjectRequest>,
 ) -> Json<serde_json::Value> {
     let context = req.context.clone();
-    eprintln!("[inject:{context}] {}...", req.message.chars().take(80).collect::<String>());
+    if crate::logging::content() {
+        eprintln!("[inject:{context}] {}...", req.message.chars().take(80).collect::<String>());
+    }
 
     // Push into the conversation's message history
     {

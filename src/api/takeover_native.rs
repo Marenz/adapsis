@@ -91,17 +91,22 @@ pub(super) async fn run(turn: TakeoverRun<'_>) -> anyhow::Result<String> {
     }
     let reply = render_reply(&native, budget.generations());
     eprintln!(
-        "[llm_takeover:{}] native turn end={:?} generations={:?}",
+        "[llm_takeover:{}] native turn end={} generations={:?}",
         turn.context,
-        native.end,
+        native.end.category(),
         budget.generations()
     );
-    write_log_file(
-        &config.log_file,
-        "ai-text",
-        &format!("[{}] {reply}", turn.context),
-    )
-    .await;
+    if let LoopEnd::ProviderError(error) = &native.end {
+        crate::logging::diagnostic("native-provider-error", error);
+    }
+    if crate::logging::content() {
+        write_log_file(
+            &config.log_file,
+            "ai-text",
+            &format!("[{}] {reply}", turn.context),
+        )
+        .await;
+    }
     config.notify_save();
     Ok(reply)
 }
@@ -120,11 +125,10 @@ fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
     match &native.end {
         LoopEnd::Finished => prose,
         LoopEnd::Empty(error) => error.to_string(),
-        LoopEnd::ProviderError(error) => {
-            let detail: String = error.chars().take(120).collect();
+        LoopEnd::ProviderError(_) => {
             append(&format!(
                 "Entschuldigung — ich habe gerade ein technisches Problem und konnte \
-                 die Antwort nicht abschließen. Bitte versuch es gleich noch einmal. ({detail})"
+                  die Antwort nicht abschließen. Bitte versuch es gleich noch einmal. (provider error)"
             ))
         }
         LoopEnd::Exhausted

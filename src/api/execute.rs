@@ -144,14 +144,18 @@ impl OperationResult {
 
     pub(super) fn ok(&mut self, msg: impl Into<String>) {
         let entry = format!("OK: {}", msg.into());
-        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        if crate::logging::content() {
+            eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        }
         self.feedback.push(entry);
     }
 
     pub(super) fn pass(&mut self, msg: impl Into<String>) {
         self.tests_passed += 1;
         let entry = format!("PASS: {}", msg.into());
-        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        if crate::logging::content() {
+            eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        }
         self.feedback.push(entry);
     }
 
@@ -159,20 +163,26 @@ impl OperationResult {
         self.tests_failed += 1;
         self.has_errors = true;
         let entry = format!("FAIL: {}", msg.into());
-        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        if crate::logging::content() {
+            eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        }
         self.feedback.push(entry);
     }
 
     pub(super) fn error(&mut self, msg: impl Into<String>) {
         self.has_errors = true;
         let entry = format!("ERROR: {}", msg.into());
-        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        if crate::logging::content() {
+            eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        }
         self.feedback.push(entry);
     }
 
     pub(super) fn info(&mut self, msg: impl Into<String>) {
         let entry = msg.into();
-        eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        if crate::logging::content() {
+            eprintln!("[op] {}", entry.chars().take(200).collect::<String>());
+        }
         self.feedback.push(entry);
     }
 }
@@ -211,7 +221,7 @@ impl CodeExecutionResult {
 
     fn push_err(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
-        eprintln!("[execute_code:err] {}", msg.chars().take(200).collect::<String>());
+        crate::logging::diagnostic("execute-code-error", &msg);
         self.has_errors = true;
         self.mutation_results.push(MutationResult { message: msg, success: false });
     }
@@ -499,7 +509,9 @@ pub(super) async fn execute_code_with_baseline(
                                         Ok(Err(e)) => { (format!("eval error: {e}"), false) }
                                         Err(e) => { (format!("eval task error: {e}"), false) }
                                     };
-                                    eprintln!("[execute_code:eval] {msg}");
+                                    if crate::logging::content() {
+                                        eprintln!("[execute_code:eval] {msg}");
+                                    }
                                     if success {
                                         result.push_ok(msg);
                                     } else {
@@ -516,12 +528,16 @@ pub(super) async fn execute_code_with_baseline(
                             match crate::eval::eval_inline_expr(&session.program, expr) {
                                 Ok(val) => {
                                     let msg = format!("= {val}");
-                                    eprintln!("[execute_code:eval] {msg}");
+                                    if crate::logging::content() {
+                                        eprintln!("[execute_code:eval] {msg}");
+                                    }
                                     result.push_ok(msg);
                                 }
                                 Err(e) => {
                                     let msg = format!("eval error: {e}");
-                                    eprintln!("[execute_code:eval:err] {msg}");
+                                    if crate::logging::content() {
+                                        eprintln!("[execute_code:eval:err] {msg}");
+                                    }
                                     result.push_err(msg);
                                 }
                             }
@@ -576,7 +592,9 @@ pub(super) async fn execute_code_with_baseline(
                                     Ok(Err(e)) => { (format!("eval error: {e}"), false) }
                                     Err(e) => { (format!("eval task error: {e}"), false) }
                                 };
-                                eprintln!("[execute_code:eval] {msg}");
+                                if crate::logging::content() {
+                                    eprintln!("[execute_code:eval] {msg}");
+                                }
                                 if success {
                                     result.push_ok(msg);
                                 } else {
@@ -593,12 +611,16 @@ pub(super) async fn execute_code_with_baseline(
                                 Ok((val, compiled)) => {
                                     let tag = if compiled { " [compiled]" } else { "" };
                                     let msg = format!("eval {}() = {val}{tag}", ev.function_name);
-                                    eprintln!("[execute_code:eval] {msg}");
+                                    if crate::logging::content() {
+                                        eprintln!("[execute_code:eval] {msg}");
+                                    }
                                     result.push_ok(msg);
                                 }
                                 Err(e) => {
                                     let msg = format!("eval error: {e}");
-                                    eprintln!("[execute_code:eval:err] {msg}");
+                                    if crate::logging::content() {
+                                        eprintln!("[execute_code:eval:err] {msg}");
+                                    }
                                     result.push_err(msg);
                                 }
                             }
@@ -659,7 +681,7 @@ pub(super) async fn execute_code_with_baseline(
                             }
                         };
 
-                        eprintln!("[execute_code:watch] {function_name}({args}) every {interval_ms}ms");
+                        crate::logging::diagnostic("watch-start", format_args!("{function_name}({args}) every {interval_ms}ms"));
                         let fn_name = function_name.clone();
                         let interval = *interval_ms;
                         let watch_program = config.program.clone();
@@ -683,7 +705,11 @@ pub(super) async fn execute_code_with_baseline(
                                     }
                                 };
                                 if result != last_result && !last_result.is_empty() {
-                                    eprintln!("[execute_code:watch:trigger] {fn_name} changed: {last_result} → {result}");
+                                    if crate::logging::content() {
+                                        eprintln!("[execute_code:watch:trigger] {fn_name} changed: {last_result} → {result}");
+                                    } else {
+                                        eprintln!("[execute_code:watch:trigger] {fn_name} result changed");
+                                    }
                                     let msg = format!("Watcher '{fn_name}' triggered: result changed from '{last_result}' to '{result}'");
                                     let _ = trigger.send(msg).await;
                                 }
@@ -701,7 +727,7 @@ pub(super) async fn execute_code_with_baseline(
                             ));
                             continue;
                         }
-                        eprintln!("[execute_code:agent] spawning '{name}' scope={scope} task={}", task.chars().take(80).collect::<String>());
+                        crate::logging::diagnostic("agent-start", format_args!("{name} scope={scope} task={task}"));
 
                         let agent_scope = crate::session::AgentScope::parse(scope);
                         let branch = crate::session::AgentBranch::fork_from_parts(name, agent_scope, task, &session.program, &session.runtime, &session.meta);
@@ -797,7 +823,7 @@ pub(super) async fn execute_code_with_baseline(
 
                                 let output = match agent_llm.generate(agent_messages.clone()).await {
                                     Ok(o) => o,
-                                    Err(e) => { eprintln!("[agent:{agent_name}] LLM error: {e}"); break; }
+                                    Err(e) => { crate::logging::diagnostic("agent-provider-error", &e); break; }
                                 };
 
                                 agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));
@@ -811,7 +837,9 @@ pub(super) async fn execute_code_with_baseline(
                                 if let Ok(ops) = crate::parser::parse(&code) {
                                     for op in &ops {
                                         if let crate::parser::Operation::Message { to, content } = op {
-                                            eprintln!("[agent:{agent_name}] !msg → {to}: {content}");
+                                            if crate::logging::content() {
+                                                eprintln!("[agent:{agent_name}] !msg → {to}: {content}");
+                                            }
                                             let mut meta = agent_meta.lock().unwrap();
                                             let msg = crate::session::AgentMessage {
                                                 from: agent_name.clone(),
@@ -828,7 +856,9 @@ pub(super) async fn execute_code_with_baseline(
                                     Ok(results) => {
                                         let mut has_err = false;
                                         for (msg, ok) in &results {
-                                            eprintln!("[agent:{agent_name}] {}: {msg}", if *ok {"ok"} else {"err"});
+                                            if crate::logging::content() {
+                                                eprintln!("[agent:{agent_name}] {}: {msg}", if *ok {"ok"} else {"err"});
+                                            }
                                             if !*ok { has_err = true; }
                                         }
                                         let feedback = results.iter()
@@ -841,7 +871,7 @@ pub(super) async fn execute_code_with_baseline(
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("[agent:{agent_name}] apply error: {e}");
+                                        crate::logging::diagnostic("agent-apply-error", &e);
                                         agent_messages.push(crate::llm::ChatMessage::user(format!("Error: {e}\nFix and continue.")));
                                     }
                                 }
@@ -952,7 +982,7 @@ pub(super) async fn execute_code_with_baseline(
                                                     }
                                                 }
                                                 // Deliver via callback
-                                                eprintln!("[agent:{agent_name}] delivering reply via {}({})", cb.reply_fn, cb.reply_arg);
+                                                crate::logging::diagnostic("agent-callback", format_args!("{}({})", cb.reply_fn, cb.reply_arg));
                                                 if let Some(sender) = agent_io_sender {
                                                     let (tx, _rx) = tokio::sync::oneshot::channel();
                                                     let _ = sender.send(crate::coroutine::IoRequest::Spawn {
@@ -967,7 +997,7 @@ pub(super) async fn execute_code_with_baseline(
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!("[agent:{agent_name}] summary LLM call failed: {e}");
+                                             crate::logging::diagnostic("agent-summary-error", &e);
                                         }
                                     }
                                 }
@@ -1022,7 +1052,9 @@ pub(super) async fn execute_code_with_baseline(
                         result.done_accepted = true;
                     }
                     crate::parser::Operation::Message { to, content } => {
-                        eprintln!("[execute_code:msg] → {to}: {content}");
+                        if crate::logging::content() {
+                            eprintln!("[execute_code:msg] → {to}: {content}");
+                        }
                         crate::session::send_agent_message(&mut session.meta, "main", to, content);
                         config.write_back_working_set(session).await;
                         result.push_ok(format!("Message sent to '{to}'"));
@@ -1096,7 +1128,7 @@ pub(super) async fn execute_code_with_baseline(
                 }
                 eprintln!("[execute_code:opencode] acquiring lock...");
                 let _lock = config.opencode_lock.lock().await;
-                eprintln!("[execute_code:opencode] {task}");
+                crate::logging::diagnostic("opencode-task", &task);
                 let mut cmd = tokio::process::Command::new("opencode");
                 cmd.arg("run").arg("--format").arg("json")
                     .arg("--dir").arg(&config.opencode_git_dir)

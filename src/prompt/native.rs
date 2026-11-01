@@ -1,10 +1,46 @@
 //! The opt-in HTTP protocol deliberately does not include legacy command advice.
-pub fn native_tool_prompt(context: &str) -> String {
+///
+/// `with_memory` is true only for conversational turns that carry a
+/// [`crate::coroutine::TurnIdentity`] (takeover turns), which is exactly when the
+/// turn-bound memory tool schemas are advertised. HTTP native turns have no turn
+/// identity and no memory tools, so their prompt must not claim them.
+pub fn native_tool_prompt(context: &str, with_memory: bool) -> String {
+    let memory_tool_list = if with_memory {
+        "memory_inspect, memory_remember, memory_correct, memory_forget, "
+    } else {
+        ""
+    };
+    let memory_section = if with_memory {
+        r#"
+## Long-term memory (Ladybug)
+Memories live in the dedicated memory tools, not in module functions. Use
+memory_inspect to look up what this conversation remembers, memory_remember to
+record an explicit fact or instruction, memory_correct to fix a wrong or stale
+memory (keeping an auditable history), and memory_forget to drop one. The
+context and speaker are bound to this conversation: never pass or infer them as
+arguments. Memory ids are the bracketed ids returned by inspection. Do not wrap
+these operations in module functions or look for a module-level memory API.
+
+For broad inventory questions such as "what do you know about X", first call
+memory_inspect for authorized memories visible in this conversation, including
+authorized global records. Do not present the currently surfaced or cited records
+as everything held in the store. Automatic recall and conversation history are
+bounded selections; even memory_inspect is capped by count, characters and scan
+limits. Returned rows alone never establish an exhaustive inventory. Describe
+what inspection surfaced and its limits; do not infer absence from omitted rows.
+Do not trawl another person's private chat or expand ACLs to answer an inventory
+question. Tool authority remains the existing builtin's: inspection/correction
+are context-scoped, while non-guest forget uses the speaker's contribution
+memberships across all governing groups, not a new current-context-only rule."#
+    } else {
+        ""
+    };
     format!(
         r#"You are the Adapsis programming assistant in context `{context}`.
 
 ## Fixed native tool protocol
-Use only the supplied native tools to act: inspect, mutate, test, evaluate, finish.
+Use only the supplied native tools to act: inspect, mutate, test, evaluate,
+{memory_tool_list}finish.
 Text, <code> blocks, legacy commands and provider stop markers perform no action.
 Every answer or clarification requires a successful finish call. Finish must be
 the only call in its response. It checks tests for functions changed in this turn.
@@ -150,6 +186,7 @@ canonical, not preservation of original comments or formatting.
 Inspect also supports library and tasks. Task output contains only readable,
 attributable function names and categorical states, never result/path/command
 payloads. No agent, plan or roadmap tool exists in this native protocol.
+{memory_section}
 "#
     )
 }
@@ -174,9 +211,37 @@ response is retried once; a second consecutive empty response ends the turn.
 
 Unavailable in this native protocol: plans (!plan), roadmap (!roadmap),
 background agents (!agent), !opencode runtime changes, model switching, IO
-mocks/stubs, removal commands and every other legacy <code> command. Runtime
-builtins (memory, messaging, files, HTTP) are reachable only by evaluating an
-existing module function that wraps them. If the person asks for an unavailable
-feature, say so plainly instead of pretending it happened."#
+mocks/stubs, removal commands and every other legacy <code> command. Long-term
+memory is available through the native memory_inspect / memory_remember /
+memory_correct / memory_forget tools (Ladybug), bound to this conversation.
+Messaging, files and raw HTTP are reachable only by evaluating an existing
+module function that wraps them. If the person asks for an unavailable feature,
+say so plainly instead of pretending it happened."#
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_native_prefix_claims_no_memory_tools() {
+        // HTTP native turns have no TurnIdentity, so no memory tool schemas are
+        // advertised; the prompt must not claim them (a model told about tools
+        // it cannot call invents module wrappers instead).
+        let http = native_tool_prompt("main", false);
+        assert!(!http.contains("memory_inspect"), "{http}");
+        assert!(!http.contains("memory_remember"), "{http}");
+        assert!(!http.contains("Long-term memory"), "{http}");
+        assert!(!http.contains("broad inventory"));
+
+        let takeover = native_tool_prompt("telegram:100000001", true);
+        assert!(takeover.contains("memory_inspect"));
+        assert!(takeover.contains("memory_forget"));
+        assert!(takeover.contains("Long-term memory"));
+        for guidance in ["first call", "memory_inspect", "never establish an exhaustive inventory",
+            "Do not trawl another person's private chat", "contribution\nmemberships"] {
+            assert!(takeover.contains(guidance), "missing guidance: {guidance}");
+        }
+    }
 }

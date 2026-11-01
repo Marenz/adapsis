@@ -94,7 +94,9 @@ fn stable_prefix_keyed_mode(
     let rendered = match native_takeover {
         None => render_stable_prefix(inputs, mesh.as_deref(), &identity),
         Some(takeover) => {
-            let mut sections = vec![crate::prompt::native_tool_prompt(inputs.context)];
+            // Memory tools are advertised only for turns with a TurnIdentity
+            // (takeover); HTTP native turns have none, so their prompt omits them.
+            let mut sections = vec![crate::prompt::native_tool_prompt(inputs.context, takeover)];
             if takeover {
                 sections.push(crate::prompt::native_takeover_mechanics());
             }

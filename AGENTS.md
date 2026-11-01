@@ -403,6 +403,10 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
 - JSONL training log at `--training-log` path (default: `training.jsonl`)
 - Each iteration: model, context, thinking, code, outcome, tests passed/failed
 - Accumulates in `~/.config/adapsis/training/`
+- **`--training-log` deliberately stores full content (prompt/thinking/code/outcome).**
+  It is a separate fine-tuning artifact, enabled by default by `adapsis os` at
+  `training.jsonl`, not the journal — the #88 metadata-only gate does not apply
+  to it. Select its path with the expectation that it holds model/user content.
 - `tools/generate_training_data.py` — generates examples using Opus, validates through parser
 - `tools/module_training_examples.py` — hand-crafted per-module examples
 - `tools/merge_training_data.py` — deduplicates and merges all JSONL files
@@ -498,10 +502,17 @@ replaces that branch with one composer.
   widening is not.
 
 ## Conversation System (llm_takeover)
-- **Experimental native HTTP tools (#78):** `adapsis os --native-tools` opts
-  write-capable, non-guest `/api/ask` and `/api/ask-stream` turns into the native
-  protocol. Since #85 the same flag also covers takeover turns (below); guests,
-  non-write speakers and processes without the flag retain legacy behavior.
+- **Native tools remain opt-in pending parity (#89).** `--native-tools` enables
+  the native protocol for eligible write-capable, non-guest `/api/ask`,
+  `/api/ask-stream` and `llm_takeover` turns. With no flag, legacy remains the
+  default. `--legacy-tools` explicitly forces legacy and wins if both flags are
+  supplied, regardless of order. Guests/execute-only speakers retain whole-turn
+  legacy routing. Native turns do not have per-feature fallback for unavailable
+  operations. The owner's superseding gate requires executable conversation
+  capability parity and independent review before changing the default. Preserve
+  legacy code and the guarded external `!opencode` integration (process/model
+  gates and runner boundary); native schemas do not replace that development
+  environment. Memory/logging/TUI fixes can ship independently under opt-in.
   `api/native_turn.rs` owns the shared HTTP loop; `api/native_tools.rs` validates
   arguments and permissions over the existing executor. The initial surface is
   inspect (symbols/source/deps/tasks/library), mutate (explicit module/function/
@@ -535,7 +546,8 @@ replaces that branch with one composer.
   semantics, so a corrected error can coexist with `completed: true`.
   The main conversation's permission profile intersects the active model per
   group in a pinned turn snapshot; an override can only narrow execution.
-- **Native takeover turns (#85).** With `--native-tools`, `handle_llm_takeover`
+- **Native takeover turns (#85).** With the native protocol opted in (see above),
+  `handle_llm_takeover`
   (Telegram DMs/groups) uses the native protocol when the speaker's pinned snapshot
   `native_turn::permission_snapshot_for(tmp_config, context)` (active/effective
   model intersected with the context `permission_model` and `[principals]`
@@ -568,8 +580,23 @@ replaces that branch with one composer.
     An accepted finish with no prose at all returns `""`, as legacy `!done` does,
     so the Telegram module sends nothing.
   - Not available natively: `!agent` (so no agent completion callbacks),
-    plan/roadmap, `!opencode`, model switching, mocks. Builtins are reachable only
-    through existing module functions via evaluate.
+    plan/roadmap, `!opencode`, model switching, mocks. Other builtins are reachable
+    only through existing module functions via evaluate.
+  - **Turn-bound memory tools (#87).** `memory_inspect`, `memory_remember`
+    (scope `context`|`global`), `memory_correct` and `memory_forget` are native
+    tools that dispatch the *same* turn-bound builtins as `!eval memory_*`
+    (`api/native_tools.rs` → `CoroutineHandle::with_turn` → `execute_await`), so
+    ACL/scope/write-capability rules and caps are identical. They take no
+    context/principal arguments, are advertised only when the turn has a
+    `TurnIdentity` (fail closed otherwise), and are reachable only for
+    write-capable non-guest turns. The native prompt points memory at these tools
+    (Ladybug) instead of module functions, so models stop wrapping them in
+    throwaway library modules.
+    Broad inventory questions require authorized `memory_inspect` first;
+    retrieved rows (including inspection itself) are bounded and never establish
+    completeness. This is not permission to search other private chats. Native
+    forget retains the builtin's all-governing-groups contribution ACL, which
+    can authorize non-guest cross-context changes; no narrower rule is invented.
   - Native assistant text has no `!done`, so compaction's "end chunk at the last
     `!done`" boundary does not apply to native segments (it compacts the whole
     bounded chunk).
@@ -1301,6 +1328,19 @@ The system prompt only shows modules the model can at least Read. Execute-level 
   (user/ai-text/llm-error), and an LLM failure returns a short apology to the
   reply callback instead of silently dropping the message.
 - Panic hook + exit logging for crash debugging
+- **Metadata-only logging (#88).** `src/logging.rs` gates model output, prompts,
+  tool arguments, eval results, extracted memories, self-trigger previews and
+  user/ai-text journal entries behind `ADAPSIS_LOG_CONTENT=1`. Default stdout/
+  stderr/`--log-file` carry only context, model, latency, token usage, end state
+  and error class — never reasoning, completion text or user data (which escape
+  Ladybug ACLs). Set `ADAPSIS_LOG_CONTENT=1` to restore full content logging for
+  debugging. Existing journal entries persist until rotation
+  (`journalctl --user --vacuum-time=`, operator decision, not automatic).
+  Error text is content too (serde/regex/provider errors can echo inputs).
+  `logging::diagnostic` and `logging::event` render categories and byte counts
+  at the sink; event tags never authorize their detail strings. Caller/UI errors
+  retain details. Tests use child processes with immutable logging policy, never
+  shared flag overrides across async waits.
 
 ## Voice Transcription (ASR)
 > **Voice messages required FOUR stacked bug fixes (2026-06-21).** Each masked

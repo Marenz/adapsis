@@ -105,11 +105,11 @@ pub(super) fn start(
         match result {
             Ok(Ok((attachment, summary))) => {
                 if let Err(error) = deliver_stabilized(&sender, &context, summary, attachment).await {
-                    eprintln!("[video:{context}] stabilized output delivery failed: {error:#}");
+                    crate::logging::diagnostic("video-delivery-error", format_args!("{error:#}"));
                 }
             }
             Ok(Err(error)) => {
-                eprintln!("[video:{context}] stabilization failed: {error:#}");
+                crate::logging::diagnostic("video-stabilization-error", format_args!("{error:#}"));
                 let _ = notify(
                     &sender,
                     &context,
@@ -364,7 +364,7 @@ async fn select_video_encoder(binary: &Path) -> VideoEncoder {
     match run_tool(binary, &encoder_probe_args()).await {
         Ok(output) => encoder_from_listing(&output.stdout),
         Err(error) => {
-            eprintln!("[video] ffmpeg encoder probe failed; falling back to mpeg4: {error:#}");
+            crate::logging::diagnostic("video-encoder-probe-error", format_args!("{error:#}"));
             VideoEncoder::Mpeg4
         }
     }
@@ -526,10 +526,7 @@ async fn remove_persisted_output(attachment: &Attachment) {
         && let Err(error) = tokio::fs::remove_file(path).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
-        eprintln!(
-            "[video] failed to remove delivered output {}: {error}",
-            path.display()
-        );
+        crate::logging::diagnostic("video-output-cleanup-error", format_args!("{}: {error}", path.display()));
     }
 }
 
@@ -541,10 +538,10 @@ async fn deliver_stabilized(
 ) -> Result<()> {
     let delivery = notify(sender, context, summary, Some(attachment.clone())).await;
     if let Err(error) = &delivery {
-        eprintln!("[video:{context}] attachment callback failed; trying text fallback: {error:#}");
+        crate::logging::diagnostic("video-attachment-callback-error", format_args!("{error:#}"));
         let fallback = "The stabilized video was created, but the file could not be delivered to this chat. The temporary output has been cleaned up; please try again with a shorter or lower-resolution clip.";
         if let Err(fallback_error) = notify(sender, context, fallback.into(), None).await {
-            eprintln!("[video:{context}] text-only delivery fallback also failed: {fallback_error:#}");
+            crate::logging::diagnostic("video-text-fallback-error", format_args!("{fallback_error:#}"));
         }
     }
     remove_persisted_output(&attachment).await;

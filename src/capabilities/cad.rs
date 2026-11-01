@@ -60,7 +60,11 @@ pub(super) fn start(context: String, title: String, source: String, material: St
             }
             Err(error) => {
                 let detail = format!("{error:#}");
-                eprintln!("[cad:{context}] preparation failed: {}", tail_chars(&detail, 4000));
+                if crate::logging::content() {
+                    eprintln!("[cad:{context}] preparation failed: {}", tail_chars(&detail, 4000));
+                } else {
+                    eprintln!("[cad:{context}] preparation failed");
+                }
                 let message = format!("CAD preparation failed; no print was started. {} Details: {}",
                     failure_hint(&detail), tail_chars(&detail, 2500));
                 notify(&sender, &context, message).await;

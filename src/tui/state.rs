@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use serde::Deserialize;
 
@@ -36,7 +36,10 @@ pub(crate) enum ServerEvent {
         detail: String,
         current: Option<u64>,
     },
-    Thinking(String),
+    Thinking {
+        text: String,
+        reasoning_tokens: Option<u64>,
+    },
     Content(String),
     Text(String),
     Code(String),
@@ -97,7 +100,10 @@ impl ServerEvent {
                     detail,
                 }
             }
-            "thinking" => Self::Thinking(text("text")),
+            "thinking" => Self::Thinking {
+                text: text("text"),
+                reasoning_tokens: reasoning_tokens(&value),
+            },
             "content" => Self::Content(text("text")),
             "text" => Self::Text(text("text")),
             "code" => Self::Code(text("code")),
@@ -130,6 +136,18 @@ impl ServerEvent {
             },
         })
     }
+}
+
+fn reasoning_tokens(value: &serde_json::Value) -> Option<u64> {
+    value
+        .get("reasoning_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            value
+                .get("usage")
+                .and_then(|usage| usage.get("reasoning_tokens"))
+                .and_then(serde_json::Value::as_u64)
+        })
 }
 
 fn iteration_number(detail: &str) -> Option<u64> {
@@ -170,6 +188,8 @@ pub(crate) struct TimelineEntry {
     pub text: String,
     pub success: Option<bool>,
     pub live: bool,
+    pub reasoning_tokens: Option<u64>,
+    pub interrupted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,14 +222,17 @@ pub(crate) struct AppState {
     pub turn: TurnState,
     pub status: Option<StatusSnapshot>,
     pub help_visible: bool,
+    pub show_thinking: bool,
     pub follow: bool,
     pub scroll_top: usize,
     pub layout_total_lines: usize,
     pub layout_viewport_lines: usize,
+    pub(crate) entry_heights: HashMap<u64, usize>,
     next_id: u64,
     timeline_chars: usize,
     pending_echo: Option<String>,
     live_content_id: Option<u64>,
+    thinking_entry_id: Option<u64>,
     turn_had_errors: bool,
 }
 
@@ -223,19 +246,24 @@ impl AppState {
             turn: TurnState::Idle,
             status: None,
             help_visible: false,
+            show_thinking: false,
             follow: true,
             scroll_top: 0,
             layout_total_lines: 0,
             layout_viewport_lines: 0,
+            entry_heights: HashMap::new(),
             next_id: 1,
             timeline_chars: 0,
             pending_echo: None,
             live_content_id: None,
+            thinking_entry_id: None,
             turn_had_errors: false,
         }
     }
 
     pub(crate) fn begin_turn(&mut self, message: String) {
+        self.finish_thinking();
+        self.thinking_entry_id = None;
         self.push(EntryKind::User, message.clone(), None, false);
         self.pending_echo = Some(message);
         self.live_content_id = None;
@@ -281,6 +309,18 @@ impl AppState {
     }
 
     fn apply_server_event(&mut self, event: ServerEvent) {
+        match &event {
+            ServerEvent::Thinking { .. }
+            | ServerEvent::Start(_)
+            | ServerEvent::User
+            | ServerEvent::Iteration { .. }
+            | ServerEvent::Unknown { .. } => {}
+            ServerEvent::Error(_)
+            | ServerEvent::NativeComplete {
+                completed: false, ..
+            } => self.interrupt_thinking(),
+            _ => self.finish_thinking(),
+        }
         match event {
             ServerEvent::Start(message) => self.accept_start(message),
             // `user` is an internal context/log event. The submitted message was
@@ -293,7 +333,10 @@ impl AppState {
                 self.push(EntryKind::System, iteration_label(&detail), None, false);
             }
             ServerEvent::Iteration { .. } => {}
-            ServerEvent::Thinking(text) => self.append_or_push(EntryKind::Thinking, text, true),
+            ServerEvent::Thinking {
+                text,
+                reasoning_tokens,
+            } => self.record_thinking(text, reasoning_tokens),
             ServerEvent::Content(text) => self.append_content(text),
             ServerEvent::Text(text) => self.finalize_content(text),
             ServerEvent::Code(code) => {
@@ -394,6 +437,7 @@ impl AppState {
                 entry.text = text;
                 entry.live = false;
                 self.timeline_chars += entry.text.len();
+                self.entry_heights.remove(&id);
                 self.enforce_bounds();
                 return;
             }
@@ -403,12 +447,92 @@ impl AppState {
         }
     }
 
+    fn record_thinking(&mut self, text: String, reasoning_tokens: Option<u64>) {
+        if !text.is_empty() {
+            let mut appended_id = None;
+            if let Some(id) = self.thinking_entry_id {
+                if let Some(entry) = self
+                    .timeline
+                    .iter_mut()
+                    .find(|entry| entry.id == id && entry.live)
+                {
+                    entry.text.push_str(&text);
+                    entry.interrupted = false;
+                    appended_id = Some(id);
+                }
+            }
+            if let Some(id) = appended_id {
+                self.timeline_chars += text.len();
+                self.entry_heights.remove(&id);
+                self.enforce_bounds();
+            } else {
+                let id = self.push(EntryKind::Thinking, text, None, true);
+                self.thinking_entry_id = Some(id);
+            }
+        }
+        if let Some(tokens) = reasoning_tokens {
+            if let Some(id) = self.thinking_entry_id {
+                let mut updated = false;
+                if let Some(entry) = self
+                    .timeline
+                    .iter_mut()
+                    .find(|entry| entry.id == id && entry.live)
+                {
+                    entry.reasoning_tokens = Some(tokens);
+                    updated = true;
+                }
+                if updated {
+                    self.entry_heights.remove(&id);
+                }
+            }
+        }
+    }
+
+    fn finish_thinking(&mut self) {
+        let finished = self
+            .timeline
+            .iter_mut()
+            .filter_map(|entry| {
+                if entry.kind == EntryKind::Thinking && entry.live {
+                    entry.live = false;
+                    entry.interrupted = false;
+                    Some(entry.id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for id in finished {
+            self.entry_heights.remove(&id);
+        }
+    }
+
+    fn interrupt_thinking(&mut self) {
+        let interrupted = self
+            .timeline
+            .iter_mut()
+            .filter_map(|entry| {
+                if entry.kind == EntryKind::Thinking && entry.live {
+                    entry.live = false;
+                    entry.interrupted = true;
+                    Some(entry.id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for id in interrupted {
+            self.entry_heights.remove(&id);
+        }
+    }
+
     fn record_outcome(&mut self, kind: EntryKind, message: String, success: bool) {
         self.turn_had_errors |= !success;
         self.push(kind, message, Some(success), false);
     }
 
     fn complete_turn(&mut self) {
+        self.finish_thinking();
         self.pending_echo = None;
         self.live_content_id = None;
         self.turn = if self.turn_had_errors {
@@ -434,24 +558,11 @@ impl AppState {
     }
 
     fn fail_turn(&mut self, error: String) {
+        self.interrupt_thinking();
         self.turn_had_errors = true;
         self.turn = TurnState::Failed;
         self.live_content_id = None;
         self.push(EntryKind::Error, error, Some(false), false);
-    }
-
-    fn append_or_push(&mut self, kind: EntryKind, text: String, live: bool) {
-        if text.is_empty() {
-            return;
-        }
-        if let Some(entry) = self.timeline.back_mut().filter(|entry| entry.kind == kind) {
-            entry.text.push_str(&text);
-            entry.live = live;
-            self.timeline_chars += text.len();
-            self.enforce_bounds();
-        } else {
-            self.push(kind, text, None, live);
-        }
     }
 
     fn append_to(&mut self, id: u64, text: &str) -> bool {
@@ -460,6 +571,7 @@ impl AppState {
         };
         entry.text.push_str(text);
         self.timeline_chars += text.len();
+        self.entry_heights.remove(&id);
         self.enforce_bounds();
         true
     }
@@ -474,6 +586,8 @@ impl AppState {
             text,
             success,
             live,
+            reasoning_tokens: None,
+            interrupted: false,
         });
         self.enforce_bounds();
         id
@@ -486,8 +600,14 @@ impl AppState {
                 break;
             };
             self.timeline_chars = self.timeline_chars.saturating_sub(removed.text.len());
+            let measured_height = self.entry_heights.remove(&removed.id);
             if !self.follow {
-                self.scroll_top = self.scroll_top.saturating_sub(logical_lines(&removed.text));
+                if let Some(height) = measured_height {
+                    let separator = usize::from(!self.timeline.is_empty());
+                    self.scroll_top = self
+                        .scroll_top
+                        .saturating_sub(height.saturating_add(separator));
+                }
             }
             if self.live_content_id == Some(removed.id) {
                 self.live_content_id = None;
@@ -536,10 +656,6 @@ impl AppState {
     }
 }
 
-fn logical_lines(text: &str) -> usize {
-    text.lines().count().max(1) + 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +678,43 @@ mod tests {
             ServerEvent::Result {
                 message: "no".to_string(),
                 success: false,
+            }
+        );
+        assert_eq!(
+            ServerEvent::parse(r#"{"type":"thinking","text":"checking"}"#).unwrap(),
+            ServerEvent::Thinking {
+                text: "checking".to_string(),
+                reasoning_tokens: None,
+            }
+        );
+        assert_eq!(
+            ServerEvent::parse(
+                r#"{"type":"thinking","text":"checking","reasoning_tokens":12,"completion_tokens":900}"#
+            )
+            .unwrap(),
+            ServerEvent::Thinking {
+                text: "checking".to_string(),
+                reasoning_tokens: Some(12),
+            }
+        );
+        assert_eq!(
+            ServerEvent::parse(
+                r#"{"type":"thinking","text":"checking","usage":{"reasoning_tokens":13,"total_tokens":900}}"#
+            )
+            .unwrap(),
+            ServerEvent::Thinking {
+                text: "checking".to_string(),
+                reasoning_tokens: Some(13),
+            }
+        );
+        assert_eq!(
+            ServerEvent::parse(
+                r#"{"type":"thinking","text":"checking","completion_tokens":900,"total_tokens":901}"#
+            )
+            .unwrap(),
+            ServerEvent::Thinking {
+                text: "checking".to_string(),
+                reasoning_tokens: None,
             }
         );
         assert_eq!(
@@ -603,18 +756,14 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            !state
-                .timeline
-                .iter()
-                .any(|entry| entry.text.contains("Working directory"))
-        );
-        assert!(
-            state
-                .timeline
-                .iter()
-                .any(|entry| { entry.kind == EntryKind::System && entry.text == "Iteration 3/10" })
-        );
+        assert!(!state
+            .timeline
+            .iter()
+            .any(|entry| entry.text.contains("Working directory")));
+        assert!(state
+            .timeline
+            .iter()
+            .any(|entry| { entry.kind == EntryKind::System && entry.text == "Iteration 3/10" }));
     }
 
     #[test]
@@ -624,9 +773,10 @@ mod tests {
         state.apply(ClientMessage::Stream(ServerEvent::Start(
             "build it".to_string(),
         )));
-        state.apply(ClientMessage::Stream(ServerEvent::Thinking(
-            "checking".to_string(),
-        )));
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: "checking".to_string(),
+            reasoning_tokens: None,
+        }));
         state.apply(ClientMessage::Stream(ServerEvent::Content(
             "draft <code>x".to_string(),
         )));
@@ -648,12 +798,10 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            state
-                .timeline
-                .iter()
-                .any(|e| { e.kind == EntryKind::Assistant && e.text == "final answer" && !e.live })
-        );
+        assert!(state
+            .timeline
+            .iter()
+            .any(|e| { e.kind == EntryKind::Assistant && e.text == "final answer" && !e.live }));
         assert!(!state.timeline.iter().any(|e| e.text.contains("draft")));
     }
 
@@ -673,14 +821,12 @@ mod tests {
         disconnected.begin_turn("go".to_string());
         disconnected.apply(ClientMessage::StreamClosed);
         assert_eq!(disconnected.turn, TurnState::Failed);
-        assert!(
-            disconnected
-                .timeline
-                .back()
-                .unwrap()
-                .text
-                .contains("before")
-        );
+        assert!(disconnected
+            .timeline
+            .back()
+            .unwrap()
+            .text
+            .contains("before"));
     }
 
     #[test]
@@ -732,6 +878,181 @@ mod tests {
         }
         assert_eq!(state.timeline.len(), MAX_TIMELINE_ENTRIES);
         assert_eq!(state.timeline.front().unwrap().text, "20");
+    }
+
+    #[test]
+    fn thinking_stays_preserved_while_hidden_and_finishes_on_content() {
+        let mut state = AppState::new("http://local".to_string());
+        assert!(!state.show_thinking);
+        state.begin_turn("go".to_string());
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: "reasoning-secret".to_string(),
+            reasoning_tokens: None,
+        }));
+        let thinking = state
+            .timeline
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Thinking)
+            .expect("thinking entry");
+        assert!(thinking.live);
+        assert!(!thinking.interrupted);
+        assert_eq!(thinking.text, "reasoning-secret");
+
+        state.apply(ClientMessage::Stream(ServerEvent::Content(
+            "answer".to_string(),
+        )));
+        let thinking = state
+            .timeline
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Thinking)
+            .expect("thinking entry");
+        assert!(!thinking.live);
+        assert!(!thinking.interrupted);
+        assert_eq!(thinking.text, "reasoning-secret");
+        assert_eq!(state.turn, TurnState::Streaming);
+    }
+
+    #[test]
+    fn exact_reasoning_counts_update_without_turning_content_counts_into_reasoning() {
+        let mut state = AppState::new("http://local".to_string());
+        state.begin_turn("go".to_string());
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: "reasoning".to_string(),
+            reasoning_tokens: None,
+        }));
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: String::new(),
+            reasoning_tokens: Some(21),
+        }));
+        let thinking = state
+            .timeline
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Thinking)
+            .expect("thinking entry");
+        assert_eq!(thinking.reasoning_tokens, Some(21));
+        assert_eq!(thinking.text, "reasoning");
+    }
+
+    #[test]
+    fn late_token_only_event_does_not_mutate_completed_reasoning() {
+        let mut state = AppState::new("http://local".to_string());
+        state.begin_turn("go".to_string());
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: "reasoning".to_string(),
+            reasoning_tokens: None,
+        }));
+        state.apply(ClientMessage::Stream(ServerEvent::Content(
+            "answer".to_string(),
+        )));
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: String::new(),
+            reasoning_tokens: Some(999),
+        }));
+        let thinking = state
+            .timeline
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Thinking)
+            .expect("thinking entry");
+        assert!(!thinking.live);
+        assert_eq!(thinking.reasoning_tokens, None);
+        assert_eq!(thinking.text, "reasoning");
+    }
+
+    #[test]
+    fn failed_turn_marks_open_thinking_as_interrupted() {
+        let mut state = AppState::new("http://local".to_string());
+        state.begin_turn("go".to_string());
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: "partial reasoning".to_string(),
+            reasoning_tokens: None,
+        }));
+        state.apply(ClientMessage::StreamClosed);
+        let thinking = state
+            .timeline
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Thinking)
+            .expect("thinking entry");
+        assert!(!thinking.live);
+        assert!(thinking.interrupted);
+        assert_eq!(state.turn, TurnState::Failed);
+    }
+
+    #[test]
+    fn metadata_events_do_not_finish_open_reasoning() {
+        let mut state = AppState::new("http://local".to_string());
+        state.begin_turn("go".to_string());
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: "partial reasoning".to_string(),
+            reasoning_tokens: None,
+        }));
+        for event in [
+            ServerEvent::Start(String::new()),
+            ServerEvent::User,
+            ServerEvent::Iteration {
+                detail: "iteration 2/10".to_string(),
+                current: Some(2),
+            },
+            ServerEvent::Unknown {
+                kind: "usage".to_string(),
+                payload: "{}".to_string(),
+            },
+        ] {
+            state.apply(ClientMessage::Stream(event));
+            let thinking = state
+                .timeline
+                .iter()
+                .find(|entry| entry.kind == EntryKind::Thinking)
+                .expect("thinking entry");
+            assert!(thinking.live);
+            assert!(!thinking.interrupted);
+        }
+
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: " continued".to_string(),
+            reasoning_tokens: None,
+        }));
+        let thinking_entries = state
+            .timeline
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Thinking)
+            .collect::<Vec<_>>();
+        assert_eq!(thinking_entries.len(), 1);
+        assert_eq!(thinking_entries[0].text, "partial reasoning continued");
+        assert!(thinking_entries[0].live);
+
+        state.apply(ClientMessage::Stream(ServerEvent::Content(
+            "answer".to_string(),
+        )));
+        let thinking = state
+            .timeline
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Thinking)
+            .expect("thinking entry");
+        assert!(!thinking.live);
+        assert_eq!(thinking.text, "partial reasoning continued");
+    }
+
+    #[test]
+    fn reasoning_counts_do_not_update_a_previous_turn() {
+        let mut state = AppState::new("http://local".to_string());
+        state.begin_turn("one".to_string());
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: "old reasoning".to_string(),
+            reasoning_tokens: None,
+        }));
+        state.apply(ClientMessage::Stream(ServerEvent::Complete));
+        state.begin_turn("two".to_string());
+        state.apply(ClientMessage::Stream(ServerEvent::Thinking {
+            text: String::new(),
+            reasoning_tokens: Some(99),
+        }));
+        let thinking = state
+            .timeline
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Thinking)
+            .expect("thinking entry");
+        assert_eq!(thinking.text, "old reasoning");
+        assert_eq!(thinking.reasoning_tokens, None);
     }
 
     #[test]
