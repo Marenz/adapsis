@@ -115,9 +115,11 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             "handle_user_dm_attachment",
             "transcribe_voice",
             "process_update",
+            "send_reply_with_attachment",
+            "send_audio_file",
         ])
     );
-    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 14);
+    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 16);
     assert_eq!(
         entry["introduced_types"]["TgSendAttempt"],
         serde_json::json!([

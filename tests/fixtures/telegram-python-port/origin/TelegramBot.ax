@@ -5,6 +5,41 @@
 +shared admin_user_ids:String = "<redacted>"
 +shared allowed_user_ids:String = ""
 +shared sandbox_perm_model:String = "family"
++fn telegram_upload_attempt (response:Result<String>)->TgSendAttempt
+  +match response
+  +case Ok(body)
+    +if json_kind(body, "ok")!="bool"
+      +return TgUncertain(body)
+    +if to_string(json_get(body, "ok"))=="true"
+      +return TgSent(body)
+    +return TgRejected(body)
+  +case Err(error)
+    +return TgUncertain(error)
++fn send_reply_with_attachment (chat_id_str:String, text:String, attachment:Attachment)->TgSendAttempt [io,fail,async]
+  +let chat_id:Int = to_int(chat_id_str)
+  +if text!=""
+    +await message_attempt:TgSendAttempt = TelegramBot.send_message(chat_id, text)
+    +match message_attempt
+    +case TgSent(_)
+    +case _
+      +return message_attempt
+  +let url:String = concat("<redacted>", telegram_token, "/sendDocument")
+  +let extra:String = concat("chat_id=", to_string(chat_id))
+  +await response:Result<String> = http_upload(url, attachment, "document", extra)
+  +return TelegramBot.telegram_upload_attempt(response)
++doc "Send nonempty text first; only confirmed Sent permits the single document upload. Empty text permits attachment-only delivery. Propagate upload outcome; callback acknowledgement remains separate (#104)."
++fn send_audio_file (chat_id:Int, file_path:String, caption:String)->TgSendAttempt [io,fail,async]
+  +if contains(caption, "&")
+    +return TgUncertain("caption contains unsupported multipart field delimiter")
+  +let url:String = concat("<redacted>", telegram_token, "/sendDocument")
+  +let extra:String = concat("chat_id=", to_string(chat_id), "&caption=", caption)
+  +await response:Result<String> = http_upload(url, file_path, "document", extra)
+  +return TelegramBot.telegram_upload_attempt(response)
++doc "Attempt one document upload from the existing path API. Captions containing ampersand are refused before IO because multipart extras cannot escape it (#106). No upload retry; callback ACK remains separate."
++fn extract_reply (json:String)->String
+  +let val:String = json_get(json, "reply")
+  +return val
++doc "Extract reply field from API response JSON"
 +fn intake_validate (payload:String)->String
   +let objects:List<String> = list("message", "message.chat", "message.from")
   +let i:Int = 0

@@ -16,6 +16,48 @@ admin_user_ids: str = "<redacted>"
 allowed_user_ids: str = ""
 sandbox_perm_model: str = "family"
 
+def telegram_upload_attempt(response: Result[str]) -> TgSendAttempt:
+    match response:
+        case Ok(body):
+            if json_kind(body, "ok") != "bool":
+                return TgUncertain(body)
+            if to_string(json_get(body, "ok")) == "true":
+                return TgSent(body)
+            return TgRejected(body)
+        case Err(error):
+            return TgUncertain(error)
+
+@effects("io", "fail")
+async def send_reply_with_attachment(chat_id_str: str, text: str, attachment: Attachment) -> TgSendAttempt:
+    """Send nonempty text first; only confirmed Sent permits the single document upload. Empty text permits attachment-only delivery. Propagate upload outcome; callback acknowledgement remains separate (#104)."""
+    chat_id: int = to_int(chat_id_str)
+    if text != "":
+        message_attempt: TgSendAttempt = await TelegramBot.send_message(chat_id, text)
+        match message_attempt:
+            case TgSent(_):
+                pass
+            case _:
+                return message_attempt
+    url: str = concat("<redacted>", telegram_token, "/sendDocument")
+    extra: str = concat("chat_id=", to_string(chat_id))
+    response: Result[str] = await http_upload(url, attachment, "document", extra)
+    return TelegramBot.telegram_upload_attempt(response)
+
+@effects("io", "fail")
+async def send_audio_file(chat_id: int, file_path: str, caption: str) -> TgSendAttempt:
+    """Attempt one document upload from the existing path API. Captions containing ampersand are refused before IO because multipart extras cannot escape it (#106). No upload retry; callback ACK remains separate."""
+    if contains(caption, "&"):
+        return TgUncertain("caption contains unsupported multipart field delimiter")
+    url: str = concat("<redacted>", telegram_token, "/sendDocument")
+    extra: str = concat("chat_id=", to_string(chat_id), "&caption=", caption)
+    response: Result[str] = await http_upload(url, file_path, "document", extra)
+    return TelegramBot.telegram_upload_attempt(response)
+
+def extract_reply(json: str) -> str:
+    """Extract reply field from API response JSON"""
+    val: str = json_get(json, "reply")
+    return val
+
 def intake_validate(payload: str) -> str:
     objects: list[str] = ["message", "message.chat", "message.from"]
     i: int = 0

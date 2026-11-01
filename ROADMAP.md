@@ -2,7 +2,36 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — original-name intake, baseline `016711a`
+### Current pending slice — outbound closure, baseline `fc2952b`
+
+- Three originals send_reply_with_attachment/send_audio_file/extract_reply→36/42;
+ 6pending. NEWpure telegram_upload_attempt separately inventoried (41total).
+  Both callers explicitly await builtin upload Result and return TgSendAttempt;
+  nonempty reply text mustSent before one document upload, emptytext skips text.
+  Text failure or malformedJSON stops latereffects; upload never retries.
+- Original parse/URL/extras/uploadargs preserved for admitted inputs; extract_reply
+  exactAST/doc preserved with trusted actualtype characterization (not soundString).
+  Classifier exactJSONBool true/false→Sent/Rejected; otherstatus/transport→Uncertain;
+  malformedJSON terminal. No Result literal-policy/runtime/frontend relaxation.
+- #106 rawmultipart extras split '&' with no escaping/decoding: conservative
+  caption'&' refusal is true0IO; general arbitrarycaption support unresolved.
+  Safe '=' Unicode/newline/% values, including percentescaped-looking suffixes,
+  remain exact. No percentencoding fiction or hidden runtime fix.
+- Bothorigin normalasync tests use explicit test-only acquisitiondriver for
+  Attachment argument; leading acquisition is separate from delivery counts.
+  Invaliddestination=1acquisition/0delivery, emptytext=1acquisition/1upload.
+  Pathoriginalfunction directly invoked with inert path and intercepted request;
+  no realfiles/network. Exactbytes/MIME/name/documentfield/chat_id/caption checked.
+  Targeted46/46; pure66Telegram/38Tg; onefullgate1825passed/strictparity1failed/
+  2ignored,CLI5/5. Log `tool_18b0cc1b5001PJLz6IpAASvCYU`.
+- Authored manifest/origin/Python blobs:
+  `169ceb420cc03267038f266ccf684e78d78d4093`,
+  `7d45a6f83348762ff2f70ddf1dfdc698d932e56a`,
+  `21dae4a305be5c9508cdf72df17e7206dc7b8741`.
+  Frozen pending independent review; no writer commit/deployment. #104 callbackACK,
+  #99 size safety and webhook/poll/lifecycle remain separate.
+
+### Accepted checkpoint `fc2952b` — original-name intake
 
 - Two originals process_update+describe_update_kind→33/42;9pending. Three NEW
   pure validators separately inventoried with existing NEWtextentry (37total).
@@ -29,8 +58,8 @@
   `215be83f8cef91b3aab10d17c198a6853885ce16`,
   `16f0835665972f9a3dcc6ba37aa46f19db92364d`,
   `4dfecc6054b135a10c37923d69542d2c76d202b4`.
-  Frozen for independent review; no commit/liveIO/deployment. Outbound attachments,
-  webhook/poll/lifecycle, #99splitting/#104callbackACK remain separate.
+  Accepted and checkpointed atfc2952b; no liveIO/deployment. At this checkpoint
+  outbound attachments/webhook/poll/lifecycle/#99/#104 remained separate.
 
 ### Accepted checkpoint `016711a` — two voice helpers
 

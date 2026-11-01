@@ -179,3 +179,11 @@ def test_describe_update_kind_poll() -> None:
     assert describe_update_kind('{"message":{"poll":{"question":"What?"}}}') == "user sent a poll: What?"
 def test_describe_update_kind_video_note() -> None:
     assert describe_update_kind('{"message":{"video_note":{"file_id":"vn"}}}') == "user sent a video note which I cannot watch"
+def test_extract_reply_string() -> None:
+    assert extract_reply('{"reply":"hello"}') == "hello"
+
+def test_extract_reply_missing() -> None:
+    assert extract_reply('{}') == ""
+
+def test_extract_reply_literal_null() -> None:
+    assert extract_reply('{"reply":"null"}') == "null"

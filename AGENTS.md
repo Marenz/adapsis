@@ -624,8 +624,8 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 33/42 original TelegramBot functions plus a separate partial text entry
-  and three separately inventoried pure intake validators,
+  (now 36/42 original TelegramBot functions plus a separate partial text entry,
+  three separately inventoried pure intake validators and a pure upload classifier,
   and 18/18 TgFormat functions; module/stored-test and
   intake/delivery surfaces still incomplete). Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
@@ -634,8 +634,18 @@ replaces that branch with one composer.
   takeover and reply requests with tiny memory-backed Attachments; no Runtime IO
   loop or live service is used. Lookup keeps String/error-String results through
   an explicit builtin Result binding; attachment handlers preserve takeover
-  prefixes and propagate TgTextTurn without added retries. Outbound attachments
-  remain pending; #99/#104 remain open. Original-name process_update now integrates
+  prefixes and propagate TgTextTurn without added retries. Callable outbound
+  attachment closure now returns TgSendAttempt: nonempty text must be Sent before
+  one upload; empty text permits upload-only; actual builtin Result is classified
+  by the new pure telegram_upload_attempt with exact Bool JSON status. Uploads
+  never retry. Test-only PortOutboundDriver acquires tiny memory bytes before the
+  normal async caller, so invalid destination means one acquisition/zero delivery,
+  not total0IO. Path upload tests intercept an inert path before any Runtime IO loop.
+  send_audio_file rejects caption '&' before IO: raw multipart extras cannot escape
+  it (#106); '=' Unicode/newline/% are preserved, percent encoding is not a fix.
+  General arbitrary-caption fidelity remains unresolved. extract_reply preserves
+  original AST/doc and inherited json_get polymorphism; it is not the classifier.
+  #99/#104 remain open. Original-name process_update now integrates
   text/photo/video/voice through normal async both-origin raw-payload tests without
   a driver. It deliberately adds conservative consumed-field preflight, including
   represented int IDs/date and date<=9223372036854775, before authorization/IO;
