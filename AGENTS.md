@@ -186,6 +186,27 @@ Function evaluation goes through up to three tiers (fastest first):
     or a cached decision across Program revisions. Unknown/builtin-only awaits
     retain existing behavior. `io_performed` and post-effect replay guards stay
     unchanged; never reset them to recover from a partially executed user await.
+  - `vm/field_admission.rs` (#114) refuses, BEFORE execution, any function whose
+    reachable graph contains a `FieldAccess` whose base is not statically proven to
+    be a `Value::Struct`. The VM's `GetField` reads structs only, while the tree also
+    gives `.len`/`.is_empty` (String/List), `.is_ok`/`.is_err`/`.unwrap`/`.error`/
+    `.unwrap_err` (Result) and transparent `Ok(struct).field` meaning; after IO the
+    async path cannot fall back, so this has to be decided at compile time. Same
+    iterative traversal and tree `get_function` lookup as `await_admission` (shares its
+    `Work`/`statement_work`/`expression_work`). Proof = declared `Struct` parameters
+    and `+each` bindings, `+let` of a declared Struct whose VALUE is proven, struct
+    literals, plain user calls returning a declared non-Result Struct, and chained
+    fields declared Struct with a UNIQUE declaration. NEVER proven: any `+call`/
+    `+spawn`/`+await` binding (VM keeps `Ok` where the tree unwraps, #82 viaok),
+    match captures (they poison same-named bindings), shared vars, builtin calls.
+    Parameters are only sound because (a) every in-graph call site must pass a proven
+    struct to a Struct-typed parameter and (b) `check_arguments` (in `execute_cached`)
+    shape-checks the ROOT call's entry arguments (`!eval f p=Ok({..})` reaches a Struct
+    parameter otherwise). Conservative by design: it may send a struct-only function to
+    the tree, never admits an unproven base. VM `GetField` and the JIT are unchanged.
+    Blast radius on `examples/*.ax` (99 functions): VM-compilable 95 -> 52 (44 more go
+    to the tree; `vm/blast_tests.rs` prints counts and asserts no function with only
+    ordinary field names is refused); parity library unchanged (161 functions, 107).
    - Dedicated `Value::Ok`/`Value::Err` matching is handled by
      `vm/result_match.rs` (#93): push the inner value/error String before the
      match Bool so the existing reverse-order binding stores consume it correctly.
