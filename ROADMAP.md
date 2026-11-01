@@ -2,32 +2,35 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — polling slice C (poll_loop), baseline `2a5d0cd`
+### Current pending slice — D1 (module doc, shared paths, startup, route), baseline `9fa4da2`
 
-- Fixtures/tests/docs only. poll_loop (typed_poll_loop_v1, R6 option ii, #107) -> 42/42
-  original TelegramBot functions, 0 pending functions. Shared poll_running added. Loop
-  bounded to 1000 cycles (10x under the tree while cap of 10000, counted per while
-  statement); on the bound it clears the latch, THEN spawns one zero-arg qualified
-  successor and returns "poll loop restarted"; a stop request still returns "poll loop
-  stopped" with no successor; "already running" does zero IO.
-- Limits: outer errors out of poll_once cannot be caught in-language and leave the latch
-  set (#109, runtime follow-up); the Bool latch is not an identity so stop + immediate
-  restart during an in-flight getUpdates can run two loops (inherited). Zero-arg spawn
-  admitted by the frontend (probed). Non-function surfaces (module doc, token_path,
-  allowed_path, startup, route, original stored tests) pending; #86 not complete.
-- Four named normal-async tests on both origins through the real tree spawn path
-  (get/sleep/spawn intercepted; a hook writes the typed poll_running slot): already
-  running + stop after exactly 3 cycles; exactly 1000 cycles then one successor (1002
-  events) and a simulated handoff; latch kept on sleep failure / u64 id; spawn-failure
-  order via a dropped receiver ("+spawn failed to send", latch already clear, recoverable);
-  test-only CapProbe pins the 10000-pass tree cap. Targeted 58/58; ONE full gate 1845
-  passed / strict parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_c.log.
+- Fixtures/tests/docs only. Exact module doc (docstring), token_path/allowed_path (all 9
+  shared in frozen order), `+startup` (qualification of 2 sites + effect spelling
+  [io,mut,async]; NO semantic repair) and `+route POST /webhook/telegram` ported in ax+py.
+  Probes passed with no frontend change: `length(str)` keeps its spelling, shared assignment
+  and file awaits inside a lifecycle body lower fine.
+- Equality: whole-Program serialization covers doc/shared/startup/routes; pending_routes
+  (#[serde(skip)]) asserted explicitly; frozen-subset gate extended to doc, routes, shared and
+  startup (startup via a FunctionDecl wrapper + inverse qualification proof).
+- Startup tests through the production call shape (task-tracked handle, `__module_name`,
+  qualified name), intercepted FileRead/FileExists/Spawn, token never echoed (byte length
+  only). Route: dispatch replica + real HTTP via router_with_llm/oneshot (200 `{}` + spawn,
+  404 for GET/PUT/trailing slash/other paths, 500 without io_sender, #108 header pin).
+- Targeted 66/66; ONE full gate 1853 passed / strict parity 1 failed / 2 ignored; CLI 5/5.
+  Strict PARITY_SUMMARY/GROUPS lines byte-identical to slice C (116/58/399, 54 files, 573
+  entries). Log /tmp/opencode/full_gate_d1.log. AGENTS.md len/str note corrected.
 - Authored manifest/origin/Python blobs:
-  `701de87440b247773d717bcfcf59f64abce146c3`,
-  `e49f5b8d4ecee950ce3210039a9a99a859bed488`,
-  `16254223253a20a6ed1db4d1ea1a7633d9e17e57`.
-  Frozen for review; no commit. Next: slice D (startup with the `length` admission probe,
-  route, token_path/allowed_path, module doc, stored tests).
+  `35d7b341e83f2dae6b3e2efbb2fc548e2b650427`,
+  `7fec607188955ad6f06eeffeab99c05ce7bdd77c`,
+  `da4575bb24b570ba57988cbd95d71b8ee3ed6ecf`.
+  Frozen for review; no commit. Next: D2 (carry original stored tests; manifest-driven
+  61-case disposition test). Claims: all frozen module members except the stored tests are
+  ported; #86 not complete.
+
+### Accepted checkpoint `9fa4da2` — polling slice C (poll_loop), 42/42 functions
+
+- poll_loop bounded to 1000 cycles with clear-before-spawn successor (#107); latch kept on
+  outer errors (#109); Bool latch not an identity.
 
 ### Accepted checkpoint `2a5d0cd` — polling slice B (poll_once, baseline `da46d2e`)
 

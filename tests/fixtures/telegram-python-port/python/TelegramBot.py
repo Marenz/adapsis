@@ -1,3 +1,5 @@
+"""Telegram bot: webhook OR long-poll intake, photo understanding, bounded video-tool intake, voice transcription, and LLM replies. Three-tier access: admins (admin_user_ids) full, allow-listed users (allowed_user_ids from allowed_path) sandboxed, everyone else ignored. Supports group chats and per-user sandboxing."""
+
 @union
 class TgSendAttempt:
     TgSent: tuple[str]
@@ -12,12 +14,27 @@ class TgTextTurn:
     TgDeferred: tuple[str]
 
 telegram_token: str = ""
+token_path: str = "<redacted>"
+allowed_path: str = "<redacted>"
 admin_user_ids: str = "<redacted>"
 allowed_user_ids: str = ""
 sandbox_perm_model: str = "family"
 intake_mode: str = "poll"
 poll_offset: int = 0
 poll_running: bool = False
+
+@effects("io", "mut")
+async def startup() -> None:
+    token: str = await read_file(token_path)
+    telegram_token = trim(token)
+    has_allowed: bool = await file_exists(allowed_path)
+    if has_allowed:
+        raw: str = await read_file(allowed_path)
+        allowed_user_ids = TelegramBot.parse_id_list(raw)
+    if intake_mode == "poll":
+        spawn(TelegramBot.poll_loop())
+        return concat("<redacted>", to_string(length(telegram_token)), "ch, admins=", admin_user_ids, ", allowed=", allowed_user_ids)
+    return concat("<redacted>", to_string(length(telegram_token)), "ch, admins=", admin_user_ids, ", allowed=", allowed_user_ids)
 
 def telegram_upload_attempt(response: Result[str]) -> TgSendAttempt:
     match response:
@@ -75,6 +92,7 @@ def init(token: str, admins: str) -> str:
     admin_user_ids = admins
     return "ok"
 
+@route("POST", "/webhook/telegram")
 @effects("io")
 async def handle_update(payload: str) -> str:
     """Webhook intake: acknowledge immediately, process in background. Ignored unless intake_mode is 'webhook' so a stale route can't double-deliver while polling."""

@@ -88,7 +88,7 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             .variants
             .iter()
             .all(|v| v.payload == [ast::Type::String]));
-        assert_eq!(module.shared_vars.len(), 7);
+        assert_eq!(module.shared_vars.len(), 9);
         assert_eq!(module.shared_vars[0].name, "telegram_token");
         assert!(
             matches!(eval::eval_expr_standalone(&program, &module.shared_vars[0].default).unwrap(), eval::Value::String(ref value) if value.is_empty())

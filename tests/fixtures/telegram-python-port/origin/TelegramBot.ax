@@ -1,13 +1,28 @@
 +module TelegramBot
++doc "Telegram bot: webhook OR long-poll intake, photo understanding, bounded video-tool intake, voice transcription, and LLM replies. Three-tier access: admins (admin_user_ids) full, allow-listed users (allowed_user_ids from allowed_path) sandboxed, everyone else ignored. Supports group chats and per-user sandboxing."
 +type TgSendAttempt = TgSent(String) | TgRejected(String) | TgUncertain(String)
 +type TgTextTurn = TgNoImmediateReply(String) | TgDeliveryAttempt(TgSendAttempt) | TgIgnored(String) | TgDeferred(String)
 +shared telegram_token:String = ""
++shared token_path:String = "<redacted>"
++shared allowed_path:String = "<redacted>"
 +shared admin_user_ids:String = "<redacted>"
 +shared allowed_user_ids:String = ""
 +shared sandbox_perm_model:String = "family"
 +shared intake_mode:String = "poll"
 +shared poll_offset:Int = 0
 +shared poll_running:Bool = false
++startup [io,mut,async]
+  +await token:String = read_file(token_path)
+  +set telegram_token = trim(token)
+  +await has_allowed:Bool = file_exists(allowed_path)
+  +if has_allowed
+    +await raw:String = read_file(allowed_path)
+    +set allowed_user_ids = TelegramBot.parse_id_list(raw)
+  +if intake_mode=="poll"
+    +spawn TelegramBot.poll_loop()
+    +return concat("<redacted>", to_string(length(telegram_token)), "ch, admins=", admin_user_ids, ", allowed=", allowed_user_ids)
+  +return concat("<redacted>", to_string(length(telegram_token)), "ch, admins=", admin_user_ids, ", allowed=", allowed_user_ids)
++route POST "/webhook/telegram" -> handle_update
 +fn telegram_upload_attempt (response:Result<String>)->TgSendAttempt
   +match response
   +case Ok(body)

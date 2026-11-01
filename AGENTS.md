@@ -654,8 +654,11 @@ replaces that branch with one composer.
   requests spawn nothing; an outer error from poll_once keeps the latch set and cannot be
   caught in-language (#109); the Bool latch is not an identity (stop + immediate restart
   during an in-flight getUpdates can run two loops). Non-function surfaces (module doc,
-  token_path, allowed_path, startup, route, original stored tests) remain pending and
-  #86 is not complete (webhook ingress limit: #108).
+  token_path, allowed_path, startup, route) are ported in slice D1: exact module doc,
+  startup (qualification + effect spelling only, no semantic repair; the token only as
+  BYTE length), and the webhook route verified through a dispatch replica AND the real
+  HTTP layer (200 "{}" + spawn; no header/secret access, #108). Original stored tests
+  remain pending (D2) and #86 is not complete.
   Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
   The NEW test-only PortMediaDriver is excluded from original-function inventory
@@ -785,7 +788,8 @@ replaces that branch with one composer.
   Supported syntax/exclusions and runnable commands: `examples/python/README.md`.
   New bindings/parameters/returns are annotated; imports, mutable collections,
   dynamic calls and ambiguous numeric/truthiness behavior fail with source
-  locations. For targets cannot escape/reuse; len is list-only. Pure async calls
+  locations. For targets cannot escape/reuse; `len`/`length` accept a statically known
+  list, str, Map or Set (str length is BYTES). Pure async calls
   need await; synchronous calls cannot be awaited. IO await also needs the inert
   io effect declaration. Awaiting Result-returning user functions is refused
   until inherited runtime unwrapping is reconciled (#82); direct IO builtin

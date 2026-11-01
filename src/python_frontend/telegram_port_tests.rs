@@ -12,6 +12,7 @@ const TELEGRAM_CASES: usize = 84;
 const FORMAT_CASES: usize = 38;
 mod io_contracts;
 mod intake;
+mod lifecycle;
 mod outbound;
 mod polling;
 mod media;
@@ -67,6 +68,10 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
     attach_format(&mut python, true);
     super::validate_runtime_arguments(&lowered.operations, &python).unwrap();
     assert!(super::ast_equality::program(&origin, &python));
+    // Program.pending_routes is #[serde(skip)], so the structural comparison above
+    // cannot see it: assert route registration on both origins explicitly.
+    assert_eq!(origin.pending_routes, python.pending_routes);
+    assert_eq!(origin.pending_routes, lifecycle::expected_routes());
     let printed = super::print_module(&python, "TelegramBot").unwrap();
     let mut second = program(&lower_telegram(&printed).operations);
     attach_format(&mut second, true);
@@ -75,6 +80,14 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
         super::print_module(&second, "TelegramBot").unwrap(),
         printed
     );
+    assert_eq!(second.pending_routes, python.pending_routes);
+    for fragment in [
+        "Telegram bot: webhook OR long-poll intake",
+        "@route(\"POST\", \"/webhook/telegram\")",
+        "async def startup() -> None:",
+    ] {
+        assert!(printed.contains(fragment), "{fragment}");
+    }
 
     // Validate only the explicitly selected pure closure against the frozen
     // function ASTs. The original whole module is still invalid (#91).
@@ -88,25 +101,20 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
         parser::Operation::Function(f) => f.name != "transcribe_voice" && origin
             .get_function(&format!("TelegramBot.{}", f.name))
             .is_some(),
-        parser::Operation::SharedVar(shared) => [
-            "telegram_token",
-            "admin_user_ids",
-            "allowed_user_ids",
-            "sandbox_perm_model",
-            "intake_mode",
-            "poll_offset",
-            "poll_running",
-        ]
-        .contains(&shared.name.as_str()),
+        // Every frozen shared declaration, the startup block and the route are part
+        // of the selected surface; the module doc stays attached (not cleared).
+        parser::Operation::SharedVar(_)
+        | parser::Operation::Startup(_)
+        | parser::Operation::Route { .. } => true,
         _ => false,
     });
-    module.doc = None;
     let selected = program(&operations);
     assert_eq!(selected.modules[0].functions.len(), 41);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
     );
+    lifecycle::verify_surface(&selected, &origin);
     verify_qualification(&selected, &origin, "TelegramBot");
 }
 

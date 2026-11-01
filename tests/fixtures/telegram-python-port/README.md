@@ -44,7 +44,7 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **58 passing tests**, including the original
+This focused command currently has **66 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
@@ -132,20 +132,19 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current polling-slice-C release gate: **1845 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current slice-D1 release gate: **1853 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**58 passed**. This remains partial routing evidence, not deployment certification.
+**66 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
 The manifest lists **no pending TelegramBot original functions** (42/42 are ported as corrected
-fixtures); TgFormat has no pending functions. **The non-function surfaces remain pending**: the
-module doc, `token_path`, `allowed_path`, `+startup`, the `+route`, and the original stored tests.
-**#86 is not complete.**
+fixtures); TgFormat has no pending functions. **Slice D1 ported the module doc, `token_path`, `allowed_path`, `+startup` and the `+route`;
+the original stored tests remain pending (slice D2). #86 is not complete.**
 Still required: full corrected-origin provenance/review and whole-module paired
-structural/idempotence gates and the startup/route/remaining-shared/stored-test surface. Raw-update text/photo/video/voice callable routing
+structural/idempotence gates and the stored-test surface. Raw-update text/photo/video/voice callable routing
 is covered by the bounded corrected-origin integration below; deployed callbacks,
 polling and lifecycle are not thereby certified.
 The partial tests here do not close #86, certify deployment, or imply the original
@@ -578,3 +577,61 @@ Full-gate log: `/tmp/opencode/full_gate_c.log`.
 Claims after this slice: 42/42 original TelegramBot functions are ported as corrected
 fixtures. The non-function surfaces (module doc, `token_path`, `allowed_path`, `startup`,
 `route`, original stored tests) are pending, and **#86 is not complete**.
+
+## Slice D1: module doc, shared paths, `+startup`, `+route`
+
+All nine frozen shared declarations are now ported in frozen order (`token_path` and
+`allowed_path` keep the sanitized `<redacted>` defaults of the frozen blob), together with
+the exact module doc (a Python module docstring), the `+startup` block and the webhook
+`+route`. `qualified_call_sites` in the manifest counts the qualified sites in the
+corrected body (for `poll_loop` that is 2: the `poll_once` call and the self-spawn target),
+not the sites that survive the inverse proof. `len`/`length` accept `str` in the frontend
+(byte length); `AGENTS.md` previously said list-only.
+
+Equality: `ast_equality::program` serializes the whole Program, so module doc, shared vars,
+startup and routes are compared between the corrected `.ax` and the Python-lowered module.
+`Program.pending_routes` is `#[serde(skip)]`, so route registration is asserted explicitly
+on both origins and on the printed-then-relowered module. Against the FROZEN blob the
+selected-subset gate now retains every shared declaration, the startup block, the route and
+the doc: doc, routes and shared vars compare equal, and startup equals the frozen block after
+qualifying `parse_id_list` and the `poll_loop` spawn target (2 sites) with the effect
+order normalized (`[io,async,mut]` frozen, `[io,mut,async]` corrected because Python spells
+`async` last; the effect set is equal). **Startup carries no semantic repair.** Both original
+branches (which return the same string) are kept verbatim.
+
+Inherited observations (documented, not repaired): the startup result echoes the admin and
+allow-list IDs and only the BYTE length of the token (never the token); an empty token file
+still spawns `poll_loop` (slice B's backoff makes the resulting 404 cycles a 3 s cadence); a
+file that yields no IDs replaces the allow-list with the empty string; `main.rs:2161-2163`
+only `eprintln!`s startup errors, so a failed read leaves polling silently off, and outer errors
+cannot be caught in-language (#109 class); startup does not consult the `poll_running` latch.
+
+Startup tests (both origins) use the production call shape of `main.rs:2149-2164`: the stored
+`startup` body, a task-tracked handle (registries taken from a `Runtime`, its IO loop never
+runs), `__module_name`, and `eval_function_body_named("TelegramBot.startup", ...)`. `FileRead`,
+`FileExists` and `+spawn` are intercepted; any other request fails the test; no file is read.
+`..._poll_mode_reads_files_trims_token_and_spawns` (event order read/exists/read/spawn,
+trimmed token stored, `42,7,9` parsed from a commented file, return `<redacted>11ch, ...` for
+a 10-character/11-byte token, token text and file names absent from the result and spawn
+arguments), `..._defaults_and_allowed_file_variants` (unseeded paths equal the declared
+`<redacted>` defaults; missing or empty allowed file), `..._non_poll_modes_never_spawn`
+(`webhook`, empty, `Poll`, `poll `, `polling`), `..._failures_end_without_spawn_or_rollback`
+(token, existence, allowed-file errors and a spawn that cannot be queued, with partial state
+pinned) and `..._empty_token_still_spawns_and_rerun_respawns`.
+
+Route tests: `telegram_port_route_declaration_and_production_dispatch_binding` replicates
+the dispatch body of `api/mod.rs:1692-1715` (route handler name taken from `module.routes`,
+body bound positionally via `bind_input_to_params`, plain `CoroutineHandle`), and the
+`lifecycle/http.rs` tests drive the real HTTP layer (`router_with_llm` + tower `oneshot`, route
+table seeded from `pending_routes` as `session.rs:595-598` does, `io_sender` intercepted, no
+`src/api` edits): `POST /webhook/telegram` returns 200 `{}` with JSON content type and one
+`TelegramBot.process_update` spawn carrying the exact body (malformed, empty, Unicode; invalid
+bytes become U+FFFD); poll mode acknowledges without spawning; GET, PUT, a trailing slash and
+other paths are 404; without an `io_sender` the handler reports `+spawn requires async
+context` (HTTP 500). **#108 is pinned at this boundary:** a wrong, empty or absent
+`X-Telegram-Bot-Api-Secret-Token` (or any other header) cannot change the outcome and a body
+claiming an admin `from.id` is forwarded verbatim, because the handler never sees headers.
+
+The strict `python_parity` report is byte-identical to the slice C log (`files=54 entries=573
+verified=116 invalid=58 unsupported=399`, same group counts); nothing in the frozen corpus,
+the frontend or the runtime was edited. Full-gate log: `/tmp/opencode/full_gate_d1.log`.
