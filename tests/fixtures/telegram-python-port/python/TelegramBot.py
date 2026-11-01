@@ -113,6 +113,28 @@ async def dispatch_updates(body: str) -> str:
         return concat("dispatched ", to_string(n - skipped), ", skipped ", to_string(skipped))
     return concat("dispatched ", to_string(n))
 
+@effects("io", "mut")
+async def poll_once() -> str:
+    """One getUpdates cycle (30s long-poll). Corrected port: explicit builtin Result binding; transport errors back off 3s; a 200 body that is not valid JSON, has no result array (e.g. Telegram 401/409 error JSON, which HttpGet delivers as Ok) or yields only skipped updates also backs off 3s instead of re-polling immediately or aborting; a genuine empty result array returns immediately. Dispatch is at-most-once (#104)."""
+    url: str = concat("<redacted>", telegram_token, "/getUpdates?timeout=30&offset=", to_string(poll_offset))
+    response: Result[str] = await http_get(url)
+    match response:
+        case Ok(body):
+            if json_valid(body) == False:
+                _: int = await sleep(3000)
+                return "poll rejected: invalid body"
+            outcome: str = await TelegramBot.dispatch_updates(body)
+            if outcome == "no result":
+                _: int = await sleep(3000)
+                return "poll rejected: no result"
+            if starts_with(outcome, "dispatched 0, skipped "):
+                _: int = await sleep(3000)
+                return "poll rejected: no valid updates"
+            return "ok"
+        case Err(e):
+            _: int = await sleep(3000)
+            return concat("poll error: ", e)
+
 def intake_validate(payload: str) -> str:
     objects: list[str] = ["message", "message.chat", "message.from"]
     i: int = 0

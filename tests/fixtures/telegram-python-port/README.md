@@ -7,9 +7,9 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 40 of 42 original functions, plus six introduced functions.**
+- **TelegramBot: 41 of 42 original functions, plus six introduced functions.**
   Nineteen literal-paired original pure helpers, one trusted-Result pure helper,
-  two shared-state authorization helpers, one shared-state mutator (`init`) and seventeen
+  two shared-state authorization helpers, one shared-state mutator (`init`) and eighteen
   IO functions are separately covered. `process_text_update` is NEW and is not
   counted among the original 42. Three NEW pure intake validators are also counted
   separately, as are one NEW pure upload Result classifier and one NEW pure batch update-id validator. Original-name `process_update` is integrated as an explicit
@@ -22,7 +22,7 @@ per-function transformation ledger, implemented and pending inventories.
 - Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Seventeen separately ledgered semantic repairs deliberately change return
+  unchanged. Eighteen separately ledgered semantic repairs deliberately change return
   types/effects/control flow/docs; these are not qualification-only equivalence.
   Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
@@ -44,7 +44,7 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **50 passing tests**, including the original
+This focused command currently has **54 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
@@ -132,19 +132,19 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current polling-slice-A release gate: **1829 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current polling-slice-B release gate: **1841 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**50 passed**. This remains partial routing evidence, not deployment certification.
+**54 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **2 TelegramBot pending original functions** (`poll_once`, `poll_loop`); TgFormat has
+The manifest explicitly lists **1 TelegramBot pending original function** (`poll_loop`); TgFormat has
 no pending functions but its original stored-test surface remains pending.
 Still required: full corrected-origin provenance/review and whole-module paired
 structural/idempotence gates, the long-poll cycle and loop
-(`poll_once`, `poll_loop`) and the startup/route/remaining-shared/stored-test surface. Raw-update text/photo/video/voice callable routing
+(`poll_loop`) and the startup/route/remaining-shared/stored-test surface. Raw-update text/photo/video/voice callable routing
 is covered by the bounded corrected-origin integration below; deployed callbacks,
 polling and lifecycle are not thereby certified.
 The partial tests here do not close #86, certify deployment, or imply the original
@@ -478,3 +478,46 @@ exceeds a 100-update page): `telegram_port_polling_init_writes_shared_state`,
 shared `poll_offset`. A full-AST/idempotence gate and an inverse qualification proof
 cover the repaired function; shared access fails direct-VM compilation, so none of
 this is direct-VM parity. Full-gate log: `/tmp/opencode/full_gate_a.log`.
+
+## Polling slice B: `poll_once`
+
+`poll_once` (ledger `typed_poll_once_v1`) keeps the frozen getUpdates URL exactly
+(`getUpdates?timeout=30&offset=<poll_offset>`, offset read from shared state at the
+start of each cycle) and the transport-error arm (sleep 3000, `poll error: <e>`). It is
+repaired in four ways, each tied to a reachable failure:
+- The builtin `Result` is bound explicitly (`await response: Result[str]`, then matched)
+  instead of matching the call directly (#94 shape).
+- `HttpGet` never checks the HTTP status, so a Telegram 401/409 error JSON arrives as
+  `Ok`; the original dispatched it, got `no result`, and re-polled immediately in a hot
+  loop. A body for which `dispatch_updates` answers `no result` now sleeps 3000 and
+  returns `poll rejected: no result`.
+- A body that is not JSON (HTML, truncated, empty, BOM, `1e400`, over-deep) fails
+  `json_valid` before dispatch, sleeps 3000 and returns `poll rejected: invalid body`.
+  The original let the terminal parse error end the loop.
+- A page whose updates are all skipped (`dispatched 0, skipped k`) cannot advance the
+  offset, so Telegram would redeliver it immediately; it now sleeps 3000 and returns
+  `poll rejected: no valid updates`. Mixed pages stay `ok`.
+
+Valid pages and a genuine empty array still return `ok` with no backoff. The Python
+spelling puts `async` last (`[io,mut,async]`); the effect set equals the original.
+`_` is an accepted await binding name in the frontend (probed), so the unchanged Err
+arm needs no rename. The inverse proof undoes only the ledgered transformations and
+compares the rest to the frozen function (one qualified call, `dispatch_updates`).
+
+Retained limits: matching `dispatch_updates`' sentinel strings couples the two
+functions (pinned by tests); the terminal `json_kind` error for ids above `i64::MAX`
+and a failing sleep still propagate out of `poll_once` (loop survival is slice C,
+#107); spawn stays at-most-once (#104); the 30 s long poll can coincide with the 30 s
+client timeout, so idle cycles may end in the error arm, and the URL is not changed.
+
+Tests (both origins, normal async; `http_get`, `sleep` and `+spawn` are intercepted,
+`process_update` never runs, nothing sleeps for real, any other request panics):
+`telegram_port_poll_once_valid_pages_urls_and_sequence` (URL for offsets 0, 7 and
+`i64::MAX`; empty page; two-id page; three-poll sequence whose later URLs carry the
+post-dispatch offset), `..._rejected_bodies_back_off_without_dispatch` (12 valid
+non-array bodies and 10 invalid ones, event list `[get, sleep 3000]`, no spawn),
+`..._transport_errors_and_sleep_failure` (including empty and Unicode errors; a failing
+sleep after exactly one request, no retry) and `..._skipped_updates_and_terminal_ids`
+(mixed page, three all-skipped pages, the u64 terminal characterization after one
+spawn). Shared access fails direct-VM compilation, so this is not VM parity. Full-gate
+log: `/tmp/opencode/full_gate_b.log`.

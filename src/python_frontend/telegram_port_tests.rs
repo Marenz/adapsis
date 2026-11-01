@@ -101,7 +101,7 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
     });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 39);
+    assert_eq!(selected.modules[0].functions.len(), 40);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
@@ -373,7 +373,9 @@ fn verify_qualification(original: &ast::Program, corrected: &ast::Program, modul
     for function in &original.modules[0].functions {
         let target = format!("{module}.{}", function.name);
         if let Some(repair) = ledger["semantic_repairs"].get(&function.name) {
-            if repair["kind"] == "typed_dispatch_v1" {
+            if repair["kind"] == "typed_poll_once_v1" {
+                polling::cycle::verify_repair(function, corrected.get_function(&target).unwrap());
+            } else if repair["kind"] == "typed_dispatch_v1" {
                 polling::verify_repair(function, corrected.get_function(&target).unwrap());
             } else if repair["kind"] == "typed_attachment_reply_v1" || repair["kind"] == "typed_audio_upload_v1" {
                 outbound::verify_repair(function, corrected.get_function(&target).unwrap());
@@ -477,7 +479,8 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
                     "TelegramBot.send_audio_file".to_owned(),
                     "TelegramBot.init".to_owned(),
                     "TelegramBot.handle_update".to_owned(),
-                    "TelegramBot.dispatch_updates".to_owned()
+                    "TelegramBot.dispatch_updates".to_owned(),
+                    "TelegramBot.poll_once".to_owned()
                 ]
                 .into_iter()
                 .collect(),

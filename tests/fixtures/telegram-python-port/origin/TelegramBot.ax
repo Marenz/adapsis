@@ -87,6 +87,26 @@
     +return concat("dispatched ", to_string(n-skipped), ", skipped ", to_string(skipped))
   +return concat("dispatched ", to_string(n))
 +doc "Split a getUpdates array into individual updates, advance the dedup offset, and feed each to process_update (same path as webhook). Corrected port: a missing or non-array result returns 'no result'; updates without a represented update_id in 0..i64::MAX-1 are skipped without advancing or spawning; spawn stays fire-and-forget (at-most-once, no outcome, #104)."
++fn poll_once ()->String [io,mut,async]
+  +let url:String = concat("<redacted>", telegram_token, "/getUpdates?timeout=30&offset=", to_string(poll_offset))
+  +await response:Result<String> = http_get(url)
+  +match response
+  +case Ok(body)
+    +if json_valid(body)==false
+      +await _:Int = sleep(3000)
+      +return "poll rejected: invalid body"
+    +await outcome:String = TelegramBot.dispatch_updates(body)
+    +if outcome=="no result"
+      +await _:Int = sleep(3000)
+      +return "poll rejected: no result"
+    +if starts_with(outcome, "dispatched 0, skipped ")
+      +await _:Int = sleep(3000)
+      +return "poll rejected: no valid updates"
+    +return "ok"
+  +case Err(e)
+    +await _:Int = sleep(3000)
+    +return concat("poll error: ", e)
++doc "One getUpdates cycle (30s long-poll). Corrected port: explicit builtin Result binding; transport errors back off 3s; a 200 body that is not valid JSON, has no result array (e.g. Telegram 401/409 error JSON, which HttpGet delivers as Ok) or yields only skipped updates also backs off 3s instead of re-polling immediately or aborting; a genuine empty result array returns immediately. Dispatch is at-most-once (#104)."
 +fn intake_validate (payload:String)->String
   +let objects:List<String> = list("message", "message.chat", "message.from")
   +let i:Int = 0

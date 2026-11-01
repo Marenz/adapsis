@@ -2,16 +2,31 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — json_valid primitive, baseline `614051a`
+### Current pending slice — polling slice B (poll_once), baseline `da46d2e`
 
-- Runtime/registry/catalog/prompt/docs/tests only; no Telegram fixture edits. Pure
-  total `json_valid(String)->Bool` == the shared serde parse step of json_get/json_kind/
-  json_array_len succeeds; not strict RFC 8259. serde's 128 recursion budget makes >127
-  nested containers false (clean Err->false, no stack overflow, incl. 100_000 brackets);
-  1e400 false; u64 max valid (validity != representability: json_kind still errors).
-  Arity/non-String error like json_kind. JIT refuses implicitly (no json_* lowering),
-  proven like json_kind; module functions are never JIT-compiled.
-- Adoption (poll_once guard only; dispatch_updates unchanged) is slice B.
+- Fixtures/tests/docs only. poll_once (typed_poll_once_v1) -> 41/42, 1 pending
+  (poll_loop). URL and Err arm preserved; R1 explicit builtin Result; json_valid guard
+  -> "poll rejected: invalid body"; dispatch "no result" (HttpGet delivers 401/409 JSON
+  as Ok) -> "poll rejected: no result"; "dispatched 0, skipped " -> "poll rejected: no
+  valid updates"; each backs off 3000. Valid/empty pages and mixed pages stay immediate ok.
+- `_` await binding admitted by the frontend (probed); effect set equal, Python spells
+  async last. Inverse proof leaves one qualified call. Four named normal-async tests on
+  both origins (get/sleep/spawn intercepted; offsets 0/7/i64::MAX; sequence with
+  post-dispatch offset; 22 rejected bodies; transport and sleep failure pins; mixed,
+  all-skipped and u64 terminal pages). Targeted 54/54; ONE full gate 1841 passed /
+  strict parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_b.log.
+- Authored manifest/origin/Python blobs:
+  `08e9a4e895b29f212b52ebec7a2f45612e0dae4f`,
+  `834ed7f488c8fa3976a9eb46f784d730c4e7bb42`,
+  `9751654e45c9a396b5550ca69b6ae2b31746cd40`.
+  Frozen for review; no commit. Next: poll_loop (R6 option ii, #107), then the
+  non-function surface.
+
+### Accepted checkpoint `da46d2e` — json_valid primitive (baseline `614051a`)
+
+- Pure total json_valid(String)->Bool == the shared serde parse step of json_get/
+  json_kind/json_array_len succeeds; not strict RFC 8259; >127 nested containers and
+  1e400 false, u64 max valid (validity != representability); JIT refuses implicitly.
 
 ### Accepted checkpoint `614051a` — polling slice A (baseline `8c38ace`)
 
@@ -35,12 +50,11 @@
   read typed shared poll_offset back; 84 pure cases (18 new). Targeted 50/50; ONE full
   gate 1829 passed / strict parity 1 failed / 2 ignored; CLI 5/5. Log
   /tmp/opencode/full_gate_a.log.
-- Authored manifest/origin/Python blobs:
+- Authored manifest/origin/Python blobs (slice A, historical):
   `134870e6175c256d160d5ff1aca88ed3521492ba`,
   `73c69dae365ef7116903d6187eed34e7c6d7f0e4`,
   `f62ae623548c40bdcaaf0f5611f005b3c777aaab`.
-  Frozen for review; no writer commit/deployment. Next: json_valid checkpoint, then
-  poll_once (R1/R2), poll_loop (R6 option ii, #107), then non-function surface.
+  Independently accepted and committed as 614051a; no deployment.
 
 ### Accepted checkpoint `8c38ace` — outbound closure
 
