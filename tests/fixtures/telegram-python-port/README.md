@@ -710,3 +710,13 @@ expectation each fail the gate. TgFormat's `pending_non_function_surface` is now
 (unqualified local calls have no exact Python surface) and that #99 is unchanged. The strict
 `python_parity` lines are byte-identical to slice C (116/58/399). Full-gate log:
 `/tmp/opencode/full_gate_d3.log`.
+
+## Independent check by the strict-harness printer (B1)
+
+The 80 carried stored cases (41 TelegramBot + 39 TgFormat) were written by a script, so
+they are an independent oracle for the new harness-only test printer
+(`python_frontend/tests_print.rs`, used by `parity/test_blocks.rs`):
+`telegram_port_stored_printer_reproduces_carried_python_assertions_and_refuses_ax_only`
+requires the printer to reproduce every stored `assert` line byte-for-byte from the FROZEN
+case, and to refuse all 19 `carried_ax_only` cases (calls and Result inputs stay outside the
+Python test-data policy). This adds no manifest disposition and changes no fixture.

@@ -580,3 +580,64 @@ fn telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tier
     });
     assert!(outcome.is_err() || !outcome.unwrap().1.is_empty());
 }
+
+/// Independent oracle for the strict-harness test printer (B1): the 80 carried frozen
+/// cases were written by a script, not by `tests_print`, so the printer must reproduce
+/// each stored Python assertion byte-for-byte, and must refuse exactly the cases the
+/// port carries in the `.ax` only (calls and Result inputs stay outside the policy).
+#[test]
+fn telegram_port_stored_printer_reproduces_carried_python_assertions_and_refuses_ax_only() {
+    for subject in [&TELEGRAM, &TGFORMAT] {
+        let manifest = manifest();
+        let table = manifest["modules"][subject.index]["stored_tests"]["dispositions"]
+            .as_object()
+            .unwrap()
+            .clone();
+        let (mut printed, mut refused) = (0, 0);
+        for (function, cases) in blocks(subject.frozen) {
+            for (index, case) in cases.iter().enumerate() {
+                let mark = table[&function][index].as_str().unwrap();
+                let result = super::super::tests_print::print_case(&function, case);
+                match mark {
+                    "carried" => {
+                        let name = format!("def test_stored_{function}_{}() -> None:\n", index + 1);
+                        let start = subject.tests.find(&name).expect("stored def") + name.len();
+                        let end = subject.tests[start..]
+                            .find("\n\n")
+                            .map_or(subject.tests.len(), |offset| start + offset);
+                        let stored = format!("{}\n", subject.tests[start..end].trim_end());
+                        assert_eq!(
+                            result.unwrap(),
+                            stored,
+                            "{} {function}[{}]",
+                            subject.module,
+                            index + 1
+                        );
+                        printed += 1;
+                    }
+                    "carried_ax_only" => {
+                        assert!(
+                            result.is_err(),
+                            "{} {function}[{}] must stay outside the Python test-data policy",
+                            subject.module,
+                            index + 1
+                        );
+                        refused += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let (want_printed, want_refused) = if subject.module == "TelegramBot" {
+            (41, 2)
+        } else {
+            (39, 17)
+        };
+        assert_eq!(
+            (printed, refused),
+            (want_printed, want_refused),
+            "{}",
+            subject.module
+        );
+    }
+}

@@ -609,6 +609,14 @@ replaces that branch with one composer.
   compares exact ASTs ignoring only typed NodeId fields, and checks second-print
   byte identity. Do not count a fixture as covered merely because a function
   printer passed; unqualified call normalization is an AST difference.
+  Stored module `+test` blocks are compared as `parser::TestCase` values (the validator
+  never stores tests in the Program) through the harness-only `tests_print.rs` inverse of
+  `tests_lower`: print, lower, Debug-equal per case, second print byte-identical, with the
+  session's bare-name target rule (session.rs:636-641) required to name the same function
+  as the module-qualified lowering. The Python test-data policy is unchanged (no records,
+  variants, calls, Result inputs), top-level blocks stay unsupported until a module-less
+  scope surface exists, and `success()` is untouched. Current strict counts:
+  184 verified / 58 invalid / 331 unsupported (54 files, 573 entries).
   #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed
   JIT immutable normalization slice shares one emitter across AND/OR, NOT and
   Check/Branch/While. Local/rebound condition dependencies conservatively refuse

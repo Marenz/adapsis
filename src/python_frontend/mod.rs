@@ -15,6 +15,10 @@ mod surface;
 mod shared_default;
 mod references;
 mod tests_lower;
+#[cfg(test)]
+mod tests_print;
+#[cfg(test)]
+mod tests_print_tests;
 mod types;
 mod type_bindings;
 

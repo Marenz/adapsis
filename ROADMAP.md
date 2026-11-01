@@ -2,25 +2,43 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — D3 (TgFormat original stored tests), baseline `fae91e7`
+### Current pending slice — B1 (strict-harness stored-test printer), baseline `2e1e018`
 
-- Fixtures/tests/docs only. The D2 mechanism, parametrized by module, dispositions all 57
-  frozen TgFormat cases (10 blocks): 39 carried (frozen == corrected .ax == Python
-  `test_stored_<fn>_<idx>`, keyword args, list literals), 17 carried_ax_only (calls such as
-  code_wrap/pre_wrap/concat/sample_*(); Python literal policy unchanged; no evaluated twin),
-  1 redacted (markdown_to_html case 6, unrecoverable), 0 covered_elsewhere/obsolete.
-- Probes first: bare frozen callee names resolve in the corrected TgFormat (112 evaluations ok)
-  and keyword list literals lower Debug-identical. All 56 visible cases run from the corrected
-  .ax on both origins, tree + direct VM. TgFormat pure gate 38 -> 77 cases. Mutation checks
-  (flip redacted, edit carried expectation, drop a Python def, corrupt a call expectation) fail.
-- Targeted 72/72; ONE full gate 1859 passed / strict parity 1 failed / 2 ignored; CLI 5/5;
-  strict PARITY lines byte-identical to slice C. Log /tmp/opencode/full_gate_d3.log.
-- Authored manifest/TgFormat.ax/test_tg_format.py blobs:
-  `d3f4cb9c935f4f7884495de3c2e39eb68149e3b9`,
-  `410df55ec5ee52002dee2e20aa97a7857499b648`,
-  `b4a0b018ec3b85f7c71490fe69e63e308d23e3e0`. Frozen for review; no commit. Both ported
-  modules now have no pending inventory; #86 NOT complete (strict corpus red, #91/#99/#104/
-  #106/#108/#109 open, no deployment certification). parity.rs success semantics untouched.
+- Test-only (`#[cfg(test)]`, no runtime/frontend/native-tool change, test-data policy NOT
+  broadened, parity.rs `success()` untouched). New `tests_print.rs` is the inverse of
+  `tests_lower`: it prints parser test data as restricted Python (bool/str/int/finite
+  float/signed numerics/lists; keyword, positional or `_N`-positional arguments;
+  `==`, `contains`/`starts_with`/`is_ok`/`is_err`/`Err(..)` and `assert_after`) and refuses
+  records, variants, calls, `Ok`/`Err` inputs, non-finite floats and i64::MIN with a reason.
+- Harness: `Op::Test` was an unconditional Unsupported. `parity/test_blocks.rs` now compares
+  module-scoped blocks as `parser::TestCase` values (the validator never stores tests in the
+  Program): print -> `lower_tests` -> Debug equality per case -> second print byte-identical
+  -> second lowering equal. Target rule exactly as session.rs:636-641 (bare name when any
+  function of that name exists, else Module.name); a block is exact only if that function is
+  the one the module-qualified lowering targets (`ptr::eq`), a test for an undeclared
+  function is InvalidProgram. Any single inexpressible case keeps the whole block Unsupported
+  and names it. Top-level blocks stay Unsupported (scope surface pending, A).
+- Strict PARITY before -> after (same 54 files / 573 entries): verified 116 -> 184,
+  unsupported 399 -> 331, invalid 58 -> 58, mismatches 0, non-idempotent 0. Only `Test`
+  entries moved: Unsupported/Test 122 -> 54 and Verified/Test 0 -> 68 (all other 505 group
+  counts and every other entry's status+detail are identical, checked entry by entry).
+  Remaining 54 Test entries: 43 top-level blocks (A), 8 calls/Result inputs the policy
+  refuses (TgFormat 7: concat, code_wrap x3, pre_wrap, sample_lines x2; TelegramBot 1: Ok),
+  3 bare targets captured by another module's function (GithubSync.api_base vs
+  Chronica.api_base, Probe2.rm and Probe3.rm vs Probe.rm).
+- Real finding: the session runs a module test for a bare function name against the GLOBAL
+  first match, so those three module tests exercise a different module's function.
+- Evidence: 5 printer unit tests; 2 harness tests (module blocks compared as cases, target
+  rules); independent oracle `telegram_port_stored_printer_reproduces_carried_python_assertions_and_refuses_ax_only`
+  - the printer reproduces byte-for-byte all 80 script-written carried Python assertions
+  (41 TelegramBot + 39 TgFormat) and refuses all 19 ax-only cases. Mutation checks
+  (float without decimal point, dropped target-identity check, single-quoted strings) each
+  fail a test; files restored byte-for-byte. Targeted tests_print 5/5, telegram_port 73/73,
+  `python_` 301 passed + the expected strict-corpus failure; ONE full gate 1867 passed / strict
+  parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_b1.log.
+- Frozen for review; no commit. Next (approved): A1 sizing probe after B1 is accepted.
+
+### Accepted checkpoint `2e1e018` — D3 (TgFormat stored tests: 39 carried, 17 ax-only, 1 redacted)
 
 ### Accepted checkpoint `fae91e7` — D2 (TelegramBot original stored tests)
 

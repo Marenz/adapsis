@@ -2,6 +2,7 @@
 //! is reported as invalid, never counted as represented or silently omitted.
 use super::ast_equality as equality;
 mod scope;
+mod test_blocks;
 mod tests;
 
 use crate::{ast, parser, validator};
@@ -397,8 +398,20 @@ fn inventory_ops(
                     result,
                 );
             }
-            // Tests and runtime commands must remain visible: validator is a
-            // no-op for several of these, so Program equality cannot cover them.
+            // Stored tests are not part of the Program (the validator skips them),
+            // so they are compared as parser::TestCase values instead.
+            Op::Test(test) => report.record(
+                file,
+                &format!("{scope}#{index}"),
+                &operation_kind(op),
+                if invalid {
+                    fallback()
+                } else {
+                    test_blocks::check(program, scope, test)
+                },
+            ),
+            // Runtime commands must remain visible: validator is a no-op for
+            // several of these, so Program equality cannot cover them.
             _ => report.record(
                 file,
                 &format!("{scope}#{index}"),

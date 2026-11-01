@@ -226,3 +226,83 @@ fn python_parity_equality_retains_source_id_configuration_module_docs_and_routes
     ids_only.modules[0].id = "new-actual-node-id".into();
     assert!(equality::program(&original, &ids_only));
 }
+
+fn test_entries(source: &str) -> Vec<(Status, String)> {
+    let fixture = corpus(source);
+    run(fixture.path())
+        .entries
+        .into_iter()
+        .filter(|entry| entry.kind == "Test")
+        .map(|entry| (entry.status, entry.detail))
+        .collect()
+}
+
+const MODULE_F: &str = "+module T\n+fn f (n:Int)->Int\n  +return n\n+end\n";
+
+#[test]
+fn python_parity_module_test_blocks_are_compared_as_cases_not_skipped() {
+    // Literal, matcher and keyword forms roundtrip; one entry per block.
+    let entries = test_entries(&format!(
+        "{MODULE_F}+test f\n  +with 1 -> expect 1\n  +with n=2 -> expect 2\n  +with 3 -> expect contains(\"3\")\n"
+    ));
+    assert_eq!(entries, [(Status::Verified, String::new())]);
+    // One inexpressible case keeps the WHOLE block unsupported and names the case.
+    let entries = test_entries(&format!(
+        "{MODULE_F}+test f\n  +with 1 -> expect 1\n  +with Some(1) -> expect 1\n"
+    ));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, Status::Unsupported);
+    assert!(
+        entries[0].1.starts_with("case 2: call to Some"),
+        "{entries:?}"
+    );
+    // Top-level blocks wait for the module-less scope surface.
+    let entries =
+        test_entries("+fn f (n:Int)->Int\n  +return n\n+end\n+test f\n  +with 1 -> expect 1\n");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, Status::Unsupported);
+    assert!(
+        entries[0].1.contains("top-level stored test"),
+        "{entries:?}"
+    );
+}
+
+#[test]
+fn python_parity_test_block_target_rules_follow_the_session() {
+    // A test for a function no scope declares is a source defect.
+    let entries = test_entries(&format!("{MODULE_F}+test missing\n  +with 1 -> expect 1\n"));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, Status::InvalidProgram);
+    assert!(
+        entries[0].1.contains("undeclared function `missing`"),
+        "{entries:?}"
+    );
+    // session.rs runs a bare module test against ANY function of that name (the global
+    // first match), so a later module's same-named function is not what the
+    // module-qualified Python lowering targets.
+    let entries = test_entries(&format!(
+        "{MODULE_F}+module U\n+fn f (n:Int)->Int\n  +return n\n+end\n+test f\n  +with 1 -> expect 1\n"
+    ));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, Status::Unsupported);
+    assert!(
+        entries[0]
+            .1
+            .contains("runs f, but the module-qualified Python lowering targets U.f"),
+        "{entries:?}"
+    );
+    // A top-level function of the same name captures the bare test name the same way.
+    let entries = test_entries(&format!(
+        "+fn f (n:Int)->Int\n  +return n\n+end\n{MODULE_F}+test f\n  +with 1 -> expect 1\n"
+    ));
+    assert!(
+        entries
+            .iter()
+            .any(|(status, detail)| *status == Status::Unsupported
+                && detail.contains("runs f, but the module-qualified Python lowering targets T.f")),
+        "{entries:?}"
+    );
+    // A qualified target is exact.
+    let entries = test_entries(&format!("{MODULE_F}+test T.f\n  +with 1 -> expect 1\n"));
+    assert_eq!(entries, [(Status::Verified, String::new())]);
+}
