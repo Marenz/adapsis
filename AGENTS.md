@@ -657,8 +657,12 @@ replaces that branch with one composer.
   token_path, allowed_path, startup, route) are ported in slice D1: exact module doc,
   startup (qualification + effect spelling only, no semantic repair; the token only as
   BYTE length), and the webhook route verified through a dispatch replica AND the real
-  HTTP layer (200 "{}" + spawn; no header/secret access, #108). Original stored tests
-  remain pending (D2) and #86 is not complete.
+  HTTP layer (200 "{}" + spawn; no header/secret access, #108). The 61 original
+  TelegramBot stored cases each have one manifest disposition (D2): 41 carried verbatim
+  (frozen/corrected .ax/Python Debug-equal), 2 carried in the .ax only (Result literals;
+  Python literal policy unchanged), 1 covered by a named default-state test, 14 redacted
+  and unrecoverable (never recovered from non-fixture sources), 3 obsolete by ledgered
+  repair. TgFormat's original stored tests remain pending and #86 is not complete.
   Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
   The NEW test-only PortMediaDriver is excluded from original-function inventory

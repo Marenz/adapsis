@@ -2,30 +2,34 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — D1 (module doc, shared paths, startup, route), baseline `9fa4da2`
+### Current pending slice — D2 (original stored tests), baseline `a4ab092`
 
-- Fixtures/tests/docs only. Exact module doc (docstring), token_path/allowed_path (all 9
-  shared in frozen order), `+startup` (qualification of 2 sites + effect spelling
-  [io,mut,async]; NO semantic repair) and `+route POST /webhook/telegram` ported in ax+py.
-  Probes passed with no frontend change: `length(str)` keeps its spelling, shared assignment
-  and file awaits inside a lifecycle body lower fine.
-- Equality: whole-Program serialization covers doc/shared/startup/routes; pending_routes
-  (#[serde(skip)]) asserted explicitly; frozen-subset gate extended to doc, routes, shared and
-  startup (startup via a FunctionDecl wrapper + inverse qualification proof).
-- Startup tests through the production call shape (task-tracked handle, `__module_name`,
-  qualified name), intercepted FileRead/FileExists/Spawn, token never echoed (byte length
-  only). Route: dispatch replica + real HTTP via router_with_llm/oneshot (200 `{}` + spawn,
-  404 for GET/PUT/trailing slash/other paths, 500 without io_sender, #108 header pin).
-- Targeted 66/66; ONE full gate 1853 passed / strict parity 1 failed / 2 ignored; CLI 5/5.
-  Strict PARITY_SUMMARY/GROUPS lines byte-identical to slice C (116/58/399, 54 files, 573
-  entries). Log /tmp/opencode/full_gate_d1.log. AGENTS.md len/str note corrected.
-- Authored manifest/origin/Python blobs:
-  `35d7b341e83f2dae6b3e2efbb2fc548e2b650427`,
-  `7fec607188955ad6f06eeffeab99c05ce7bdd77c`,
-  `da4575bb24b570ba57988cbd95d71b8ee3ed6ecf`.
-  Frozen for review; no commit. Next: D2 (carry original stored tests; manifest-driven
-  61-case disposition test). Claims: all frozen module members except the stored tests are
-  ported; #86 not complete.
+- Fixtures/tests/docs only. All 61 frozen TelegramBot stored cases (23 blocks) get exactly
+  one manifest disposition, proven by a manifest-driven gate with set equality: 41 carried
+  (Debug-identical parser::TestCase in frozen, corrected-origin .ax and Python-lowered
+  `test_stored_<fn>_<idx>`), 2 carried_ax_only (transcription_upload_response: Result literals,
+  Python literal policy unchanged), 1 covered_elsewhere (is_allowed, default shared state), 14
+  redacted (unrecoverable, deliberately NOT recovered from any non-fixture source), 3 obsolete
+  (send_message/_part/_parts, ledgered repairs with named replacement tests).
+- Execution: carried cases run on both origins, tree + direct VM, via run_cases (refactored
+  out of run_paired, same runner); trusted Result harness for the transcription cases; Python
+  defs join the paired pure gate (125 cases per origin/tier). Mutation checks (flip a
+  disposition, edit a carried expectation) fail the gate. A module may empty its pending
+  inventories only with a named `open_items` list (guard extended in the provenance test).
+- TgFormat original stored tests (10 blocks / 57 cases, 1 redacted) remain a separate pending
+  surface. Targeted 70/70; ONE full gate 1857 passed / strict parity 1 failed / 2 ignored; CLI 5/5;
+  strict PARITY lines byte-identical to slice C. Log /tmp/opencode/full_gate_d2.log.
+- Authored manifest/origin/test blobs:
+  `a5b4b9bf6f46b327bc10d606fcbca30a380376c7`,
+  `1af21bed0f38a280e36b5f524c2d71820cd774a0`,
+  `10bc9c3381ad3de9da3f1731ca6a43079d17a0f2` (test_telegram_bot.py).
+  Frozen for review; no commit. Claims: every frozen TelegramBot module member is ported or
+  carries a ledgered disposition; #86 NOT complete.
+
+### Accepted checkpoint `a4ab092` — D1 (doc, shared paths, startup, route)
+
+- Exact module doc, all 9 shared in frozen order, startup (qualification + effect spelling,
+  no semantic repair), webhook route; real-HTTP route test; #108 pinned.
 
 ### Accepted checkpoint `9fa4da2` — polling slice C (poll_loop), 42/42 functions
 

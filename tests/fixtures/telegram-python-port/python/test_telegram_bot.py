@@ -241,3 +241,127 @@ def test_batch_update_id_rejects_array_element() -> None:
 
 def test_batch_update_id_rejects_out_of_range_index() -> None:
     assert batch_update_id_valid('[{"update_id":5}]', "3") == False
+
+# Original stored cases carried verbatim (frozen block/case index in the name).
+def test_stored_parse_id_list_5() -> None:
+    assert parse_id_list(raw="") == ""
+
+def test_stored_parse_id_list_6() -> None:
+    assert parse_id_list(raw="\n\n") == ""
+
+def test_stored_extract_update_id_1() -> None:
+    assert extract_update_id(update="{\"update_id\":42,\"message\":{}}") == 42
+
+def test_stored_extract_update_id_2() -> None:
+    assert extract_update_id(update="{\"message\":{}}") == 0
+
+def test_stored_extract_sender_name_3() -> None:
+    assert extract_sender_name(payload="{\"message\":{\"from\":{\"username\":\"marenz\"}}}") == "marenz"
+
+def test_stored_extract_sender_name_4() -> None:
+    assert extract_sender_name(payload="{\"message\":{\"from\":{\"id\":1}}}") == ""
+
+def test_stored_format_sender_2() -> None:
+    assert format_sender(user_id=42, name="", text="hi") == "[user:42] hi"
+
+def test_stored_describe_update_kind_1() -> None:
+    assert describe_update_kind(payload="{\"message\":{\"sticker\":{\"file_id\":\"s\",\"emoji\":\"x\"}}}") == "user sent a sticker x"
+
+def test_stored_describe_update_kind_2() -> None:
+    assert describe_update_kind(payload="{\"message\":{\"video\":{\"file_id\":\"v\"}}}") == "user sent a video"
+
+def test_stored_describe_update_kind_3() -> None:
+    assert describe_update_kind(payload="{\"message\":{\"document\":{\"file_id\":\"d\",\"file_name\":\"notes.pdf\"}}}") == "user sent a file (notes.pdf) which I cannot read"
+
+def test_stored_describe_update_kind_4() -> None:
+    assert describe_update_kind(payload="{\"message\":{\"text\":\"hello\"}}") == ""
+
+def test_stored_describe_update_kind_5() -> None:
+    assert describe_update_kind(payload="{\"message\":{}}") == ""
+
+def test_stored_speaker_principal_1() -> None:
+    assert speaker_principal(payload="{\"message\":{\"from\":{\"id\":456}}}") == "telegram:user:456"
+
+def test_stored_speaker_principal_2() -> None:
+    assert speaker_principal(payload="{\"message\":{}}") == ""
+
+def test_stored_source_metadata_2() -> None:
+    assert source_metadata(payload="{\"message\":{\"message_id\":7,\"date\":1700000000,\"from\":{\"id\":8967661082},\"video\":{\"file_id\":\"vid-1\",\"file_name\":\"phone.mp4\",\"mime_type\":\"video/mp4\",\"duration\":12,\"file_size\":3456}}}") == "{\"message_id\":\"7\",\"speaker_id\":\"telegram:user:8967661082\",\"speaker_name\":\"\",\"created_at_ms\":1700000000000,\"attachment_ref\":\"vid-1\",\"attachment_name\":\"phone.mp4\",\"attachment_mime\":\"video/mp4\",\"attachment_duration_seconds\":\"12\",\"attachment_size_bytes\":\"3456\"}"
+
+def test_stored_telegram_file_path_response_1() -> None:
+    assert telegram_file_path_response(file_info="{\"ok\":true,\"result\":{\"file_path\":\"voice/file_42.oga\"}}") == "voice/file_42.oga"
+
+def test_stored_telegram_file_path_response_2() -> None:
+    assert telegram_file_path_response(file_info="{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: file is too big\",\"result\":{\"file_path\":\"\"}}") == "ERROR: Bad Request: file is too big"
+
+def test_stored_telegram_file_error_message_1() -> None:
+    assert telegram_file_error_message(error="ERROR: HTTP 400 Bad Request: {\"description\":\"Bad Request: file is too big\"}", kind="video") == "Telegram bots can only download files up to 20 MB. Please send a smaller video."
+
+def test_stored_telegram_file_error_message_2() -> None:
+    assert telegram_file_error_message(error="ERROR: timeout", kind="photo") == "I could not download that photo. Please send it again."
+
+def test_stored_extract_chat_id_1() -> None:
+    assert extract_chat_id(payload="{\"message\":{\"chat\":{\"id\":123}}}") == 123
+
+def test_stored_extract_user_id_1() -> None:
+    assert extract_user_id(payload="{\"message\":{\"from\":{\"id\":456}}}") == 456
+
+def test_stored_extract_user_id_2() -> None:
+    assert extract_user_id(payload="{\"message\":{}}") == 0
+
+def test_stored_extract_chat_type_1() -> None:
+    assert extract_chat_type(payload="{\"message\":{\"chat\":{\"type\":\"group\"}}}") == "group"
+
+def test_stored_extract_chat_type_2() -> None:
+    assert extract_chat_type(payload="{\"message\":{\"chat\":{\"type\":\"private\"}}}") == "private"
+
+def test_stored_extract_chat_type_3() -> None:
+    assert extract_chat_type(payload="{\"message\":{\"chat\":{}}}") == ""
+
+def test_stored_extract_text_1() -> None:
+    assert extract_text(payload="{\"message\":{\"text\":\"hello\"}}") == "hello"
+
+def test_stored_extract_text_2() -> None:
+    assert extract_text(payload="{\"message\":{\"caption\":\"what is this?\"}}") == "what is this?"
+
+def test_stored_extract_text_3() -> None:
+    assert extract_text(payload="{\"message\":{}}") == ""
+
+def test_stored_extract_image_file_id_1() -> None:
+    assert extract_image_file_id(payload="{\"message\":{\"photo\":[{\"file_id\":\"small\"},{\"file_id\":\"large\"}]}}") == "large"
+
+def test_stored_extract_image_file_id_2() -> None:
+    assert extract_image_file_id(payload="{\"message\":{\"document\":{\"file_id\":\"doc\",\"mime_type\":\"image/png\"}}}") == "doc"
+
+def test_stored_extract_image_file_id_3() -> None:
+    assert extract_image_file_id(payload="{\"message\":{\"document\":{\"file_id\":\"pdf\",\"mime_type\":\"application/pdf\"}}}") == ""
+
+def test_stored_extract_image_file_id_4() -> None:
+    assert extract_image_file_id(payload="{\"message\":{}}") == ""
+
+def test_stored_extract_video_file_id_1() -> None:
+    assert extract_video_file_id(payload="{\"message\":{\"video\":{\"file_id\":\"phone\",\"mime_type\":\"video/mp4\"}}}") == "phone"
+
+def test_stored_extract_video_file_id_2() -> None:
+    assert extract_video_file_id(payload="{\"message\":{\"document\":{\"file_id\":\"doc\",\"mime_type\":\"video/quicktime\"}}}") == "doc"
+
+def test_stored_extract_video_file_id_3() -> None:
+    assert extract_video_file_id(payload="{\"message\":{\"document\":{\"file_id\":\"pdf\",\"mime_type\":\"application/pdf\"}}}") == ""
+
+def test_stored_extract_video_file_id_4() -> None:
+    assert extract_video_file_id(payload="{\"message\":{}}") == ""
+
+def test_stored_send_message_body_1() -> None:
+    assert send_message_body(chat_id=1, text="hi", html=True) == "{\"chat_id\":1,\"text\":\"hi\",\"parse_mode\":\"HTML\"}"
+
+def test_stored_send_message_body_2() -> None:
+    assert send_message_body(chat_id=1, text="hi", html=False) == "{\"chat_id\":1,\"text\":\"hi\"}"
+
+def test_stored_telegram_response_ok_1() -> None:
+    assert telegram_response_ok(response="{\"ok\":true,\"result\":{}}") == True
+
+def test_stored_telegram_response_ok_2() -> None:
+    assert telegram_response_ok(response="{\"ok\":false,\"description\":\"bad entities\"}") == False
+
+def test_stored_telegram_response_ok_3() -> None:
+    assert telegram_response_ok(response="transport failure") == False

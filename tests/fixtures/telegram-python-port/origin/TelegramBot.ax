@@ -725,3 +725,64 @@
   +return TgNoImmediateReply("no immediate reply")
 +end
 +doc "Preserve sandboxed attachment takeover arguments and propagate immediate delivery outcome. NoImmediateReply is not callback success."
++test parse_id_list
+  +with raw="" -> expect ""
+  +with raw="\n\n" -> expect ""
++test extract_update_id
+  +with update="{\"update_id\":42,\"message\":{}}" -> expect 42
+  +with update="{\"message\":{}}" -> expect 0
++test extract_sender_name
+  +with payload="{\"message\":{\"from\":{\"username\":\"marenz\"}}}" -> expect "marenz"
+  +with payload="{\"message\":{\"from\":{\"id\":1}}}" -> expect ""
++test format_sender
+  +with user_id=42 name="" text="hi" -> expect "[user:42] hi"
++test describe_update_kind
+  +with payload="{\"message\":{\"sticker\":{\"file_id\":\"s\",\"emoji\":\"x\"}}}" -> expect "user sent a sticker x"
+  +with payload="{\"message\":{\"video\":{\"file_id\":\"v\"}}}" -> expect "user sent a video"
+  +with payload="{\"message\":{\"document\":{\"file_id\":\"d\",\"file_name\":\"notes.pdf\"}}}" -> expect "user sent a file (notes.pdf) which I cannot read"
+  +with payload="{\"message\":{\"text\":\"hello\"}}" -> expect ""
+  +with payload="{\"message\":{}}" -> expect ""
++test speaker_principal
+  +with payload="{\"message\":{\"from\":{\"id\":456}}}" -> expect "telegram:user:456"
+  +with payload="{\"message\":{}}" -> expect ""
++test source_metadata
+  +with payload="{\"message\":{\"message_id\":7,\"date\":1700000000,\"from\":{\"id\":8967661082},\"video\":{\"file_id\":\"vid-1\",\"file_name\":\"phone.mp4\",\"mime_type\":\"video/mp4\",\"duration\":12,\"file_size\":3456}}}" -> expect "{\"message_id\":\"7\",\"speaker_id\":\"telegram:user:8967661082\",\"speaker_name\":\"\",\"created_at_ms\":1700000000000,\"attachment_ref\":\"vid-1\",\"attachment_name\":\"phone.mp4\",\"attachment_mime\":\"video/mp4\",\"attachment_duration_seconds\":\"12\",\"attachment_size_bytes\":\"3456\"}"
++test telegram_file_path_response
+  +with file_info="{\"ok\":true,\"result\":{\"file_path\":\"voice/file_42.oga\"}}" -> expect "voice/file_42.oga"
+  +with file_info="{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: file is too big\",\"result\":{\"file_path\":\"\"}}" -> expect "ERROR: Bad Request: file is too big"
++test telegram_file_error_message
+  +with error="ERROR: HTTP 400 Bad Request: {\"description\":\"Bad Request: file is too big\"}" kind="video" -> expect "Telegram bots can only download files up to 20 MB. Please send a smaller video."
+  +with error="ERROR: timeout" kind="photo" -> expect "I could not download that photo. Please send it again."
++test transcription_upload_response
+  +with {response: Ok("{\"text\":\"hello from ASR\"}")} -> expect "hello from ASR"
+  +with {response: Err("HTTP upload failed with 503 Service Unavailable")} -> expect "[voice message - transcription failed]"
++test extract_chat_id
+  +with payload="{\"message\":{\"chat\":{\"id\":123}}}" -> expect 123
++test extract_user_id
+  +with payload="{\"message\":{\"from\":{\"id\":456}}}" -> expect 456
+  +with payload="{\"message\":{}}" -> expect 0
++test extract_chat_type
+  +with payload="{\"message\":{\"chat\":{\"type\":\"group\"}}}" -> expect "group"
+  +with payload="{\"message\":{\"chat\":{\"type\":\"private\"}}}" -> expect "private"
+  +with payload="{\"message\":{\"chat\":{}}}" -> expect ""
++test extract_text
+  +with payload="{\"message\":{\"text\":\"hello\"}}" -> expect "hello"
+  +with payload="{\"message\":{\"caption\":\"what is this?\"}}" -> expect "what is this?"
+  +with payload="{\"message\":{}}" -> expect ""
++test extract_image_file_id
+  +with payload="{\"message\":{\"photo\":[{\"file_id\":\"small\"},{\"file_id\":\"large\"}]}}" -> expect "large"
+  +with payload="{\"message\":{\"document\":{\"file_id\":\"doc\",\"mime_type\":\"image/png\"}}}" -> expect "doc"
+  +with payload="{\"message\":{\"document\":{\"file_id\":\"pdf\",\"mime_type\":\"application/pdf\"}}}" -> expect ""
+  +with payload="{\"message\":{}}" -> expect ""
++test extract_video_file_id
+  +with payload="{\"message\":{\"video\":{\"file_id\":\"phone\",\"mime_type\":\"video/mp4\"}}}" -> expect "phone"
+  +with payload="{\"message\":{\"document\":{\"file_id\":\"doc\",\"mime_type\":\"video/quicktime\"}}}" -> expect "doc"
+  +with payload="{\"message\":{\"document\":{\"file_id\":\"pdf\",\"mime_type\":\"application/pdf\"}}}" -> expect ""
+  +with payload="{\"message\":{}}" -> expect ""
++test send_message_body
+  +with chat_id=1 text="hi" html=true -> expect "{\"chat_id\":1,\"text\":\"hi\",\"parse_mode\":\"HTML\"}"
+  +with chat_id=1 text="hi" html=false -> expect "{\"chat_id\":1,\"text\":\"hi\"}"
++test telegram_response_ok
+  +with response="{\"ok\":true,\"result\":{}}" -> expect true
+  +with response="{\"ok\":false,\"description\":\"bad entities\"}" -> expect false
+  +with response="transport failure" -> expect false
