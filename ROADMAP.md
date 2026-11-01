@@ -2,34 +2,40 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — outbound closure, baseline `fc2952b`
+### Current pending slice — polling slice A, baseline `8c38ace`
 
-- Three originals send_reply_with_attachment/send_audio_file/extract_reply→36/42;
- 6pending. NEWpure telegram_upload_attempt separately inventoried (41total).
-  Both callers explicitly await builtin upload Result and return TgSendAttempt;
-  nonempty reply text mustSent before one document upload, emptytext skips text.
-  Text failure or malformedJSON stops latereffects; upload never retries.
-- Original parse/URL/extras/uploadargs preserved for admitted inputs; extract_reply
-  exactAST/doc preserved with trusted actualtype characterization (not soundString).
-  Classifier exactJSONBool true/false→Sent/Rejected; otherstatus/transport→Uncertain;
-  malformedJSON terminal. No Result literal-policy/runtime/frontend relaxation.
-- #106 rawmultipart extras split '&' with no escaping/decoding: conservative
-  caption'&' refusal is true0IO; general arbitrarycaption support unresolved.
-  Safe '=' Unicode/newline/% values, including percentescaped-looking suffixes,
-  remain exact. No percentencoding fiction or hidden runtime fix.
-- Bothorigin normalasync tests use explicit test-only acquisitiondriver for
-  Attachment argument; leading acquisition is separate from delivery counts.
-  Invaliddestination=1acquisition/0delivery, emptytext=1acquisition/1upload.
-  Pathoriginalfunction directly invoked with inert path and intercepted request;
-  no realfiles/network. Exactbytes/MIME/name/documentfield/chat_id/caption checked.
-  Targeted46/46; pure66Telegram/38Tg; onefullgate1825passed/strictparity1failed/
-  2ignored,CLI5/5. Log `tool_18b0cc1b5001PJLz6IpAASvCYU`.
+- Fixtures/tests/docs only. Four originals: extract_update_id (unchanged AST/doc,
+  original 42/0 cases), init (unchanged), handle_update (spawn-target qualification
+  only) and dispatch_updates (typed_dispatch_v1) -> 40/42, 2 pending (poll_once,
+  poll_loop). NEW pure batch_update_id_valid separately inventoried (46 total with
+  the text entry, validators and upload classifier). Shared intake_mode/poll_offset
+  added; token_path/allowed_path/poll_running pending.
+- dispatch_updates repairs (R3/R4): non-array/absent result -> "no result" via
+  json_kind; invalid/missing/non-int/negative/>=i64::MAX update_id or non-object
+  element skipped without advance or spawn, batch continues, ", skipped k" only when
+  k>0. Offset rule and advance-before-spawn preserved (R5): fire-and-forget, at-most-once,
+  no outcome (#104), same-chat ordering inside a batch not guaranteed.
+- Limits kept: malformed top-level JSON and ids above i64 stay terminal (json_valid is
+  a separate approved checkpoint); handle_update returns "{}" unconditionally and cannot
+  authenticate webhook senders (#108); Python spells async last so the corrected
+  origin uses [io,mut,async] (effect set equal).
+- Four named normal-async tests on both origins intercept +spawn as IoRequest (qualified
+  name, exact args/order, capacity 256 > 100-update page, process_update never runs) and
+  read typed shared poll_offset back; 84 pure cases (18 new). Targeted 50/50; ONE full
+  gate 1829 passed / strict parity 1 failed / 2 ignored; CLI 5/5. Log
+  /tmp/opencode/full_gate_a.log.
 - Authored manifest/origin/Python blobs:
-  `169ceb420cc03267038f266ccf684e78d78d4093`,
-  `7d45a6f83348762ff2f70ddf1dfdc698d932e56a`,
-  `21dae4a305be5c9508cdf72df17e7206dc7b8741`.
-  Frozen pending independent review; no writer commit/deployment. #104 callbackACK,
-  #99 size safety and webhook/poll/lifecycle remain separate.
+  `134870e6175c256d160d5ff1aca88ed3521492ba`,
+  `73c69dae365ef7116903d6187eed34e7c6d7f0e4`,
+  `f62ae623548c40bdcaaf0f5611f005b3c777aaab`.
+  Frozen for review; no writer commit/deployment. Next: json_valid checkpoint, then
+  poll_once (R1/R2), poll_loop (R6 option ii, #107), then non-function surface.
+
+### Accepted checkpoint `8c38ace` — outbound closure
+
+- Three originals send_reply_with_attachment/send_audio_file/extract_reply (36/42) plus
+  the NEW pure telegram_upload_attempt; caption '&' refused before IO (#106); nonempty
+  text must be Sent before one upload; #104 callback ACK and #99 unchanged.
 
 ### Accepted checkpoint `fc2952b` — original-name intake
 

@@ -15,6 +15,8 @@ telegram_token: str = ""
 admin_user_ids: str = "<redacted>"
 allowed_user_ids: str = ""
 sandbox_perm_model: str = "family"
+intake_mode: str = "poll"
+poll_offset: int = 0
 
 def telegram_upload_attempt(response: Result[str]) -> TgSendAttempt:
     match response:
@@ -57,6 +59,59 @@ def extract_reply(json: str) -> str:
     """Extract reply field from API response JSON"""
     val: str = json_get(json, "reply")
     return val
+
+def extract_update_id(update: str) -> int:
+    """Extract update_id for offset tracking (acknowledges the update so Telegram stops re-sending it)"""
+    val: str = json_get(update, "update_id")
+    if val == "":
+        return 0
+    return to_int(val)
+
+@effects("mut")
+def init(token: str, admins: str) -> str:
+    """<redacted>"""
+    telegram_token = token
+    admin_user_ids = admins
+    return "ok"
+
+@effects("io")
+async def handle_update(payload: str) -> str:
+    """Webhook intake: acknowledge immediately, process in background. Ignored unless intake_mode is 'webhook' so a stale route can't double-deliver while polling."""
+    if intake_mode != "webhook":
+        return "{}"
+    spawn(TelegramBot.process_update(payload))
+    return "{}"
+
+def batch_update_id_valid(batch: str, idx: str) -> bool:
+    path: str = concat(idx, ".update_id")
+    if json_kind(batch, path) != "int":
+        return False
+    uid: int = to_int(json_get(batch, path))
+    return uid >= 0 and uid < 9223372036854775807
+
+@effects("io", "mut")
+async def dispatch_updates(body: str) -> str:
+    """Split a getUpdates array into individual updates, advance the dedup offset, and feed each to process_update (same path as webhook). Corrected port: a missing or non-array result returns 'no result'; updates without a represented update_id in 0..i64::MAX-1 are skipped without advancing or spawning; spawn stays fire-and-forget (at-most-once, no outcome, #104)."""
+    if json_kind(body, "result") != "array":
+        return "no result"
+    arr: str = json_get(body, "result")
+    n: int = json_array_len(arr)
+    i: int = 0
+    skipped: int = 0
+    while i < n:
+        idx: str = to_string(i)
+        if TelegramBot.batch_update_id_valid(arr, idx):
+            update: str = json_get(arr, idx)
+            uid: int = TelegramBot.extract_update_id(update)
+            if uid >= poll_offset:
+                poll_offset = uid + 1
+            spawn(TelegramBot.process_update(update))
+        else:
+            skipped = skipped + 1
+        i = i + 1
+    if skipped > 0:
+        return concat("dispatched ", to_string(n - skipped), ", skipped ", to_string(skipped))
+    return concat("dispatched ", to_string(n))
 
 def intake_validate(payload: str) -> str:
     objects: list[str] = ["message", "message.chat", "message.from"]

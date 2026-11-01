@@ -88,7 +88,7 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             .variants
             .iter()
             .all(|v| v.payload == [ast::Type::String]));
-        assert_eq!(module.shared_vars.len(), 4);
+        assert_eq!(module.shared_vars.len(), 6);
         assert_eq!(module.shared_vars[0].name, "telegram_token");
         assert!(
             matches!(eval::eval_expr_standalone(&program, &module.shared_vars[0].default).unwrap(), eval::Value::String(ref value) if value.is_empty())
@@ -117,9 +117,11 @@ fn telegram_port_send_union_signatures_and_shared_fixture_are_explicit() {
             "process_update",
             "send_reply_with_attachment",
             "send_audio_file",
+            "handle_update",
+            "dispatch_updates",
         ])
     );
-    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 16);
+    assert_eq!(entry["semantic_repairs"].as_object().unwrap().len(), 17);
     assert_eq!(
         entry["introduced_types"]["TgSendAttempt"],
         serde_json::json!([

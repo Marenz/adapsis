@@ -479,8 +479,8 @@ fn telegram_port_text_nested_union_and_coverage_categories() {
         let module = &program.modules[0];
         assert_eq!(
             module.functions.len(),
-            41,
-            "36 original functions plus text entry, three validators and upload classifier"
+            46,
+            "40 original functions plus text entry, three validators, upload classifier and batch validator"
         );
         assert!(program.get_function("TelegramBot.process_update").is_some());
         let outcome = module
@@ -519,9 +519,9 @@ fn telegram_port_text_nested_union_and_coverage_categories() {
     ))
     .unwrap();
     let module = &manifest["modules"][0];
-    assert_eq!(module["implemented"].as_array().unwrap().len(), 36);
-    assert_eq!(module["pending"].as_array().unwrap().len(), 6);
-    assert_eq!(module["introduced_functions"].as_object().unwrap().len(), 5);
+    assert_eq!(module["implemented"].as_array().unwrap().len(), 40);
+    assert_eq!(module["pending"].as_array().unwrap().len(), 2);
+    assert_eq!(module["introduced_functions"].as_object().unwrap().len(), 6);
     assert_eq!(
         module["normal_shared_contract_functions"],
         json!(SHARED_FUNCTIONS)
@@ -531,6 +531,7 @@ fn telegram_port_text_nested_union_and_coverage_categories() {
         "direct_vm_paired_functions",
         "normal_shared_contract_functions",
         "normal_io_contract_functions",
+        "normal_state_contract_functions",
         "trusted_result_contract_functions",
     ] {
         for name in module[category].as_array().unwrap() {

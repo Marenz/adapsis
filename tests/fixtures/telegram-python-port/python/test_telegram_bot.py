@@ -187,3 +187,57 @@ def test_extract_reply_missing() -> None:
 
 def test_extract_reply_literal_null() -> None:
     assert extract_reply('{"reply":"null"}') == "null"
+
+def test_extract_update_id_original_present() -> None:
+    assert extract_update_id('{"update_id":42,"message":{}}') == 42
+
+def test_extract_update_id_original_missing() -> None:
+    assert extract_update_id('{"message":{}}') == 0
+
+def test_extract_update_id_zero() -> None:
+    assert extract_update_id('{"update_id":0}') == 0
+
+def test_extract_update_id_string_is_not_validated_here() -> None:
+    assert extract_update_id('{"update_id":"9"}') == 9
+
+def test_batch_update_id_valid_first() -> None:
+    assert batch_update_id_valid('[{"update_id":5}]', "0") == True
+
+def test_batch_update_id_valid_second() -> None:
+    assert batch_update_id_valid('[{"update_id":1},{"update_id":9}]', "1") == True
+
+def test_batch_update_id_valid_zero() -> None:
+    assert batch_update_id_valid('[{"update_id":0}]', "0") == True
+
+def test_batch_update_id_valid_max_minus_one() -> None:
+    assert batch_update_id_valid('[{"update_id":9223372036854775806}]', "0") == True
+
+def test_batch_update_id_rejects_max() -> None:
+    assert batch_update_id_valid('[{"update_id":9223372036854775807}]', "0") == False
+
+def test_batch_update_id_rejects_negative() -> None:
+    assert batch_update_id_valid('[{"update_id":-1}]', "0") == False
+
+def test_batch_update_id_rejects_missing() -> None:
+    assert batch_update_id_valid('[{}]', "0") == False
+
+def test_batch_update_id_rejects_string() -> None:
+    assert batch_update_id_valid('[{"update_id":"5"}]', "0") == False
+
+def test_batch_update_id_rejects_float() -> None:
+    assert batch_update_id_valid('[{"update_id":1.0}]', "0") == False
+
+def test_batch_update_id_rejects_null() -> None:
+    assert batch_update_id_valid('[{"update_id":null}]', "0") == False
+
+def test_batch_update_id_rejects_number_element() -> None:
+    assert batch_update_id_valid('[5]', "0") == False
+
+def test_batch_update_id_rejects_string_element() -> None:
+    assert batch_update_id_valid('["x"]', "0") == False
+
+def test_batch_update_id_rejects_array_element() -> None:
+    assert batch_update_id_valid('[[1]]', "0") == False
+
+def test_batch_update_id_rejects_out_of_range_index() -> None:
+    assert batch_update_id_valid('[{"update_id":5}]', "3") == False

@@ -8,11 +8,12 @@ const PYTHON: &str =
 const TESTS: &str =
     include_str!("../../tests/fixtures/telegram-python-port/python/test_telegram_bot.py");
 const FROZEN: &str = include_str!("../../tests/fixtures/python-parity/library/TelegramBot.ax");
-const TELEGRAM_CASES: usize = 66;
+const TELEGRAM_CASES: usize = 84;
 const FORMAT_CASES: usize = 38;
 mod io_contracts;
 mod intake;
 mod outbound;
+mod polling;
 mod media;
 mod qualification;
 mod routing;
@@ -92,13 +93,15 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
             "admin_user_ids",
             "allowed_user_ids",
             "sandbox_perm_model",
+            "intake_mode",
+            "poll_offset",
         ]
         .contains(&shared.name.as_str()),
         _ => false,
     });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 35);
+    assert_eq!(selected.modules[0].functions.len(), 39);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
@@ -370,7 +373,9 @@ fn verify_qualification(original: &ast::Program, corrected: &ast::Program, modul
     for function in &original.modules[0].functions {
         let target = format!("{module}.{}", function.name);
         if let Some(repair) = ledger["semantic_repairs"].get(&function.name) {
-            if repair["kind"] == "typed_attachment_reply_v1" || repair["kind"] == "typed_audio_upload_v1" {
+            if repair["kind"] == "typed_dispatch_v1" {
+                polling::verify_repair(function, corrected.get_function(&target).unwrap());
+            } else if repair["kind"] == "typed_attachment_reply_v1" || repair["kind"] == "typed_audio_upload_v1" {
                 outbound::verify_repair(function, corrected.get_function(&target).unwrap());
             } else if repair["kind"] == "typed_intake_v1" {
                 intake::verify_repair(function, corrected.get_function(&target).unwrap());
@@ -469,7 +474,10 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
                     "TelegramBot.transcribe_voice".to_owned(),
                     "TelegramBot.process_update".to_owned(),
                     "TelegramBot.send_reply_with_attachment".to_owned(),
-                    "TelegramBot.send_audio_file".to_owned()
+                    "TelegramBot.send_audio_file".to_owned(),
+                    "TelegramBot.init".to_owned(),
+                    "TelegramBot.handle_update".to_owned(),
+                    "TelegramBot.dispatch_updates".to_owned()
                 ]
                 .into_iter()
                 .collect(),

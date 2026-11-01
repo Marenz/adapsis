@@ -624,10 +624,17 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 36/42 original TelegramBot functions plus a separate partial text entry,
-  three separately inventoried pure intake validators and a pure upload classifier,
+  (now 40/42 original TelegramBot functions plus a separate partial text entry,
+  three separately inventoried pure intake validators, a pure upload classifier
+  and a pure batch update-id validator,
   and 18/18 TgFormat functions; module/stored-test and
-  intake/delivery surfaces still incomplete). Media fixtures add file-path/error
+  intake/delivery surfaces still incomplete). Polling slice A ports extract_update_id,
+  init, handle_update and dispatch_updates: spawn is fire-and-forget (at-most-once, no
+  outcome, same-chat order within a batch unguaranteed), invalid update ids and
+  non-array results are skipped/"no result" instead of terminal, malformed top-level
+  JSON stays terminal until a separate json_valid checkpoint; poll_once/poll_loop,
+  startup, route, token_path/allowed_path/poll_running remain pending (#107/#108).
+  Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
   The NEW test-only PortMediaDriver is excluded from original-function inventory
   and source parity. Both-origin normal async tests intercept acquisition,

@@ -7,12 +7,12 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 36 of 42 original functions, plus five introduced functions.**
-  Eighteen literal-paired original pure helpers, one trusted-Result pure helper,
-  two shared-state authorization helpers and fifteen
+- **TelegramBot: 40 of 42 original functions, plus six introduced functions.**
+  Nineteen literal-paired original pure helpers, one trusted-Result pure helper,
+  two shared-state authorization helpers, one shared-state mutator (`init`) and seventeen
   IO functions are separately covered. `process_text_update` is NEW and is not
   counted among the original 42. Three NEW pure intake validators are also counted
-  separately, as is one NEW pure upload Result classifier. Original-name `process_update` is integrated as an explicit
+  separately, as are one NEW pure upload Result classifier and one NEW pure batch update-id validator. Original-name `process_update` is integrated as an explicit
   stricter semantic repair, not equivalence to the frozen source.
   A new application outcome union and the original sanitized empty token shared
   declaration support this bounded send-chain port.
@@ -22,7 +22,7 @@ per-function transformation ledger, implemented and pending inventories.
 - Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Sixteen separately ledgered semantic repairs deliberately change return
+  unchanged. Seventeen separately ledgered semantic repairs deliberately change return
   types/effects/control flow/docs; these are not qualification-only equivalence.
   Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
@@ -44,14 +44,14 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **46 passing tests**, including the original
+This focused command currently has **50 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
 
 | Subset | Tree per origin | Direct VM per origin |
 |---|---:|---:|
-| TelegramBot originals + introduced validators (66 literal cases) | 66 pass | 66 pass |
+| TelegramBot originals + introduced validators (84 literal cases) | 84 pass | 84 pass |
 | TgFormat (38 literal cases) | 38 pass | 38 pass |
 
 Both corrected `.ax` and Python-lowered origins have the same results. The first
@@ -132,19 +132,19 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current outbound-slice release gate: **1825 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current polling-slice-A release gate: **1829 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**46 passed**. This remains partial routing evidence, not deployment certification.
+**50 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **6 TelegramBot pending original functions**; TgFormat has
+The manifest explicitly lists **2 TelegramBot pending original functions** (`poll_once`, `poll_loop`); TgFormat has
 no pending functions but its original stored-test surface remains pending.
 Still required: full corrected-origin provenance/review and whole-module paired
-structural/idempotence gates, webhook/poll dispatch and
-startup/shared/spawn behavior. Raw-update text/photo/video/voice callable routing
+structural/idempotence gates, the long-poll cycle and loop
+(`poll_once`, `poll_loop`) and the startup/route/remaining-shared/stored-test surface. Raw-update text/photo/video/voice callable routing
 is covered by the bounded corrected-origin integration below; deployed callbacks,
 polling and lifecycle are not thereby certified.
 The partial tests here do not close #86, certify deployment, or imply the original
@@ -435,3 +435,46 @@ does not change it, json_get, runtime dispatch, aliases or frontend signatures.
 Tests retain original handlers/helpers, both-origin exact AST/idempotence and the
 unchanged pure gates; additional collision, huge-number and i64-edge controls run
 through the actual normal async entry. #91, #99 and #104 remain separate blockers.
+
+## Polling slice A: update ids, webhook ingress, batch dispatch, `init`
+
+Four originals land: `extract_update_id` (unchanged AST/doc; the original 42/0
+expectations are carried as paired cases, plus zero and a string id that this
+unchanged function still converts), `init` (unchanged `[mut]` body), `handle_update`
+(only the spawn target is qualified) and `dispatch_updates` (explicit repair
+`typed_dispatch_v1`). Shared `intake_mode` and `poll_offset` are added with their
+frozen defaults; `token_path`, `allowed_path` and `poll_running` stay pending. The NEW
+pure `batch_update_id_valid(batch, idx)` is inventoried separately, not as an
+original.
+
+Deliberate changes in `dispatch_updates`, each tied to a reachable failure:
+- A missing, null, object, string or other non-array `result` now returns
+  `no result` (via `json_kind`) instead of the original `json_array_len` terminal error.
+- An update whose `update_id` is not a represented integer in `0..i64::MAX-1`, or
+  whose batch element is not an object, is skipped: no offset advance and no spawn;
+  the batch continues. `dispatched N` is unchanged for fully valid batches; when k>0
+  updates are skipped the result is `dispatched M, skipped k` with M the spawned count.
+- The offset rule (`uid>=poll_offset` then `uid+1`, **before** the spawn) and the
+  spawn order are preserved. Effects are the same set; Python spells `async` last
+  so the corrected origin writes `[io,mut,async]`.
+
+Retained limits (documented, not repaired): spawn is fire-and-forget and returns no
+outcome (#104), so delivery is **at-most-once**: an update is acknowledged when its
+spawn is queued, whatever its later outcome. Spawned tasks run concurrently, so the
+order of processing inside a batch (and for one chat) is not guaranteed even though
+spawns are issued in array order. A malformed top-level body (for example proxy HTML)
+is still a terminal `json_kind` error, as is an `update_id` above `i64::MAX`, after
+any earlier updates in the batch were already advanced and spawned; a pure
+`json_valid` primitive is a separate checkpoint. `handle_update` keeps its
+unconditional `{}` reply: it validates nothing and a route handler sees only the body,
+so webhook mode cannot authenticate the sender (#108). Mode is exact `webhook`.
+
+Tests (both origins, normal async, `+spawn` intercepted as an `IoRequest`; the
+spawned `process_update` is never executed, replies are dropped and capacity 256
+exceeds a 100-update page): `telegram_port_polling_init_writes_shared_state`,
+`..._handle_update_spawn_and_mode`, `..._dispatch_updates_batches` and
+`..._dispatch_updates_skips_and_non_arrays`. They assert the qualified function name
+`TelegramBot.process_update`, the exact spawned argument and order, and the final typed
+shared `poll_offset`. A full-AST/idempotence gate and an inverse qualification proof
+cover the repaired function; shared access fails direct-VM compilation, so none of
+this is direct-VM parity. Full-gate log: `/tmp/opencode/full_gate_a.log`.

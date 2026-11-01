@@ -5,6 +5,8 @@
 +shared admin_user_ids:String = "<redacted>"
 +shared allowed_user_ids:String = ""
 +shared sandbox_perm_model:String = "family"
++shared intake_mode:String = "poll"
++shared poll_offset:Int = 0
 +fn telegram_upload_attempt (response:Result<String>)->TgSendAttempt
   +match response
   +case Ok(body)
@@ -40,6 +42,51 @@
   +let val:String = json_get(json, "reply")
   +return val
 +doc "Extract reply field from API response JSON"
++fn extract_update_id (update:String)->Int
+  +let val:String = json_get(update, "update_id")
+  +if val==""
+    +return 0
+  +return to_int(val)
++doc "Extract update_id for offset tracking (acknowledges the update so Telegram stops re-sending it)"
++fn init (token:String, admins:String)->String [mut]
+  +set telegram_token = token
+  +set admin_user_ids = admins
+  +return "ok"
++doc "<redacted>"
++fn handle_update (payload:String)->String [io,async]
+  +if intake_mode!="webhook"
+    +return "{}"
+  +spawn TelegramBot.process_update(payload)
+  +return "{}"
++doc "Webhook intake: acknowledge immediately, process in background. Ignored unless intake_mode is 'webhook' so a stale route can't double-deliver while polling."
++fn batch_update_id_valid (batch:String, idx:String)->Bool
+  +let path:String = concat(idx, ".update_id")
+  +if json_kind(batch, path)!="int"
+    +return false
+  +let uid:Int = to_int(json_get(batch, path))
+  +return uid>=0 AND uid<9223372036854775807
++fn dispatch_updates (body:String)->String [io,mut,async]
+  +if json_kind(body, "result")!="array"
+    +return "no result"
+  +let arr:String = json_get(body, "result")
+  +let n:Int = json_array_len(arr)
+  +let i:Int = 0
+  +let skipped:Int = 0
+  +while i<n
+    +let idx:String = to_string(i)
+    +if TelegramBot.batch_update_id_valid(arr, idx)
+      +let update:String = json_get(arr, idx)
+      +let uid:Int = TelegramBot.extract_update_id(update)
+      +if uid>=poll_offset
+        +set poll_offset = uid+1
+      +spawn TelegramBot.process_update(update)
+    +else
+      +set skipped = skipped+1
+    +set i = i+1
+  +if skipped>0
+    +return concat("dispatched ", to_string(n-skipped), ", skipped ", to_string(skipped))
+  +return concat("dispatched ", to_string(n))
++doc "Split a getUpdates array into individual updates, advance the dedup offset, and feed each to process_update (same path as webhook). Corrected port: a missing or non-array result returns 'no result'; updates without a represented update_id in 0..i64::MAX-1 are skipped without advancing or spawning; spawn stays fire-and-forget (at-most-once, no outcome, #104)."
 +fn intake_validate (payload:String)->String
   +let objects:List<String> = list("message", "message.chat", "message.from")
   +let i:Int = 0
