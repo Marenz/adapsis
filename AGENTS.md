@@ -317,9 +317,13 @@ gateway resolves via `model_aliases` or `virtual_models`.
   a new model ID directly (`POST /v1/chat/completions` with
   `{"model":"...","messages":[...],"max_tokens":10}`) before putting it first in
   a chain — the gateway silently advances past a 404 target to the next one.
-- **`deepinfra/zai-org/GLM-5.2` returns 402** on every request (no credit). It
-  used to be `dev-bot`'s *first* target, so every call burned a round trip
-  before falling through — now demoted to the tail. The `openai` provider also
+- **`deepinfra/zai-org/GLM-5.2` returned 402** on every request (no credit) as of
+  2026-07-27. It used to be `dev-bot`'s *first* target, so every call burned a
+  round trip before falling through — now demoted to the tail. **DeepInfra has
+  credit again as of 2026-11-01:** `deepinfra/deepseek-ai/DeepSeek-V4-Flash`
+  returns 200, and the here-gateway alias `deepseek-v4-flash` now points at it
+  (DeepSeek's own balance ran out). Re-test any DeepInfra ID before relying on
+  it. The `openai` provider also
   401s on `/models` (`OPENAI_API_KEY` stale), but that's cosmetic: `chatgpt/*`
   routes through the Codex OAuth provider, not `openai`.
 - **A hung gateway is usually a stale `*-auth.json.lock`, not broken auth.**
