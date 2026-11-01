@@ -2,41 +2,49 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — B1 (strict-harness stored-test printer), baseline `2e1e018`
+### Current pending slice — A1 (module-less type surface, owner ""), baseline `d1ae977`
 
-- Test-only (`#[cfg(test)]`, no runtime/frontend/native-tool change, test-data policy NOT
-  broadened, parity.rs `success()` untouched). New `tests_print.rs` is the inverse of
-  `tests_lower`: it prints parser test data as restricted Python (bool/str/int/finite
-  float/signed numerics/lists; keyword, positional or `_N`-positional arguments;
-  `==`, `contains`/`starts_with`/`is_ok`/`is_err`/`Err(..)` and `assert_after`) and refuses
-  records, variants, calls, `Ok`/`Err` inputs, non-finite floats and i64::MIN with a reason.
-- Harness: `Op::Test` was an unconditional Unsupported. `parity/test_blocks.rs` now compares
-  module-scoped blocks as `parser::TestCase` values (the validator never stores tests in the
-  Program): print -> `lower_tests` -> Debug equality per case -> second print byte-identical
-  -> second lowering equal. Target rule exactly as session.rs:636-641 (bare name when any
-  function of that name exists, else Module.name); a block is exact only if that function is
-  the one the module-qualified lowering targets (`ptr::eq`), a test for an undeclared
-  function is InvalidProgram. Any single inexpressible case keeps the whole block Unsupported
-  and names it. Top-level blocks stay Unsupported (scope surface pending, A).
-- Strict PARITY before -> after (same 54 files / 573 entries): verified 116 -> 184,
-  unsupported 399 -> 331, invalid 58 -> 58, mismatches 0, non-idempotent 0. Only `Test`
-  entries moved: Unsupported/Test 122 -> 54 and Verified/Test 0 -> 68 (all other 505 group
-  counts and every other entry's status+detail are identical, checked entry by entry).
-  Remaining 54 Test entries: 43 top-level blocks (A), 8 calls/Result inputs the policy
-  refuses (TgFormat 7: concat, code_wrap x3, pre_wrap, sample_lines x2; TelegramBot 1: Ok),
-  3 bare targets captured by another module's function (GithubSync.api_base vs
-  Chronica.api_base, Probe2.rm and Probe3.rm vs Probe.rm).
-- Real finding: the session runs a module test for a bare function name against the GLOBAL
-  first match, so those three module tests exercise a different module's function.
-- Evidence: 5 printer unit tests; 2 harness tests (module blocks compared as cases, target
-  rules); independent oracle `telegram_port_stored_printer_reproduces_carried_python_assertions_and_refuses_ax_only`
-  - the printer reproduces byte-for-byte all 80 script-written carried Python assertions
-  (41 TelegramBot + 39 TgFormat) and refuses all 19 ax-only cases. Mutation checks
-  (float without decimal point, dropped target-identity check, single-quoted strings) each
-  fail a test; files restored byte-for-byte. Targeted tests_print 5/5, telegram_port 73/73,
-  `python_` 301 passed + the expected strict-corpus failure; ONE full gate 1867 passed / strict
-  parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_b1.log.
-- Frozen for review; no commit. Next (approved): A1 sizing probe after B1 is accepted.
+- `#[cfg(test)]` only; no runtime, validator, native-tool, fixture, `lower.rs`, `types.rs` or
+  `expressions.rs` change, parity.rs `success()` untouched. Only non-test source touched:
+  `Context::error` labels an empty module owner `<top-level>` (unreachable for modules,
+  whose names must be non-empty identifiers).
+- New `top_level.rs`: `lower_toplevel(source, &Program)` returns UNWRAPPED
+  `Operation::Type`s with `Context.module == ""`, which is the real catalog owner
+  (`owned_name("", n) == n`, `catalog_from_program` inserts `program.types` with owner "").
+  It refuses shared variables, functions (A2), docstrings, imports and statements with named
+  reasons. `print_toplevel_type` (printer.rs) picks `program.types` only (a module type with
+  the same bare name is a different owner) and proves the text re-lowers to an identical type.
+  Harness `parity/top_level.rs::check_type`: print -> lower into the program WITHOUT the type
+  (the validator's own duplicate rule stays in force) -> `equality::ty` -> second print
+  byte-identical -> second lowering equal.
+- Declaration-time TYPE collision rules (new, explicit messages): type vs module name; type
+  vs any union variant (existing top-level or module types, or submitted) and the symmetric
+  variant vs any type name. Existing member rules still apply (builtin/syntax/keyword/dunder
+  type names, duplicates). Two unions sharing a variant (`Some`) stay accepted: the ambiguity
+  is a use-site fact (A2). Replacement is not simulated: the validator rejects duplicate
+  top-level types.
+- Strict PARITY before -> after (same 54 files / 573 entries): verified 184 -> 207 (+23),
+  unsupported 331 -> 308 (-23), invalid 58, mismatches 0, non-idempotent 0. Only `type`
+  entries moved: Unsupported/type 24 -> 1, Verified/type 0 -> 23 (entry-by-entry diff:
+  exactly 24 entries changed, all `type`). Remaining: `adapsis_in_adapsis.Env` (member
+  `vars` is an unsafe member name, G6). Matches the sizing probe (+23) exactly.
+- The harness's pre-existing repeated-target rule already reports a module and a type
+  sharing a spelling in one file as Unsupported ("repeated declaration"); the lowering rule
+  is covered separately in unit tests.
+- Evidence: 7 unit tests (unwrapped ops; owner "" vs module owner; every type shape incl.
+  recursive, Option/None_, builtin-named variants roundtrips + identical reprint; 26-case
+  collision/rejection matrix incl. builtin, syntax, keyword, dunder, duplicate, module,
+  variant-vs-type both directions, shared/function/docstring/import/empty; legitimate
+  overlaps; unprintable member) + 1 harness test. Mutation checks (drop module rule, drop
+  variant rule, wrong owner) each fail tests; files restored byte-for-byte. Targeted
+  `python_` 308 passed + the expected strict-corpus failure; ONE full gate 1874 passed /
+  strict parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_a1.log.
+- `#110` is now referenced in the bare-test-target reason text (detail strings of 3 entries
+  changed, statuses and group counts unchanged).
+- Frozen for review; no commit. Next (approved): A2 (top-level functions), then A3+B2
+  (sign quirk #111: refuse negative numeric in keyword shorthand).
+
+### Accepted checkpoint `d1ae977` — B1 (module stored-test printer, strict 184/58/331)
 
 ### Accepted checkpoint `2e1e018` — D3 (TgFormat stored tests: 39 carried, 17 ax-only, 1 redacted)
 

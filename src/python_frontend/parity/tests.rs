@@ -46,7 +46,15 @@ fn python_parity_inventories_top_level_functions_types_tests_and_commands() {
         "+type Record = id:Int\n+fn f ()->Int\n  +return 1\n+end\n+test f\n  +with -> expect 1\n!eval f\n",
     );
     let report = run(fixture.path());
-    for kind in ["type", "function", "Test", "Eval", "program"] {
+    // Module-less TYPES now have a real (owner "") surface; everything else stays open.
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "type" && entry.status == Status::Verified),
+        "{report:?}"
+    );
+    for kind in ["function", "Test", "Eval", "program"] {
         assert!(
             report
                 .entries
@@ -305,4 +313,56 @@ fn python_parity_test_block_target_rules_follow_the_session() {
     // A qualified target is exact.
     let entries = test_entries(&format!("{MODULE_F}+test T.f\n  +with 1 -> expect 1\n"));
     assert_eq!(entries, [(Status::Verified, String::new())]);
+}
+
+fn type_entries(source: &str) -> Vec<(String, Status, String)> {
+    let fixture = corpus(source);
+    run(fixture.path())
+        .entries
+        .into_iter()
+        .filter(|entry| entry.kind == "type")
+        .map(|entry| (entry.target, entry.status, entry.detail))
+        .collect()
+}
+
+#[test]
+fn python_parity_top_level_types_use_the_empty_owner_surface() {
+    // Struct, union, recursive union and a cross-reference all roundtrip.
+    let entries = type_entries(
+        "+type Point = x:Int, y:Int\n+type Line = start:Point, end:Point\n+type IntList = Cons(Int, IntList) | Nil\n+type Option = Some(Int) | None\n",
+    );
+    assert_eq!(entries.len(), 4);
+    assert!(
+        entries
+            .iter()
+            .all(|(_, status, _)| *status == Status::Verified),
+        "{entries:?}"
+    );
+    // Unprintable member names stay Unsupported with the frontend's own reason.
+    let entries = type_entries("+type Env = vars:Int, other:Int\n");
+    assert_eq!(entries[0].1, Status::Unsupported);
+    assert!(
+        entries[0].2.contains("unsupported member name \"vars\""),
+        "{entries:?}"
+    );
+    // A top-level type colliding with a module is reported, never approximated. The
+    // harness's own repeated-target rule fires first (module and type share the
+    // target spelling); the lowering-level rule is covered in top_level_tests.
+    let entries =
+        type_entries("+type Geo = x:Int\n+module Geo\n+fn f ()->Int\n  +return 1\n+end\n");
+    let geo = entries.iter().find(|(target, ..)| target == "Geo").unwrap();
+    assert_eq!(geo.1, Status::Unsupported);
+    assert!(geo.2.contains("repeated declaration"), "{entries:?}");
+    // Type/variant collisions across top-level types are reported on BOTH sides.
+    let entries = type_entries("+type Shape = Circle(Int) | Dot\n+type Circle = r:Int\n");
+    assert!(
+        entries
+            .iter()
+            .all(|(_, status, detail)| *status == Status::Unsupported
+                && detail.contains("collides with a")),
+        "{entries:?}"
+    );
+    // Module types are untouched by the top-level path.
+    let entries = type_entries("+module M\n+type P = x:Int\n+fn f ()->Int\n  +return 1\n+end\n");
+    assert_eq!(entries[0].0, "M.P");
 }

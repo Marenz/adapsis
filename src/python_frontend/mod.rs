@@ -16,6 +16,10 @@ mod shared_default;
 mod references;
 mod tests_lower;
 #[cfg(test)]
+mod top_level;
+#[cfg(test)]
+mod top_level_tests;
+#[cfg(test)]
 mod tests_print;
 #[cfg(test)]
 mod tests_print_tests;
@@ -70,6 +74,13 @@ pub(crate) use references::COLLISION as CONSTRUCTOR_ROLE_ERROR;
 pub(crate) use call_sites::runtime_shadowed;
 pub use type_bindings::check_native_type_bindings;
 pub use tests_lower::{lower_input, lower_tests};
+/// Test-only: module-less (top-level) lowering/printing. See `top_level.rs`.
+#[cfg(test)]
+pub(crate) fn lower_toplevel(source: &str, program: &crate::ast::Program) -> Result<LoweredSource, Diagnostic> {
+    top_level::lower(source, program)
+}
+#[cfg(test)]
+pub(crate) use printer::print_toplevel_type;
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -144,7 +155,11 @@ impl<'a> Context<'a> {
         let offset = offset.min(self.source.len());
         let prefix = self.source.get(..offset).unwrap_or("");
         Diagnostic {
-            module: self.module.to_owned(),
+            module: if self.module.is_empty() {
+                "<top-level>".to_owned()
+            } else {
+                self.module.to_owned()
+            },
             line: prefix.bytes().filter(|b| *b == b'\n').count() + 1,
             column: prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
             message: message.into(),

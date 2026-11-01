@@ -177,6 +177,46 @@ fn find_type_in_module(modules: &[a::Module], name: &str) -> Option<a::TypeDecl>
     None
 }
 
+/// Test-only: print a TOP-LEVEL type (owner "") as Python, then prove the text lowers
+/// back, through the module-less surface, to an identical declaration. Only
+/// `program.types` is consulted: a module type with the same bare name is a
+/// different declaration with a different owner and is never picked.
+#[cfg(test)]
+pub(crate) fn print_toplevel_type(program: &a::Program, name: &str) -> Result<String, Diagnostic> {
+    let error = |message: String| Diagnostic {
+        module: "<top-level>".into(),
+        line: 1,
+        column: 1,
+        message: format!(
+            "cannot print top-level type {name} as Python: {message}; inspect Adapsis source instead"
+        ),
+    };
+    let decl = program
+        .types
+        .iter()
+        .find(|t| t.name() == name)
+        .ok_or_else(|| error("top-level type not found".into()))?
+        .clone();
+    let printer = Printer::new(program);
+    let text = printer.type_decl(&decl).map_err(&error)?;
+    // Collision rules compare against the REST of the program; the validator rejects
+    // duplicates, so the type under test must not be present while re-applying it.
+    let mut rest = program.clone();
+    rest.types.retain(|t| t.name() != name);
+    let lowered = super::lower_toplevel(&text, &rest).map_err(|e| error(e.message))?;
+    let [p::Operation::Type(lowered_type)] = lowered.operations.as_slice() else {
+        return Err(error("internal top-level type roundtrip mismatch".into()));
+    };
+    let converted =
+        crate::validator::convert_type_decl(lowered_type).map_err(|e| error(e.to_string()))?;
+    if !super::ast_equality::ty(&decl, &converted) {
+        return Err(error(
+            "unsupported AST semantics (Python roundtrip changed the type)".into(),
+        ));
+    }
+    Ok(text)
+}
+
 pub(super) fn collect_signatures(
     modules: &[a::Module],
     prefix: &str,

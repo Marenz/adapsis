@@ -615,8 +615,12 @@ replaces that branch with one composer.
   session's bare-name target rule (session.rs:636-641) required to name the same function
   as the module-qualified lowering. The Python test-data policy is unchanged (no records,
   variants, calls, Result inputs), top-level blocks stay unsupported until a module-less
-  scope surface exists, and `success()` is untouched. Current strict counts:
-  184 verified / 58 invalid / 331 unsupported (54 files, 573 entries).
+  scope surface exists, and `success()` is untouched. Module-less TYPES (A1) have a
+  `#[cfg(test)]`-only surface with the real empty owner (`top_level.rs`,
+  `print_toplevel_type`): unwrapped `Operation::Type`s, type-vs-module and type-vs-variant
+  collisions refused, functions/shared/lifecycle not part of it. It has no authority model
+  and must never be exposed to native tools. Current strict counts:
+  207 verified / 58 invalid / 308 unsupported (54 files, 573 entries).
   #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed
   JIT immutable normalization slice shares one emitter across AND/OR, NOT and
   Check/Branch/While. Local/rebound condition dependencies conservatively refuse

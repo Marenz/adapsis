@@ -3,6 +3,7 @@
 use super::ast_equality as equality;
 mod scope;
 mod test_blocks;
+mod top_level;
 mod tests;
 
 use crate::{ast, parser, validator};
@@ -552,10 +553,7 @@ fn check_module(program: &ast::Program, target: &str) -> Check {
 
 fn check_type(program: &ast::Program, target: &str) -> Check {
     let Some((module, name)) = target.rsplit_once('.') else {
-        return Err((
-            Status::Unsupported,
-            "production Python lowerer has no top-level type scope surface".into(),
-        ));
+        return top_level::check_type(program, target);
     };
     let original = find_module(program, module)
         .and_then(|m| m.types.iter().find(|t| t.name() == name))

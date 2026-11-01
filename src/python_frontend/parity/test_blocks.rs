@@ -40,7 +40,7 @@ pub(super) fn check(program: &ast::Program, scope: &str, test: &parser::TestMuta
             return Err((
                 Status::Unsupported,
                 format!(
-                    "bare test target `{bare}` runs {session}, but the module-qualified Python lowering targets {lowered_target}"
+                    "bare test target `{bare}` runs {session}, but the module-qualified Python lowering targets {lowered_target} (#110)"
                 ),
             ))
         }
