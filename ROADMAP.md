@@ -1,5 +1,22 @@
 # AdapsisOS Roadmap
 
+## Deployed 2026-11-01 19:34 CET — here (Kronk), release/2026-11-01 `1ed6424`
+
+- Binary sha256 `1c3e5285925e0cc42bf98e1eb33e08d9c26c01cf17bdb087e36d9dc6db64f39e`
+  installed at `~/.local/bin/adapsis`; running PID verified via `/proc/<pid>/exe`.
+  Rollback: `~/.local/bin/adapsis.bak-6685599-20261101-193414` (previous prod `6685599`).
+- Contents: work/native-tools `a4ab092` + work/issue-87-88 `e28fe29` (#87 native memory
+  tools, #88 private logs, #69 TUI, #89 native stays opt-in). Later native-tools commits
+  `fae91e7`, `2e1e018`, `d1ae977` are test/fixture-only and do not change the binary.
+- Service config unchanged by owner request (same ExecStart incl. `--native-tools`,
+  `--model deepseek-v4-flash`, permissions file, creative principal mapping and context file).
+- Verified: active/running, NRestarts=0, session revision 237 loaded, 28 library modules,
+  webhook route registered, `TelegramBot.startup` completed, `TelegramBot.poll_loop` polling.
+  No live Telegram smoke message sent. sleek and edox not deployed.
+- Follow-ups filed: #112 (/api/tasks exposes token prefix), #113 (route message under
+  library-error category).
+
+
 Release 2026-11-01 combines work/native-tools a4ab092 and work/issue-87-88 e28fe29
 (both branched from production 6685599). Sections below are kept verbatim from each
 side: the first block is the #86 Python-parity line, the second the #87/#88/TUI line
