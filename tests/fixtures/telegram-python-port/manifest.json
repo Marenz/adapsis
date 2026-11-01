@@ -1,7 +1,7 @@
 {
   "status": "partial",
   "full_port_complete": false,
-  "implementation_baseline": "a4ab092",
+  "implementation_baseline": "fae91e7",
   "historical_first_slice_observed_status": {
     "TelegramBot": {"tree_cases_per_origin": 28, "direct_vm_passes_per_origin": 25, "direct_vm_failures_per_origin": 3, "direct_vm_gate": "red, no exemptions"},
     "TgFormat": {"tree_cases_per_origin": 7, "direct_vm_passes_per_origin": 7},
@@ -220,7 +220,180 @@
         "sample_pre_join": "qualify local calls; otherwise exact function AST including doc"
       },
       "qualified_call_sites": {"code_wrap": 2, "code_segments": 4, "inline_code": 1, "convert_line": 7, "convert_lines": 10, "markdown_to_html": 2, "pre_wrap": 2, "split_parts": 5, "split_for_telegram": 1, "parts_preview": 1, "sample_pre": 1, "sample_pre_join": 1},
-      "pending_non_function_surface": ["original stored tests"],
+      "stored_tests": {
+        "frozen_blocks": 10,
+        "frozen_cases": 57,
+        "summary": {
+          "carried": 39,
+          "carried_ax_only": 17,
+          "covered_elsewhere": 0,
+          "redacted": 1,
+          "obsolete": 0
+        },
+        "policy": "Same mechanism as TelegramBot stored_tests: exactly one disposition per frozen case index (1-based within its block). carried = Debug-identical parser::TestCase in the frozen blob, the corrected-origin .ax module body and the Python test file (def test_stored_<function>_<frozen index>, keyword arguments, list literals lower to list(..)); carried_ax_only = the case calls module functions, so it is carried verbatim in the corrected .ax only and executed on both origins (no evaluated twin: that would not be independent evidence); redacted = unrecoverable, deliberately not recovered from any non-fixture source. No TgFormat function was repaired, so nothing is obsolete.",
+        "dispositions": {
+          "escape_html": [
+            "carried",
+            "carried",
+            "carried"
+          ],
+          "apply_inline": [
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried"
+          ],
+          "code_segments": [
+            "carried",
+            "carried_ax_only",
+            "carried_ax_only"
+          ],
+          "inline_code": [
+            "carried_ax_only",
+            "carried_ax_only",
+            "carried_ax_only",
+            "carried"
+          ],
+          "convert_line": [
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried_ax_only"
+          ],
+          "convert_lines": [
+            "carried",
+            "carried_ax_only",
+            "carried_ax_only"
+          ],
+          "markdown_to_html": [
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "redacted",
+            "carried_ax_only",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried",
+            "carried_ax_only",
+            "carried_ax_only",
+            "carried_ax_only"
+          ],
+          "split_parts": [
+            "carried",
+            "carried"
+          ],
+          "split_for_telegram": [
+            "carried_ax_only",
+            "carried"
+          ],
+          "parts_preview": [
+            "carried_ax_only",
+            "carried_ax_only",
+            "carried_ax_only",
+            "carried_ax_only"
+          ]
+        },
+        "carried_ax_only": {
+          "code_segments": {
+            "cases": [
+              2,
+              3
+            ],
+            "tests": [
+              "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers"
+            ],
+            "reason": "the frozen input or expectation calls module functions (code_wrap, pre_wrap, concat, sample_*); the Python test-data literal policy rejects calls and is unchanged. The verbatim case is carried in the corrected .ax and executed on both origins"
+          },
+          "inline_code": {
+            "cases": [
+              1,
+              2,
+              3
+            ],
+            "tests": [
+              "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers"
+            ],
+            "reason": "the frozen input or expectation calls module functions (code_wrap, pre_wrap, concat, sample_*); the Python test-data literal policy rejects calls and is unchanged. The verbatim case is carried in the corrected .ax and executed on both origins"
+          },
+          "convert_line": {
+            "cases": [
+              9
+            ],
+            "tests": [
+              "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers"
+            ],
+            "reason": "the frozen input or expectation calls module functions (code_wrap, pre_wrap, concat, sample_*); the Python test-data literal policy rejects calls and is unchanged. The verbatim case is carried in the corrected .ax and executed on both origins"
+          },
+          "convert_lines": {
+            "cases": [
+              2,
+              3
+            ],
+            "tests": [
+              "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers"
+            ],
+            "reason": "the frozen input or expectation calls module functions (code_wrap, pre_wrap, concat, sample_*); the Python test-data literal policy rejects calls and is unchanged. The verbatim case is carried in the corrected .ax and executed on both origins"
+          },
+          "markdown_to_html": {
+            "cases": [
+              7,
+              17,
+              18,
+              19
+            ],
+            "tests": [
+              "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers"
+            ],
+            "reason": "the frozen input or expectation calls module functions (code_wrap, pre_wrap, concat, sample_*); the Python test-data literal policy rejects calls and is unchanged. The verbatim case is carried in the corrected .ax and executed on both origins"
+          },
+          "split_for_telegram": {
+            "cases": [
+              1
+            ],
+            "tests": [
+              "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers"
+            ],
+            "reason": "the frozen input or expectation calls module functions (code_wrap, pre_wrap, concat, sample_*); the Python test-data literal policy rejects calls and is unchanged. The verbatim case is carried in the corrected .ax and executed on both origins"
+          },
+          "parts_preview": {
+            "cases": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "tests": [
+              "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers"
+            ],
+            "reason": "the frozen input or expectation calls module functions (code_wrap, pre_wrap, concat, sample_*); the Python test-data literal policy rejects calls and is unchanged. The verbatim case is carried in the corrected .ax and executed on both origins"
+          }
+        },
+        "covered_elsewhere": {},
+        "obsolete": {}
+      },
+      "contract_tests": {
+        "telegram_port_tgformat_stored_every_frozen_case_has_exactly_one_disposition": ["escape_html", "apply_inline", "code_segments", "inline_code", "convert_line", "convert_lines", "markdown_to_html", "split_parts", "split_for_telegram", "parts_preview"],
+        "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers": ["escape_html", "apply_inline", "code_segments", "inline_code", "convert_line", "convert_lines", "markdown_to_html", "split_parts", "split_for_telegram", "parts_preview"]
+      },
+      "pending_non_function_surface": [],
+      "open_items": ["TgFormat stored-test dispositions are complete; the frozen TgFormat module as a whole still fails the strict python_parity gate (unqualified local calls have no exact Python surface)", "#99 splitter size safety is unchanged", "no deployment certification"],
       "pending_reviewed_transformations": []
     }
   ],

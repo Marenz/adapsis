@@ -111,3 +111,121 @@ def test_sample_pre() -> None:
 
 def test_sample_pre_join() -> None:
     assert sample_pre_join() == "<pre>a\nb</pre> || xx"
+
+# Original stored cases carried verbatim (frozen block/case index in the name).
+def test_stored_escape_html_1() -> None:
+    assert escape_html(text="a < b & c > d") == "a &lt; b &amp; c &gt; d"
+
+def test_stored_escape_html_2() -> None:
+    assert escape_html(text="<script>alert(1)</script>") == "&lt;script&gt;alert(1)&lt;/script&gt;"
+
+def test_stored_escape_html_3() -> None:
+    assert escape_html(text="plain text") == "plain text"
+
+def test_stored_apply_inline_1() -> None:
+    assert apply_inline(s="**b**") == "<b>b</b>"
+
+def test_stored_apply_inline_2() -> None:
+    assert apply_inline(s="__b__") == "<b>b</b>"
+
+def test_stored_apply_inline_3() -> None:
+    assert apply_inline(s="*i*") == "<i>i</i>"
+
+def test_stored_apply_inline_4() -> None:
+    assert apply_inline(s="_i_") == "<i>i</i>"
+
+def test_stored_apply_inline_5() -> None:
+    assert apply_inline(s="~~s~~") == "<s>s</s>"
+
+def test_stored_apply_inline_6() -> None:
+    assert apply_inline(s="||sp||") == "<tg-spoiler>sp</tg-spoiler>"
+
+def test_stored_apply_inline_7() -> None:
+    assert apply_inline(s="[lbl](http://x.y)") == "<a href=\"http://x.y\">lbl</a>"
+
+def test_stored_apply_inline_8() -> None:
+    assert apply_inline(s="hi _x_ y") == "hi <i>x</i> y"
+
+def test_stored_code_segments_1() -> None:
+    assert code_segments(parts=["a"], i=0, acc="") == "a"
+
+def test_stored_inline_code_4() -> None:
+    assert inline_code(s="no code here") == "no code here"
+
+def test_stored_convert_line_1() -> None:
+    assert convert_line(line="# H") == "<b>H</b>"
+
+def test_stored_convert_line_2() -> None:
+    assert convert_line(line="## H") == "<b>H</b>"
+
+def test_stored_convert_line_3() -> None:
+    assert convert_line(line="### H") == "<b>H</b>"
+
+def test_stored_convert_line_4() -> None:
+    assert convert_line(line="&gt; q") == "<blockquote>q</blockquote>"
+
+def test_stored_convert_line_5() -> None:
+    assert convert_line(line="&gt;") == "<blockquote></blockquote>"
+
+def test_stored_convert_line_6() -> None:
+    assert convert_line(line="- i") == "• i"
+
+def test_stored_convert_line_7() -> None:
+    assert convert_line(line="* i") == "• i"
+
+def test_stored_convert_line_8() -> None:
+    assert convert_line(line="plain") == "plain"
+
+def test_stored_convert_lines_1() -> None:
+    assert convert_lines(lines=["a", "b"], i=0, in_pre=False, buf="", acc=[]) == ["a", "b"]
+
+def test_stored_markdown_to_html_1() -> None:
+    assert markdown_to_html(text="**bold**") == "<b>bold</b>"
+
+def test_stored_markdown_to_html_2() -> None:
+    assert markdown_to_html(text="__bold__") == "<b>bold</b>"
+
+def test_stored_markdown_to_html_3() -> None:
+    assert markdown_to_html(text="*ital*") == "<i>ital</i>"
+
+def test_stored_markdown_to_html_4() -> None:
+    assert markdown_to_html(text="_ital_") == "<i>ital</i>"
+
+def test_stored_markdown_to_html_5() -> None:
+    assert markdown_to_html(text="~~gone~~") == "<s>gone</s>"
+
+def test_stored_markdown_to_html_8() -> None:
+    assert markdown_to_html(text="# Title") == "<b>Title</b>"
+
+def test_stored_markdown_to_html_9() -> None:
+    assert markdown_to_html(text="## Title") == "<b>Title</b>"
+
+def test_stored_markdown_to_html_10() -> None:
+    assert markdown_to_html(text="### Title") == "<b>Title</b>"
+
+def test_stored_markdown_to_html_11() -> None:
+    assert markdown_to_html(text="- item") == "• item"
+
+def test_stored_markdown_to_html_12() -> None:
+    assert markdown_to_html(text="* item") == "• item"
+
+def test_stored_markdown_to_html_13() -> None:
+    assert markdown_to_html(text="> quoted") == "<blockquote>quoted</blockquote>"
+
+def test_stored_markdown_to_html_14() -> None:
+    assert markdown_to_html(text="a < b & c") == "a &lt; b &amp; c"
+
+def test_stored_markdown_to_html_15() -> None:
+    assert markdown_to_html(text="<script>x</script>") == "&lt;script&gt;x&lt;/script&gt;"
+
+def test_stored_markdown_to_html_16() -> None:
+    assert markdown_to_html(text="[lbl](http://x.y)") == "<a href=\"http://x.y\">lbl</a>"
+
+def test_stored_split_parts_1() -> None:
+    assert split_parts(lines=["a", "b"], i=0, part="", depth=0, limit=1, acc=[]) == ["a", "b"]
+
+def test_stored_split_parts_2() -> None:
+    assert split_parts(lines=["solo"], i=0, part="", depth=0, limit=2, acc=[]) == ["solo"]
+
+def test_stored_split_for_telegram_2() -> None:
+    assert split_for_telegram(html="solo", limit=2) == ["solo"]

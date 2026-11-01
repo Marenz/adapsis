@@ -1,7 +1,8 @@
-//! Slice D2: the 23 stored `+test` blocks / 61 cases of the FROZEN TelegramBot module.
-//! A manifest-driven gate assigns exactly one disposition to every frozen case and
-//! proves each disposition against the parsed fixtures. Redacted values are never
-//! recovered from any non-fixture source: they are recorded as unrecoverable.
+//! Slices D2/D3: the stored `+test` blocks of the FROZEN TelegramBot (23 blocks / 61
+//! cases) and TgFormat (10 blocks / 57 cases) modules. A manifest-driven gate assigns
+//! exactly one disposition to every frozen case and proves each disposition against
+//! the parsed fixtures. Redacted values are never recovered from any non-fixture
+//! source: they are recorded as unrecoverable.
 use super::{FROZEN, ORIGIN, TESTS};
 use crate::{
     ast,
@@ -16,6 +17,11 @@ const MANIFEST: &str = include_str!("../../../tests/fixtures/telegram-python-por
 const THIS_FILE: &str = include_str!("stored_tests.rs");
 const REPLY_CLOSURE: &str = include_str!("send_chain/runtime/reply_closure.rs");
 const SEND_RUNTIME: &str = include_str!("send_chain/runtime.rs");
+const TG_FROZEN: &str = include_str!("../../../tests/fixtures/python-parity/library/TgFormat.ax");
+const TG_ORIGIN: &str =
+    include_str!("../../../tests/fixtures/telegram-python-port/origin/TgFormat.ax");
+const TG_TESTS: &str =
+    include_str!("../../../tests/fixtures/telegram-python-port/python/test_tg_format.py");
 const DISPOSITIONS: [&str; 5] = [
     "carried",
     "carried_ax_only",
@@ -23,6 +29,51 @@ const DISPOSITIONS: [&str; 5] = [
     "redacted",
     "obsolete",
 ];
+
+/// One frozen module whose stored tests are dispositioned.
+struct Subject {
+    module: &'static str,
+    index: usize,
+    frozen: &'static str,
+    origin: &'static str,
+    tests: &'static str,
+    blocks: usize,
+    cases: usize,
+    /// carried + carried_ax_only + covered_elsewhere
+    covered: usize,
+    gate_test: &'static str,
+    exec_test: &'static str,
+    /// Dispositions whose functions the execution test must be registered for.
+    exec_kinds: &'static [&'static str],
+}
+
+const TELEGRAM: Subject = Subject {
+    module: "TelegramBot",
+    index: 0,
+    frozen: FROZEN,
+    origin: ORIGIN,
+    tests: TESTS,
+    blocks: 23,
+    cases: 61,
+    covered: 44,
+    gate_test: "telegram_port_stored_tests_every_frozen_case_has_exactly_one_disposition",
+    exec_test: "telegram_port_stored_carried_cases_execute_on_both_origins_and_tiers",
+    exec_kinds: &["carried"],
+};
+
+const TGFORMAT: Subject = Subject {
+    module: "TgFormat",
+    index: 1,
+    frozen: TG_FROZEN,
+    origin: TG_ORIGIN,
+    tests: TG_TESTS,
+    blocks: 10,
+    cases: 57,
+    covered: 56,
+    gate_test: "telegram_port_tgformat_stored_every_frozen_case_has_exactly_one_disposition",
+    exec_test: "telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers",
+    exec_kinds: &["carried", "carried_ax_only"],
+};
 
 fn dbg(case: &parser::TestCase) -> String {
     format!("{case:?}")
@@ -45,15 +96,16 @@ fn blocks(source: &str) -> Vec<(String, Vec<parser::TestCase>)> {
 }
 
 /// Python tests: (def name, qualified function, case) in source order.
-fn python_cases() -> Vec<(String, String, parser::TestCase)> {
-    let names: Vec<String> = TESTS
+fn python_cases(s: &Subject) -> Vec<(String, String, parser::TestCase)> {
+    let names: Vec<String> = s
+        .tests
         .lines()
         .filter_map(|line| line.strip_prefix("def "))
         .filter_map(|rest| rest.split('(').next())
         .filter(|name| name.starts_with("test_"))
         .map(str::to_owned)
         .collect();
-    let lowered = super::super::lower_tests(TESTS, "TelegramBot").unwrap();
+    let lowered = super::super::lower_tests(s.tests, s.module).unwrap();
     assert_eq!(
         names.len(),
         lowered.operations.len(),
@@ -93,28 +145,42 @@ fn has_test_fn(name: &str, sources: &[&str]) -> bool {
 
 #[test]
 fn telegram_port_stored_tests_every_frozen_case_has_exactly_one_disposition() {
+    check_dispositions(&TELEGRAM);
+}
+
+#[test]
+fn telegram_port_tgformat_stored_every_frozen_case_has_exactly_one_disposition() {
+    check_dispositions(&TGFORMAT);
+}
+
+fn check_dispositions(subject: &Subject) {
     let manifest = manifest();
-    let module = &manifest["modules"][0];
+    let module = &manifest["modules"][subject.index];
+    assert_eq!(module["name"], subject.module);
     let stored = &module["stored_tests"];
-    let frozen = blocks(FROZEN);
+    let frozen = blocks(subject.frozen);
     let table = stored["dispositions"].as_object().unwrap();
-    // Set equality (not counts): same functions, same case arity, 23 blocks / 61 cases.
+    // Set equality (not counts): same functions, same case arity, blocks / cases.
     let frozen_functions: BTreeSet<_> = frozen.iter().map(|(name, _)| name.clone()).collect();
-    assert_eq!(frozen.len(), 23);
-    assert_eq!(frozen_functions.len(), 23, "one block per function");
+    assert_eq!(frozen.len(), subject.blocks);
+    assert_eq!(
+        frozen_functions.len(),
+        subject.blocks,
+        "one block per function"
+    );
     assert_eq!(
         frozen_functions,
         table.keys().cloned().collect::<BTreeSet<_>>()
     );
     assert_eq!(
         frozen.iter().map(|(_, cases)| cases.len()).sum::<usize>(),
-        61
+        subject.cases
     );
-    assert_eq!(stored["frozen_blocks"], 23);
-    assert_eq!(stored["frozen_cases"], 61);
+    assert_eq!(stored["frozen_blocks"], subject.blocks);
+    assert_eq!(stored["frozen_cases"], subject.cases);
 
-    let origin = blocks(ORIGIN);
-    let python = python_cases();
+    let origin = blocks(subject.origin);
+    let python = python_cases(subject);
     let python_by_name: BTreeMap<_, _> = python
         .iter()
         .map(|(name, function, case)| (name.clone(), (function.clone(), dbg(case))))
@@ -162,7 +228,7 @@ fn telegram_port_stored_tests_every_frozen_case_has_exactly_one_disposition() {
                     let (qualified, python_case) = python_by_name
                         .get(&python_name)
                         .unwrap_or_else(|| panic!("missing Python test {python_name}"));
-                    assert_eq!(*qualified, format!("TelegramBot.{function}"));
+                    assert_eq!(*qualified, format!("{}.{function}", subject.module));
                     assert_eq!(*python_case, dbg(case), "{python_name}");
                 }
                 "carried_ax_only" => expected_origin.push(dbg(case)),
@@ -217,10 +283,11 @@ fn telegram_port_stored_tests_every_frozen_case_has_exactly_one_disposition() {
             "{kind}"
         );
     }
-    assert_eq!(summary.values().sum::<usize>(), 61);
+    assert_eq!(summary.values().sum::<usize>(), subject.cases);
+    let count = |kind: &str| summary.get(kind).copied().unwrap_or(0);
     assert_eq!(
-        summary["carried"] + summary["carried_ax_only"] + summary["covered_elsewhere"],
-        44
+        count("carried") + count("carried_ax_only") + count("covered_elsewhere"),
+        subject.covered
     );
 
     // Per-disposition detail maps must match the table by set equality.
@@ -303,15 +370,14 @@ fn telegram_port_stored_tests_every_frozen_case_has_exactly_one_disposition() {
         }
     }
     // The execution and disposition tests are registered against the right functions.
+    let executed: BTreeSet<String> = subject
+        .exec_kinds
+        .iter()
+        .flat_map(|kind| by_kind.get(*kind).cloned().unwrap_or_default())
+        .collect();
     for (test, functions) in [
-        (
-            "telegram_port_stored_tests_every_frozen_case_has_exactly_one_disposition",
-            frozen_functions.clone(),
-        ),
-        (
-            "telegram_port_stored_carried_cases_execute_on_both_origins_and_tiers",
-            by_kind["carried"].clone(),
-        ),
+        (subject.gate_test, frozen_functions.clone()),
+        (subject.exec_test, executed),
     ] {
         assert!(has_test_fn(test, &[THIS_FILE]));
         assert_eq!(strings(&contracts[test]), functions, "{test}");
@@ -471,4 +537,46 @@ fn telegram_port_stored_transcription_cases_run_ax_origin_and_trusted_results() 
             }
         }
     }
+}
+
+#[test]
+fn telegram_port_tgformat_stored_cases_execute_verbatim_on_both_origins_and_tiers() {
+    // Every visible frozen TgFormat case (39 carried + 17 ax-only, the latter with
+    // calls such as `code_wrap(..)` / `sample_lines()` resolved by their bare module
+    // names exactly as in the frozen module) runs from the corrected-origin .ax blocks
+    // on BOTH programs, tree and direct VM, with the shared pure-case runner.
+    let operations: Vec<parser::Operation> = blocks(TG_ORIGIN)
+        .into_iter()
+        .map(|(name, cases)| {
+            parser::Operation::Test(parser::TestMutation {
+                function_name: format!("TgFormat.{name}"),
+                cases,
+            })
+        })
+        .collect();
+    let [origin, python] = super::send_chain::programs();
+    for program in [&origin, &python] {
+        let (count, failures) = super::run_cases(program, &operations, true);
+        assert_eq!(count, 56);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+    // Not vacuous: the redacted case is absent, and a corrupted expectation (a call
+    // expression, so the evaluator path is exercised) is reported as a failure.
+    assert!(!TG_ORIGIN.contains("<redacted>"));
+    let mut corrupted = operations.clone();
+    let target = corrupted
+        .iter_mut()
+        .find_map(|op| match op {
+            parser::Operation::Test(test) if test.function_name == "TgFormat.inline_code" => {
+                Some(test)
+            }
+            _ => None,
+        })
+        .unwrap();
+    target.cases[0].expected = parser::Expr::String("corrupted".into());
+    let outcome = std::panic::catch_unwind(|| {
+        let [origin, _] = super::send_chain::programs();
+        super::run_cases(&origin, &corrupted, true)
+    });
+    assert!(outcome.is_err() || !outcome.unwrap().1.is_empty());
 }

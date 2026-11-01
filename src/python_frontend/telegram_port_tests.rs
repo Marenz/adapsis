@@ -9,7 +9,7 @@ const TESTS: &str =
     include_str!("../../tests/fixtures/telegram-python-port/python/test_telegram_bot.py");
 const FROZEN: &str = include_str!("../../tests/fixtures/python-parity/library/TelegramBot.ax");
 const TELEGRAM_CASES: usize = 125;
-const FORMAT_CASES: usize = 38;
+const FORMAT_CASES: usize = 77;
 mod io_contracts;
 mod intake;
 mod lifecycle;

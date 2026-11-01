@@ -662,7 +662,9 @@ replaces that branch with one composer.
   (frozen/corrected .ax/Python Debug-equal), 2 carried in the .ax only (Result literals;
   Python literal policy unchanged), 1 covered by a named default-state test, 14 redacted
   and unrecoverable (never recovered from non-fixture sources), 3 obsolete by ledgered
-  repair. TgFormat's original stored tests remain pending and #86 is not complete.
+  repair. TgFormat's 57 stored cases (D3) are dispositioned the same way: 39 carried,
+  17 carried in the .ax only (calls in test data), 1 redacted and unrecoverable. No port
+  inventory remains pending and #86 is not complete.
   Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
   The NEW test-only PortMediaDriver is excluded from original-function inventory

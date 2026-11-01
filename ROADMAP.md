@@ -2,29 +2,30 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — D2 (original stored tests), baseline `a4ab092`
+### Current pending slice — D3 (TgFormat original stored tests), baseline `fae91e7`
 
-- Fixtures/tests/docs only. All 61 frozen TelegramBot stored cases (23 blocks) get exactly
-  one manifest disposition, proven by a manifest-driven gate with set equality: 41 carried
-  (Debug-identical parser::TestCase in frozen, corrected-origin .ax and Python-lowered
-  `test_stored_<fn>_<idx>`), 2 carried_ax_only (transcription_upload_response: Result literals,
-  Python literal policy unchanged), 1 covered_elsewhere (is_allowed, default shared state), 14
-  redacted (unrecoverable, deliberately NOT recovered from any non-fixture source), 3 obsolete
-  (send_message/_part/_parts, ledgered repairs with named replacement tests).
-- Execution: carried cases run on both origins, tree + direct VM, via run_cases (refactored
-  out of run_paired, same runner); trusted Result harness for the transcription cases; Python
-  defs join the paired pure gate (125 cases per origin/tier). Mutation checks (flip a
-  disposition, edit a carried expectation) fail the gate. A module may empty its pending
-  inventories only with a named `open_items` list (guard extended in the provenance test).
-- TgFormat original stored tests (10 blocks / 57 cases, 1 redacted) remain a separate pending
-  surface. Targeted 70/70; ONE full gate 1857 passed / strict parity 1 failed / 2 ignored; CLI 5/5;
-  strict PARITY lines byte-identical to slice C. Log /tmp/opencode/full_gate_d2.log.
-- Authored manifest/origin/test blobs:
-  `a5b4b9bf6f46b327bc10d606fcbca30a380376c7`,
-  `1af21bed0f38a280e36b5f524c2d71820cd774a0`,
-  `10bc9c3381ad3de9da3f1731ca6a43079d17a0f2` (test_telegram_bot.py).
-  Frozen for review; no commit. Claims: every frozen TelegramBot module member is ported or
-  carries a ledgered disposition; #86 NOT complete.
+- Fixtures/tests/docs only. The D2 mechanism, parametrized by module, dispositions all 57
+  frozen TgFormat cases (10 blocks): 39 carried (frozen == corrected .ax == Python
+  `test_stored_<fn>_<idx>`, keyword args, list literals), 17 carried_ax_only (calls such as
+  code_wrap/pre_wrap/concat/sample_*(); Python literal policy unchanged; no evaluated twin),
+  1 redacted (markdown_to_html case 6, unrecoverable), 0 covered_elsewhere/obsolete.
+- Probes first: bare frozen callee names resolve in the corrected TgFormat (112 evaluations ok)
+  and keyword list literals lower Debug-identical. All 56 visible cases run from the corrected
+  .ax on both origins, tree + direct VM. TgFormat pure gate 38 -> 77 cases. Mutation checks
+  (flip redacted, edit carried expectation, drop a Python def, corrupt a call expectation) fail.
+- Targeted 72/72; ONE full gate 1859 passed / strict parity 1 failed / 2 ignored; CLI 5/5;
+  strict PARITY lines byte-identical to slice C. Log /tmp/opencode/full_gate_d3.log.
+- Authored manifest/TgFormat.ax/test_tg_format.py blobs:
+  `d3f4cb9c935f4f7884495de3c2e39eb68149e3b9`,
+  `410df55ec5ee52002dee2e20aa97a7857499b648`,
+  `b4a0b018ec3b85f7c71490fe69e63e308d23e3e0`. Frozen for review; no commit. Both ported
+  modules now have no pending inventory; #86 NOT complete (strict corpus red, #91/#99/#104/
+  #106/#108/#109 open, no deployment certification). parity.rs success semantics untouched.
+
+### Accepted checkpoint `fae91e7` — D2 (TelegramBot original stored tests)
+
+- All 61 TelegramBot stored cases dispositioned (41 carried, 2 ax-only, 1 covered elsewhere,
+  14 redacted, 3 obsolete); manifest-driven gate with set equality.
 
 ### Accepted checkpoint `a4ab092` — D1 (doc, shared paths, startup, route)
 
