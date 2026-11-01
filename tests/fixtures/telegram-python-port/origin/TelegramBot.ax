@@ -7,6 +7,7 @@
 +shared sandbox_perm_model:String = "family"
 +shared intake_mode:String = "poll"
 +shared poll_offset:Int = 0
++shared poll_running:Bool = false
 +fn telegram_upload_attempt (response:Result<String>)->TgSendAttempt
   +match response
   +case Ok(body)
@@ -87,6 +88,20 @@
     +return concat("dispatched ", to_string(n-skipped), ", skipped ", to_string(skipped))
   +return concat("dispatched ", to_string(n))
 +doc "Split a getUpdates array into individual updates, advance the dedup offset, and feed each to process_update (same path as webhook). Corrected port: a missing or non-array result returns 'no result'; updates without a represented update_id in 0..i64::MAX-1 are skipped without advancing or spawning; spawn stays fire-and-forget (at-most-once, no outcome, #104)."
++fn poll_loop ()->String [io,mut,async]
+  +if poll_running
+    +return "already running"
+  +set poll_running = true
+  +let cycles:Int = 0
+  +while poll_running AND cycles<1000
+    +await _:String = TelegramBot.poll_once()
+    +set cycles = cycles+1
+  +if poll_running
+    +set poll_running = false
+    +spawn TelegramBot.poll_loop()
+    +return "poll loop restarted"
+  +return "poll loop stopped"
++doc "Long-poll intake: repeatedly calls getUpdates. No inbound port required. Guarded by poll_running so it is started at most once. Corrected port: after 1000 cycles the loop clears the latch and spawns one successor (the tree-walker aborts a while after 10000 passes, #107); a stop request (poll_running false) still ends it with 'poll loop stopped' and spawns nothing. An outer error from poll_once ends the loop with the latch still set (#109)."
 +fn poll_once ()->String [io,mut,async]
   +let url:String = concat("<redacted>", telegram_token, "/getUpdates?timeout=30&offset=", to_string(poll_offset))
   +await response:Result<String> = http_get(url)

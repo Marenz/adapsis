@@ -2,25 +2,37 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — polling slice B (poll_once), baseline `da46d2e`
+### Current pending slice — polling slice C (poll_loop), baseline `2a5d0cd`
 
-- Fixtures/tests/docs only. poll_once (typed_poll_once_v1) -> 41/42, 1 pending
-  (poll_loop). URL and Err arm preserved; R1 explicit builtin Result; json_valid guard
-  -> "poll rejected: invalid body"; dispatch "no result" (HttpGet delivers 401/409 JSON
-  as Ok) -> "poll rejected: no result"; "dispatched 0, skipped " -> "poll rejected: no
-  valid updates"; each backs off 3000. Valid/empty pages and mixed pages stay immediate ok.
-- `_` await binding admitted by the frontend (probed); effect set equal, Python spells
-  async last. Inverse proof leaves one qualified call. Four named normal-async tests on
-  both origins (get/sleep/spawn intercepted; offsets 0/7/i64::MAX; sequence with
-  post-dispatch offset; 22 rejected bodies; transport and sleep failure pins; mixed,
-  all-skipped and u64 terminal pages). Targeted 54/54; ONE full gate 1841 passed /
-  strict parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_b.log.
+- Fixtures/tests/docs only. poll_loop (typed_poll_loop_v1, R6 option ii, #107) -> 42/42
+  original TelegramBot functions, 0 pending functions. Shared poll_running added. Loop
+  bounded to 1000 cycles (10x under the tree while cap of 10000, counted per while
+  statement); on the bound it clears the latch, THEN spawns one zero-arg qualified
+  successor and returns "poll loop restarted"; a stop request still returns "poll loop
+  stopped" with no successor; "already running" does zero IO.
+- Limits: outer errors out of poll_once cannot be caught in-language and leave the latch
+  set (#109, runtime follow-up); the Bool latch is not an identity so stop + immediate
+  restart during an in-flight getUpdates can run two loops (inherited). Zero-arg spawn
+  admitted by the frontend (probed). Non-function surfaces (module doc, token_path,
+  allowed_path, startup, route, original stored tests) pending; #86 not complete.
+- Four named normal-async tests on both origins through the real tree spawn path
+  (get/sleep/spawn intercepted; a hook writes the typed poll_running slot): already
+  running + stop after exactly 3 cycles; exactly 1000 cycles then one successor (1002
+  events) and a simulated handoff; latch kept on sleep failure / u64 id; spawn-failure
+  order via a dropped receiver ("+spawn failed to send", latch already clear, recoverable);
+  test-only CapProbe pins the 10000-pass tree cap. Targeted 58/58; ONE full gate 1845
+  passed / strict parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_c.log.
 - Authored manifest/origin/Python blobs:
-  `08e9a4e895b29f212b52ebec7a2f45612e0dae4f`,
-  `834ed7f488c8fa3976a9eb46f784d730c4e7bb42`,
-  `9751654e45c9a396b5550ca69b6ae2b31746cd40`.
-  Frozen for review; no commit. Next: poll_loop (R6 option ii, #107), then the
-  non-function surface.
+  `701de87440b247773d717bcfcf59f64abce146c3`,
+  `e49f5b8d4ecee950ce3210039a9a99a859bed488`,
+  `16254223253a20a6ed1db4d1ea1a7633d9e17e57`.
+  Frozen for review; no commit. Next: slice D (startup with the `length` admission probe,
+  route, token_path/allowed_path, module doc, stored tests).
+
+### Accepted checkpoint `2a5d0cd` — polling slice B (poll_once, baseline `da46d2e`)
+
+- poll_once (typed_poll_once_v1): explicit builtin Result, json_valid guard, no-result and
+  no-valid-updates backoff; 41/42.
 
 ### Accepted checkpoint `da46d2e` — json_valid primitive (baseline `614051a`)
 

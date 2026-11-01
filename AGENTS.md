@@ -637,7 +637,7 @@ replaces that branch with one composer.
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
   disagrees with tree already, so fallback is not a fix for that #90 residual.
   A separate partial TelegramBot port lives in `tests/fixtures/telegram-python-port`
-  (now 41/42 original TelegramBot functions plus a separate partial text entry,
+  (now 42/42 original TelegramBot functions plus a separate partial text entry,
   three separately inventoried pure intake validators, a pure upload classifier
   and a pure batch update-id validator,
   and 18/18 TgFormat functions; module/stored-test and
@@ -648,8 +648,14 @@ replaces that branch with one composer.
   poll_once: explicit builtin Result, json_valid guard (invalid body), dispatch
   "no result" and "dispatched 0, skipped " outcomes each back off 3s instead of
   hot-looping or aborting; valid/empty/mixed pages stay immediate ok; dispatch_updates
-  itself still treats a malformed top-level body as terminal. poll_loop, startup,
-  route, token_path/allowed_path/poll_running remain pending (#107/#108).
+  itself still treats a malformed top-level body as terminal. Slice C ports poll_loop
+  (42/42): bounded to 1000 cycles, then the latch is cleared BEFORE one zero-arg
+  successor spawn ("poll loop restarted", #107: the tree while cap is 10000); stop
+  requests spawn nothing; an outer error from poll_once keeps the latch set and cannot be
+  caught in-language (#109); the Bool latch is not an identity (stop + immediate restart
+  during an in-flight getUpdates can run two loops). Non-function surfaces (module doc,
+  token_path, allowed_path, startup, route, original stored tests) remain pending and
+  #86 is not complete (webhook ingress limit: #108).
   Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
   The NEW test-only PortMediaDriver is excluded from original-function inventory

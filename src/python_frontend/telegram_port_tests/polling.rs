@@ -9,6 +9,7 @@ use crate::{
 };
 use serde_json::{json, Value as Json};
 pub(super) mod cycle;
+pub(super) mod looping;
 
 pub(super) fn verify_repair(original: &ast::FunctionDecl, corrected: &ast::FunctionDecl) {
     use ast::StatementKind as S;

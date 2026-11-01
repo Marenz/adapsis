@@ -17,6 +17,7 @@ allowed_user_ids: str = ""
 sandbox_perm_model: str = "family"
 intake_mode: str = "poll"
 poll_offset: int = 0
+poll_running: bool = False
 
 def telegram_upload_attempt(response: Result[str]) -> TgSendAttempt:
     match response:
@@ -112,6 +113,22 @@ async def dispatch_updates(body: str) -> str:
     if skipped > 0:
         return concat("dispatched ", to_string(n - skipped), ", skipped ", to_string(skipped))
     return concat("dispatched ", to_string(n))
+
+@effects("io", "mut")
+async def poll_loop() -> str:
+    """Long-poll intake: repeatedly calls getUpdates. No inbound port required. Guarded by poll_running so it is started at most once. Corrected port: after 1000 cycles the loop clears the latch and spawns one successor (the tree-walker aborts a while after 10000 passes, #107); a stop request (poll_running false) still ends it with 'poll loop stopped' and spawns nothing. An outer error from poll_once ends the loop with the latch still set (#109)."""
+    if poll_running:
+        return "already running"
+    poll_running = True
+    cycles: int = 0
+    while poll_running and cycles < 1000:
+        _: str = await TelegramBot.poll_once()
+        cycles = cycles + 1
+    if poll_running:
+        poll_running = False
+        spawn(TelegramBot.poll_loop())
+        return "poll loop restarted"
+    return "poll loop stopped"
 
 @effects("io", "mut")
 async def poll_once() -> str:

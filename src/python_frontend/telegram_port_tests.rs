@@ -95,13 +95,14 @@ fn telegram_port_pure_origin_and_python_exact_roundtrip() {
             "sandbox_perm_model",
             "intake_mode",
             "poll_offset",
+            "poll_running",
         ]
         .contains(&shared.name.as_str()),
         _ => false,
     });
     module.doc = None;
     let selected = program(&operations);
-    assert_eq!(selected.modules[0].functions.len(), 40);
+    assert_eq!(selected.modules[0].functions.len(), 41);
     assert_eq!(
         selected.modules[0].shared_vars,
         origin.modules[0].shared_vars
@@ -373,7 +374,9 @@ fn verify_qualification(original: &ast::Program, corrected: &ast::Program, modul
     for function in &original.modules[0].functions {
         let target = format!("{module}.{}", function.name);
         if let Some(repair) = ledger["semantic_repairs"].get(&function.name) {
-            if repair["kind"] == "typed_poll_once_v1" {
+            if repair["kind"] == "typed_poll_loop_v1" {
+                polling::looping::verify_repair(function, corrected.get_function(&target).unwrap());
+            } else if repair["kind"] == "typed_poll_once_v1" {
                 polling::cycle::verify_repair(function, corrected.get_function(&target).unwrap());
             } else if repair["kind"] == "typed_dispatch_v1" {
                 polling::verify_repair(function, corrected.get_function(&target).unwrap());
@@ -480,7 +483,8 @@ fn assert_paired_coverage(program: &ast::Program, tests: &[parser::Operation]) {
                     "TelegramBot.init".to_owned(),
                     "TelegramBot.handle_update".to_owned(),
                     "TelegramBot.dispatch_updates".to_owned(),
-                    "TelegramBot.poll_once".to_owned()
+                    "TelegramBot.poll_once".to_owned(),
+                    "TelegramBot.poll_loop".to_owned()
                 ]
                 .into_iter()
                 .collect(),

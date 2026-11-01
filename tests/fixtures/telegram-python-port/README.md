@@ -7,9 +7,9 @@ per-function transformation ledger, implemented and pending inventories.
 
 ## Present subset
 
-- **TelegramBot: 41 of 42 original functions, plus six introduced functions.**
+- **TelegramBot: 42 of 42 original functions, plus six introduced functions.**
   Nineteen literal-paired original pure helpers, one trusted-Result pure helper,
-  two shared-state authorization helpers, one shared-state mutator (`init`) and eighteen
+  two shared-state authorization helpers, one shared-state mutator (`init`) and nineteen
   IO functions are separately covered. `process_text_update` is NEW and is not
   counted among the original 42. Three NEW pure intake validators are also counted
   separately, as are one NEW pure upload Result classifier and one NEW pure batch update-id validator. Original-name `process_update` is integrated as an explicit
@@ -22,7 +22,7 @@ per-function transformation ledger, implemented and pending inventories.
 - Unrepaired functions permit only approved local-call qualification: **37 call
   sites in TgFormat, 5 in TelegramBot**, counted per function in the manifest.
   The test-only transform proves all other function fields, including docs,
-  unchanged. Eighteen separately ledgered semantic repairs deliberately change return
+  unchanged. Nineteen separately ledgered semantic repairs deliberately change return
   types/effects/control flow/docs; these are not qualification-only equivalence.
   Corrected origins and Python lowering compare exact structures
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
@@ -44,7 +44,7 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **54 passing tests**, including the original
+This focused command currently has **58 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
@@ -132,19 +132,20 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current polling-slice-B release gate: **1841 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current polling-slice-C release gate: **1845 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**54 passed**. This remains partial routing evidence, not deployment certification.
+**58 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
-The manifest explicitly lists **1 TelegramBot pending original function** (`poll_loop`); TgFormat has
-no pending functions but its original stored-test surface remains pending.
+The manifest lists **no pending TelegramBot original functions** (42/42 are ported as corrected
+fixtures); TgFormat has no pending functions. **The non-function surfaces remain pending**: the
+module doc, `token_path`, `allowed_path`, `+startup`, the `+route`, and the original stored tests.
+**#86 is not complete.**
 Still required: full corrected-origin provenance/review and whole-module paired
-structural/idempotence gates, the long-poll cycle and loop
-(`poll_loop`) and the startup/route/remaining-shared/stored-test surface. Raw-update text/photo/video/voice callable routing
+structural/idempotence gates and the startup/route/remaining-shared/stored-test surface. Raw-update text/photo/video/voice callable routing
 is covered by the bounded corrected-origin integration below; deployed callbacks,
 polling and lifecycle are not thereby certified.
 The partial tests here do not close #86, certify deployment, or imply the original
@@ -521,3 +522,59 @@ sleep after exactly one request, no retry) and `..._skipped_updates_and_terminal
 (mixed page, three all-skipped pages, the u64 terminal characterization after one
 spawn). Shared access fails direct-VM compilation, so this is not VM parity. Full-gate
 log: `/tmp/opencode/full_gate_b.log`.
+
+## Polling slice C: `poll_loop` (R6, #107) -- 42/42 original functions
+
+`poll_loop` (ledger `typed_poll_loop_v1`) adds the shared `poll_running` latch (default
+`False`) and keeps the frozen shape: `already running` with zero IO, latch set, one
+`poll_once` per pass, `poll loop stopped` when the flag is cleared. One repair, tied to a
+reachable failure: the tree-walker aborts any single `while` after 10000 passes
+(`eval/mod.rs:2239-2249`, "while loop exceeded 10000 iterations"; spawned tasks always use
+the tree-walker). The original loop therefore died after about 83 hours of idle 30 s polls
+(minutes under heavy traffic) with `poll_running` still true, so nothing could restart it.
+The corrected loop runs at most **1000 cycles** (10x under the cap; only this statement's
+own passes count, nested loops in `poll_once`/`dispatch_updates` have separate counters).
+When the bound, not a stop request, ended it, it clears the latch, spawns exactly one
+zero-argument `TelegramBot.poll_loop` successor and returns `poll loop restarted`. The
+latch is cleared **before** the spawn: the reverse order would let the successor read
+`true` and answer `already running`; with this order a spawn that cannot be queued leaves
+a recoverable latch. A stop request still returns `poll loop stopped` and spawns nothing.
+
+Limits (documented, not repaired):
+- **Outer errors keep the latch (#109).** Adapsis has no try/catch/finally and a user
+  function's outer error is not a matchable value, so an error escaping `poll_once`
+  (a failing sleep, an `update_id` above `i64::MAX` in `dispatch_updates`, a spawn that
+  cannot be queued inside dispatch) ends the loop with `poll_running` still true. Later
+  `poll_loop()` calls answer `already running` until the process restarts (shared vars are
+  not persisted) or the flag is reset. The failed task is visible in the task registry
+  (`main.rs:1377-1384`). No in-language workaround or watchdog is attempted.
+- **The Bool latch is not an identity (inherited).** Stopping and then immediately
+  restarting while a `getUpdates` is still in flight makes the old loop's condition true
+  again, so two loops can run (Telegram answers 409 to concurrent polls). The restart
+  logic neither introduces nor worsens this; successor creation itself cannot overlap a
+  poll because the predecessor performs no further cycle after queuing it.
+- `startup` is the only production starter and is slice D; spawn stays at-most-once
+  (#104); `token_path`, `allowed_path`, the module doc, the route and the original stored
+  tests are still pending.
+
+Tests (both origins, normal async; `http_get`, `sleep` and `+spawn` are intercepted
+through the real tree spawn path, nothing sleeps, any other request fails; the hook writes
+the typed per-key `poll_running` slot, which the tree re-reads on every access):
+`..._latch_stop_and_already_running` (seeded latch: zero IO and flag untouched; a stop
+written during the 3rd poll ends after exactly 3 cycles with the offset carried and no
+successor; stop-then-start under the same state continues at the persisted offset),
+`..._generation_restart_and_successor` (exactly 1000 polls, one successor spawn event with
+the qualified name and no arguments, flag cleared, 1002 events; a simulated successor
+continues at the saved offset; a second starter loses with `already running`),
+`..._outer_errors_keep_latch_and_spawn_failure_order` (failing sleep and the u64-id page
+keep the latch and the next call is `already running` with zero IO; with the receiver
+dropped before the 1000th answer the evaluator's own `try_send` fails with
+"+spawn failed to send", the latch is already cleared and a fresh run proceeds) and
+`..._original_shape_dies_at_tree_cap` (a test-only `CapProbe` module, not inventoried,
+with the frozen loop shape over a shared flag: the body runs exactly 10000 times, then the
+cap error). Shared access fails direct-VM compilation, so none of this is VM parity.
+Full-gate log: `/tmp/opencode/full_gate_c.log`.
+
+Claims after this slice: 42/42 original TelegramBot functions are ported as corrected
+fixtures. The non-function surfaces (module doc, `token_path`, `allowed_path`, `startup`,
+`route`, original stored tests) are pending, and **#86 is not complete**.
