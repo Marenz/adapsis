@@ -541,3 +541,25 @@ fn python_parity_input_parameter_functions_verify_at_both_scopes() {
     let entries = kind_entries(&module, "program");
     assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
 }
+
+#[test]
+fn python_parity_pseudo_field_functions_verify_at_both_scopes() {
+    // G1: property-form `.len`/`.is_empty`/`.is_ok`/`.is_err`/`.unwrap` roundtrip exactly.
+    let top = "+fn probe (s:String, r:Result<Int>)->Int\n  +if r.is_ok\n    +if s.is_empty\n      +return 0\n    +end\n    +return s.len + r.unwrap\n  +end\n  +return 0\n+end\n";
+    let entries = kind_entries(top, "function");
+    assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
+    let module = format!("+module M\n{top}");
+    let entries = kind_entries(&module, "function");
+    assert_eq!(entries[0].1, Status::Verified, "{entries:?}");
+    assert_eq!(kind_entries(&module, "program")[0].1, Status::Verified);
+    // Out-of-gate uses stay Unsupported with the frontend's own reason.
+    let entries = kind_entries(
+        "+fn probe (r:Result<Int>)->Int\n  +return r.len\n+end\n",
+        "function",
+    );
+    assert_eq!(entries[0].1, Status::Unsupported);
+    assert!(
+        entries[0].2.contains("not supported on a Result"),
+        "{entries:?}"
+    );
+}

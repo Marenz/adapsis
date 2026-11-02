@@ -2,7 +2,37 @@
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — G2 (`input` as a binding name), baseline `762de63`
+### Current pending slice — G1 (Python pseudo-field properties), baseline `5fb1ca8`
+
+- PRODUCTION frontend change (native mutate/test/evaluate/inspect), owner-approved choices:
+  names `len`, `is_empty`, `is_ok`, `is_err`, `unwrap` only; PROPERTY form lowering to the
+  same `FieldAccess` AST the `.ax` source has; type-gated (str/list for `len`/`is_empty`,
+  Result for `is_ok`/`is_err`/`unwrap`); a real struct field of the same name wins (the
+  pseudo-field table is only consulted for a non-struct base); everything else keeps a
+  refusal, with dedicated reasons for Map/Set and for `.len` on a Result. Documented as
+  NOT runnable CPython (README, native prompt, `pseudo_fields.rs`).
+- Code: new `python_frontend/pseudo_fields.rs` (type table + refusal text) and a
+  7-line branch in `expressions.rs::field_access`. The printer already emitted
+  `base.field`; the preflight `surface::attribute_access` already accepted these names
+  (it never type-gated), so no other production file changed. Execution: the VM's
+  `GetField` is untouched; #114's `field_admission` routes these functions to the tree.
+- Strict PARITY before -> after (54 files / 573 entries): verified 298 -> 324 (+26),
+  unsupported 217 -> 191, invalid 58, mismatches 0, non-idempotent 0. Entry diff: 21
+  `function` and 5 `program` Unsupported -> Verified, plus 12 entries that stay
+  Unsupported with a later reason; no Verified entry lost. Programs gained: expr_parser,
+  http_server, imperative, self_read, tokenizer. Identical to the earlier probe. Residual
+  top-level function blockers: G3 anonymous literal 4, Int/Str type-mismatch + comparison
+  (G4 json_get typing) 3, G7 implicit Ok wrap 7, G5 shared `Some` 2.
+- Evidence: 8 frontend tests (`pseudo_field_tests.rs`: AST equality with `.ax` for every
+  form + tree results, print/reprint identity, chains/conditions/loops, same-name struct
+  field precedence incl. VM compile, 17-case refusal matrix, native-entry agreement, VM
+  refusal + async-after-IO tree result), 3 native tests (`python_pseudo_field_tests.rs`:
+  mutate+test+evaluate+inspect, six refusals leaving the program unchanged, async
+  `.len` after an awaited read with one synthetic FileRead), 1 harness test. 19 mutations
+  (every table row, wrong result types, three leaks, both refusal texts, struct-field
+  precedence x2, field renaming, #114 admission disabled) all fail tests; each restored.
+
+### Accepted slice — G2 (`input` as a binding name), baseline `762de63`
 
 - PRODUCTION frontend change (native mutate/test/inspect, `adapsis test --language python`),
   owner-approved. `mod.rs::forbidden_binding(name)` = `forbidden` minus `input`, used at

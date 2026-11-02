@@ -12,6 +12,7 @@ mod runtime_arguments;
 mod call_sites;
 mod builtin_signatures;
 mod surface;
+mod pseudo_fields;
 mod shared_default;
 mod references;
 mod tests_lower;
@@ -23,6 +24,8 @@ mod top_level_tests;
 mod top_level_function_tests;
 #[cfg(test)]
 mod input_binding_tests;
+#[cfg(test)]
+mod pseudo_field_tests;
 #[cfg(test)]
 mod tests_print;
 #[cfg(test)]

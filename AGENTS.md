@@ -652,7 +652,7 @@ replaces that branch with one composer.
   `types::owned_name`; do not return to `resolved.contains('.')`, which misclassifies owner
   "". The printer prints a bare user call only at owner "" for a real `program.functions`
   entry. It has no authority model and must never be exposed to native tools. Current
-  strict counts: 298 verified / 58 invalid / 217 unsupported (54 files, 573 entries). G2
+  strict counts: 324 verified / 58 invalid / 191 unsupported (54 files, 573 entries). G2
   allows `input` as a parameter/local/capture/value/field-base name ONLY
   (`forbidden_binding`); as a callee, function, type, member, shared, annotation or attribute
   name it stays forbidden. A3
@@ -661,9 +661,13 @@ replaces that branch with one composer.
   lowered target must equal the runtime string `get_function` resolves; module blocks keep
   the #110 session rule). The test printer refuses negative numeric CONSTANT nodes (#111,
   keyword shorthand only; `Unary Neg` spellings are exact). The
-  remaining top-level function blockers are G1 pseudo-fields (deferred behind #114, the VM
-  GetField gap), G3 anonymous struct literals, G4 json_get typing, G5 shared `Some`, and
-  G7 implicit Ok wrap in `[fail]` Result returns (owner decisions).
+  remaining top-level function blockers are G3 anonymous struct literals, G4 json_get
+  typing, G5 shared `Some`, and G7 implicit Ok wrap in `[fail]` Result returns (owner
+  decisions). G1 is done (`pseudo_fields.rs`): `.len`/`.is_empty` on str/list and
+  `.is_ok`/`.is_err`/`.unwrap` on a Result lower as PROPERTIES to the same `FieldAccess`
+  AST, only for a non-struct base (a struct field of the same name wins); Map/Set `.len`,
+  Result `.len`, `error`/`unwrap_err`/`is_some`/`is_none` stay refused. The text is not
+  runnable CPython. `vm/field_admission.rs` (#114) sends these functions to the tree.
   #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed
   JIT immutable normalization slice shares one emitter across AND/OR, NOT and
   Check/Branch/While. Local/rebound condition dependencies conservatively refuse

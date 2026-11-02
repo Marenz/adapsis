@@ -649,9 +649,18 @@ impl Expressions<'_, '_> {
     fn field_access(&self, a: &py::ExprAttribute) -> Result<(p::Expr, Ty), Diagnostic> {
         let (base, base_ty) = self.field_base(a.value.as_ref())?;
         if !matches!(base_ty, Ty::Named(_)) {
-            return Err(self
-                .cx
-                .at(a, "field access requires a struct-typed base name"));
+            return match super::pseudo_fields::pseudo_field_type(&base_ty, a.attr.as_str()) {
+                Some(ty) => Ok((
+                    p::Expr::FieldAccess {
+                        base: Box::new(base),
+                        field: a.attr.to_string(),
+                    },
+                    ty,
+                )),
+                None => Err(self
+                    .cx
+                    .at(a, super::pseudo_fields::refusal(&base_ty, a.attr.as_str()))),
+            };
         }
         let field_ty = super::types::struct_field_type(self.types, &base_ty, a.attr.as_str())
             .map_err(|message| self.cx.at(a, message))?

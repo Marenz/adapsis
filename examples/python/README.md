@@ -46,6 +46,14 @@ live-provider certification; native tools retain their additional admission rule
   classes (keyword-arg construction + field access); tagged unions are `@union`
   classes with `Variant: tuple[...]` payload attributes (`tuple[()]` = none;
   the `None` variant is written `None_`).
+- Runtime properties, written as ATTRIBUTES (the only spelling that lowers to the same
+  AST as `.ax`): `s.len` / `s.is_empty` on `str` or `list[T]` (`str` length is BYTES),
+  and `r.is_ok` / `r.is_err` / `r.unwrap` on `Result[T]` (`unwrap` has the inner type;
+  `r.unwrap.name` chains into a struct). They are type-gated: a struct field of the same
+  name always wins; `int`, `Map`, `Set`, `Option`, `.len` on a `Result`, and the names
+  `error`, `unwrap_err`, `is_some`, `is_none` are refused. This text is **not runnable
+  CPython** (`str` has no `.len`); like `Ok(..)` and `@union` it exists only for this
+  runtime. Functions that use them always execute on the tree walker (#114).
 - Statements: `if`/`elif`/`else`, `while`, `for`, and `match` with `case` patterns
   (declared variants, `Ok`/`Err`/`Some`/`None`, nested class patterns, literal
   sub-patterns, `_`). A match must be exhaustive. Match subjects may call IO
