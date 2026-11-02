@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 mod slots;
 mod capture;
 mod provenance;
+mod compare_live;
 
 type Checked<T> = Result<T, &'static str>;
 const FORMAT: &str = include_str!("../../../tests/fixtures/telegram-python-port/origin/TgFormat.ax");

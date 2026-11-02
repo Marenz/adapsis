@@ -4,6 +4,18 @@
 Adapsis is an AI-native programming language and live agentic environment. Programs are built incrementally through validated mutations. The AI writes Adapsis code, gets immediate feedback, and iterates. The system can modify its own runtime via `!opencode`.
 
 ## Development baseline (2026-10-25 cleanup)
+- Current here Telegram deployment (2026-11-02): runtime binary `88b4275`;
+  TelegramBot/TgFormat are now production-Python-frontend-authored modules
+  (48/18 functions, 221 stored cases), prepared with reviewed tooling `9ffd3fa`.
+  Private provenance/rollback: `~/.local/share/adapsis/telegram-python-migration-20261102/`
+  (`backup`, `capture`, `python-authored`); durable `.py` is authorship provenance,
+  while the runtime library stores lowered canonical `.ax`. Preserve effective shared
+  settings and final poll cursor; session snapshots alone omit these values.
+  Library persistence changes source bytes: compare parser/full module AST and
+  grouped tests against the authored artifact before treating a hash change as drift.
+  Post-install exact text reply `PYTHONLIVE7429` was observed by manager; underscore
+  stripping is an end-to-end residual of unestablished cause. No live repair-task/attachment or failure-ACK
+  certification follows. ROADMAP.md's newest entry supersedes deployment status below.
 - Release worktree integration (2026-11-02): `release/2026-11-01` combines the
   deployed `1ed6424` line (#87/#88, TUI, native opt-in) with exact main checkpoint
   `108e4dc` (G2/#114/G1/#112/#116). See ROADMAP.md's top release section for merge

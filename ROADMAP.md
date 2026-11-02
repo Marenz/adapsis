@@ -1,5 +1,35 @@
 # AdapsisOS Roadmap
 
+## Live Python-authored Telegram modules — 2026-11-02, exact text reply observed
+
+- Manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi` completed reviewed v3 helper/drain,
+  runtime capture, fresh recapture, whole-service stop, final export/library gates,
+  pair installation and one start. Runtime binary remains `88b4275` (hash below);
+  migration tooling checkpoint `9ffd3fa` adds no production runtime feature.
+  Durable `.py` files record authorship; the running library stores lowered canonical `.ax`.
+- Durable owner-only provenance/rollback bundle:
+  `~/.local/share/adapsis/telegram-python-migration-20261102/{backup,capture,python-authored}`.
+  Preserve captured effective settings/cursor on rollback; session alone omits shared state.
+- Installed Python-lowered canonical hashes: TelegramBot
+  `201fd1d90f31b7caf62191de623ff9538cb45c5a18bf6a9826d410f89fb6f4cf`;
+  TgFormat `0e4d1e25009b3cc4123122833b46f744f405ded1b53b6c0337d365753ec1297f`.
+  Normal library persistence subsequently serialized these as
+  `9c50c2fabcc18e9cf18704dcc401f591d41bbca9d0398e6916472fc2b118e408` and
+  `e03f323ab47ef42932971bd6ae31b323d0c772233912d2f083c45844b6ae32bf` respectively.
+- Writer `ses_e67e01ef9ffettWZDQAXWveOxc` independently proved exact full module
+  ASTs (only typed NodeIds ignored), all grouped cases (127+94=221), and route
+  registration batch equality against the final artifacts. No semantic drift;
+  read-only test `telegram_migration_compare_deployed_artifact` passed (1/1).
+  Runtime symbols confirm 48/18 functions, two outcome types, TgTextTurn return
+  on process_update and no migration helpers. PID1636185 active, NRestarts0,
+  one poll task, zero active non-poll tasks at observation.
+- Manager observed post-install Telegram request542631 -> reply542632 at
+  12:31:22 UTC, exactly `PYTHONLIVE7429`. Earlier post-install request542629
+  requested `KRONK_PYTHON_LIVE_20261102_B`; reply542630 stripped underscores,
+  an observed end-to-end residual whose cause (model or formatter) is unestablished.
+  No pre-migration baseline is acceptance evidence; no live repair-task/attachment certification;
+  #104 failure ACK and #99 splitter residuals remain. Plan/roadmap feature HOLD unchanged.
+
 ## Deployed 2026-11-02 — #118 grouped Python tests, release `88b4275`
 
 - Writer `ses_e67e01ef9ffettWZDQAXWveOxc`, manager
