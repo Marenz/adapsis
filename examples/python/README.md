@@ -31,6 +31,16 @@ before that set is stored. Targets execute in first-seen order, so interleaved
 targets are regrouped; cases within each target retain source order. A later
 submission replaces that target's stored set rather than appending stale cases.
 
+An unrelated legacy builtin-name collision no longer blocks a narrow scalar-only
+test/evaluate/source-inspection entry: scalar parameters/return, fresh scalar local
+assignments then return, with literals, bound names and unary/binary operators only.
+Execution also requires scalar literal test data/arguments (no matcher/after-check),
+and all implicitly initialized shared defaults must be proven scalar and call-free.
+Inspection uses authorized metadata and does not initialize defaults. This proof is
+rechecked after edits. Calls, fields/pseudo-fields, constructors, effects, control
+flow, list data and unproved defaults still use the conservative collision gate;
+this is a bounded exception, not complete support for legacy helper collisions.
+
 Omitting `language` or source `format` preserves Adapsis syntax. Python `module`
 metadata selects a namespace, never permission. Live gateway compatibility is
 a separate deployment/certification gate; these local examples need no gateway.

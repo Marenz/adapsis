@@ -90,7 +90,11 @@ pub(super) fn runtime_targets(
             exists(program, function)?;
             let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
             if *python {
-                super::literals::require_python_entry(program, function)?;
+                super::literals::require_python_entry(
+                    program,
+                    function,
+                    super::scalar_entry::EntryUse::Execute(&ops),
+                )?;
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }
             for op in ops {
@@ -111,7 +115,11 @@ pub(super) fn runtime_targets(
             let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
             if *python {
                 for target in targets {
-                    super::literals::require_python_entry(program, target)?;
+                    super::literals::require_python_entry(
+                        program,
+                        target,
+                        super::scalar_entry::EntryUse::Execute(&ops),
+                    )?;
                 }
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }

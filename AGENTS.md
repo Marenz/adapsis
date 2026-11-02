@@ -915,8 +915,20 @@ replaces that branch with one composer.
   Python test/evaluate/inspection conservatively rejects current builtin-name
   collisions in both `BUILTINS` and `IO_BUILTINS` (including aliases and user
   union variants), so later `.ax` edits cannot intercept installed helpers.
-  Narrower helper-specific usability is deferred to #83; retain the broad safe
-  check. Tests remain data-only declarations.
+  #83 has ONE narrow exception in `api/native_tools/scalar_entry.rs`: effect-free
+  scalar signatures, straight-line fresh scalar lets followed by return, and only
+  scalar literals/bound parameters/earlier locals/unary/binary operators. Python
+  execution additionally requires scalar literal argument carriers/expectations,
+  no matchers/after-checks, and a call-free scalar proof for ALL potentially
+  initialized shared defaults (empty binding set, full current Program). Runtime
+  eagerly evaluates unrelated defaults, so checking only the target body is unsafe.
+  Inspection uses the same body proof with authorized metadata; it executes no
+  defaults. Root named tests/evaluation bypass function-call stubs, and admitted
+  bodies/data contain no call site that could invoke one. Recheck each snapshot;
+  preserve unconditional reachable-constructor checks and existing literal guards.
+  Calls, fields, constructors, unknown/shared identifiers, control flow, effects,
+  list data, or unproved defaults retain conservative admission. This is not full
+  helper-specific resolution or general #83 completion. Tests remain data-only.
   Supported syntax/exclusions and runnable commands: `examples/python/README.md`.
   New bindings/parameters/returns are annotated; imports, mutable collections,
   dynamic calls and ambiguous numeric/truthiness behavior fail with source

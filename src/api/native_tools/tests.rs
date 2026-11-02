@@ -36,6 +36,8 @@ mod json_valid_tests;
 mod python_input_name_tests;
 #[path = "python_pseudo_field_tests.rs"]
 mod python_pseudo_field_tests;
+#[path = "python_scalar_tests.rs"]
+mod python_scalar_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
