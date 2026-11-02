@@ -107,8 +107,7 @@ fn roundtrip(test: &parser::TestMutation, scope: &str, expected: &str) -> Check 
     Ok(())
 }
 
-/// Lower the printed block and return its cases, requiring one declaration per case
-/// all targeting `expected`.
+/// Lower the printed block into one grouped operation targeting `expected`.
 pub(super) fn lower(
     text: &str,
     scope: &str,
@@ -120,12 +119,18 @@ pub(super) fn lower(
         crate::python_frontend::lower_tests(text, scope)
     }
     .map_err(|e| (Status::Unsupported, e.to_string()))?;
+    if lowered.operations.len() != 1 {
+        return Err((
+            Status::AstMismatch,
+            "expected one grouped test target".into(),
+        ));
+    }
     let mut cases = Vec::new();
     for operation in lowered.operations {
         let parser::Operation::Test(test) = operation else {
             return Err((Status::AstMismatch, "lowering produced a non-test".into()));
         };
-        if test.function_name != expected || test.cases.len() != 1 {
+        if test.function_name != expected || test.cases.is_empty() {
             return Err((
                 Status::AstMismatch,
                 format!(
@@ -135,6 +140,17 @@ pub(super) fn lower(
             ));
         }
         cases.extend(test.cases);
+    }
+    if lowered.source_map.len() != cases.len()
+        || lowered
+            .source_map
+            .iter()
+            .any(|span| span.operation_index != 0)
+    {
+        return Err((
+            Status::AstMismatch,
+            "test definition/case mapping differs".into(),
+        ));
     }
     Ok(cases)
 }

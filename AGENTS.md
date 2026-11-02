@@ -405,6 +405,14 @@ gateway resolves via `model_aliases` or `virtual_models`.
   `adapsis.service`/`adapsis-bot.service` `ExecStart`, `daemon-reload`, restart.
 
 ## Test Infrastructure
+
+- Python test submissions group cases by exact lowered target (#118) before
+  canonical emission. Targets execute in first-seen order (interleaved targets
+  regroup); cases retain per-target source order. Each def keeps its SourceSpan,
+  mapping to the grouped operation. All cases must pass to store the replacement
+  set; later submissions replace rather than append. Session/executor storage
+  semantics are unchanged. Strict parity compares the entire ordered case set;
+  per-def fixture inventories use source spans to consume each grouped case once.
 - Tests persist in `session.stored_tests` (HashMap<fn_name, Vec<StoredTestCase>>)
 - Auto-rerun when functions change via `invalidate_and_retest()`
 - `!mock` intercepts `+await` calls during `!test` with fake IO responses

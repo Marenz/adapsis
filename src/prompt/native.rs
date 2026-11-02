@@ -96,6 +96,11 @@ def add_two(x: int) -> int:
 def test_add_two() -> None:
     assert add_two(3) == 5
 
+   Use one assertion per test definition. Definitions for the same exact target
+   in one submission form one stored set only if all pass. Targets execute in
+   first-seen order (interleaved targets regroup), with source-order cases per
+   target. A later test submission replaces that target's stored set.
+
 4. Call evaluate with language="python", function="Example.add_two", input="3".
    Multiple literal arguments may use input="1, 2" or input="left=1, right=2".
 5. Call finish alone. Functions with more than two statements need passing tests

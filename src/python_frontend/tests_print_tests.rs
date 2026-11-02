@@ -238,11 +238,11 @@ fn module_less_test_lowering_keeps_the_runtime_target_string() {
         .operations
         .iter()
         .map(|op| match op {
-            p::Operation::Test(t) => t.function_name.clone(),
+            p::Operation::Test(t) => (t.function_name.clone(), t.cases.len()),
             _ => panic!(),
         })
         .collect();
-    assert_eq!(names, ["f", "M.f", "f"]);
+    assert_eq!(names, [("f".into(), 2), ("M.f".into(), 1)]);
     assert!(
         lowered.canonical_adapsis.contains("+test f")
             && !lowered.canonical_adapsis.contains("+module")
@@ -253,11 +253,11 @@ fn module_less_test_lowering_keeps_the_runtime_target_string() {
         .operations
         .iter()
         .map(|op| match op {
-            p::Operation::Test(t) => t.function_name.clone(),
+            p::Operation::Test(t) => (t.function_name.clone(), t.cases.len()),
             _ => panic!(),
         })
         .collect();
-    assert_eq!(names, ["M.f", "M.f", "M.f"]);
+    assert_eq!(names, [("M.f".into(), 3)]);
     // The module-name check still guards the public entry point.
     assert!(lower_tests(text, "").is_err());
 }

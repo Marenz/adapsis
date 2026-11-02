@@ -300,6 +300,58 @@ fn python_literal_test_lowering_never_registers_or_executes_test_functions() {
 }
 
 #[test]
+fn python_test_lowering_groups_exact_targets_and_maps_every_definition() {
+    let source = "def test_one():\n    assert f(7) == 23\ndef test_other():\n    assert Other.f(4) == 4\ndef test_zero():\n    assert f(0) == 2\n";
+    let lowered = lower_tests(source, "Example").unwrap();
+    assert_eq!(lowered.operations.len(), 2);
+    let targets: Vec<_> = lowered
+        .operations
+        .iter()
+        .map(|op| {
+            let parser::Operation::Test(test) = op else {
+                panic!("only tests")
+            };
+            (test.function_name.as_str(), test.cases.len())
+        })
+        .collect();
+    assert_eq!(targets, [("Example.f", 2), ("Other.f", 1)]);
+    assert_eq!(
+        lowered
+            .source_map
+            .iter()
+            .map(|s| (s.operation_index, s.line))
+            .collect::<Vec<_>>(),
+        [(0, 1), (1, 3), (0, 5)]
+    );
+    let mut used = [0, 0];
+    for span in &lowered.source_map {
+        let single = lower_tests(&source[span.start..span.end], "Example").unwrap();
+        let parser::Operation::Test(original) = &single.operations[0] else {
+            panic!()
+        };
+        let parser::Operation::Test(grouped) = &lowered.operations[span.operation_index] else {
+            panic!()
+        };
+        assert_eq!(original.function_name, grouped.function_name);
+        assert_eq!(
+            format!("{:?}", original.cases[0]),
+            format!("{:?}", grouped.cases[used[span.operation_index]])
+        );
+        used[span.operation_index] += 1;
+    }
+    assert_eq!(used, [2, 1]);
+    assert_eq!(
+        format!("{:?}", parser::parse(&lowered.canonical_adapsis).unwrap()),
+        format!("{:?}", lowered.operations)
+    );
+    let replacement = lower_tests("def test_new():\n    assert f(8) == 8\n", "Example").unwrap();
+    let parser::Operation::Test(test) = &replacement.operations[0] else {
+        panic!()
+    };
+    assert_eq!(test.cases.len(), 1);
+}
+
+#[test]
 fn python_literal_inputs_are_structurally_safe_and_match_runtime_binding() {
     let source = "def combine(left: int, right: int) -> int:\n    return left * 10 + right\n";
     assert_eq!(evaluate(source, "Example.combine", "2, 3"), "23");

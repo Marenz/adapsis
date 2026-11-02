@@ -25,6 +25,12 @@ Inspect with `{"kind":"source","target":"PyBasic.add_two","format":"python"}`.
 Call `finish` explicitly after testing. Functions changed in the turn still owe
 their ordinary Adapsis tests; Python syntax does not bypass the completion gate.
 
+Each test definition contains one assertion. Within one submission, definitions
+for the same exact qualified target form one ordered test set: all cases must pass
+before that set is stored. Targets execute in first-seen order, so interleaved
+targets are regrouped; cases within each target retain source order. A later
+submission replaces that target's stored set rather than appending stale cases.
+
 Omitting `language` or source `format` preserves Adapsis syntax. Python `module`
 metadata selects a namespace, never permission. Live gateway compatibility is
 a separate deployment/certification gate; these local examples need no gateway.
