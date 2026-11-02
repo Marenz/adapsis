@@ -20,6 +20,10 @@
   `deepinfra/deepseek-ai/DeepSeek-V4-Flash` (owner-approved). Direct and alias test
   requests returned 200; gateway and adapsis services active. Backup:
   `~/.config/llm-gateway/config.json.bak-20261101-deepinfra`.
+- 2026-11-02 ~02:30: DeepInfra returned 402 "positive balance required" on every
+  request, so the bot's alias was failing. Rolled `deepseek-v4-flash` back to
+  `deepseek/deepseek-v4-flash` (DeepSeek direct answered 200; balance low).
+  Backup of the DeepInfra state: `config.json.bak-20261102-deepinfra402`.
 
 
 Release 2026-11-01 combines work/native-tools a4ab092 and work/issue-87-88 e28fe29
