@@ -54,7 +54,7 @@ mod tests {
         let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.set("a", lhs.clone());
         env.set("b", rhs.clone());
-        let tree = eval::eval_function_body_named(program, "probe", &function.body, &mut env);
+        let tree = eval::eval_declared_function(program, "probe", function, &mut env);
         let compiled = vm::compile_function(function, program).unwrap();
         let machine = vm::execute_with_io(&compiled, vec![lhs, rhs], program, &|_, _| {
             anyhow::bail!("comparison must not perform IO")

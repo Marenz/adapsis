@@ -4,17 +4,24 @@
 
 - Owner authorizes the broader work and deployment toward a useful programming/task/agent
   bot that can eventually replace OpenCode. Current worker scope is the approved bounded
-  VM scalar-safety checkpoint of B-safety (#97), after accepted Result A and JIT/cache
-  safety. No commit, push, service changes, live-module access or live IO in this scope.
+  behavior-preserving C invocation/observer plumbing checkpoint, after accepted Result A,
+  JIT/cache and scalar VM safety. Result activation and trace correction are a later
+  coherent checkpoint. No commit, push, service changes, live-module access or live IO.
 - Model rule: OpenAI only for now, `openai/gpt-6-astra`, default variant (no explicit high
   effort); no Anthropic. This supersedes historical model-routing notes below.
-- Main checkout baseline `2e9b3fc`. Manager reports live release `88b4275`, binary SHA
+- Main checkout baseline `bbfe932`. Manager reports live release `88b4275`, binary SHA
   `4ef591486f0d74850d78affde7b6b77f2e3e2c8bb3b7133fdbfbc42b41ab0414`, deployment record
   `2019299`, service and runtime model `chatgpt/gpt-6-astra` with default effort;
   this worker has not re-verified production. Host-only poll status and pure JSON smoke
   passed. A no-change native turn had `completed=true` but an empty reply: not full
   conversational success. Historical DeepInfra 402 caused an alias rollback to direct
   DeepSeek; the current runtime selection is Astra, and worker policy stays OpenAI-only.
+- Subsequent manager/release evidence: Python-authored live TelegramBot/TgFormat installed
+  via tooling `9ffd3fa`, exact AST + 221 cases verified; real Telegram marker message
+  542631/reply 542632 exactly `PYTHONLIVE7429`, release record `5b788be`, binary `88b4275`
+  unchanged. This is a real text-reply proof, not proof of the new C runtime. Broader
+  programming smoke exposed #83 restart-helper collision (native Python test/eval denied;
+  .ax repaired the module and stored two cases), not a Result regression.
 - Ownership: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; sole main-checkout writer
   `ses_e8b17a23affedgH4V52JdwxNDL`; release writer `ses_e67e01ef9ffettWZDQAXWveOxc`.
   Main writer must not touch the release checkout. Review session
@@ -22,7 +29,8 @@
   by `463d839`, deployed and closed; two cases survive save/load. The release worker's
   live Python TelegramBot investigation is separate: this writer must not touch live modules.
 - Accepted main work: G1 `fce692c`; #114 `5fb1ca8`; #112 `ce9096a` + structural hardening
-  `56ce420`; #116 `ab2000a`; Result slice A `75da3aa`; JIT safety `2e9b3fc`. A/B are excluded from the current
+  `56ce420`; #116 `ab2000a`; Result slice A `75da3aa`; JIT safety `2e9b3fc`; scalar VM
+  safety `bbfe932`. A/B are excluded from the current
   release integration; historical commit presence alone is not activation evidence.
   Strict parity remains RED: 324 verified / 58 invalid / 191 unsupported (573 entries).
 - Approved next sequence: Result contract A, then B (VM Check/unwind and fail-closed JIT
@@ -124,7 +132,7 @@ invocation migration or release activation follows from this helper-only checkpo
   2 ignored, CLI 5/5; strict counts unchanged at 324/58/191. Log:
   `/tmp/opencode/full_gate_jit_safety.log`. No exhaustive mutation campaign was run.
 
-### Current VM scalar-safety checkpoint — #97 (uncommitted)
+### Accepted VM scalar-safety checkpoint — #97 (`bbfe932`)
 
 - Baseline reproduced on a genuinely VM-admitted graph: ordinary scalar failing helper
   between two builtin awaits emitted `[before, after]`; required result is `[before]` and
@@ -157,6 +165,37 @@ invocation migration or release activation follows from this helper-only checkpo
   native 149, Telegram port 73, await/field admission 14 each. One full release gate:
   1995 passed / strict parity 1 failed / 2 ignored; CLI 5/5, strict still 324/58/191.
   Full log `/tmp/opencode/full_gate_vm_scalar.log`. No broad mutation campaign.
+
+### Current C invocation/observer plumbing — behavior-preserving (uncommitted)
+
+- `eval/invocation.rs` receives the actual FunctionDecl and a declared or selected-stub
+  body, returns the existing raw outcome, and optionally calls a trusted Rust observer.
+  No production caller installs that observer; nested callees do not inherit it, and it
+  receives no coroutine handle or nested private body. Stub selection/authority, program-only
+  expression context, named frame setup and depth guards remain unchanged.
+- Moved real named/parser/nested/async/test/spawned/source/route invocation sites to the
+  wrapper; raw startup/lifecycle and synthetic statement blocks remain outside it. CLI
+  run-async historically used an unframed body entry; its explicit legacy-unframed wrapper
+  retains that behavior (including the root shared-scope limitation) in this checkpoint.
+- No normalization/capture/propagation/await activation: current raw-vs-named-result
+  discrepancy, external error rendering and legacy catch-all behavior are retained.
+  Legacy trace is untouched and explicitly characterized: a branch returning 7 is skipped
+  and trace reports a later 9; a Check inside a branch is likewise skipped. Correcting this
+  requires the later shared-executor/trace C checkpoint, not an implicit plumbing change.
+- Metadata-only release audit (no live reads by main writer): migrated TelegramBot48 /
+  TgFormat18, no Result-returning functions, no +call captures or user-Result awaits;
+  two Result-parameter helpers and seven Result-typed builtin awaits. Preserve app unions
+  and builtin Err behavior. The frozen old Result callback signature is not a live claim.
+- C activation must explicitly migrate operational catch consumers: self-hosted REPL
+  division currently reaches a broad +call Result catch; use an authored domain Check/Err
+  where recovery is intended, never string classification or frozen-fixture edits. Test
+  observers may assert execution failure but may not create recoverable language values.
+  Other live-module metadata audit, generic ACK #104, and frontend guard relaxation remain
+  separate gates. No task/workspace/plan features are authorized for this writer.
+- Review freeze: 10 boundary/observer characterizations pass; eval 341 passed/1 ignored,
+  VM 91, native 149 and Telegram port 73 passed. One full release gate: 2005 passed /
+  strict parity 1 failed / 2 ignored, CLI 5/5; strict unchanged324/58/191. Log:
+  `/tmp/opencode/full_gate_c_plumbing.log`. No expanded mutation campaign.
 
 ## Historical recovery — Python parity #86 (2026-10-28 onward, red)
 

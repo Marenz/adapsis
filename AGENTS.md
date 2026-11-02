@@ -190,6 +190,19 @@ web/
 ## Execution Tiers
 Function evaluation goes through up to three tiers (fastest first):
 
+**Interpreter invocation plumbing (C prerequisite, not contract activation):** genuine
+declared calls use `eval/invocation.rs::eval_declared_function` with the actual
+`FunctionDecl`, including selected stubs, parser/named/async/test/task/source/route
+paths. Outcomes are still raw; existing adapters retain wrapping/catching/await behavior.
+The trusted outcome observer is not installed by production callers and is not inherited
+by nested callees. Raw lifecycle/blocks keep `eval_function_body_named` without signature
+lookup. CLI `run-async` explicitly retains its legacy unframed entry setup through
+`eval_declared_function_unframed`; unlike framed entry it cannot resolve root +shared
+reads, a separately characterized exception to the named-frame invariant above.
+Legacy `trace_function` is still partial (it skips branches, including checks inside them).
+Correct trace execution and Result activation must land together later; these plumbing
+tests are not a trace-parity or invocation-normalization certificate.
+
 1. **Cranelift JIT** (`compiler.rs`) — numeric/string functions only
    (`is_compilable_function` gate; bails on each/await/spawn/yield/List/Map/Union).
    - `compiler/failure_admission.rs` (#97/#119 safety checkpoint) refuses reachable

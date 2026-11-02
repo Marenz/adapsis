@@ -52,7 +52,7 @@ fn scalar_failure_stops_later_arguments_operands_loops_and_recursive_calls() {
         assert_check(&error, "stop");
         let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         let error =
-            eval::eval_function_body_named(&program, "root", &root.body, &mut env).unwrap_err();
+            eval::eval_declared_function(&program, "root", root, &mut env).unwrap_err();
         assert_check(&error, "stop");
         let (text, jit) = eval::eval_compiled_or_interpreted(
             &program,

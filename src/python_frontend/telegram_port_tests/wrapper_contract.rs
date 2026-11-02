@@ -216,5 +216,5 @@ fn run_entry(
             eval::eval_parser_expr_with_program(&field.value, program)?,
         );
     }
-    eval::eval_function_body_named(program, name, &function.body, &mut env)
+    eval::eval_declared_function(program, name, function, &mut env)
 }

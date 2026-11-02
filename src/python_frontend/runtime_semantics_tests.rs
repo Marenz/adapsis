@@ -20,7 +20,7 @@ fn tree(program: &ast::Program, target: &str, args: Vec<Value>) -> anyhow::Resul
     for (param, arg) in function.params.iter().zip(args) {
         env.set(&param.name, arg);
     }
-    eval::eval_function_body_named(program, target, &function.body, &mut env)
+    eval::eval_declared_function(program, target, function, &mut env)
 }
 
 fn bytecode(program: &ast::Program, target: &str, args: Vec<Value>) -> anyhow::Result<Value> {
@@ -112,10 +112,10 @@ fn python_boolean_io_count_order_matches_short_circuit_across_tiers() {
             "__coroutine_handle",
             Value::CoroutineHandle(coroutine::CoroutineHandle::new(sender)),
         );
-        let result = eval::eval_function_body_named(
+        let result = eval::eval_declared_function(
             &program,
             "probe",
-            &program.get_function("probe").unwrap().body,
+            program.get_function("probe").unwrap(),
             &mut env,
         )
         .unwrap();

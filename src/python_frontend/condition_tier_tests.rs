@@ -373,8 +373,8 @@ fn trusted_ax_failed_check_caller_effect_characterization() {
         } else {
             let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
             env.set("__coroutine_handle", Value::CoroutineHandle(handle));
-            let body = &program.get_function("probe").unwrap().body;
-            assert!(eval::eval_function_body_named(&program, "probe", body, &mut env).is_err());
+            let function = program.get_function("probe").unwrap();
+            assert!(eval::eval_declared_function(&program, "probe", function, &mut env).is_err());
         }
         assert_eq!(responder.join().unwrap(), 0);
     }

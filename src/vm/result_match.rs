@@ -128,7 +128,7 @@ mod tests {
         let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.set(&function.params[0].name, argument.clone());
         let tree =
-            eval::eval_function_body_named(program, target, &function.body, &mut env).unwrap();
+            eval::eval_declared_function(program, target, function, &mut env).unwrap();
         let compiled = if matches!(function.params[0].ty, ast::Type::Result(_)) {
             assert!(vm::compile_function(function, program).is_err());
             assert!(matches!(

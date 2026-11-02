@@ -44,7 +44,7 @@ fn python_json_valid_signature_roundtrip_and_tree_vm_dispatch_tiers() {
             let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
             env.set("payload", args[0].clone());
             let tree =
-                eval::eval_function_body_named(program, "Valid.probe", &function.body, &mut env)
+                eval::eval_declared_function(program, "Valid.probe", function, &mut env)
                     .unwrap();
             let code = vm::compile_function(function, program).unwrap();
             let machine = vm::execute_with_io(&code, args, program, &|_, _| {

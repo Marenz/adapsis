@@ -1711,7 +1711,7 @@ async fn adapsis_route_dispatch(
         }
         let input = eval::Value::string(body_str);
         eval::bind_input_to_params(&program, func, &input, &mut env);
-        eval::eval_function_body_named(&program, &handler_fn, &func.body, &mut env)
+        eval::eval_declared_function(&program, &handler_fn, func, &mut env)
     })
     .await;
 

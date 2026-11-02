@@ -1303,7 +1303,7 @@ async fn main() -> Result<()> {
                 let mut env = eval::Env::new_with_shared_interner(&program_clone.shared_interner);
                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
 
-                eval::eval_function_body_pub(&program_clone, &func_decl.body, &mut env)
+                eval::eval_declared_function_unframed(&program_clone, &func_clone, func_decl, &mut env)
             });
 
             // Event loop — process IO requests from coroutines
@@ -1366,7 +1366,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_named(&prog, &function_name, &func_decl.body, &mut env) {
+                                match eval::eval_declared_function(&prog, &function_name, &func_decl, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -1433,7 +1433,7 @@ async fn main() -> Result<()> {
                                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
                                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                                 env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_name)));
-                                                match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
+                                                match eval::eval_declared_function(&prog, &handler_name, &func, &mut env) {
                                                     Ok(val) => eprintln!("[timer:{}] {} -> {}", alias, handler_name, val),
                                                     Err(e) => eprintln!("[timer:{}] {} error: {}", alias, handler_name, e),
                                                 }
@@ -1776,7 +1776,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_named(&program, &function_name, &func_decl.body, &mut env) {
+                                match eval::eval_declared_function(&program, &function_name, &func_decl, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -1850,7 +1850,7 @@ async fn main() -> Result<()> {
                                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
                                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                                 env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_for_tick)));
-                                                match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
+                                                match eval::eval_declared_function(&prog, &handler_name, &func, &mut env) {
                                                     Ok(val) => {
                                                         eprintln!("[timer:{}] {} -> {}", alias_for_tick, handler_name, val);
                                                     }

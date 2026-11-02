@@ -11,6 +11,8 @@ use crate::parser;
 use crate::vm;
 mod json;
 mod jit_dispatch;
+mod invocation;
+pub use invocation::{eval_declared_function, eval_declared_function_unframed};
 pub(crate) mod result_contract;
 #[cfg(test)]
 mod jit_cache_tests;
@@ -806,10 +808,7 @@ pub fn eval_call_with_input(
 
         let returns_result = matches!(&func.return_type, ast::Type::Result(_));
 
-        let qualified = program.qualify_function_name(function_name);
-        FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-        let body_result = eval_function_body(program, &func.body, &mut env);
-        FN_NAME_STACK.with(|s| s.borrow_mut().pop());
+        let body_result = eval_declared_function(program, function_name, func, &mut env);
         return match body_result {
             Ok(val) => {
                 let result = if returns_result {
@@ -1299,7 +1298,7 @@ pub fn eval_test_case_with_mocks(
 
     // Execute function body (use named variant so FN_NAME_STACK has the qualified name
     // for shared variable resolution in Env::get())
-    let result = eval_function_body_named(program, function_name, &func.body, &mut env);
+    let result = eval_declared_function(program, function_name, func, &mut env);
 
     let msg = check_test_result(
         result,
@@ -1445,10 +1444,10 @@ fn eval_test_case_with_runtime(
                 env.set("__coroutine_handle", Value::CoroutineHandle(handle));
 
                 bind_input_to_params(&program, func, &input, &mut env);
-                // Use eval_function_body_named so FN_NAME_STACK is populated
+                // The declared invocation wrapper populates FN_NAME_STACK
                 // with the qualified function name — required for +shared
                 // variable resolution in Env::get()/set_existing().
-                let result = eval_function_body_named(&program, &fn_name, &func.body, &mut env);
+                let result = eval_declared_function(&program, &fn_name, func, &mut env);
                 let msg =
                     check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
 
@@ -1554,10 +1553,10 @@ pub async fn eval_test_case_async(
 
         bind_input_to_params(&program, func, &input, &mut env);
 
-        // Use eval_function_body_named so FN_NAME_STACK is populated
+        // The declared invocation wrapper populates FN_NAME_STACK
         // with the qualified function name — required for +shared
         // variable resolution in Env::get()/set_existing().
-        let result = eval_function_body_named(&program, &fn_name, &func.body, &mut env);
+        let result = eval_declared_function(&program, &fn_name, func, &mut env);
         let msg = check_test_result(result, &return_type, &input, &expected, matcher.as_ref())?;
 
         // Check +after assertions
@@ -1716,7 +1715,9 @@ fn check_after(
     Ok(())
 }
 
-/// Public entry point for running a function body with an env.
+/// Raw synthetic statement/block runner with no declaration or invocation frame.
+/// Real function entry points use `eval_declared_function` (or the explicit legacy
+/// unframed declared variant for CLI run-async).
 pub fn eval_function_body_pub(
     program: &ast::Program,
     body: &[ast::Statement],
@@ -1732,8 +1733,9 @@ pub fn eval_expr_standalone(program: &ast::Program, expr: &ast::Expr) -> Result<
     eval_ast_expr(program, expr, &mut env)
 }
 
-/// Public entry point that also sets the top-level function name for snapshot tracking.
-/// Use this for spawned tasks so `?inspect task N` shows the correct function name.
+/// Raw named body/block execution: module-frame setup only, no declared return contract.
+/// Use `eval_declared_function` for real invocations (including spawned tasks); lifecycle
+/// blocks and deliberate raw-body diagnostics use this entry without signature lookup.
 ///
 /// The name is qualified to `Module.fn` before it goes on `FN_NAME_STACK`.
 /// This is the choke point for that invariant: `Env::current_module_name()`
@@ -3382,7 +3384,7 @@ pub fn eval_builtin_or_user(
     env: &mut Env,
 ) -> Result<Value> {
     // Function stubs: intercept user function calls during tests.
-    if program.get_function(callee).is_some() {
+    if let Some(function) = program.get_function(callee) {
         if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
             let qualified = program.qualify_function_name(callee);
             let stub_expr = handle
@@ -3393,9 +3395,9 @@ pub fn eval_builtin_or_user(
                     None
                 });
             if let Some(expr_str) = stub_expr {
-                let parsed_expr = crate::parser::parse_single_expr(&expr_str)
-                    .map_err(|e| anyhow::anyhow!("stub expression parse error: {e}"))?;
-                return eval_parser_expr_with_program(&parsed_expr, program);
+                return invocation::invoke(
+                    program, callee, function, invocation::Body::Stub(&expr_str), None,
+                );
             }
         }
     }
@@ -3474,15 +3476,7 @@ pub fn eval_builtin_or_user(
                 if let Some(handle) = env.get_raw("__coroutine_handle") {
                     call_env.set("__coroutine_handle", handle.clone());
                 }
-                // Qualify the function name so shared variable resolution can
-                // derive the correct module prefix from FN_NAME_STACK.
-                // Without this, intra-module calls like `B()` push bare "B"
-                // instead of "Module.B", making shared vars invisible.
-                let qualified = program.qualify_function_name(callee);
-                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-                let result = eval_function_body(program, &func.body, &mut call_env);
-                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
-                result
+                eval_declared_function(program, callee, func, &mut call_env)
             } else {
                 // Check if it's a union variant constructor
                 if is_union_variant(program, callee) {
@@ -3891,11 +3885,7 @@ fn eval_parser_expr_impl(
                 if func.params.is_empty() {
                     check_side_effects(func, name, env.is_some(), pure_ctx)?;
                     let mut call_env = make_call_env(program, env.as_deref());
-                    let qualified = program.qualify_function_name(name);
-                    FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-                    let result = eval_function_body(program, &func.body, &mut call_env);
-                    FN_NAME_STACK.with(|s| s.borrow_mut().pop());
-                    return result;
+                    return eval_declared_function(program, name, func, &mut call_env);
                 }
             }
             eval_parser_expr_standalone(expr)
@@ -3918,11 +3908,7 @@ fn eval_parser_expr_impl(
                 for (param, arg) in func.params.iter().zip(eval_args_vec) {
                     call_env.set(&param.name, arg);
                 }
-                let qualified = program.qualify_function_name(&name);
-                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-                let result = eval_function_body(program, &func.body, &mut call_env);
-                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
-                return result;
+                return eval_declared_function(program, &name, func, &mut call_env);
             }
             // Builtin function (skip Ok/Err/Some/None — handled by standalone)
             if crate::builtins::is_builtin(&name)
@@ -3947,11 +3933,7 @@ fn eval_parser_expr_impl(
             if let Some((name, func)) = named_zero_arg_function(expr, program) {
                 check_side_effects(func, &name, env.is_some(), pure_ctx)?;
                 let mut call_env = make_call_env(program, env.as_deref());
-                let qualified = program.qualify_function_name(&name);
-                FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-                let result = eval_function_body(program, &func.body, &mut call_env);
-                FN_NAME_STACK.with(|s| s.borrow_mut().pop());
-                return result;
+                return eval_declared_function(program, &name, func, &mut call_env);
             }
             reject_unresolved_qualified_name(&parser_callee_name(expr), pure_ctx)?;
             eval_parser_expr_standalone(expr)
@@ -4358,7 +4340,7 @@ pub fn eval_async_function(
     let input_val = eval_parser_expr_with_program(input, program)?;
     env.set("__coroutine_handle", Value::CoroutineHandle(handle));
     bind_input_to_params(program, func, &input_val, &mut env);
-    eval_function_body_named(program, function_name, &func.body, &mut env)
+    eval_declared_function(program, function_name, func, &mut env)
 }
 
 #[cfg(test)]

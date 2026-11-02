@@ -20,7 +20,7 @@ pub(super) fn tree(prog: &ast::Program, target: &str, args: Vec<Value>) -> anyho
     for (param, arg) in function.params.iter().zip(args) {
         env.set(&param.name, arg);
     }
-    eval::eval_function_body_named(prog, target, &function.body, &mut env)
+    eval::eval_declared_function(prog, target, function, &mut env)
 }
 
 pub(super) fn vm_run(prog: &ast::Program, target: &str, args: Vec<Value>) -> anyhow::Result<Value> {
@@ -310,7 +310,7 @@ fn ax_logical_call_operand_consumes_no_io_when_short_circuited() {
         env.set("flag", Value::Bool(flag));
         env.set("path", Value::string("fixture"));
         let result =
-            eval::eval_function_body_named(&prog, target, &function.body, &mut env).unwrap();
+            eval::eval_declared_function(&prog, target, function, &mut env).unwrap();
         drop(env);
         assert!(
             matches!(result, Value::Bool(b) if b == expected),

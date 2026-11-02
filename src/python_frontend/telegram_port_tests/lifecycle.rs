@@ -548,7 +548,7 @@ fn dispatch_replica(
         Value::CoroutineHandle(CoroutineHandle::new(sender)),
     );
     eval::bind_input_to_params(program, function, &Value::string(body), &mut env);
-    let result = eval::eval_function_body_named(program, handler, &function.body, &mut env)
+    let result = eval::eval_declared_function(program, handler, function, &mut env)
         .map(|value| match value {
             Value::String(text) => text.to_string(),
             other => panic!("route handler must return a String, got {other:?}"),
