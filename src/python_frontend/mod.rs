@@ -69,6 +69,8 @@ mod condition_tier_tests;
 mod telegram_port_tests;
 #[cfg(test)]
 mod task_domain_tests;
+#[cfg(test)]
+mod task_durable_tests;
 
 use rustpython_parser::{ast as py, ast::Ranged, Parse};
 

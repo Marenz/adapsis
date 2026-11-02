@@ -170,6 +170,7 @@ fn query_tasks_builtin_and_snapshot_wait_reason_are_redacted() {
         mocks: Some(vec![]),
         stubs: None,
         turn: None,
+        record_access: None,
     };
     let result = match handle.execute_await("query_tasks", &[]).unwrap() {
         Value::String(text) => text.as_ref().clone(),

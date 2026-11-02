@@ -57,6 +57,7 @@ async fn bounded_upload_response(response: reqwest::Response) -> Result<String> 
 pub mod shell_policy;
 pub mod scoped;
 mod http_policy;
+mod records;
 #[cfg(test)]
 mod http_policy_tests;
 mod matching;
@@ -255,6 +256,7 @@ pub fn remove_source(registry: &SourceRegistry, module: &str, alias: &str) -> bo
 /// IO operations that Adapsis code can request via +await.
 #[derive(Debug)]
 pub enum IoRequest {
+    Records { request: records::Request, reply: oneshot::Sender<Result<std::result::Result<String, crate::memory_graph::records::StoreError>>> },
     Scoped {
         request: scoped::Request,
         reply: oneshot::Sender<Result<String>>,
@@ -437,6 +439,7 @@ impl Runtime {
     /// Process a single IO request. Called from the event loop.
     pub async fn handle_io(&self, request: IoRequest) {
         match request {
+            IoRequest::Records { request, reply } => { tokio::spawn(records::dispatch(request, reply)); }
             IoRequest::TcpListen { port, reply } => {
                 match TcpListener::bind(format!("0.0.0.0:{port}")).await {
                     Ok(listener) => {
@@ -968,6 +971,7 @@ pub struct CoroutineHandle {
     /// route handlers, `+startup` tasks and CLI evaluation — identity-scoped
     /// builtins refuse rather than guess in that case.
     turn: Option<TurnIdentity>,
+    record_access: Option<records::Access>,
 }
 
 /// Stringify a call argument for mock/stub matching (issue #7).
@@ -985,7 +989,7 @@ fn mock_arg_string(arg: &Value) -> String {
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None, record_access: None }
     }
 
     pub fn new_with_task(
@@ -994,27 +998,27 @@ impl CoroutineHandle {
         registry: TaskRegistry,
         snapshot_registry: TaskSnapshotRegistry,
     ) -> Self {
-        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None, turn: None }
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None, turn: None, record_access: None }
     }
 
     /// Create a mock handle for testing — no real IO, returns mock responses.
     #[allow(dead_code)]
     pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, record_access: None }
     }
 
     /// Create a mock handle with function stubs for testing.
     pub fn new_mock_with_stubs(mocks: Vec<crate::session::IoMock>, stubs: Vec<crate::session::FunctionStub>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs), turn: None }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs), turn: None, record_access: None }
     }
 
     /// Create a handle with mocks AND a real IO sender — mocks are checked first,
     /// unmatched operations fall through to real IO via the sender.
     #[cfg(test)]
     pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, record_access: None }
     }
 
     /// Bind this handle to the conversational turn it executes for.
@@ -1231,6 +1235,8 @@ impl CoroutineHandle {
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
         self.check_guest_tool(op, args)?;
+        // Record grants are never bypassed by mock responses.
+        if let Some(value) = self.execute_records(op, args) { return Ok(value); }
         if op != "mock_set" && op != "mock_clear" {
             if let Some(result) = self.try_mock_io(op, args, false)? {
                 return Ok(result);

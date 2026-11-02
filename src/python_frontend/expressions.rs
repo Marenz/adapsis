@@ -889,6 +889,12 @@ impl Expressions<'_, '_> {
             Ty::Str
         } else if matches!(name, "read_file" | "file_read") {
             Ty::Str
+        } else if matches!(name, "records_read" | "records_commit" | "records_receipt") && sig.is_none() {
+            let count = if name == "records_commit" { 2 } else { 1 };
+            if values.len() != count || values.iter().any(|(_, ty)| *ty != Ty::Str) {
+                return Err(self.cx.at(c, format!("{name} expects exactly {count} str arguments")));
+            }
+            Ty::Result(Box::new(Ty::Str))
         } else if name == "http_get" {
             Ty::Result(Box::new(Ty::Str))
         } else {

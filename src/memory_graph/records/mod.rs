@@ -11,6 +11,7 @@ use super::MemoryGraph;
 use crate::coroutine::TurnIdentity;
 pub(crate) use envelope::Field;
 use envelope::{Batch, Expected, identity};
+pub(crate) use envelope::{MAX_BATCH_BYTES, MAX_KEY_BYTES};
 use lbug::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -96,6 +97,14 @@ enum Fault {
 }
 
 impl RecordStore {
+    pub(crate) fn check_access(
+        &self,
+        binding: &RecordBinding,
+        turn: Option<&TurnIdentity>,
+        write: bool,
+    ) -> Result<(), StoreError> {
+        self.authorize(Some(binding), turn, write).map(|_| ())
+    }
     fn authorize<'a>(
         &self,
         binding: Option<&'a RecordBinding>,
@@ -315,7 +324,26 @@ fn apply_batch(
 
 #[cfg(test)]
 impl RecordStore {
-    fn initialize_for_test(graph: MemoryGraph) -> Result<Self, StoreError> {
+    pub(crate) fn disk_for_test(path: &std::path::Path) -> Result<Self, StoreError> {
+        Self::initialize_for_test(Self::graph_for_test(path)?)
+    }
+    pub(crate) fn graph_for_test(path: &std::path::Path) -> Result<MemoryGraph, StoreError> {
+        let database = lbug::Database::new(
+            path,
+            lbug::SystemConfig::default()
+                .enable_checksums(true)
+                .throw_on_wal_replay_failure(true)
+                .buffer_pool_size(64 * 1024 * 1024)
+                .max_db_size(1024 * 1024 * 1024)
+                .max_num_threads(2),
+        )
+        .map_err(|_| StoreError::Unavailable)?;
+        Ok(MemoryGraph {
+            database: Arc::new(database),
+            write_lock: Arc::new(std::sync::Mutex::new(())),
+        })
+    }
+    pub(crate) fn initialize_for_test(graph: MemoryGraph) -> Result<Self, StoreError> {
         let store = Self {
             graph,
             identity: Arc::new(()),
@@ -328,7 +356,7 @@ impl RecordStore {
         Ok(store)
     }
 
-    fn grant_for_test(
+    pub(crate) fn grant_for_test(
         &self,
         namespace: &str,
         turn: &TurnIdentity,

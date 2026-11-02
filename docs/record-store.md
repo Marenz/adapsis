@@ -1,18 +1,20 @@
-# Dormant generic record backend — #120 checkpoint 1
+# Generic record backend — #120 checkpoints 1–2
 
 The implementation in `src/memory_graph/records/` reuses the existing
 `MemoryGraph` Ladybug database owner and write lock. It contains **no task states,
 workspace policy, resource policy, Python workflows or queue**. Those belong in
-Python-frontend Adapsis modules. No new database/dependency, public IO builtin,
-native tool, coroutine registration or live startup/schema activation is added.
-Only `cfg(test)` code can initialize the two tables or mint a binding/store.
+Python-frontend Adapsis modules. No new database/dependency, native task tool or live
+startup/schema activation is added. Only `cfg(test)` code can initialize the two
+tables or mint a binding/store. Checkpoint 2 adds a fail-closed generic coroutine
+bridge; see [task-durable.md](task-durable.md). Production provisioning stays absent.
 
 ## Record/envelope contract (provisional, not an exposed API)
 
 The backend Rust methods are `read(binding, turn, request)`,
 `commit(binding, turn, request_id, request)` and
 `receipt(binding, turn, request_id)`. They return typed Rust records/receipts or
-categorical `StoreError`s. The future IO envelope/Result adapter is not wired.
+categorical `StoreError`s. The generic IO adapter preserves these categories as
+direct builtin `Result<String>` values; no storage access exists without a binding.
 
 Read request: `{"version":1,"keys":["record-id"]}`. Returns one optional row per
 requested key in request order, from one read-only transaction. Absence is explicit.
@@ -135,5 +137,5 @@ production's safety flags), bounded 64 MiB buffer pools and two DB threads:
 
 No kill-after-COMMIT subprocess gate, power-loss/fsync certification, multiprocess
 writer test, live user database test, effect replay safety or task pause/executor
-integration is claimed. The next separately reviewed slice is IO binding plus
-Python durable workflows; no schedule, roles or GitHub integration is bundled.
+integration is claimed by these backend tests. The separate IO/Python bridge tests
+are documented in task-durable.md; no schedule, roles or GitHub integration is bundled.

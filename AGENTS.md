@@ -178,10 +178,19 @@ response has no Content-Disposition header.
 - `memory_graph/records/` is a dormant general bounded record/CAS/idempotency
   backend using the existing Ladybug owner and write lock. Only cfg(test) can
   initialize tables or mint namespace/principal/context-bound grants; there is no
-  production activation/builtin/IO wiring. Task policy stays in Python modules.
+  production activation/provisioning. Generic records_read/commit/receipt IO now
+  exists but all ordinary handles default to no binding and fail closed; only
+  cfg(test) can attach access. Task policy stays in Python modules.
   Receipt access requires the same write authority as commits. COMMIT/CHECKPOINT
   errors are outcome-unknown, never a safe-to-reissue-new-ID signal. See
   `docs/record-store.md`; focused disk-backed gate: `cargo test --release memory_graph::records`.
+  `examples/tasks/{codec,durable}.py` bridge tests use normal async/real IO and
+  temporary disk stores (`cargo test --release task_durable`); see
+  `docs/task-durable.md` for trusted-envelope limits and no live activation.
+  `regex_match` is pattern-first: reversed args can pass revision 1 and reject 2.
+  External-union typed locals can fail whole-module printing (#86/#95 class);
+  constructing the typed containing record directly keeps this module within the
+  supported exact-roundtrip surface without relaxing the printer.
 
 - #120 task-domain logic lives in Python-frontend Adapsis modules, initially
   `examples/tasks/domain.py`; the premature Rust foundation is removed from active

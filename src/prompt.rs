@@ -338,6 +338,15 @@ After `+with` lines, add `+after` to verify side effects. State is checked after
 Effect validation is enforced when functions are added or replaced:
 - Any function that uses `+await` must declare `[async]`.
 - Any function that awaits an IO builtin such as `http_get`, `file_read`, or `llm_call` must also declare `[io]`.
+- Generic `records_read(request:String)`, `records_commit(request_id:String,batch:String)`,
+  and `records_receipt(request_id:String)` return `Result<String>` and require an
+  explicit server-bound record grant. Production provisioning is NOT enabled;
+  without a binding these operations are unavailable, not a live task-storage capability.
+  Direct Python builtin await keeps Result: `r: Result[str] = await records_read(request)`;
+  match Ok/Err before use. Inputs are bounded version-1 envelopes, outputs carry the
+  String marker `records_v1`; null means absent row/receipt. No identity/namespace/path
+  arguments. `record_commit_outcome_unknown` means reconcile the exact request/receipt,
+  never automatically issue a fresh request ID. Application transitions belong in modules.
 - Any function that mutates module `+shared` state with `+set` must declare `[mut]`.
         +end
     Use (a) when your function also has [fail]. Use (b) when you handle errors explicitly.

@@ -1,24 +1,10 @@
 use super::*;
-use lbug::{Database, SystemConfig};
 use serde_json::{Value as Json, json};
 use std::path::Path;
-use std::sync::{Barrier, Mutex};
+use std::sync::Barrier;
 
 fn disk_graph(path: &Path) -> MemoryGraph {
-    let database = Database::new(
-        path,
-        SystemConfig::default()
-            .enable_checksums(true)
-            .throw_on_wal_replay_failure(true)
-            .buffer_pool_size(64 * 1024 * 1024)
-            .max_db_size(1024 * 1024 * 1024)
-            .max_num_threads(2),
-    )
-    .unwrap();
-    MemoryGraph {
-        database: Arc::new(database),
-        write_lock: Arc::new(Mutex::new(())),
-    }
+    RecordStore::graph_for_test(path).unwrap()
 }
 
 fn turn() -> TurnIdentity {

@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-pub(super) const MAX_BATCH_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_BATCH_BYTES: usize = 128 * 1024;
 pub(super) const MAX_KEYS: usize = 32;
 pub(super) const MAX_PUTS: usize = 16;
-pub(super) const MAX_KEY_BYTES: usize = 128;
+pub(crate) const MAX_KEY_BYTES: usize = 128;
 pub(super) const MAX_FIELDS: usize = 32;
 pub(super) const MAX_FIELD_BYTES: usize = 64;
 pub(super) const MAX_VALUE_BYTES: usize = 4096;

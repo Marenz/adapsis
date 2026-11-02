@@ -1,6 +1,7 @@
 //! Builtin function registry.
 //! Single source of truth for all builtin names and their descriptions.
 mod json;
+mod records;
 
 /// A builtin function entry.
 pub struct Builtin {
@@ -500,6 +501,9 @@ pub static BUILTINS: &[Builtin] = &[
 
 /// IO builtins (used with +await).
 pub static IO_BUILTINS: &[Builtin] = &[
+    records::READ,
+    records::COMMIT,
+    records::RECEIPT,
     Builtin {
         name: "tcp_listen",
         aliases: &[],

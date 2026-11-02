@@ -108,10 +108,12 @@ temporary concatenation of domain.py and scenarios.py with:
 
 ## Next reusable mechanisms and integration gaps
 
-Backend-only checkpoint 1 now implements the dormant general record/CAS mechanism
+Checkpoint 1 implements the dormant general record/CAS mechanism
 described in [record-store.md](record-store.md), with explicit test-only grants and
-schema initialization. It is not exposed to modules; the following IO/workflow
-integration gaps remain. No task-specific Rust manager is introduced.
+schema initialization. [Checkpoint 2](task-durable.md) adds fail-closed generic IO
+and Python durable workflows tested against isolated databases, with production
+bindings still absent. The remaining integration gaps below are not a task-specific
+Rust manager authorization.
 
 1. **Durable typed storage transactions / compare-and-write.** Proposed generic
    shape: read a scoped collection with version; atomically commit a bounded typed
