@@ -106,7 +106,12 @@ claim follows from the pure test runtime. The standalone CLI can also run a
 temporary concatenation of domain.py and scenarios.py with:
 `adapsis test COMBINED.py --language python --module TaskDomain --tests examples/tasks/test_scenarios.py`.
 
-## Next reusable mechanisms (specification gaps, not implemented)
+## Next reusable mechanisms and integration gaps
+
+Backend-only checkpoint 1 now implements the dormant general record/CAS mechanism
+described in [record-store.md](record-store.md), with explicit test-only grants and
+schema initialization. It is not exposed to modules; the following IO/workflow
+integration gaps remain. No task-specific Rust manager is introduced.
 
 1. **Durable typed storage transactions / compare-and-write.** Proposed generic
    shape: read a scoped collection with version; atomically commit a bounded typed

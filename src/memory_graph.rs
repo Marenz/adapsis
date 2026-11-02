@@ -10,6 +10,7 @@ mod activity;
 mod history;
 pub mod inspect;
 mod lifecycle;
+pub(crate) mod records;
 mod prompt_budget;
 pub mod quality;
 pub use activity::is_private_admin;
