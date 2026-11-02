@@ -10,6 +10,7 @@ use crate::intern::{self, InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
 mod json;
+pub(crate) mod result_contract;
 
 /// Cache for JIT-compiled programs, keyed by session revision.
 /// When the revision matches, the compiled module is reused instead of recompiling.
@@ -856,10 +857,7 @@ pub fn eval_call_with_input(
         return match body_result {
             Ok(val) => {
                 let result = if returns_result {
-                    match &val {
-                        Value::Ok(_) | Value::Err(_) => val,
-                        _ => Value::Ok(Box::new(val)),
-                    }
+                    result_contract::wrap_success(val)
                 } else {
                     val
                 };
@@ -1634,10 +1632,7 @@ fn check_test_result(
         Ok(val) => {
             if returns_result {
                 // Wrap in Ok if not already a result type
-                match &val {
-                    Value::Ok(_) | Value::Err(_) => val,
-                    _ => Value::Ok(Box::new(val)),
-                }
+                result_contract::wrap_success(val)
             } else {
                 val
             }
@@ -1849,10 +1844,7 @@ pub(crate) fn eval_function_body(
                         Ok(val) => {
                             if let Some(binding) = binding {
                                 // Wrap success in Ok
-                                let wrapped = match &val {
-                                    Value::Ok(_) | Value::Err(_) => val,
-                                    _ => Value::Ok(Box::new(val)),
-                                };
+                                let wrapped = result_contract::wrap_success(val);
                                 env.set(&binding.name, wrapped);
                             }
                         }

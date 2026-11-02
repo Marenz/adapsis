@@ -1,8 +1,84 @@
 # AdapsisOS Roadmap
 
-## Recovery — Python parity #86 (current: 2026-10-28, red)
+## CURRENT recovery — 2026-11-02
 
-### Current pending slice — G1 (Python pseudo-field properties), baseline `5fb1ca8`
+- Owner authorizes the broader work and deployment toward a useful programming/task/agent
+  bot that can eventually replace OpenCode. Current worker scope is approved Result slice A
+  for #82/#97/#86: shared typed helpers and deterministic tests, with only behavior-preserving
+  extraction into existing callers. No commit, push, service changes or live IO in this scope.
+- Model rule: OpenAI only for now, `openai/gpt-6-astra`, default variant (no explicit high
+  effort); no Anthropic. This supersedes historical model-routing notes below.
+- Main checkout baseline `108e4dc`; live revision reported by manager is `1ed6424` (not
+  re-verified here). Release integration is ongoing in a separate checkout. The deployed
+  gateway alias is back on direct DeepSeek after DeepInfra returned 402; this deployment
+  fact does not authorize DeepSeek for the OpenAI-only worker workflow.
+- Ownership: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; sole main-checkout writer
+  `ses_e8b17a23affedgH4V52JdwxNDL`; release writer `ses_e67e01ef9ffettWZDQAXWveOxc`.
+  Main writer must not touch the release checkout. Review session
+  `ses_e82647931ffewdBFqa9bGCmPIz` remains separate from write ownership.
+- Accepted main work: G1 `fce692c`; #114 `5fb1ca8`; #112 `ce9096a` + structural hardening
+  `56ce420`; #116 `ab2000a`. These commits are not evidence of deployed activation.
+  Strict parity remains RED: 324 verified / 58 invalid / 191 unsupported (573 entries).
+- Approved next sequence: Result contract A, then B (VM Check/unwind and fail-closed JIT
+  admission), C (invocation/await normalization), then G7 frontend admission. Parked:
+  G3 anonymous literals, G4 json_get typing,
+  G5 shared Some, G6 vars, QualifiedEquivalent classification and the strict success
+  definition. Preserve frozen fixtures and existing acceptance criteria pending decisions.
+- Adoption is behavioral: #76 manager-workflow gates and #89's latest owner correction
+  require native conversation capability parity before a default flip; retain legacy and
+  the guarded OpenCode integration. Language parity alone is not cutover evidence.
+
+### Approved Result contract — #82/#97/#86; slice A only
+
+- This is Adapsis semantics, not Python inference. At every genuine invocation boundary,
+  declared Result<T> wraps successful plain T once; explicit Ok/Err is preserved. Ordinary
+  calls and user awaits preserve Result. No block/branch/loop-body normalization.
+- A typed language Check/propagation failure unwinds scalar callers and becomes Err once
+  at a declared-Result invocation. Operational/internal anyhow failures remain execution
+  errors. Failure classification uses a Rust type, never rendered text. Context-wrapped
+  language failures retain their original label; source chains of operational errors survive.
+- `+call x:T` unwraps one Ok and propagates explicit Err. `+call x:Result<T>` remains an
+  explicit compatible catching form. An intentional handler may continue; the failing
+  callee and unwound scalar callers must not execute later effects. Nested Results require
+  explicit outer Ok/Err at each Result layer; no recursive flattening or implicit nesting.
+- Slice A adds `eval/result_contract.rs`: `LanguageFailure::{Check,Propagation}`,
+  `complete_invocation`, `propagate_call`, `capture_call` and legacy `wrap_success`.
+  Only `wrap_success` is connected: it replaces three identical existing success-wrapping
+  blocks (tree eval entry, test comparator, Result-typed +call), preserving their behavior.
+  The new typed contract is tested but NOT activated at current Check/call/await boundaries.
+  Legacy catch-all error conversion and nested success wrapping are unchanged in A.
+- Scope/compatibility: no VM, JIT, frontend, fixture, persistence or activation change.
+  Before behavior-changing B/C activates, audit ordinary consumers expecting plain T from
+  Result functions, user await into plain T, +call Result catching operational errors, scalar
+  +call accepting explicit Err, and tests that mask wrappers. Preserve #114/await admission
+  and the no-IO-replay guard. Release integration at 108e4dc excludes this work.
+
+| Current discrepancy (not repaired by A) | Planned discriminating B/C gate |
+|---|---|
+| VM Check is PushErr+Return; scalar caller may continue | B: `check_unwinds_scalar_callers_before_effects`; direct VM/tree/normal async, zero requests before failure or exactly one preceding request, never the later request |
+| JIT Check traps and Result ABI erases wrapper | B: `fallible_graph_refused_before_jit_execution`; safe numeric control stays eligible, hazardous direct compile and cached paths refuse before execution |
+| Tree named entry/test comparator wrap; ordinary/parser/VM calls do not | C: `result_boundary_matrix`; structural plain/Ok/Err values through named, inline, session/API, CLI, stubs and spawned/route invocations |
+| Tree +call unwraps Ok but keeps explicit Err; VM lacks that unwrap | C: `propagate_or_capture_call_matrix`; explicit Err unwinds, Result binding catches language failure only, one-layer unwrap preserves nested Result data |
+| User await strips Ok; builtin await preserves it | C: `user_builtin_await_result_parity`; same-source/existing declarations, post-await failure, ordered synthetic IO and zero replay |
+| Broad anyhow catches conflate language and operational failure | B/C: `failure_category_matrix`; identical text with different types, preserved source chain, operational error cannot be caught as Result |
+| Native flags/callbacks can confuse application result with task success | C plus #104/#76: assert structural Result and execution status separately; no parsing formatted Err or claiming delivery/merge success from evaluator Ok |
+
+Slice A's helper tests prove wrapping, explicit typed capture/propagation, nested-wrapper
+requirements, payload identity and operational-error preservation only. The IO/entry/JIT
+rows above are future integration gates, not claimed evidence from these pure tests.
+Useful completion trials after C: validation→transform→write (invalid input means zero
+writes); fetch→decode→reply (one request per step, deliberate recovery only); worker
+validation→tool execution (failed Check means no later shell/tool action and truthful report).
+
+Slice A review checkpoint (uncommitted): 15 contract tests pass; `eval::` 324 passed /
+1 ignored, `native_` 149 passed, `python_` 350 passed plus the existing strict-parity failure.
+One full release gate: 1962 passed / strict parity 1 failed / 2 ignored; CLI 5/5. Strict
+counts unchanged at 324/58/191. Log: `/tmp/opencode/full_gate_result_a.log`. No production
+invocation migration or release activation follows from this helper-only checkpoint.
+
+## Historical recovery — Python parity #86 (2026-10-28 onward, red)
+
+### Accepted slice — G1 (Python pseudo-field properties), commit `fce692c`, baseline `5fb1ca8`
 
 - PRODUCTION frontend change (native mutate/test/evaluate/inspect), owner-approved choices:
   names `len`, `is_empty`, `is_ok`, `is_err`, `unwrap` only; PROPERTY form lowering to the
