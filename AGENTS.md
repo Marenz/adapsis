@@ -174,6 +174,14 @@ falls back to the last URL path segment (query included) as the attachment name 
 response has no Content-Disposition header.
 
 ## Architecture
+
+- `src/task_foundation/` is a dormant crate-private identity/scope model, registered
+  only by a module declaration. Tagged UUIDv4 IDs and whole-snapshot validation
+  preserve task/run separation and same-workspace project links. It has no storage,
+  permissions, API/tools or SessionMeta wiring; validity never grants access.
+  Legacy plan/roadmap/agent vectors are not migrated or assigned a default workspace.
+  See `docs/task-foundation.md`; focused tests: `cargo test --release task_foundation`.
+
 ```
 src/
   main.rs        — CLI, autonomous loop, session management
