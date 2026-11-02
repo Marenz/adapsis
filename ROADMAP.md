@@ -3,21 +3,26 @@
 ## CURRENT recovery — 2026-11-02
 
 - Owner authorizes the broader work and deployment toward a useful programming/task/agent
-  bot that can eventually replace OpenCode. Current worker scope is approved Result slice A
-  for #82/#97/#86: shared typed helpers and deterministic tests, with only behavior-preserving
-  extraction into existing callers. No commit, push, service changes or live IO in this scope.
+  bot that can eventually replace OpenCode. Current worker scope is the approved bounded
+  JIT-admission/cache checkpoint of B-safety (#97/#119), after accepted Result slice A.
+  VM unwind is deferred to the next checkpoint. No commit, push, service changes or live
+  IO in this scope.
 - Model rule: OpenAI only for now, `openai/gpt-6-astra`, default variant (no explicit high
   effort); no Anthropic. This supersedes historical model-routing notes below.
-- Main checkout baseline `108e4dc`; live revision reported by manager is `1ed6424` (not
-  re-verified here). Release integration is ongoing in a separate checkout. The deployed
-  gateway alias is back on direct DeepSeek after DeepInfra returned 402; this deployment
-  fact does not authorize DeepSeek for the OpenAI-only worker workflow.
+- Main checkout baseline `75da3aa`. Manager reports live release `e424fc9`, binary SHA
+  `7a914632…341f3`, service and runtime model `chatgpt/gpt-6-astra` with default effort;
+  this worker has not re-verified production. Host-only poll status and pure JSON smoke
+  passed. A no-change native turn had `completed=true` but an empty reply: not full
+  conversational success. Historical DeepInfra 402 caused an alias rollback to direct
+  DeepSeek; the current runtime selection is Astra, and worker policy stays OpenAI-only.
 - Ownership: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; sole main-checkout writer
   `ses_e8b17a23affedgH4V52JdwxNDL`; release writer `ses_e67e01ef9ffettWZDQAXWveOxc`.
   Main writer must not touch the release checkout. Review session
-  `ses_e82647931ffewdBFqa9bGCmPIz` remains separate from write ownership.
+  `ses_e82647931ffewdBFqa9bGCmPIz` remains separate from write ownership. The #118
+  acceptance writer is repairing test-case overwrite in a dedicated worktree, not main.
 - Accepted main work: G1 `fce692c`; #114 `5fb1ca8`; #112 `ce9096a` + structural hardening
-  `56ce420`; #116 `ab2000a`. These commits are not evidence of deployed activation.
+  `56ce420`; #116 `ab2000a`; Result slice A `75da3aa`. A is excluded from the current
+  release integration; historical commit presence alone is not activation evidence.
   Strict parity remains RED: 324 verified / 58 invalid / 191 unsupported (573 entries).
 - Approved next sequence: Result contract A, then B (VM Check/unwind and fail-closed JIT
   admission), C (invocation/await normalization), then G7 frontend admission. Parked:
@@ -70,11 +75,51 @@ Useful completion trials after C: validation→transform→write (invalid input 
 writes); fetch→decode→reply (one request per step, deliberate recovery only); worker
 validation→tool execution (failed Check means no later shell/tool action and truthful report).
 
-Slice A review checkpoint (uncommitted): 15 contract tests pass; `eval::` 324 passed /
+Accepted slice A (`75da3aa`): 15 contract tests pass; `eval::` 324 passed /
 1 ignored, `native_` 149 passed, `python_` 350 passed plus the existing strict-parity failure.
 One full release gate: 1962 passed / strict parity 1 failed / 2 ignored; CLI 5/5. Strict
 counts unchanged at 324/58/191. Log: `/tmp/opencode/full_gate_result_a.log`. No production
 invocation migration or release activation follows from this helper-only checkpoint.
+
+### Current JIT-only safety checkpoint — #97/#119 (uncommitted)
+
+- #119 reproduced before repair: revision 1 `probe` returned 11 on JIT; revision 2
+  changed it to 22 and introduced an unsupported List-returning sibling. Rebuild failed,
+  yet normal cached dispatch returned `(11, used_jit=true)` instead of `(22, false)`.
+  Evidence: `/tmp/opencode/jit_119_before.log`; no trap execution was needed.
+- New program-aware JIT failure admission refuses reachable Check, `[fail]`, Result
+  contracts/bindings/named fields and Result constructors. Direct compilation checks
+  every emitted top-level function; cached entry checks the current root graph as well.
+  Shared await-admission AST visitor is exposed crate-wide (visibility only); VM
+  admission/execution behavior is unchanged. The decision is never cached across revisions.
+- JIT dispatch extracted to `eval/jit_dispatch.rs`: cached revision must match exactly;
+  clear stale cache before rebuild; failed compilation cannot invoke the old module.
+  Matched warm same-revision and later successful revision controls remain on JIT.
+- Former Check-trap tests now assert direct compile refusal, retaining their tree/VM
+  operand/short-circuit and known VM-error-as-data cases. JSON-builtin refusal still has
+  an independent undefined-callee control; admission is not proof of JSON JIT support.
+  Result helper tests add triple nesting with a missing deepest wrapper, a middle Err,
+  and an extra terminal wrapper pin (no general payload-type validation).
+- Static compilation blast sample: examples 99 functions, local JIT-eligibility hint
+  41 -> 39, new current-root graph eligibility 39; strict library 161 functions, local
+  83 -> 81, graph 81. These are admission/hint counts, NOT emitted-code success counts:
+  compiler backend limitations remain, and library functions are inside modules while
+  the compiler emits top-level functions only. Whole-program safety admission allows
+  19/26 valid example programs; two invalid files are excluded, not counted as covered.
+- Safe numeric timing sample, 10,000 invocations per mode, before -> after:
+  arithmetic direct 216 -> 222 microseconds, warm cached 2.10 -> 4.17 ms;
+  numeric branch direct 216 -> 212 microseconds, warm cached 2.30 -> 4.08 ms.
+  Both controls assert `used_jit=true`; timing is informational, noisy single samples,
+  not a performance threshold. Logs: `/tmp/opencode/jit_safety_{before,after}.log`.
+- Still open: VM NotAdmitted/Executed distinction, scalar Check unwind, temporary VM
+  quarantine for Result/catching graphs, combined B/C normalization and explicit catch
+  activation. No caller behavior migration, frontend relaxation, or callback ACK change
+  ships in this checkpoint. Run source compatibility audit before behavior-changing
+  VM/B/C activation; no production self-modification or replay-after-IO relaxation.
+- Review freeze: focused admission/cache/Result/await tests 44 passed; native 149 and
+  Telegram port 73 passed. One full release gate: 1979 passed / strict parity 1 failed /
+  2 ignored, CLI 5/5; strict counts unchanged at 324/58/191. Log:
+  `/tmp/opencode/full_gate_jit_safety.log`. No exhaustive mutation campaign was run.
 
 ## Historical recovery — Python parity #86 (2026-10-28 onward, red)
 

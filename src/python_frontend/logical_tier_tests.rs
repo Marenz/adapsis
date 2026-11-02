@@ -495,29 +495,13 @@ fn python_jit_not_string_parameter_survives_scratch_name_collision() {
 }
 
 #[test]
-#[cfg(unix)]
 fn python_jit_not_float_call_preserves_operand_failure() {
-    use std::os::unix::process::ExitStatusExt;
-    const CHILD: &str = "ADAPSIS_NOT_FLOAT_FAILURE_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        let prog = build("+fn fail_float ()->Float [fail]\n  +check required false ~failed\n  +return 0.0\n+end\n+fn probe ()->Int\n  +if NOT fail_float()\n    +return 1\n  +end\n  +return 0\n+end\n");
-        let mut jit = compiler::compile(&prog).unwrap();
-        println!("NOT_FLOAT_COMPILED");
-        jit.call_i64("probe", &[]).unwrap();
-        panic!("Float operand failure was skipped");
-    }
-    let output = std::process::Command::new("prlimit")
-        .args(["--core=0", "--"])
-        .arg(std::env::current_exe().unwrap())
-        .args(["--exact", "python_frontend::logical_tier_tests::python_jit_not_float_call_preserves_operand_failure", "--nocapture"])
-        .env(CHILD, "1").output().unwrap();
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("NOT_FLOAT_COMPILED"),
-        "{output:?}"
-    );
-    // Cranelift's existing Check failure traps. A normal exit or Rust panic is
-    // not evidence of executing it; require the child's signal termination.
-    assert!(output.status.signal().is_some(), "{output:?}");
+    let prog = build("+fn fail_float ()->Float [fail]\n  +check required false ~failed\n  +return 0.0\n+end\n+fn probe ()->Int\n  +if NOT fail_float()\n    +return 1\n  +end\n  +return 0\n+end\n");
+    let Err(error) = compiler::compile(&prog) else { panic!("fallible JIT graph admitted") };
+    assert!(error.to_string().contains("jit: reachable Check"), "{error}");
+    assert!(tree(&prog, "probe", vec![]).is_err());
+    // #97 VM unwind is still pending: Err is consumed as falsy, then NOT makes it true.
+    assert!(matches!(vm_run(&prog, "probe", vec![]).unwrap(), Value::Int(1)));
 }
 
 #[test]

@@ -255,3 +255,36 @@ fn legacy_success_helper_keeps_existing_nested_and_non_result_behavior() {
     assert!(matches!(wrap_success(Value::Err("e".into())), Value::Err(label) if label == "e"));
     assert!(matches!(wrap_success(Value::None), Value::Ok(inner) if matches!(*inner, Value::None)));
 }
+
+#[test]
+fn triple_result_requires_the_deepest_wrapper_but_middle_err_terminates() {
+    let ty = result_type(result_type(result_type(Type::Int)));
+    let missing = Value::Ok(Box::new(Value::Ok(Box::new(Value::Int(7)))));
+    let error = complete_invocation("M.triple", &ty, Ok(missing)).unwrap_err();
+    assert!(error.downcast_ref::<LanguageFailure>().is_none());
+    let middle_err = Value::Ok(Box::new(Value::Err("middle".into())));
+    let value = complete_invocation("M.triple", &ty, Ok(middle_err)).unwrap();
+    let Value::Ok(inner) = value else {
+        panic!("outer wrapper lost")
+    };
+    assert!(matches!(*inner, Value::Err(message) if message == "middle"));
+}
+
+#[test]
+fn extra_terminal_wrapper_is_preserved_not_payload_type_checked() {
+    // This helper validates required Result layers, not terminal payload types. Pin that
+    // boundary explicitly: an extra wrapper at the terminal Int is left intact for the
+    // separate type-validation policy; it must not be silently flattened here.
+    let ty = result_type(result_type(Type::Int));
+    let extra = Value::Ok(Box::new(Value::Ok(Box::new(Value::Ok(Box::new(
+        Value::Int(7),
+    ))))));
+    let value = complete_invocation("M.extra", &ty, Ok(extra)).unwrap();
+    let Value::Ok(inner) = value else {
+        panic!("outer wrapper lost")
+    };
+    let Value::Ok(inner) = *inner else {
+        panic!("middle wrapper lost")
+    };
+    assert_ok_int(*inner, 7);
+}

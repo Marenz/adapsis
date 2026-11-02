@@ -17,7 +17,7 @@ use crate::intern::{InternedId, StringInterner};
 use std::sync::Arc;
 mod result_match;
 mod equality;
-mod await_admission;
+pub(crate) mod await_admission;
 mod field_admission;
 #[cfg(test)]
 mod blast_tests;

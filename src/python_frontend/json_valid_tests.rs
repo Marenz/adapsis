@@ -73,23 +73,22 @@ fn python_json_valid_signature_roundtrip_and_tree_vm_dispatch_tiers() {
 
 #[test]
 fn json_valid_jit_refuses_and_normal_dispatch_falls_back_to_correct_answers() {
-    // The JIT only compiles top-level functions. The admission gate lets a
-    // String->Bool body through, so the evidence is the JIT's own refusal: it has no
-    // json_* lowering and reports the unknown callee.
+    // The JIT only compiles top-level functions. [fail] now refuses before emission;
+    // independently, without that annotation it still has no json_* lowering.
     let top = build(
         &parser::parse(
             "+fn probe (payload:String)->Bool [fail]\n  +return json_valid(payload)\n+end\n",
         )
         .unwrap(),
     );
-    assert!(compiler::is_compilable_function(
+    assert!(!compiler::is_compilable_function(
         top.get_function("probe").unwrap()
     ));
     let error = match compiler::compile(&top) {
         Ok(_) => panic!("the JIT must refuse json_valid"),
         Err(error) => format!("{error:#}"),
     };
-    assert!(error.contains("undefined function `json_valid`"), "{error}");
+    assert!(error.contains("jit: reachable Check"), "{error}");
     // json_kind is refused identically, so json_valid adds no new JIT surface.
     let kind = build(
         &parser::parse(
@@ -102,9 +101,17 @@ fn json_valid_jit_refuses_and_normal_dispatch_falls_back_to_correct_answers() {
         Err(error) => format!("{error:#}"),
     };
     assert!(
-        kind_error.contains("undefined function `json_kind`"),
+        kind_error.contains("jit: reachable Check"),
         "{kind_error}"
     );
+    // Retain the old undefined-builtin coverage separately from fallible admission.
+    for (name, function) in [("json_valid", &top), ("json_kind", &kind)] {
+        let mut without_fail = function.clone();
+        without_fail.get_function_mut("probe").unwrap().effects.clear();
+        assert!(compiler::is_compilable_function(without_fail.get_function("probe").unwrap()));
+        let Err(error) = compiler::compile(&without_fail) else { panic!("missing JSON JIT lowering") };
+        assert!(error.to_string().contains(&format!("undefined function `{name}`")), "{error}");
+    }
     // Module-qualified functions are never handed to the JIT at all, and normal
     // dispatch (also with a top-level function, whose String argument cannot use the
     // i64 JIT ABI) answers correctly through the interpreter.

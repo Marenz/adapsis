@@ -10,7 +10,10 @@ use crate::intern::{self, InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
 mod json;
+mod jit_dispatch;
 pub(crate) mod result_contract;
+#[cfg(test)]
+mod jit_cache_tests;
 
 /// Cache for JIT-compiled programs, keyed by session revision.
 /// When the revision matches, the compiled module is reused instead of recompiling.
@@ -680,54 +683,8 @@ pub fn eval_compiled_or_interpreted_cached(
         )
     })?;
 
-    // Try compiled path
-    let returns_string = matches!(&func.return_type, ast::Type::String);
-    if crate::compiler::is_compilable_function(func) {
-        if let Ok(args) = input_to_i64_args(input, func) {
-            // Try to use cached compiled module
-            if let Some(jit_cache) = cache {
-                if let Ok(mut guard) = jit_cache.lock() {
-                    // Check if cache is valid for this revision
-                    let needs_compile = match &*guard {
-                        Some((cached_rev, _)) => *cached_rev != revision,
-                        None => true,
-                    };
-
-                    if needs_compile {
-                        // Compile and store in cache
-                        if let Ok(compiled) = crate::compiler::compile(program) {
-                            *guard = Some((revision, compiled));
-                        }
-                    }
-
-                    // Try to use the cached compiled module
-                    if let Some((_, ref mut compiled)) = *guard {
-                        if returns_string {
-                            if let Ok(result) = compiled.call_string(function_name, &args) {
-                                return Ok((format!("\"{result}\""), true));
-                            }
-                        } else {
-                            if let Ok(result) = compiled.call_i64(function_name, &args) {
-                                return Ok((format!("{result}"), true));
-                            }
-                        }
-                    }
-                }
-            } else {
-                // No cache — compile fresh each time (original behavior)
-                if let Ok(mut compiled) = crate::compiler::compile(program) {
-                    if returns_string {
-                        if let Ok(result) = compiled.call_string(function_name, &args) {
-                            return Ok((format!("\"{result}\""), true));
-                        }
-                    } else {
-                        if let Ok(result) = compiled.call_i64(function_name, &args) {
-                            return Ok((format!("{result}"), true));
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(result) = jit_dispatch::try_execute(program, func, function_name, input, cache, revision) {
+        return Ok((result, true));
     }
 
     // Try bytecode VM (middle tier — more complete than JIT, faster than tree-walk)

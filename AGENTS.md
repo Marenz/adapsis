@@ -192,6 +192,19 @@ Function evaluation goes through up to three tiers (fastest first):
 
 1. **Cranelift JIT** (`compiler.rs`) — numeric/string functions only
    (`is_compilable_function` gate; bails on each/await/spawn/yield/List/Map/Union).
+   - `compiler/failure_admission.rs` (#97/#119 safety checkpoint) refuses reachable
+     Check, `[fail]`, Result-bearing signatures/bindings/named types and Result
+     constructors before native code emission. Direct `compile(program)` checks every
+     emitted top-level function; cached dispatch additionally checks the current root's
+     reachable graph, using the shared iterative executable-AST walker and per-snapshot
+     function identity. The local `is_compilable_function` hint alone is not graph proof.
+   - `eval/jit_dispatch.rs` requires `cached_revision == revision` before invocation,
+     discards stale modules before rebuilding, and never calls old code after a failed
+     rebuild (#119). Warm same-revision safe numeric controls remain JIT-backed.
+     This checkpoint does NOT repair VM Check unwinding, Result invocation normalization,
+     or generic execution-error fallback. Native Check traps are unreachable through
+     supported compile paths; other JIT limitations (e.g. integer zero-divisor abort,
+     #92, and relocation #96) are not fixed by this admission rule.
 2. **Bytecode VM** (`vm.rs`) — near-full language coverage.
    - Sync path: `eval_compiled_or_interpreted_cached` → `try_vm_execute` (eval/mod.rs).
    - Async path: `eval_async_function` (eval/mod.rs) — IO suspensions serviced
@@ -697,7 +710,8 @@ replaces that branch with one composer.
   runnable CPython. `vm/field_admission.rs` (#114) sends these functions to the tree.
   #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed
   JIT immutable normalization slice shares one emitter across AND/OR, NOT and
-  Check/Branch/While. Local/rebound condition dependencies conservatively refuse
+  Check/Branch/While (Check is now pre-execution-refused by failure admission).
+  Local/rebound condition dependencies conservatively refuse
   compilation, including mutable loops; normal eval then uses VM/tree fallback.
   This does not establish general tier parity. Narrow JIT NOT
   uses proven semantic representations: Float (including zero/NaN) is always
@@ -715,7 +729,8 @@ replaces that branch with one composer.
   emission (no generic scratch-name lookup). It refuses IO/async callees and
   explicit `[fail]` argument callees, including nested arguments, pending #97.
   #97 is a bug: failed VM Check returns an Err value from the callee and ordinary
-  callers can continue to subsequent effects, unlike tree failure/JIT trap.
+  callers can continue to subsequent effects, unlike tree failure. JIT Check/fallible
+  graphs now refuse before compilation rather than executing the historical native trap.
   Zero-argument fallible-call tests characterize existing tier-specific behavior,
   not equivalent failure propagation. #96 JIT relocation remains open too.
   Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
