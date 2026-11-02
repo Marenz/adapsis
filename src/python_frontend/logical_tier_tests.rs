@@ -30,6 +30,20 @@ pub(super) fn vm_run(prog: &ast::Program, target: &str, args: Vec<Value>) -> any
     })
 }
 
+/// Literal Result construction/matching opcode evidence only, while production Result
+/// calls are quarantined. This must never be used to claim ordinary VM admission.
+pub(super) fn vm_result_opcode_fixture_run(
+    prog: &ast::Program,
+    target: &str,
+    args: Vec<Value>,
+) -> anyhow::Result<Value> {
+    let function = prog.get_function(target).unwrap();
+    assert!(vm::compile_function(function, prog).is_err());
+    assert!(matches!(vm::attempt(function, args.clone(), prog, false, &|_, _| anyhow::bail!("no IO")), vm::VmAttempt::NotAdmitted(_)));
+    let compiled = vm::compile_result_opcode_fixture(function, prog)?;
+    vm::execute_with_io(&compiled, args, prog, &|_, _| anyhow::bail!("no IO in Result opcode fixture"))
+}
+
 fn text(value: &Value) -> String {
     value.to_string()
 }
@@ -500,8 +514,9 @@ fn python_jit_not_float_call_preserves_operand_failure() {
     let Err(error) = compiler::compile(&prog) else { panic!("fallible JIT graph admitted") };
     assert!(error.to_string().contains("jit: reachable Check"), "{error}");
     assert!(tree(&prog, "probe", vec![]).is_err());
-    // #97 VM unwind is still pending: Err is consumed as falsy, then NOT makes it true.
-    assert!(matches!(vm_run(&prog, "probe", vec![]).unwrap(), Value::Int(1)));
+    // #97: a failing scalar operand unwinds; it cannot become falsy data for NOT.
+    let error = vm_run(&prog, "probe", vec![]).unwrap_err();
+    assert!(error.downcast_ref::<eval::result_contract::LanguageFailure>().is_some());
 }
 
 #[test]

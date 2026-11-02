@@ -344,6 +344,10 @@ Effect validation is enforced when functions are added or replaced:
     Do NOT use intermediate variables — match directly on the function call.
 
 Runtime note: the Rust side includes a bytecode VM in `src/vm.rs` with compilation, execution, and cooperative async suspension. Functions are automatically tried on the VM before falling back to the tree-walking interpreter.
+VM fallback is selected before execution. A failed scalar `+check` aborts its caller chain;
+it is not an Err value that a scalar caller can treat as false and continue past. Result/capture
+functions currently use the tree-walker while invocation semantics are being reconciled.
+An executed VM failure is never retried on the tree, so earlier IO cannot be replayed.
 
 ## Example 1: Validation with checks
 

@@ -38,6 +38,65 @@ pub(super) fn push_match(
     stack.push(Value::Bool(matched));
 }
 
+/// Preserve literal Result opcode-matching/construction tests while production Result
+/// invocation is quarantined. NOT an admission or normal-dispatch API; pure test graphs
+/// only, with no Check, IO, await, spawn, yield, sources or events. All callers must also
+/// assert production refusal/fallback so this cannot masquerade as supported execution.
+#[cfg(test)]
+pub(crate) fn compile_result_opcode_fixture(
+    function: &crate::ast::FunctionDecl,
+    program: &crate::ast::Program,
+) -> anyhow::Result<super::CompiledFunction> {
+    use super::await_admission::{expression_work, statement_work, Work};
+    use crate::ast::{Effect, StatementKind as S};
+    let mut seen = std::collections::HashSet::new();
+    let mut work = vec![Work::Function(function)];
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Function(f) => {
+                if !seen.insert(f as *const _) {
+                    continue;
+                }
+                anyhow::ensure!(
+                    !f.effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::Io | Effect::Async)),
+                    "opcode fixture must be pure"
+                );
+                work.extend(f.body.iter().map(Work::Statement));
+            }
+            Work::Statement(s) => {
+                anyhow::ensure!(
+                    !matches!(
+                        s.kind,
+                        S::Check { .. }
+                            | S::Await { .. }
+                            | S::Spawn { .. }
+                            | S::Yield { .. }
+                            | S::Source(_)
+                            | S::Event(_)
+                    ),
+                    "opcode fixture must not contain effects or language failure"
+                );
+                statement_work(&s.kind, &mut work);
+            }
+            Work::Expression(e) => expression_work(e, &mut work),
+            Work::Call(call, _) => {
+                anyhow::ensure!(
+                    !crate::builtins::is_io_builtin(&call.callee),
+                    "opcode fixture must not call IO"
+                );
+                if let Some(f) = program.get_function(&call.callee) {
+                    work.push(Work::Function(f));
+                }
+                work.extend(call.args.iter().map(Work::Expression));
+            }
+            Work::Source(_) => anyhow::bail!("opcode fixture must not register sources"),
+        }
+    }
+    super::emit_function(function, program, &program.interner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,13 +112,39 @@ mod tests {
         program
     }
 
+    #[test]
+    fn result_opcode_fixture_refuses_language_failure_and_io_graphs() {
+        for source in [
+            "+fn leaf ()->Int [fail]\n  +check ready false ~stop\n  +return 1\n+end\n+fn root ()->Int\n  +return leaf()\n+end\n",
+            "+fn root ()->Bool [io,async]\n  +await result:Bool = file_exists(\"never\")\n  +return result\n+end\n",
+        ] {
+            let program = program(source);
+            assert!(super::compile_result_opcode_fixture(program.get_function("root").unwrap(), &program).is_err());
+        }
+    }
+
     fn agree(program: &ast::Program, target: &str, argument: Value, expected: &str) {
         let function = program.get_function(target).unwrap();
         let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
         env.set(&function.params[0].name, argument.clone());
         let tree =
             eval::eval_function_body_named(program, target, &function.body, &mut env).unwrap();
-        let compiled = vm::compile_function(function, program).unwrap();
+        let compiled = if matches!(function.params[0].ty, ast::Type::Result(_)) {
+            assert!(vm::compile_function(function, program).is_err());
+            assert!(matches!(
+                vm::attempt(
+                    function,
+                    vec![argument.clone()],
+                    program,
+                    false,
+                    &|_, _| anyhow::bail!("no IO")
+                ),
+                vm::VmAttempt::NotAdmitted(_)
+            ));
+            vm::compile_result_opcode_fixture(function, program).unwrap()
+        } else {
+            vm::compile_function(function, program).unwrap()
+        };
         let vm = vm::execute_with_io(&compiled, vec![argument], program, &|_, _| {
             anyhow::bail!("no IO in matching fixture")
         })

@@ -3264,7 +3264,10 @@ fn tiered_eval_preserves_struct_name_via_vm() {
 
     // Prove the middle tier is eligible and independently preserves identity.
     intern::set_display_interner(&program.shared_interner);
-    let vm_result = try_vm_execute(&program, func, &input).expect("VM should execute");
+    let vm::VmAttempt::Executed(Ok(value)) = try_vm_execute(&program, func, &input) else {
+        panic!("VM should execute successfully, not fall back");
+    };
+    let vm_result = value.to_string();
     assert!(
         vm_result.contains("Point{"),
         "VM must preserve the struct name, got: {vm_result}"

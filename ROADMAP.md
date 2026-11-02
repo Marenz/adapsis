@@ -4,13 +4,13 @@
 
 - Owner authorizes the broader work and deployment toward a useful programming/task/agent
   bot that can eventually replace OpenCode. Current worker scope is the approved bounded
-  JIT-admission/cache checkpoint of B-safety (#97/#119), after accepted Result slice A.
-  VM unwind is deferred to the next checkpoint. No commit, push, service changes or live
-  IO in this scope.
+  VM scalar-safety checkpoint of B-safety (#97), after accepted Result A and JIT/cache
+  safety. No commit, push, service changes, live-module access or live IO in this scope.
 - Model rule: OpenAI only for now, `openai/gpt-6-astra`, default variant (no explicit high
   effort); no Anthropic. This supersedes historical model-routing notes below.
-- Main checkout baseline `75da3aa`. Manager reports live release `e424fc9`, binary SHA
-  `7a914632…341f3`, service and runtime model `chatgpt/gpt-6-astra` with default effort;
+- Main checkout baseline `2e9b3fc`. Manager reports live release `88b4275`, binary SHA
+  `4ef591486f0d74850d78affde7b6b77f2e3e2c8bb3b7133fdbfbc42b41ab0414`, deployment record
+  `2019299`, service and runtime model `chatgpt/gpt-6-astra` with default effort;
   this worker has not re-verified production. Host-only poll status and pure JSON smoke
   passed. A no-change native turn had `completed=true` but an empty reply: not full
   conversational success. Historical DeepInfra 402 caused an alias rollback to direct
@@ -18,10 +18,11 @@
 - Ownership: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; sole main-checkout writer
   `ses_e8b17a23affedgH4V52JdwxNDL`; release writer `ses_e67e01ef9ffettWZDQAXWveOxc`.
   Main writer must not touch the release checkout. Review session
-  `ses_e82647931ffewdBFqa9bGCmPIz` remains separate from write ownership. The #118
-  acceptance writer is repairing test-case overwrite in a dedicated worktree, not main.
+  `ses_e82647931ffewdBFqa9bGCmPIz` remains separate from write ownership. #118 is fixed
+  by `463d839`, deployed and closed; two cases survive save/load. The release worker's
+  live Python TelegramBot investigation is separate: this writer must not touch live modules.
 - Accepted main work: G1 `fce692c`; #114 `5fb1ca8`; #112 `ce9096a` + structural hardening
-  `56ce420`; #116 `ab2000a`; Result slice A `75da3aa`. A is excluded from the current
+  `56ce420`; #116 `ab2000a`; Result slice A `75da3aa`; JIT safety `2e9b3fc`. A/B are excluded from the current
   release integration; historical commit presence alone is not activation evidence.
   Strict parity remains RED: 324 verified / 58 invalid / 191 unsupported (573 entries).
 - Approved next sequence: Result contract A, then B (VM Check/unwind and fail-closed JIT
@@ -29,6 +30,8 @@
   G3 anonymous literals, G4 json_get typing,
   G5 shared Some, G6 vars, QualifiedEquivalent classification and the strict success
   definition. Preserve frozen fixtures and existing acceptance criteria pending decisions.
+- Plan/roadmap FEATURE design is explicitly owner-HOLD; this recovery document update
+  does not authorize proposing or implementing those features.
 - Adoption is behavioral: #76 manager-workflow gates and #89's latest owner correction
   require native conversation capability parity before a default flip; retain legacy and
   the guarded OpenCode integration. Language parity alone is not cutover evidence.
@@ -81,7 +84,7 @@ One full release gate: 1962 passed / strict parity 1 failed / 2 ignored; CLI 5/5
 counts unchanged at 324/58/191. Log: `/tmp/opencode/full_gate_result_a.log`. No production
 invocation migration or release activation follows from this helper-only checkpoint.
 
-### Current JIT-only safety checkpoint — #97/#119 (uncommitted)
+### Accepted JIT-only safety checkpoint — #97/#119 (`2e9b3fc`)
 
 - #119 reproduced before repair: revision 1 `probe` returned 11 on JIT; revision 2
   changed it to 22 and introduced an unsupported List-returning sibling. Rebuild failed,
@@ -120,6 +123,40 @@ invocation migration or release activation follows from this helper-only checkpo
   Telegram port 73 passed. One full release gate: 1979 passed / strict parity 1 failed /
   2 ignored, CLI 5/5; strict counts unchanged at 324/58/191. Log:
   `/tmp/opencode/full_gate_jit_safety.log`. No exhaustive mutation campaign was run.
+
+### Current VM scalar-safety checkpoint — #97 (uncommitted)
+
+- Baseline reproduced on a genuinely VM-admitted graph: ordinary scalar failing helper
+  between two builtin awaits emitted `[before, after]`; required result is `[before]` and
+  a typed failure. Log `/tmp/opencode/vm_scalar_before.log`. No user-await/field/Result
+  admission hides the reproduced failure. Check now emits RaiseCheck and aborts the scalar
+  VM stack; tree Check produces the same LanguageFailure::Check label.
+- `VmAttempt::NotAdmitted` is pre-execution only; `Executed(Err)` never retries tree, with
+  or without earlier IO. Sync preserves legacy Err(...) formatting; async returns the
+  execution error. Operational errors stay operational. The no-IO-replay guard remains.
+- Eager preparation compiles/reuses each unique reachable callee before any instruction,
+  shares one growing interner, resolves original call spellings and terminates cycles.
+  Nested unsupported code (e.g. shared reads) and non-Await builtin IO select tree before
+  the first effect; missing prepared bytecode is an internal execution failure.
+- Result contracts/captures/constructors temporarily select tree, preserving legacy
+  catching (including operational capture) until combined B/C. No full catch activation,
+  Result normalization, frontend relaxation or callback ACK reinterpretation. Tests retain
+  literal Result opcode evidence through a cfg(test)-only pure `compile_result_opcode_fixture`
+  plus production refusal/fallback assertions; those fixtures cannot execute Check or IO.
+- Focused regressions count actual synthetic IoRequests: Check failure before IO emits
+  zero; after earlier IO emits only before; success continues once; operational execution
+  failure also suppresses later requests. Tail/recursive/nested-argument failure, a tree
+  stub replay discriminator, alias identity, nested shared-code fallback and explicit
+  Result capture recovery are covered. Frozen fixture bytes are unchanged.
+- VM emission eligibility: examples 52 -> 49 of 99; strict library 107 -> 99 of 161.
+  Preparation can additionally refuse nested unsupported callees. Informational scalar
+  sample (1,000 iterations, one helper called twice): preparation 4.59 ms, full admitted
+  compile/execute 8.40 ms; noisy current measurements, not a before/after speed claim.
+  Logs `/tmp/opencode/vm_scalar_blast.log` and `/tmp/opencode/vm_scalar_cost.log`.
+- Review freeze: 16 new tests; focused VM suite 91 passed, eval 331 passed/1 ignored,
+  native 149, Telegram port 73, await/field admission 14 each. One full release gate:
+  1995 passed / strict parity 1 failed / 2 ignored; CLI 5/5, strict still 324/58/191.
+  Full log `/tmp/opencode/full_gate_vm_scalar.log`. No broad mutation campaign.
 
 ## Historical recovery — Python parity #86 (2026-10-28 onward, red)
 

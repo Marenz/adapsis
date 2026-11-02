@@ -687,10 +687,12 @@ pub fn eval_compiled_or_interpreted_cached(
         return Ok((result, true));
     }
 
-    // Try bytecode VM (middle tier — more complete than JIT, faster than tree-walk)
-    // For async functions, the VM will hit AwaitIo and fall through to the interpreter.
-    if let Ok(result) = try_vm_execute(program, func, input) {
-        return Ok((result, false));
+    // Only a pre-execution refusal authorizes tree fallback. Preserve the existing
+    // synchronous Err(...) presentation without re-executing a failed VM invocation.
+    match try_vm_execute(program, func, input) {
+        vm::VmAttempt::Executed(Ok(value)) => return Ok((format!("{value}"), false)),
+        vm::VmAttempt::Executed(Err(error)) => return Ok((format!("Err({error})"), false)),
+        vm::VmAttempt::NotAdmitted(_) => {}
     }
 
     // Fall back to interpreter
@@ -698,25 +700,22 @@ pub fn eval_compiled_or_interpreted_cached(
     Ok((result, false))
 }
 
-/// Try to execute a function via the bytecode VM. Returns the formatted result
-/// string on success, or an error to fall through to the tree-walker.
+/// Try synchronous VM execution. Only NotAdmitted permits tree fallback; executed
+/// values/errors are rendered by the caller without re-running the invocation.
 fn try_vm_execute(
     program: &ast::Program,
     func: &ast::FunctionDecl,
     input: &parser::Expr,
-) -> Result<String> {
+) -> vm::VmAttempt {
     // Convert input expression to VM argument values
-    let vm_args = input_to_vm_args(input, func)?;
-
-    // Compile to bytecode
-    let compiled = vm::compile_function(func, program)?;
-
-    // Execute with IO support — if the function hits AwaitIo, bail to
-    // let the tree-walker handle it (it has proper coroutine support).
-    let result = vm::execute_with_io(&compiled, vm_args, program, &|op_name, _args| {
+    let vm_args = match input_to_vm_args(input, func) {
+        Ok(args) => args,
+        Err(error) => return vm::VmAttempt::NotAdmitted(error),
+    };
+    // Reachable awaits are refused during preparation, before any instruction runs.
+    vm::attempt(func, vm_args, program, false, &|op_name, _args| {
         bail!("VM: sync path cannot perform async IO ({op_name})")
-    })?;
-    Ok(format!("{result}"))
+    })
 }
 
 /// Convert a parser expression to a Vec<Value> suitable for VM execution.
@@ -1829,7 +1828,7 @@ pub(crate) fn eval_function_body(
             } => {
                 let val = eval_ast_expr(program, condition, env)?;
                 if !val.is_truthy() {
-                    return Err(anyhow!("{on_fail}"));
+                    return Err(result_contract::LanguageFailure::Check { label: on_fail.clone() }.into());
                 }
             }
             ast::StatementKind::Return { value } => {
@@ -4295,28 +4294,15 @@ fn trace_body(
 /// Try to execute a function via the bytecode VM with async IO support.
 /// The io_handler performs IO operations when the VM suspends.
 ///
-/// Returns `None` only when the function cannot be *compiled* to bytecode
-/// (unsupported features like +shared, +spawn, +yield) — the caller should
-/// fall back to the tree-walker. Runtime errors are returned as `Some(Err)`
-/// and must NOT trigger a fallback: IO operations may already have executed,
-/// and re-running the function in the interpreter would repeat their side
-/// effects.
+/// Returns NotAdmitted only before execution (unsupported graph, input shape, or callee
+/// preparation). Executed(Err) must NOT trigger fallback, even before the first IO.
 pub fn try_vm_eval_async(
     func: &ast::FunctionDecl,
     args: &[Value],
     program: &ast::Program,
     io_handler: &dyn Fn(&str, &[Value]) -> Result<Value>,
-) -> Option<Result<Value>> {
-    let compiled = match vm::compile_function(func, program) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-    Some(vm::execute_with_io(
-        &compiled,
-        args.to_vec(),
-        program,
-        io_handler,
-    ))
+) -> vm::VmAttempt {
+    vm::attempt(func, args.to_vec(), program, true, io_handler)
 }
 
 /// Evaluate an async ([io]/[async]) function: bytecode VM first, tree-walker
@@ -4346,28 +4332,22 @@ pub fn eval_async_function(
 
     if handle.task_id.is_none() {
         if let Ok(args) = input_to_vm_args(input, func) {
-            // Track whether any IO was performed. Callee functions are
-            // compiled lazily inside the VM, so compilation of a helper
-            // (e.g. one using +shared) can fail mid-execution. Falling back
-            // to the tree-walker is only safe while no IO side effects have
-            // happened yet.
+            // Preparation compiles the reachable graph without effects. Keep the
+            // no-replay guard as a defensive invariant; Executed failures never retry,
+            // even when no IO has happened yet.
             let io_performed = std::cell::Cell::new(false);
             let io_handler = |op: &str, io_args: &[Value]| -> Result<Value> {
                 io_performed.set(true);
                 handle.execute_await(op, io_args)
             };
             match try_vm_eval_async(func, &args, program, &io_handler) {
-                Some(Ok(val)) => return Ok(val),
-                Some(Err(e)) => {
+                vm::VmAttempt::Executed(result) => return result,
+                vm::VmAttempt::NotAdmitted(e) => {
                     if io_performed.get() {
-                        // IO already executed — re-running would duplicate
-                        // side effects. Surface the error as-is.
+                        // A future admission change must never authorize replay.
                         return Err(e);
                     }
-                    // No IO yet — safe to retry with the tree-walker
-                    // (covers lazy callee-compile failures like +shared).
                 }
-                None => {} // top-level function not VM-compilable
             }
         }
     }

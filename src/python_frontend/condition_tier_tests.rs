@@ -306,20 +306,10 @@ fn python_jit_condition_failure_and_short_circuit_paths() {
             );
         } else {
             assert!(tree(&program, "probe", vec![]).is_err());
-            let vm_result = vm_run(&program, "probe", vec![]).unwrap();
-            if index == 2 || index == 3 {
-                // Existing VM failure contract: Check returns Err as a value
-                // from the CALLEE; ordinary caller control flow consumes that
-                // falsy value and reaches its following return. Unlike tree,
-                // failure does not abort the caller. This gap remains OPEN.
-                assert!(matches!(vm_result, Value::Int(0)), "{vm_result}");
-            } else {
-                // Direct/outer failed Check terminates before return1.
-                assert!(
-                    matches!(vm_result, Value::Err(ref e) if e == "failed"),
-                    "{vm_result}"
-                );
-            }
+            let error = vm_run(&program, "probe", vec![]).unwrap_err();
+            assert_eq!(error.downcast_ref::<eval::result_contract::LanguageFailure>(),
+                Some(&eval::result_contract::LanguageFailure::Check { label: "failed".into() }),
+                "case {index}: failure must unwind scalar callers, not become falsy data");
         }
         // Historical native Check traps are no longer reachable through compile().
         // Refuse the complete graph, including short-circuited fallible branches.
@@ -357,9 +347,7 @@ fn trusted_ax_condition_failure_after_io_is_not_replayed() {
     );
 }
 
-/// Existing failure-propagation discrepancy, NOT equivalence evidence. Production
-/// async dispatch selects the VM, whose ordinary caller continues after a failed
-/// Check returned as an Err value. Tree aborts before the subsequent IO effect.
+/// #97 regression: both tree and normal VM dispatch abort before the subsequent effect.
 #[test]
 fn trusted_ax_failed_check_caller_effect_characterization() {
     use crate::coroutine::{CoroutineHandle, IoRequest};
@@ -380,16 +368,14 @@ fn trusted_ax_failed_check_caller_effect_characterization() {
         let handle = CoroutineHandle::new(sender);
         if normal_dispatch {
             let input = parser::parse_single_expr("{}").unwrap();
-            assert!(matches!(
-                eval::eval_async_function(&program, "probe", &input, handle).unwrap(),
-                Value::Int(0)
-            ));
+            let error = eval::eval_async_function(&program, "probe", &input, handle).unwrap_err();
+            assert!(error.downcast_ref::<eval::result_contract::LanguageFailure>().is_some());
         } else {
             let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
             env.set("__coroutine_handle", Value::CoroutineHandle(handle));
             let body = &program.get_function("probe").unwrap().body;
             assert!(eval::eval_function_body_named(&program, "probe", body, &mut env).is_err());
         }
-        assert_eq!(responder.join().unwrap(), usize::from(normal_dispatch));
+        assert_eq!(responder.join().unwrap(), 0);
     }
 }

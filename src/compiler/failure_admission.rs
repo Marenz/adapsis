@@ -88,7 +88,7 @@ fn check_roots<'a>(
 /// Includes nested containers and named struct/union fields. Ambiguous names inspect all
 /// candidates conservatively; this does not change runtime type lookup. Both AST and type
 /// recursion are iterative and visited only within this snapshot.
-fn contains_result<'a>(ty: &'a ast::Type, program: &'a ast::Program) -> bool {
+pub(crate) fn contains_result<'a>(ty: &'a ast::Type, program: &'a ast::Program) -> bool {
     use ast::Type as T;
     let mut work = vec![ty];
     let mut visited = HashSet::new();

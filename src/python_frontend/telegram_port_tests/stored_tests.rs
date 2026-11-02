@@ -525,7 +525,7 @@ fn telegram_port_stored_transcription_cases_run_ax_origin_and_trusted_results() 
                     "TelegramBot.transcription_upload_response",
                     vec![trusted_result(case)],
                 ),
-                super::super::logical_tier_tests::vm_run(
+                super::super::logical_tier_tests::vm_result_opcode_fixture_run(
                     program,
                     "TelegramBot.transcription_upload_response",
                     vec![trusted_result(case)],

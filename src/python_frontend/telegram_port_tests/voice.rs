@@ -157,7 +157,7 @@ fn telegram_port_voice_helper_trusted_results() {
                 &expected,
             );
             check_result(
-                super::super::logical_tier_tests::vm_run(&program, HELPER, vec![input]),
+                super::super::logical_tier_tests::vm_result_opcode_fixture_run(&program, HELPER, vec![input]),
                 &expected,
             );
         }

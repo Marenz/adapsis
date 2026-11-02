@@ -201,8 +201,8 @@ Function evaluation goes through up to three tiers (fastest first):
    - `eval/jit_dispatch.rs` requires `cached_revision == revision` before invocation,
      discards stale modules before rebuilding, and never calls old code after a failed
      rebuild (#119). Warm same-revision safe numeric controls remain JIT-backed.
-     This checkpoint does NOT repair VM Check unwinding, Result invocation normalization,
-     or generic execution-error fallback. Native Check traps are unreachable through
+     This JIT checkpoint does NOT itself repair Result invocation normalization. The
+     subsequent scalar VM safety rules are below. Native Check traps are unreachable through
      supported compile paths; other JIT limitations (e.g. integer zero-divisor abort,
      #92, and relocation #96) are not fixed by this admission rule.
 2. **Bytecode VM** (`vm.rs`) — near-full language coverage.
@@ -215,6 +215,26 @@ Function evaluation goes through up to three tiers (fastest first):
      union variants — anything else is a compile error (fallback signal).
   - Async fallback rule: only safe BEFORE any IO has been performed.
     `eval_async_function` tracks this; never re-run a function after IO.
+  - **Scalar failure checkpoint (#97):** `vm/execution.rs::VmAttempt` distinguishes
+    `NotAdmitted(error)` (no instruction/effect ran) from `Executed(Result<Value>)`.
+    Only the former permits tree fallback; executed operational OR language failure
+    never retries, even before the first IO. Synchronous dispatch retains legacy
+    `Err(...)` presentation without calling the tree again; async returns the error.
+    Check emits `RaiseCheck`, yielding typed `LanguageFailure::Check` and discarding
+    the whole scalar VM state/frames, never returning an Err value to a scalar caller.
+  - `vm/scalar_admission.rs` temporarily quarantines reachable Result signatures,
+    binding/capture types and constructors until combined invocation/catch migration.
+    Existing tree catches (including catch-all operational handling) remain unchanged.
+    Non-Await builtin IO also selects tree before execution: CallBuiltin has no coroutine
+    handle. Dynamic Result values from builtin Await retain existing value semantics;
+    this is not general runtime type validation or complete #82 normalization.
+  - Preparation emits each unique reachable callee once, resolves the original spelling
+    through `get_function`, shares one growing interner and fills the call cache BEFORE
+    the first instruction. Aliases share bytecode by snapshot-local function identity;
+    recursive graphs terminate. No lazy compile/fallback during execution. Unsupported
+    nested callees (e.g. shared access) select tree before earlier IO, preserving those
+    programs when execution-error fallback is removed. Sync preparation rejects reachable
+    AwaitIo before execution. A missing prepared cache entry is an internal execution error.
   - `vm/await_admission.rs` preflights the supplied root and its statically
     reachable calls before bytecode emission. Any user-function Await forces
     pre-execution tree fallback, including a transitive await after earlier IO.
@@ -237,19 +257,27 @@ Function evaluation goes through up to three tiers (fastest first):
     `+spawn`/`+await` binding (VM keeps `Ok` where the tree unwraps, #82 viaok),
     match captures (they poison same-named bindings), shared vars, builtin calls.
     Parameters are only sound because (a) every in-graph call site must pass a proven
-    struct to a Struct-typed parameter and (b) `check_arguments` (in `execute_cached`)
-    shape-checks the ROOT call's entry arguments (`!eval f p=Ok({..})` reaches a Struct
+    struct to a Struct-typed parameter and (b) `check_arguments`
+    shape-checks the ROOT call's entry arguments in `vm/execution.rs` preparation
+    (`!eval f p=Ok({..})` reaches a Struct
     parameter otherwise). Conservative by design: it may send a struct-only function to
     the tree, never admits an unproven base. VM `GetField` and the JIT are unchanged.
-    Blast radius on `examples/*.ax` (99 functions): VM-compilable 95 -> 52 (44 more go
+    #114 blast radius on `examples/*.ax` (99 functions): VM-compilable 95 -> 52 (43 more go
     to the tree; `vm/blast_tests.rs` prints counts and asserts no function with only
-    ordinary field names is refused); parity library unchanged (161 functions, 107).
+    ordinary field names is refused by field admission); parity library unchanged
+    (161 functions, 107). Subsequent Result/direct-IO quarantine changes emission
+    eligibility to 49/99 examples and 99/161 parity-library functions; eager preparation
+    can additionally refuse nested unsupported callees before execution.
    - Dedicated `Value::Ok`/`Value::Err` matching is handled by
      `vm/result_match.rs` (#93): push the inner value/error String before the
      match Bool so the existing reverse-order binding stores consume it correctly.
      User Union payload ordering remains separate. Nested match statements are
      covered; this does not certify nested payload patterns, Option matching or
      non-exhaustive-match behavior across tiers.
+     Production Result graphs are now quarantined; literal Result opcode evidence uses
+     the cfg(test)-only `compile_result_opcode_fixture`, restricted to pure graphs without
+     Check or effects. Tests separately assert production refusal/normal tree fallback;
+     this fixture is never evidence of normal VM Result invocation support.
 3. **Tree-walker** (`eval/mod.rs`) — universal fallback; the only tier with
    `Env`-based shared vars, function stubs, spawned-task snapshot tracking.
 
@@ -728,11 +756,11 @@ replaces that branch with one composer.
   exact Bool/Int/Float user-call arguments through identity-safe recursive
   emission (no generic scratch-name lookup). It refuses IO/async callees and
   explicit `[fail]` argument callees, including nested arguments, pending #97.
-  #97 is a bug: failed VM Check returns an Err value from the callee and ordinary
-  callers can continue to subsequent effects, unlike tree failure. JIT Check/fallible
-  graphs now refuse before compilation rather than executing the historical native trap.
-  Zero-argument fallible-call tests characterize existing tier-specific behavior,
-  not equivalent failure propagation. #96 JIT relocation remains open too.
+  #97 scalar Check now unwinds with a typed language failure instead of returning Err
+  as data to a caller that could continue effects. Result/capture graphs select the
+  legacy tree path until combined B/C; full invocation/catching parity is still pending.
+  JIT Check/fallible graphs refuse before compilation rather than executing the historical
+  native trap. #96 JIT relocation remains open too.
   Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
   finite equality uses epsilon rather than IEEE equality. Ordered Float
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)

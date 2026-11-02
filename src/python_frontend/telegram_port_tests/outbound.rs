@@ -121,7 +121,7 @@ fn telegram_port_outbound_upload_classifier_and_extract_reply() {
                     "TelegramBot.telegram_upload_attempt",
                     vec![input.clone()],
                 ),
-                super::super::logical_tier_tests::vm_run(
+                super::super::logical_tier_tests::vm_result_opcode_fixture_run(
                     &program,
                     "TelegramBot.telegram_upload_attempt",
                     vec![input],
