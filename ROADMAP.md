@@ -1,10 +1,37 @@
 # AdapsisOS Roadmap
 
+## Deployed 2026-11-02 — release `6ddcfc1`, narrow #83 scalar admission
+
+- Manager deployed the saved candidate; independent read-only verification by
+  `ses_e67e01ef9ffettWZDQAXWveOxc`: PID1784882 active/running, NRestarts0,
+  `/proc` executable SHA-256
+  `218791e69156b8e33be5b60abf99f093113cce654afd843a8a1dc06b79bde385`.
+  Runtime model remains `chatgpt/gpt-6-astra`; runtime symbols retain the migrated
+  TelegramBot48/TgFormat18 functions. Manager reports host-only polling status.
+- Binary rollback: `~/.local/bin/adapsis.bak-88b4275-20261102-155153`.
+  This was binary-only deployment; private Python-authored module files were not
+  replaced. Prior module provenance/AST and exact text-reply evidence remains below.
+- Integration: reviewed `a433def` plus exact `9781f3c..50884a9` replacement delta.
+  The rejected Rust task prototype and module registration are absent. Python task
+  examples are inactive pure modules, not a deployed task service. Generic records
+  backend `1e0ed81` is NOT included. No storage/executor/authority wiring follows.
+- Offline build passed; integration full suite: 2004 passed, strict python_parity
+  alone failed, 5 ignored; CLI5 passed. Strict parity remains324/58/191 with no AST
+  mismatches. Focused python_scalar7/native_python_repair4/native_172/task_domain2/
+  module_tests10 all passed. Logs: `/tmp/opencode/release-a433def-50884a9-*.log`.
+- Observer independently verified request543083/reply543087 and scoped native batches:
+  Python buggy mutate -> two failed cases (24/23, 3/2) -> Python inspect -> final-expression-only
+  repair -> EXACT SAME test source passes (23, 2) -> Python eval23 -> accepted finish/visible summary.
+  Zero `.ax` fallback; saved Program has repaired three-statement function and two passed tests.
+- This verifies live narrow scalar Python repair, not restart recovery of the new module,
+  general #83 coverage, native parity or default cutover. #83 retains call-free scalar/data
+  and safe-shared-default proofs. This writer performed no additional live checks or builds.
+
 ## Live Python-authored Telegram modules — 2026-11-02, exact text reply observed
 
 - Manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi` completed reviewed v3 helper/drain,
   runtime capture, fresh recapture, whole-service stop, final export/library gates,
-  pair installation and one start. Runtime binary remains `88b4275` (hash below);
+  pair installation and one start. Runtime binary at migration was `88b4275` (history below);
   migration tooling checkpoint `9ffd3fa` adds no production runtime feature.
   Durable `.py` files record authorship; the running library stores lowered canonical `.ax`.
 - Durable owner-only provenance/rollback bundle:
@@ -30,41 +57,8 @@
   No pre-migration baseline is acceptance evidence; no live repair-task/attachment certification;
   #104 failure ACK and #99 splitter residuals remain. Plan/roadmap feature HOLD unchanged.
 
-## Deployed 2026-11-02 — #118 grouped Python tests, release `88b4275`
-
-- Writer `ses_e67e01ef9ffettWZDQAXWveOxc`, manager
-  `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`. Clean release HEAD `3ac0f3b` merged exact
-  reviewed checkpoint `463d839` with `--no-ff --no-commit`; no conflicts.
-  Production/test source is byte-identical to `463d839`. Manager verified the
-  integration, committed/pushed `88b4275`, and installed/restarted here; this
-  supersedes the historical `e424fc9` deployment below.
-- #118 groups all Python cases for an exact target within one submission;
-  targets execute first-seen, cases stay source-ordered per target, and later
-  submissions replace the stored set. Per-def source spans remain available.
-  HTTP/SSE mock-provider recovery tests cover repair, two-case persistence,
-  reload and auto-retest rejection when the first case breaks. #87/#88 and native
-  opt-in remain unchanged. This is offline protocol evidence, not live task quality.
-- Own-target `cargo build --release` passed (33.28s). Focused
-  `cargo test --release` filters: native_python_repair 4, native_ 166,
-  tests_print 8, telegram_port 73 passed; zero failures/ignored, CLI tests filtered.
-  Logs `/tmp/opencode/release-463d839-<filter>.log`. Whitespace check clean.
-  Full suite not duplicated: manager reports accepted checkpoint evidence
-  1991 passed / strict parity alone failed / 2 ignored, CLI 5 passed; merged source
-  is identical. Prior strict parity residuals remain (324/58/191).
-- Artifact `target/release/adapsis` SHA-256
-  `4ef591486f0d74850d78affde7b6b77f2e3e2c8bb3b7133fdbfbc42b41ab0414`.
-  `/home` reported 15 GB free (100% rounded usage) after the build.
-- Independent post-deployment read-only verification: service active/running,
-  PID 1538200, NRestarts=0; `/proc/1538200/exe` SHA-256 matches the artifact above.
-  One active poll task, zero active non-poll tasks; poll status is exactly
-  `http_get(https://api.telegram.org)`. `llm_get_model()` returns
-  `"chatgpt/gpt-6-astra"`, success=true. Binary rollback:
-  `/home/marenz/.local/bin/adapsis.bak-e424fc9-20261102-120538`.
-- Pre-install recheck found no creative permission/context drift and configured
-  and runtime Astra agreed. No live repair-task or Telegram reply certification
-  yet: repair evidence above is mock-provider/offline. Deployment actions belong
-  to manager; this worker performed read-only verification and this release log
-  update only. Owner's plan/roadmap feature HOLD remains unchanged.
+The complete historical `88b4275`/#118 deployment record is preserved verbatim in
+[docs/release-history.md](docs/release-history.md); its status claims refer to that checkpoint.
 
 ## Deployed 2026-11-02 — here (Kronk), release `e424fc9`, Astra default
 
