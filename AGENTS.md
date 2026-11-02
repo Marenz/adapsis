@@ -131,7 +131,22 @@ POST /api/sessions/:id/mutate — mutate in a specific session
 operations show the operation name, and `Completed`/`Failed` show `done`/`failed` with no
 payload. The stored values stay intact (callback acknowledgement in `main.rs` reads them), so
 never print a `WaitReason` payload directly. Out of scope and tracked separately: task locals
-in `?inspect task N` (#115) and the full URL inside `http_get`/`http_post` error text (#116).
+in `?inspect task N` (#115) is out of scope and tracked separately.
+
+**HTTP builtin errors never contain the request URL (#116).** reqwest appends
+` for url (<url>)` to its `Display`, which carries bot tokens, userinfo and query secrets, so
+every HTTP builtin (`http_get`, `http_post`, `http_post_binary`/`http_get_binary`,
+`http_upload`, `http_upload_bytes`, the upload response stream) renders transport failures
+through `task_status::transport_error`: kind text, a class from reqwest's predicates
+(`timed out` / `connection failed` / `response decode failed` / `redirect failed`) and the
+host-only target, e.g. `error sending request: connection failed (http://127.0.0.1:34567)`;
+`{:#}` appends the URL-free source chain. `http_request` (`http_policy.rs`) names the host only
+too, and no longer echoes an invalid or non-http URL (a scheme-less `bot123:TOKEN` parses with
+the scheme `bot123`, so even the scheme is not printed). **Observable change:** the old
+`error sending request for url (...)` text and `http_request GET <url> failed` are gone; nothing
+in the repository, fixtures or library modules matched on them. Not changed: `http_post_binary`
+falls back to the last URL path segment (query included) as the attachment name when the
+response has no Content-Disposition header.
 
 ## Architecture
 ```

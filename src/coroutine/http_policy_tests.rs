@@ -128,9 +128,11 @@ async fn http_request_transport_failure_is_actionable_and_catchable() {
     match value {
         Value::Err(error) => {
             assert!(
-                error.contains(&format!("http_request GET {target} failed")),
+                error.contains(&format!("http_request GET http://{address} failed")),
                 "{error}"
             );
+            assert!(error.contains("connection failed"), "{error}");
+            assert!(!error.contains("/gone"), "the path must not be echoed: {error}");
             assert!(error.len() < 1024, "transport error was not bounded");
         }
         other => panic!("expected catchable transport error, got {other:?}"),

@@ -26,11 +26,12 @@ async fn bounded_upload_response(response: reqwest::Response) -> Result<String> 
     use futures::StreamExt;
 
     let status = response.status();
+    let url = response.url().to_string();
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     let mut truncated = false;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(|e| task_status::transport_error(e, &url))?;
         let remaining = MAX_HTTP_UPLOAD_RESPONSE_BYTES.saturating_sub(body.len());
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
@@ -62,6 +63,8 @@ mod matching;
 mod task_status;
 #[cfg(test)]
 mod task_status_tests;
+#[cfg(test)]
+mod http_error_text_tests;
 pub use matching::pattern_matches;
 #[cfg(test)]
 mod scoped_tests;
@@ -638,10 +641,10 @@ impl Runtime {
                         Ok(resp) => {
                             match resp.text().await {
                                 Ok(body) => { let _ = reply.send(Ok(body)); }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                                Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                             }
                         }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -669,10 +672,10 @@ impl Runtime {
                         Ok(resp) => {
                             match resp.text().await {
                                 Ok(body) => { let _ = reply.send(Ok(body)); }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                                Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                             }
                         }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -719,10 +722,10 @@ impl Runtime {
                                         Err(e) => { let _ = reply.send(Err(anyhow::anyhow!("attachment error: {e}"))); }
                                     }
                                 }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                                Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                             }
                         }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -765,7 +768,7 @@ impl Runtime {
                     }
                     match client.post(&url).multipart(form).send().await {
                         Ok(resp) => { let _ = reply.send(bounded_upload_response(resp).await); }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -786,7 +789,7 @@ impl Runtime {
                     }
                     match client.post(&url).multipart(form).send().await {
                         Ok(resp) => { let _ = reply.send(bounded_upload_response(resp).await); }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
