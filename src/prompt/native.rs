@@ -101,6 +101,13 @@ def test_add_two() -> None:
    first-seen order (interleaved targets regroup), with source-order cases per
    target. A later test submission replaces that target's stored set.
 
+   Legacy builtin-name collisions can still block Python operations. A narrow
+   exception permits effect-free, straight-line scalar lets/return using only
+   literals, bound names and operators, with scalar literal tests/arguments and
+   proven call-free scalar implicit shared initialization. Calls, fields, control
+   flow, constructors, effects or list data retain conservative collision checks.
+   Source inspection executes no shared initialization and uses authorized metadata.
+
 4. Call evaluate with language="python", function="Example.add_two", input="3".
    Multiple literal arguments may use input="1, 2" or input="left=1, right=2".
 5. Call finish alone. Functions with more than two statements need passing tests

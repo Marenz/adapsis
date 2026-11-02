@@ -175,12 +175,18 @@ response has no Content-Disposition header.
 
 ## Architecture
 
-- `src/task_foundation/` is a dormant crate-private identity/scope model, registered
-  only by a module declaration. Tagged UUIDv4 IDs and whole-snapshot validation
-  preserve task/run separation and same-workspace project links. It has no storage,
-  permissions, API/tools or SessionMeta wiring; validity never grants access.
-  Legacy plan/roadmap/agent vectors are not migrated or assigned a default workspace.
-  See `docs/task-foundation.md`; focused tests: `cargo test --release task_foundation`.
+- #120 task-domain logic lives in Python-frontend Adapsis modules, initially
+  `examples/tasks/domain.py`; the premature Rust foundation is removed from active
+  source, history retained. Pure scoped-record validation, transition proposals
+  and advisory resource conflicts grant no authority and provide no persistence or
+  executor. Task completion remains unreachable pending evidence/run integration.
+  `scenarios.py` is test-only; literal-only assertions run through the real frontend
+  and runtime with exact AST/reprint gates: `cargo test --release task_domain`.
+  Legacy vectors remain unchanged. See `docs/task-foundation.md` for provisional
+  states, supplied-string ID limitations and reusable primitive gaps.
+  Fixture records inside list literals need explicitly typed locals first: the
+  current Python printer lacks enclosing struct context for anonymous list-element
+  record ASTs (G3). Preserve exact roundtrip gates; do not relax them for fixtures.
 
 ```
 src/
@@ -943,8 +949,20 @@ replaces that branch with one composer.
   Python test/evaluate/inspection conservatively rejects current builtin-name
   collisions in both `BUILTINS` and `IO_BUILTINS` (including aliases and user
   union variants), so later `.ax` edits cannot intercept installed helpers.
-  Narrower helper-specific usability is deferred to #83; retain the broad safe
-  check. Tests remain data-only declarations.
+  #83 has ONE narrow exception in `api/native_tools/scalar_entry.rs`: effect-free
+  scalar signatures, straight-line fresh scalar lets followed by return, and only
+  scalar literals/bound parameters/earlier locals/unary/binary operators. Python
+  execution additionally requires scalar literal argument carriers/expectations,
+  no matchers/after-checks, and a call-free scalar proof for ALL potentially
+  initialized shared defaults (empty binding set, full current Program). Runtime
+  eagerly evaluates unrelated defaults, so checking only the target body is unsafe.
+  Inspection uses the same body proof with authorized metadata; it executes no
+  defaults. Root named tests/evaluation bypass function-call stubs, and admitted
+  bodies/data contain no call site that could invoke one. Recheck each snapshot;
+  preserve unconditional reachable-constructor checks and existing literal guards.
+  Calls, fields, constructors, unknown/shared identifiers, control flow, effects,
+  list data, or unproved defaults retain conservative admission. This is not full
+  helper-specific resolution or general #83 completion. Tests remain data-only.
   Supported syntax/exclusions and runnable commands: `examples/python/README.md`.
   New bindings/parameters/returns are annotated; imports, mutable collections,
   dynamic calls and ambiguous numeric/truthiness behavior fail with source

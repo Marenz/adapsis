@@ -83,12 +83,22 @@ pub(super) fn require_python_environment(program: &ast::Program) -> Result<(), S
     Ok(())
 }
 
-/// #95: an ambiguous reachable construct is refused, but only for the entry
-/// point actually being executed. Legacy collisions elsewhere in the program
-/// must not disable unrelated Python functions (they cannot be repaired by any
-/// native tool). Declaration-time checks prevent new Python-authored collisions.
-pub(super) fn require_python_entry(program: &ast::Program, entry: &str) -> Result<(), String> {
-    require_python_environment(program)?;
+/// #83 exempts only proven scalar execution/inspection from unrelated builtin
+/// collisions. #95's reachable constructor check remains unconditional.
+pub(super) fn require_python_entry(
+    program: &ast::Program,
+    entry: &str,
+    usage: super::scalar_entry::EntryUse<'_>,
+) -> Result<(), String> {
+    if usage.scalar_data() && super::scalar_entry::proven(program, entry) {
+        if !usage.safe_initialization(program) {
+            require_python_environment(program).map_err(|_| {
+                "cannot safely admit this Python entry under current runtime state".to_string()
+            })?;
+        }
+    } else {
+        require_python_environment(program)?;
+    }
     crate::python_frontend::check_constructor_environment(program, entry)
 }
 

@@ -107,8 +107,12 @@ async fn untouched(config: &AppConfig, module: &str) -> Arc<crate::ast::Function
         .clone()
 }
 
-async fn repair(streaming: bool, module: &str) {
+async fn repair(streaming: bool, module: &str, collision: bool) {
     let fixed = BUGGY.replace("return subtotal + 1", "return subtotal");
+    let mut prelude = format!("+module {module}\n+fn untouched ()->Int\n +return 91\n+end");
+    if collision {
+        prelude.push_str(&format!("\n+module {module}Desk\n+shared seed:Int = 7\n+fn restart ()->String [io,async]\n +return \"SCALAR_RESTART_SENTINEL\"\n+end"));
+    }
     let fixture = Fixture::new(
         vec![
             tool("bug", "mutate", python_args(module, BUGGY)),
@@ -122,7 +126,7 @@ async fn repair(streaming: bool, module: &str) {
                 vec![call("done", "finish", json!({}))],
             ),
         ],
-        &format!("+module {module}\n+fn untouched ()->Int\n +return 91\n+end"),
+        &prelude,
     )
     .await;
     let before = untouched(&fixture.config, module).await;
@@ -335,12 +339,22 @@ async fn native_python_repair_all_cases_required_and_later_submission_replaces()
 
 #[tokio::test]
 async fn native_python_repair_http_and_completed_session_recovery() {
-    repair(false, "RepairHttp").await;
+    repair(false, "RepairHttp", false).await;
 }
 
 #[tokio::test]
 async fn native_python_repair_sse_and_completed_session_recovery() {
-    repair(true, "RepairSse").await;
+    repair(true, "RepairSse", false).await;
+}
+
+#[tokio::test]
+async fn native_python_scalar_repair_http_with_unrelated_restart() {
+    repair(false, "ScalarRepairHttp", true).await;
+}
+
+#[tokio::test]
+async fn native_python_scalar_repair_sse_with_unrelated_restart() {
+    repair(true, "ScalarRepairSse", true).await;
 }
 
 async fn denied_batch(streaming: bool, authored: bool, module: &str) {

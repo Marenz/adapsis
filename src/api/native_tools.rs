@@ -49,6 +49,7 @@ use crate::parser;
 mod authored;
 mod frontend;
 mod literals;
+mod scalar_entry;
 
 // ── Bounds ─────────────────────────────────────────────────────────────────
 

@@ -172,10 +172,10 @@ pub(super) fn print_source(
     program: &Program,
     target: &str,
 ) -> Result<String, String> {
-    // Full-state helper safety is categorical and independent of private
-    // signatures. The type-aware printer receives only authorized signatures.
+    // Printing executes no defaults. Both admission and the type-aware printer
+    // see only authorized metadata, independent of private signatures/defaults.
     let filtered = authorized_program(config, model, program);
-    literals::require_python_entry(&filtered, target)?;
+    literals::require_python_entry(&filtered, target, super::scalar_entry::EntryUse::Inspect)?;
     if filtered.get_function(target).is_some() {
         let source = crate::python_frontend::print_function(&filtered, target)
             .map_err(|error| error.to_string())?;
