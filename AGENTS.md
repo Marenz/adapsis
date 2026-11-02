@@ -175,12 +175,18 @@ response has no Content-Disposition header.
 
 ## Architecture
 
-- `src/task_foundation/` is a dormant crate-private identity/scope model, registered
-  only by a module declaration. Tagged UUIDv4 IDs and whole-snapshot validation
-  preserve task/run separation and same-workspace project links. It has no storage,
-  permissions, API/tools or SessionMeta wiring; validity never grants access.
-  Legacy plan/roadmap/agent vectors are not migrated or assigned a default workspace.
-  See `docs/task-foundation.md`; focused tests: `cargo test --release task_foundation`.
+- #120 task-domain logic lives in Python-frontend Adapsis modules, initially
+  `examples/tasks/domain.py`; the premature Rust foundation is removed from active
+  source, history retained. Pure scoped-record validation, transition proposals
+  and advisory resource conflicts grant no authority and provide no persistence or
+  executor. Task completion remains unreachable pending evidence/run integration.
+  `scenarios.py` is test-only; literal-only assertions run through the real frontend
+  and runtime with exact AST/reprint gates: `cargo test --release task_domain`.
+  Legacy vectors remain unchanged. See `docs/task-foundation.md` for provisional
+  states, supplied-string ID limitations and reusable primitive gaps.
+  Fixture records inside list literals need explicitly typed locals first: the
+  current Python printer lacks enclosing struct context for anonymous list-element
+  record ASTs (G3). Preserve exact roundtrip gates; do not relax them for fixtures.
 
 ```
 src/
