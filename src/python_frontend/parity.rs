@@ -2,6 +2,8 @@
 //! is reported as invalid, never counted as represented or silently omitted.
 use super::ast_equality as equality;
 mod scope;
+mod test_blocks;
+mod top_level;
 mod tests;
 
 use crate::{ast, parser, validator};
@@ -397,8 +399,20 @@ fn inventory_ops(
                     result,
                 );
             }
-            // Tests and runtime commands must remain visible: validator is a
-            // no-op for several of these, so Program equality cannot cover them.
+            // Stored tests are not part of the Program (the validator skips them),
+            // so they are compared as parser::TestCase values instead.
+            Op::Test(test) => report.record(
+                file,
+                &format!("{scope}#{index}"),
+                &operation_kind(op),
+                if invalid {
+                    fallback()
+                } else {
+                    test_blocks::check(program, scope, test)
+                },
+            ),
+            // Runtime commands must remain visible: validator is a no-op for
+            // several of these, so Program equality cannot cover them.
             _ => report.record(
                 file,
                 &format!("{scope}#{index}"),
@@ -446,10 +460,7 @@ fn check_function(program: &ast::Program, target: &str) -> Check {
     let module = target.rsplit_once('.').map_or("", |(module, _)| module);
     scope::check_function(program, module, original).map_err(|e| (Status::InvalidProgram, e))?;
     let Some((module, _)) = target.rsplit_once('.') else {
-        return Err((
-            Status::Unsupported,
-            "production Python function printer/lowerer has no top-level scope surface".into(),
-        ));
+        return top_level::check_function(program, target);
     };
     let text =
         super::print_function(program, target).map_err(|e| (Status::Unsupported, e.to_string()))?;
@@ -539,10 +550,7 @@ fn check_module(program: &ast::Program, target: &str) -> Check {
 
 fn check_type(program: &ast::Program, target: &str) -> Check {
     let Some((module, name)) = target.rsplit_once('.') else {
-        return Err((
-            Status::Unsupported,
-            "production Python lowerer has no top-level type scope surface".into(),
-        ));
+        return top_level::check_type(program, target);
     };
     let original = find_module(program, module)
         .and_then(|m| m.types.iter().find(|t| t.name() == name))
@@ -596,16 +604,15 @@ fn same_text(first: &str, second: &str) -> Check {
 }
 
 fn check_program(program: &ast::Program) -> Check {
-    if !program.functions.is_empty() || !program.types.is_empty() {
-        return Err((
-            Status::Unsupported,
-            "whole-program printer/lowerer lacks top-level scope".into(),
-        ));
-    }
-    if program.modules.is_empty() {
+    let has_top_level = !program.functions.is_empty() || !program.types.is_empty();
+    if !has_top_level && program.modules.is_empty() {
         return Err((Status::Unsupported, "no represented declarations".into()));
     }
     let mut rebuilt_program = ast::Program::default();
+    let (top_types, top_functions, top_text) = top_level::lower_all(program)?;
+    // Order matters only for validation: module bodies may use top-level types, and a
+    // top-level function may call module functions qualified.
+    build_into(&mut rebuilt_program, &top_types).map_err(|e| (Status::Unsupported, e))?;
     let mut texts = Vec::new();
     for module in &program.modules {
         check_module(program, &module.name)?;
@@ -617,6 +624,7 @@ fn check_program(program: &ast::Program) -> Check {
             .map_err(|e| (Status::Unsupported, e))?;
         texts.push(text);
     }
+    build_into(&mut rebuilt_program, &top_functions).map_err(|e| (Status::Unsupported, e))?;
     if !equality::program(program, &rebuilt_program) {
         return Err((Status::AstMismatch, "aggregate program changed".into()));
     }
@@ -624,6 +632,9 @@ fn check_program(program: &ast::Program) -> Check {
         let second = super::print_module(&rebuilt_program, &module.name)
             .map_err(|e| (Status::Unsupported, e.to_string()))?;
         same_text(&text, &second)?;
+    }
+    if has_top_level {
+        same_text(&top_text, &top_level::print_all(&rebuilt_program)?)?;
     }
     Ok(())
 }

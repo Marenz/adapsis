@@ -4,6 +4,11 @@
 Adapsis is an AI-native programming language and live agentic environment. Programs are built incrementally through validated mutations. The AI writes Adapsis code, gets immediate feedback, and iterates. The system can modify its own runtime via `!opencode`.
 
 ## Development baseline (2026-10-25 cleanup)
+- Release worktree integration (2026-11-02): `release/2026-11-01` combines the
+  deployed `1ed6424` line (#87/#88, TUI, native opt-in) with exact main checkpoint
+  `108e4dc` (G2/#114/G1/#112/#116). See ROADMAP.md's top release section for merge
+  state, worker ownership and measured gates; historical branch guidance below
+  does not authorize switching this release worktree or touching the main checkout.
 - Started on `work/issue-42` at `22d93d6`; the consolidated, sanitized upstream
   baseline is `origin/master` at `6667139`. Continue on `work/native-tools`.
 - Old feature branches already have their functionality integrated upstream
@@ -124,6 +129,30 @@ POST /api/sessions/:id/eval — eval in a specific session
 POST /api/sessions/:id/mutate — mutate in a specific session
 ```
 
+**Task status is redacted by construction (#112).** `WaitReason`'s `Display`
+(`coroutine/task_status.rs`) is the only rendering used by `/api/tasks`, `?tasks`,
+`query_tasks`, `?inspect task N` and the snapshot `wait_reason`. HTTP operations show
+`scheme://host[:port]` only (`<invalid url>` when unparsable or non-http), file/shell/takeover
+operations show the operation name, and `Completed`/`Failed` show `done`/`failed` with no
+payload. The stored values stay intact (callback acknowledgement in `main.rs` reads them), so
+never print a `WaitReason` payload directly. Out of scope and tracked separately: task locals
+in `?inspect task N` (#115) is out of scope and tracked separately.
+
+**HTTP builtin errors never contain the request URL (#116).** reqwest appends
+` for url (<url>)` to its `Display`, which carries bot tokens, userinfo and query secrets, so
+every HTTP builtin (`http_get`, `http_post`, `http_post_binary`/`http_get_binary`,
+`http_upload`, `http_upload_bytes`, the upload response stream) renders transport failures
+through `task_status::transport_error`: kind text, a class from reqwest's predicates
+(`timed out` / `connection failed` / `response decode failed` / `redirect failed`) and the
+host-only target, e.g. `error sending request: connection failed (http://127.0.0.1:34567)`;
+`{:#}` appends the URL-free source chain. `http_request` (`http_policy.rs`) names the host only
+too, and no longer echoes an invalid or non-http URL (a scheme-less `bot123:TOKEN` parses with
+the scheme `bot123`, so even the scheme is not printed). **Observable change:** the old
+`error sending request for url (...)` text and `http_request GET <url> failed` are gone; nothing
+in the repository, fixtures or library modules matched on them. Not changed: `http_post_binary`
+falls back to the last URL path segment (query included) as the attachment name when the
+response has no Content-Disposition header.
+
 ## Architecture
 ```
 src/
@@ -186,6 +215,27 @@ Function evaluation goes through up to three tiers (fastest first):
     or a cached decision across Program revisions. Unknown/builtin-only awaits
     retain existing behavior. `io_performed` and post-effect replay guards stay
     unchanged; never reset them to recover from a partially executed user await.
+  - `vm/field_admission.rs` (#114) refuses, BEFORE execution, any function whose
+    reachable graph contains a `FieldAccess` whose base is not statically proven to
+    be a `Value::Struct`. The VM's `GetField` reads structs only, while the tree also
+    gives `.len`/`.is_empty` (String/List), `.is_ok`/`.is_err`/`.unwrap`/`.error`/
+    `.unwrap_err` (Result) and transparent `Ok(struct).field` meaning; after IO the
+    async path cannot fall back, so this has to be decided at compile time. Same
+    iterative traversal and tree `get_function` lookup as `await_admission` (shares its
+    `Work`/`statement_work`/`expression_work`). Proof = declared `Struct` parameters
+    and `+each` bindings, `+let` of a declared Struct whose VALUE is proven, struct
+    literals, plain user calls returning a declared non-Result Struct, and chained
+    fields declared Struct with a UNIQUE declaration. NEVER proven: any `+call`/
+    `+spawn`/`+await` binding (VM keeps `Ok` where the tree unwraps, #82 viaok),
+    match captures (they poison same-named bindings), shared vars, builtin calls.
+    Parameters are only sound because (a) every in-graph call site must pass a proven
+    struct to a Struct-typed parameter and (b) `check_arguments` (in `execute_cached`)
+    shape-checks the ROOT call's entry arguments (`!eval f p=Ok({..})` reaches a Struct
+    parameter otherwise). Conservative by design: it may send a struct-only function to
+    the tree, never admits an unproven base. VM `GetField` and the JIT are unchanged.
+    Blast radius on `examples/*.ax` (99 functions): VM-compilable 95 -> 52 (44 more go
+    to the tree; `vm/blast_tests.rs` prints counts and asserts no function with only
+    ordinary field names is refused); parity library unchanged (161 functions, 107).
    - Dedicated `Value::Ok`/`Value::Err` matching is handled by
      `vm/result_match.rs` (#93): push the inner value/error String before the
      match Bool so the existing reverse-order binding stores consume it correctly.
@@ -317,9 +367,16 @@ gateway resolves via `model_aliases` or `virtual_models`.
   a new model ID directly (`POST /v1/chat/completions` with
   `{"model":"...","messages":[...],"max_tokens":10}`) before putting it first in
   a chain — the gateway silently advances past a 404 target to the next one.
-- **`deepinfra/zai-org/GLM-5.2` returns 402** on every request (no credit). It
-  used to be `dev-bot`'s *first* target, so every call burned a round trip
-  before falling through — now demoted to the tail. The `openai` provider also
+- **`deepinfra/zai-org/GLM-5.2` returned 402** on every request (no credit) as of
+  2026-07-27. It used to be `dev-bot`'s *first* target, so every call burned a
+  round trip before falling through — now demoted to the tail. DeepInfra credit
+  is intermittent: it worked on 2026-11-01 evening and returned 402 ("positive
+  balance required") again by 2026-11-02 ~02:30. The here-gateway alias
+  `deepseek-v4-flash` was pointed at `deepinfra/deepseek-ai/DeepSeek-V4-Flash` and
+  then rolled back to `deepseek/deepseek-v4-flash` (DeepSeek's own balance is also
+  low). **A provider balance running out silently breaks a bot whose `--model` is an
+  alias**: re-test the alias target (`POST /v1/chat/completions`, `max_tokens` ~50)
+  whenever replies stop. The `openai` provider also
   401s on `/models` (`OPENAI_API_KEY` stale), but that's cosmetic: `chatgpt/*`
   routes through the Codex OAuth provider, not `openai`.
 - **A hung gateway is usually a stale `*-auth.json.lock`, not broken auth.**
@@ -636,6 +693,40 @@ replaces that branch with one composer.
   compares exact ASTs ignoring only typed NodeId fields, and checks second-print
   byte identity. Do not count a fixture as covered merely because a function
   printer passed; unqualified call normalization is an AST difference.
+  Stored module `+test` blocks are compared as `parser::TestCase` values (the validator
+  never stores tests in the Program) through the harness-only `tests_print.rs` inverse of
+  `tests_lower`: print, lower, Debug-equal per case, second print byte-identical, with the
+  session's bare-name target rule (session.rs:636-641) required to name the same function
+  as the module-qualified lowering. The Python test-data policy is unchanged (no records,
+  variants, calls, Result inputs), top-level blocks use the module-less surface below, and
+  `success()` is untouched. Module-less TYPES (A1) have a
+  `#[cfg(test)]`-only surface with the real empty owner (`top_level.rs`,
+  `print_toplevel_type`): unwrapped `Operation::Type`s, type-vs-module and type-vs-variant
+  collisions refused, shared/lifecycle/route/source not part of it. A2 adds module-less
+  functions to the same surface (`lower_toplevel`, `print_toplevel_function`): BARE
+  signature keys for top-level functions only, so a bare call resolves exactly as the
+  runtime's top-level-first `Program::get_function`; module functions stay reachable only
+  qualified and a bare module callee is refused. `expressions.rs::call` classifies a bare
+  name with a signature as a user call (`local_user`) and builds the resolved name with
+  `types::owned_name`; do not return to `resolved.contains('.')`, which misclassifies owner
+  "". The printer prints a bare user call only at owner "" for a real `program.functions`
+  entry. It has no authority model and must never be exposed to native tools. Current
+  strict counts: 324 verified / 58 invalid / 191 unsupported (54 files, 573 entries). G2
+  allows `input` as a parameter/local/capture/value/field-base name ONLY
+  (`forbidden_binding`); as a callee, function, type, member, shared, annotation or attribute
+  name it stays forbidden. A3
+  verifies whole programs (top-level types/functions printed as one submission, rebuilt
+  between types and modules, `equality::program`) and B2 module-less stored tests (the
+  lowered target must equal the runtime string `get_function` resolves; module blocks keep
+  the #110 session rule). The test printer refuses negative numeric CONSTANT nodes (#111,
+  keyword shorthand only; `Unary Neg` spellings are exact). The
+  remaining top-level function blockers are G3 anonymous struct literals, G4 json_get
+  typing, G5 shared `Some`, and G7 implicit Ok wrap in `[fail]` Result returns (owner
+  decisions). G1 is done (`pseudo_fields.rs`): `.len`/`.is_empty` on str/list and
+  `.is_ok`/`.is_err`/`.unwrap` on a Result lower as PROPERTIES to the same `FieldAccess`
+  AST, only for a non-struct base (a struct field of the same name wins); Map/Set `.len`,
+  Result `.len`, `error`/`unwrap_err`/`is_some`/`is_none` stay refused. The text is not
+  runnable CPython. `vm/field_admission.rs` (#114) sends these functions to the tree.
   #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed
   JIT immutable normalization slice shares one emitter across AND/OR, NOT and
   Check/Branch/While. Local/rebound condition dependencies conservatively refuse
@@ -684,8 +775,14 @@ replaces that branch with one composer.
   token_path, allowed_path, startup, route) are ported in slice D1: exact module doc,
   startup (qualification + effect spelling only, no semantic repair; the token only as
   BYTE length), and the webhook route verified through a dispatch replica AND the real
-  HTTP layer (200 "{}" + spawn; no header/secret access, #108). Original stored tests
-  remain pending (D2) and #86 is not complete.
+  HTTP layer (200 "{}" + spawn; no header/secret access, #108). The 61 original
+  TelegramBot stored cases each have one manifest disposition (D2): 41 carried verbatim
+  (frozen/corrected .ax/Python Debug-equal), 2 carried in the .ax only (Result literals;
+  Python literal policy unchanged), 1 covered by a named default-state test, 14 redacted
+  and unrecoverable (never recovered from non-fixture sources), 3 obsolete by ledgered
+  repair. TgFormat's 57 stored cases (D3) are dispositioned the same way: 39 carried,
+  17 carried in the .ax only (calls in test data), 1 redacted and unrecoverable. No port
+  inventory remains pending and #86 is not complete.
   Media fixtures add file-path/error
   helpers and three attachment handlers, using actual Attachment annotations.
   The NEW test-only PortMediaDriver is excluded from original-function inventory

@@ -113,3 +113,69 @@
 +fn sample_pre_join ()->String
   +return concat(TgFormat.pre_wrap(concat("a", "\n", "b")), " || xx")
 +doc "Expected parts_preview output for sample_pre at limit 5."
++test escape_html
+  +with text="a < b & c > d" -> expect "a &lt; b &amp; c &gt; d"
+  +with text="<script>alert(1)</script>" -> expect "&lt;script&gt;alert(1)&lt;/script&gt;"
+  +with text="plain text" -> expect "plain text"
++test apply_inline
+  +with s="**b**" -> expect "<b>b</b>"
+  +with s="__b__" -> expect "<b>b</b>"
+  +with s="*i*" -> expect "<i>i</i>"
+  +with s="_i_" -> expect "<i>i</i>"
+  +with s="~~s~~" -> expect "<s>s</s>"
+  +with s="||sp||" -> expect "<tg-spoiler>sp</tg-spoiler>"
+  +with s="[lbl](http://x.y)" -> expect "<a href=\"http://x.y\">lbl</a>"
+  +with s="hi _x_ y" -> expect "hi <i>x</i> y"
++test code_segments
+  +with {parts: list("a"), i: 0, acc: ""} -> expect "a"
+  +with {parts: list("a", "b"), i: 0, acc: ""} -> expect concat("a", code_wrap("b"))
+  +with {parts: list("a", "b", "c"), i: 0, acc: ""} -> expect concat("a", code_wrap("b"), "c")
++test inline_code
+  +with s="`c`" -> expect code_wrap("c")
+  +with s="a `c` b" -> expect concat("a ", code_wrap("c"), " b")
+  +with s="`**x**`" -> expect code_wrap("**x**")
+  +with s="no code here" -> expect "no code here"
++test convert_line
+  +with line="# H" -> expect "<b>H</b>"
+  +with line="## H" -> expect "<b>H</b>"
+  +with line="### H" -> expect "<b>H</b>"
+  +with line="&gt; q" -> expect "<blockquote>q</blockquote>"
+  +with line="&gt;" -> expect "<blockquote></blockquote>"
+  +with line="- i" -> expect "• i"
+  +with line="* i" -> expect "• i"
+  +with line="plain" -> expect "plain"
+  +with line="`c`" -> expect code_wrap("c")
++test convert_lines
+  +with {lines: list("a", "b"), i: 0, in_pre: false, buf: "", acc: list()} -> expect list("a", "b")
+  +with {lines: list("```", "x", "```"), i: 0, in_pre: false, buf: "", acc: list()} -> expect list(pre_wrap("x"))
+  +with {lines: list("a", "```", "x"), i: 0, in_pre: false, buf: "", acc: list()} -> expect list("a", pre_wrap("x"))
++test markdown_to_html
+  +with text="**bold**" -> expect "<b>bold</b>"
+  +with text="__bold__" -> expect "<b>bold</b>"
+  +with text="*ital*" -> expect "<i>ital</i>"
+  +with text="_ital_" -> expect "<i>ital</i>"
+  +with text="~~gone~~" -> expect "<s>gone</s>"
+  +with text="`code`" -> expect code_wrap("code")
+  +with text="# Title" -> expect "<b>Title</b>"
+  +with text="## Title" -> expect "<b>Title</b>"
+  +with text="### Title" -> expect "<b>Title</b>"
+  +with text="- item" -> expect "• item"
+  +with text="* item" -> expect "• item"
+  +with text="> quoted" -> expect "<blockquote>quoted</blockquote>"
+  +with text="a < b & c" -> expect "a &lt; b &amp; c"
+  +with text="<script>x</script>" -> expect "&lt;script&gt;x&lt;/script&gt;"
+  +with text="[lbl](http://x.y)" -> expect "<a href=\"http://x.y\">lbl</a>"
+  +with text="**hi** _x_ `y`" -> expect concat("<b>hi</b> <i>x</i> ", code_wrap("y"))
+  +with text="```\n**not bold**\n```" -> expect pre_wrap("**not bold**")
+  +with text="`**x**`" -> expect code_wrap("**x**")
++test split_parts
+  +with {lines: list("a", "b"), i: 0, part: "", depth: 0, limit: 1, acc: list()} -> expect list("a", "b")
+  +with {lines: list("solo"), i: 0, part: "", depth: 0, limit: 2, acc: list()} -> expect list("solo")
++test split_for_telegram
+  +with {html: sample_lines(), limit: 2} -> expect list("aaa", "bbb", "ccc")
+  +with html="solo" limit=2 -> expect list("solo")
++test parts_preview
+  +with {html: sample_lines(), limit: 7} -> expect sample_join7()
+  +with {html: sample_lines(), limit: 2} -> expect sample_join2()
+  +with {html: sample_lines(), limit: 100} -> expect sample_lines()
+  +with {html: sample_pre(), limit: 5} -> expect sample_pre_join()

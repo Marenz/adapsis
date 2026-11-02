@@ -52,6 +52,18 @@ pub fn lower_tests(source: &str, module: &str) -> Result<LoweredSource, Diagnost
     if !super::identifier(module) {
         return Err(cx.error(0, "test module must be a simple identifier"));
     }
+    lower_tests_in(&cx)
+}
+
+/// Test-only: MODULE-LESS stored tests (owner ""). A bare target stays bare, exactly the
+/// string the runtime resolves through `Program::get_function`; a dotted target is kept.
+/// Same no-authority-model caveat as `top_level.rs`.
+#[cfg(test)]
+pub(crate) fn lower_tests_toplevel(source: &str) -> Result<LoweredSource, Diagnostic> {
+    lower_tests_in(&Context { source, module: "" })
+}
+
+fn lower_tests_in(cx: &Context<'_>) -> Result<LoweredSource, Diagnostic> {
     let suite = cx.parse()?;
     let mut operations = Vec::new();
     let mut source_map = Vec::new();
@@ -224,11 +236,7 @@ fn matcher_assertion(
 
 fn qualify(cx: &Context<'_>, call: &py::ExprCall) -> Result<String, Diagnostic> {
     let name = direct_name(cx, &call.func, &HashMap::new())?;
-    Ok(if name.contains('.') {
-        name
-    } else {
-        format!("{}.{}", cx.module, name)
-    })
+    Ok(super::types::owned_name(cx.module, &name))
 }
 
 /// `assert f(x) == Err("msg")` → `ErrContaining`; `assert f(x) == Err(label)` →

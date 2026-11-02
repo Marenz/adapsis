@@ -18,6 +18,9 @@ use std::sync::Arc;
 mod result_match;
 mod equality;
 mod await_admission;
+mod field_admission;
+#[cfg(test)]
+mod blast_tests;
 
 /// A single bytecode instruction.
 #[derive(Debug, Clone)]
@@ -190,6 +193,9 @@ pub struct CompiledFunction {
     /// Parameter names in declaration order (for binding call arguments, debug).
     #[allow(dead_code)]
     pub param_names: Vec<String>,
+    /// Which parameters are declared `Struct`. The field-access proof (#114) trusts
+    /// these declarations, so the entry guard requires a `Value::Struct` for each.
+    pub struct_params: Vec<bool>,
     /// All local variable names in slot order (for debug/inspect).
     #[allow(dead_code)]
     pub local_names: Vec<String>,
@@ -214,6 +220,7 @@ pub fn compile_function(
     program: &ast::Program,
 ) -> Result<CompiledFunction> {
     await_admission::check(func, program)?;
+    field_admission::check(func, program)?;
     let mut compiler = Compiler::new(program);
 
     // Allocate parameter slots first (slot 0..N-1)
@@ -234,6 +241,11 @@ pub fn compile_function(
         bytecode: Arc::new(compiler.bytecode),
         local_count: compiler.local_count,
         param_names: func.params.iter().map(|p| p.name.clone()).collect(),
+        struct_params: func
+            .params
+            .iter()
+            .map(|p| matches!(p.ty, ast::Type::Struct(_)))
+            .collect(),
         local_names: compiler.local_names.clone(),
         interner: compiler.interner,
     })
@@ -771,6 +783,8 @@ fn execute_cached(
     program: &ast::Program,
     cache: &mut CompileCache,
 ) -> Result<VmResult> {
+    // Before any instruction (and so before any IO): see `field_admission`.
+    field_admission::check_arguments(compiled, &args)?;
     let mut state = VmState {
         function_name: compiled.name.clone(),
         ip: 0,

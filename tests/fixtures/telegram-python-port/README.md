@@ -28,11 +28,11 @@ per-function transformation ledger, implemented and pending inventories.
   ignoring only typed NodeIds. Printing/re-lowering and second-print identity
   are checked. Direct-VM pure functions retain paired assertions; shared-state,
   IO and new-entry functions have separately enforced named normal-dispatch tests.
-- TgFormat's module doc is now included unchanged. TelegramBot's module doc,
-  remaining shared state, lifecycle/routes and original tests remain **pending**, as do
-  TgFormat's original stored tests.
-  Paired Python tests are newly authored literal cases; redacted original test
-  expectations are not reinterpreted. The selected TelegramBot declaration order
+- TgFormat's module doc is now included unchanged. TelegramBot's module doc, all
+  shared state, startup, route and stored-test dispositions are ported (slices D1/D2).
+  TgFormat's original stored tests are dispositioned too (slice D3).
+  Paired Python tests are newly authored literal cases plus the carried original
+  cases; redacted original test expectations are not reinterpreted. The selected TelegramBot declaration order
   is intentionally different and recorded. There are no placeholder functions.
 - The #91 voice repair is explicitly authored in this partial fixture; the
   malformed frozen function is not treated as an equivalent source program.
@@ -44,15 +44,15 @@ per-function transformation ledger, implemented and pending inventories.
 cargo test --release telegram_port -- --nocapture
 ```
 
-This focused command currently has **66 passing tests**, including the original
+This focused command currently has **72 passing tests**, including the original
 presence gate (#105) without changed expectations. No failure allowlist or
 fallback execution counts as a direct-VM pass. The separate frozen-corpus parity
 test still fails in the full suite; this partial port does not replace it.
 
 | Subset | Tree per origin | Direct VM per origin |
 |---|---:|---:|
-| TelegramBot originals + introduced validators (84 literal cases) | 84 pass | 84 pass |
-| TgFormat (38 literal cases) | 38 pass | 38 pass |
+| TelegramBot originals + introduced validators (125 literal cases) | 125 pass | 125 pass |
+| TgFormat (77 literal cases: 38 authored + 39 carried stored) | 77 pass | 77 pass |
 
 Both corrected `.ax` and Python-lowered origins have the same results. The first
 slice's VM failures (#98), preserved in historical manifest metadata, were cases
@@ -132,19 +132,22 @@ These independent blockers require separately reviewed runtime/source decisions.
 This slice does not change IO dispatch, reset replay guards, unwrap failures,
 relax permissions, or resolve #82/#94/#97.
 
-Current slice-D1 release gate: **1853 passed, 1 failed, 2 ignored; CLI 5/5**.
+Current slice-D3 release gate: **1859 passed, 1 failed, 2 ignored; CLI 5/5**.
 The remaining failure is the frozen-corpus parity gate. Targeted `telegram_port`:
-**66 passed**. This remains partial routing evidence, not deployment certification.
+**72 passed**. This remains partial routing evidence, not deployment certification.
 The earlier first-slice RED checkpoint remains in the manifest's explicitly
 historical field. Neither checkpoint is full functional-port/deployment acceptance.
 
 ## Remaining full port gate
 
 The manifest lists **no pending TelegramBot original functions** (42/42 are ported as corrected
-fixtures); TgFormat has no pending functions. **Slice D1 ported the module doc, `token_path`, `allowed_path`, `+startup` and the `+route`;
-the original stored tests remain pending (slice D2). #86 is not complete.**
+fixtures); TgFormat has no pending functions. **Slices D1 and D2 ported the module doc, `token_path`, `allowed_path`, `+startup`, the `+route`
+and a disposition for every original stored TelegramBot case. Every member of the frozen
+TelegramBot module is therefore ported as a corrected fixture or carries a ledgered disposition,
+and slice D3 did the same for TgFormat's 10 blocks / 57 cases (1 redacted). No pending
+inventory remains in the port manifest, but #86 is not complete.**
 Still required: full corrected-origin provenance/review and whole-module paired
-structural/idempotence gates and the stored-test surface. Raw-update text/photo/video/voice callable routing
+structural/idempotence gates. Raw-update text/photo/video/voice callable routing
 is covered by the bounded corrected-origin integration below; deployed callbacks,
 polling and lifecycle are not thereby certified.
 The partial tests here do not close #86, certify deployment, or imply the original
@@ -635,3 +638,85 @@ claiming an admin `from.id` is forwarded verbatim, because the handler never see
 The strict `python_parity` report is byte-identical to the slice C log (`files=54 entries=573
 verified=116 invalid=58 unsupported=399`, same group counts); nothing in the frozen corpus,
 the frontend or the runtime was edited. Full-gate log: `/tmp/opencode/full_gate_d1.log`.
+
+## Slice D2: original stored tests (23 blocks / 61 cases)
+
+Every one of the 61 frozen `+test` cases has **exactly one** disposition in the manifest
+(`stored_tests.dispositions`, 1-based case index per block), and
+`telegram_port_stored_tests_every_frozen_case_has_exactly_one_disposition` proves each one
+from the parsed fixtures by set equality, not counts:
+
+| Disposition | Cases | Meaning |
+|---|---:|---|
+| `carried` | 41 | identical `parser::TestCase` (Debug-equal input, expectation, matcher, after-checks) in the frozen blob, the corrected-origin `.ax` module body and the Python test file (`def test_stored_<function>_<frozen index>`, keyword arguments, function name `TelegramBot.<name>`) |
+| `carried_ax_only` | 2 | `transcription_upload_response`: `Ok(..)`/`Err(..)` inputs are not Python test-data literals (policy unchanged), so the cases live in the corrected `.ax` only |
+| `covered_elsewhere` | 1 | `is_allowed` (reads shared `allowed_user_ids`): the verbatim case runs against the declared default state on both origins |
+| `redacted` | 14 | the frozen blob replaced the input or expectation with `<redacted>` |
+| `obsolete` | 3 | `send_message`, `send_message_part`, `send_message_parts` were repaired in ledgered ways (return type and effects changed); named normal-async tests replace them |
+
+44 cases are carried or covered. **Redacted values are unrecoverable and were deliberately not
+recovered** from the live module library or any other non-fixture source: the gate derives
+redaction from the frozen case itself (both directions: a case is `redacted` iff it contains the
+marker), and the corrected `.ax` block of such a function holds exactly its visible cases
+(for example `parse_id_list` keeps cases 5 and 6 of 6; `is_admin_in` keeps none). The gate also
+fails if a stored Python def or an `.ax` block exists beyond the carried set, if a detail map
+does not match the table, if an obsolete function lacks a ledgered `semantic_repairs` entry or a
+replacement test, or if a named test does not exist in its source file. Mutation evidence: flipping one
+disposition, or editing one carried expectation in the corrected `.ax`, fails the gate.
+
+Execution: `telegram_port_stored_carried_cases_execute_on_both_origins_and_tiers` runs the 41
+carried cases (taken from the corrected `.ax` blocks) on both the `.ax` and the Python-lowered
+program, tree and direct VM, with the same runner as the paired pure gate, and checks that a
+corrupted expectation is reported. The Python defs also join the paired pure gate (125 literal
+cases per origin and tier). `..._is_allowed_default_state_covers_frozen_case` evaluates the frozen
+case with an empty runtime (declared defaults only) and shows the opposite expectation fails.
+`..._transcription_cases_run_ax_origin_and_trusted_results` runs the carried `.ax` cases through
+`eval_test_case` on the corrected origin and the same frozen cases, converted from the frozen
+`Ok(..)`/`Err(..)` expressions into Rust-built Result values, on both origins, tree and direct VM.
+The helper in the corrected origin differs from the frozen one by the `json_kind` guard
+(`transcript_kind_guard_v1`); both frozen expectations still hold.
+
+The loader requires a manifest `open_items` list once a module empties its pending inventories
+(the port stays partial: `full_port_complete` is false, the frozen module as a whole still fails the
+strict gate because of #91, and #99/#104/#106/#108/#109 are open). TgFormat's original stored tests
+(10 blocks / 57 cases, 1 redacted) were handled by slice D3 below. Strict `python_parity`
+lines are byte-identical to slice C (116/58/399). Full-gate log: `/tmp/opencode/full_gate_d2.log`.
+
+## Slice D3: TgFormat original stored tests (10 blocks / 57 cases)
+
+The D2 mechanism is parametrized by module (`Subject` in `stored_tests.rs`, manifest
+`modules[1].stored_tests`). Every one of the 57 frozen TgFormat cases has exactly one disposition,
+proved by `telegram_port_tgformat_stored_every_frozen_case_has_exactly_one_disposition`:
+
+| Disposition | Cases | Meaning |
+|---|---:|---|
+| `carried` | 39 | Debug-identical `parser::TestCase` in the frozen blob, the corrected `.ax` module body and the Python file (`def test_stored_<function>_<index>`, keyword arguments; Python list literals lower to the frozen `list(..)` calls) |
+| `carried_ax_only` | 17 | the frozen case calls module functions in its input or expectation (`code_wrap`, `pre_wrap`, `concat`, `sample_lines()`, `sample_join7()` ...); the Python test-data literal policy rejects calls and is unchanged, so these are carried verbatim in the corrected `.ax` only |
+| `redacted` | 1 | `markdown_to_html` case 6: unrecoverable, not recovered from any non-fixture source |
+| `covered_elsewhere`, `obsolete` | 0 | no TgFormat function was repaired (only qualified) |
+
+The 17 call-bearing cases deliberately have no Python twin (an evaluated twin computed with the
+corrected functions would not be independent evidence). Instead
+`..._cases_execute_verbatim_on_both_origins_and_tiers` runs all 56 visible cases from the
+corrected `.ax` blocks on the `.ax` and the Python-lowered programs, tree and direct VM. Probes
+before writing it: all 56 frozen cases evaluate on both programs (112 evaluations) with the bare
+frozen callee names resolving to the module functions, and `parts=['a']`/`lines=[..]`/`acc=[]`
+keyword arguments lower Debug-identical to the frozen `list(..)` inputs. The 39 stored Python defs join
+the TgFormat pure gate (77 cases per origin and tier, tree and direct VM). Mutation evidence (each
+run, then restored byte-for-byte): flipping the redacted disposition, editing a carried
+expectation in the corrected `.ax`, deleting a stored Python def, and corrupting a call-bearing
+expectation each fail the gate. TgFormat's `pending_non_function_surface` is now empty and an
+`open_items` list records that the frozen TgFormat module as a whole still fails the strict gate
+(unqualified local calls have no exact Python surface) and that #99 is unchanged. The strict
+`python_parity` lines are byte-identical to slice C (116/58/399). Full-gate log:
+`/tmp/opencode/full_gate_d3.log`.
+
+## Independent check by the strict-harness printer (B1)
+
+The 80 carried stored cases (41 TelegramBot + 39 TgFormat) were written by a script, so
+they are an independent oracle for the new harness-only test printer
+(`python_frontend/tests_print.rs`, used by `parity/test_blocks.rs`):
+`telegram_port_stored_printer_reproduces_carried_python_assertions_and_refuses_ax_only`
+requires the printer to reproduce every stored `assert` line byte-for-byte from the FROZEN
+case, and to refuse all 19 `carried_ax_only` cases (calls and Result inputs stay outside the
+Python test-data policy). This adds no manifest disposition and changes no fixture.

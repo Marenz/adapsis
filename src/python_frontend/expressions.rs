@@ -649,9 +649,18 @@ impl Expressions<'_, '_> {
     fn field_access(&self, a: &py::ExprAttribute) -> Result<(p::Expr, Ty), Diagnostic> {
         let (base, base_ty) = self.field_base(a.value.as_ref())?;
         if !matches!(base_ty, Ty::Named(_)) {
-            return Err(self
-                .cx
-                .at(a, "field access requires a struct-typed base name"));
+            return match super::pseudo_fields::pseudo_field_type(&base_ty, a.attr.as_str()) {
+                Some(ty) => Ok((
+                    p::Expr::FieldAccess {
+                        base: Box::new(base),
+                        field: a.attr.to_string(),
+                    },
+                    ty,
+                )),
+                None => Err(self
+                    .cx
+                    .at(a, super::pseudo_fields::refusal(&base_ty, a.attr.as_str()))),
+            };
         }
         let field_ty = super::types::struct_field_type(self.types, &base_ty, a.attr.as_str())
             .map_err(|message| self.cx.at(a, message))?
@@ -731,11 +740,18 @@ impl Expressions<'_, '_> {
             ));
         }
         let name = direct_name(self.cx, &c.func, self.env)?;
-        let resolved = if !name.contains('.') && self.signatures.contains_key(&name) {
-            format!("{}.{}", self.cx.module, name)
+        // A bare name with a signature is a call to a declaration owned by the current
+        // scope. `owned_name` leaves it bare at the top level (owner ""), where the runtime
+        // resolves a bare call to a top-level function first, and qualifies it in a module.
+        let local_user = !name.contains('.') && self.signatures.contains_key(&name);
+        let resolved = if local_user {
+            super::types::owned_name(self.cx.module, &name)
         } else {
             name.clone()
         };
+        if self.cx.module.is_empty() && name.contains('.') && !self.signatures.contains_key(&name) {
+            return Err(self.cx.at(c, format!("Python callable `{name}` has no supported signature in the supplied program; declare the target first")));
+        }
         if !name.contains('.')
             && !self.signatures.contains_key(&name)
             && !crate::builtins::is_builtin(&name)
@@ -752,7 +768,7 @@ impl Expressions<'_, '_> {
                     .strip_prefix(&format!("{}.", self.cx.module))
                     .and_then(|n| self.signatures.get(n))
             });
-        let target = if resolved.contains('.') {
+        let target = if local_user || resolved.contains('.') {
             Target::User(sig.map(|s| UserSignature {
                 effects: Effects::from_names(&s.effects),
                 returns_result: matches!(s.result, Ty::Result(_)),

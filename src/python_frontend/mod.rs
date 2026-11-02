@@ -12,9 +12,24 @@ mod runtime_arguments;
 mod call_sites;
 mod builtin_signatures;
 mod surface;
+mod pseudo_fields;
 mod shared_default;
 mod references;
 mod tests_lower;
+#[cfg(test)]
+mod top_level;
+#[cfg(test)]
+mod top_level_tests;
+#[cfg(test)]
+mod top_level_function_tests;
+#[cfg(test)]
+mod input_binding_tests;
+#[cfg(test)]
+mod pseudo_field_tests;
+#[cfg(test)]
+mod tests_print;
+#[cfg(test)]
+mod tests_print_tests;
 mod types;
 mod type_bindings;
 
@@ -66,6 +81,15 @@ pub(crate) use references::COLLISION as CONSTRUCTOR_ROLE_ERROR;
 pub(crate) use call_sites::runtime_shadowed;
 pub use type_bindings::check_native_type_bindings;
 pub use tests_lower::{lower_input, lower_tests};
+#[cfg(test)]
+pub(crate) use tests_lower::lower_tests_toplevel;
+/// Test-only: module-less (top-level) lowering/printing. See `top_level.rs`.
+#[cfg(test)]
+pub(crate) fn lower_toplevel(source: &str, program: &crate::ast::Program) -> Result<LoweredSource, Diagnostic> {
+    top_level::lower(source, program)
+}
+#[cfg(test)]
+pub(crate) use printer::{print_toplevel_function, print_toplevel_type};
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -140,7 +164,11 @@ impl<'a> Context<'a> {
         let offset = offset.min(self.source.len());
         let prefix = self.source.get(..offset).unwrap_or("");
         Diagnostic {
-            module: self.module.to_owned(),
+            module: if self.module.is_empty() {
+                "<top-level>".to_owned()
+            } else {
+                self.module.to_owned()
+            },
             line: prefix.bytes().filter(|b| *b == b'\n').count() + 1,
             column: prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
             message: message.into(),
@@ -215,6 +243,16 @@ fn identifier(name: &str) -> bool {
 
 fn reserved_positional_name(name: &str) -> bool {
     name.strip_prefix('_').is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit()))
+}
+
+/// Names that may not be BOUND (parameter, local, match capture, value or field-access
+/// base): the full `forbidden` list minus `input`. `input` is Python's stdin builtin, not
+/// an execution escape, and is a perfectly ordinary Adapsis identifier; as a value name
+/// it can only shadow the builtin, which the non-executing frontend never calls. It stays
+/// in `forbidden` for every other role: a callee (`input(x)` must never lower), function,
+/// type, member, shared-variable, annotation and attribute names.
+fn forbidden_binding(name: &str) -> bool {
+    name != "input" && forbidden(name)
 }
 
 fn forbidden(name: &str) -> bool {

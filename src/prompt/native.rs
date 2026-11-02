@@ -109,6 +109,11 @@ construction and field access); tagged unions with @union classes whose
 `Variant: tuple[...]` attributes list payload types (tuple[()] = no payload;
 `None` is written `None_`). Module and function docstrings become documentation.
 Cross-module calls use Module.function; no imports are needed or allowed.
+Runtime properties are written as attributes, not calls: `text.len` and
+`text.is_empty` (str or list[T]), `result.is_ok`, `result.is_err` and `result.unwrap`
+(Result[T]). A struct field of the same name takes precedence; other bases (int,
+Map, Set, Option) and other names (`error`, `is_some`) are refused. This is Adapsis
+syntax in Python clothing, not runnable CPython (`str` has no `.len`).
 Builtin-name and reserved-helper definitions are rejected.
 Named-type construction/references and same-named types across modules remain
 under parity review; follow admission errors. Inspection refuses bare user calls

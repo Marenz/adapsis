@@ -1,17 +1,10 @@
-use anyhow::{Context, Result, bail, ensure};
+use super::task_status::{host_only, strip_and_describe};
+use anyhow::{bail, ensure, Context, Result};
 
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_HEADERS_BYTES: usize = 64 * 1024;
 const MAX_URL_BYTES: usize = 8 * 1024;
-
-fn target_label(url: &str) -> String {
-    let mut target: String = url.chars().take(200).collect();
-    if target.len() < url.len() {
-        target.push_str("...");
-    }
-    target
-}
 
 fn request_method(method: &str) -> Result<reqwest::Method> {
     match method.trim().to_ascii_uppercase().as_str() {
@@ -40,12 +33,14 @@ pub(super) async fn perform(
         headers.len() <= MAX_HEADERS_BYTES,
         "http_request: headers exceed the {MAX_HEADERS_BYTES}-byte limit"
     );
-    let target = target_label(&url);
-    let parsed_url = reqwest::Url::parse(&url)
-        .with_context(|| format!("http_request: invalid URL `{target}`"))?;
+    // #116: errors name the host only; the URL (bot tokens, userinfo, query secrets) is
+    // never echoed, not even in the invalid-URL and wrong-scheme messages (a scheme-less
+    // `bot123:TOKEN` parses with scheme `bot123`, so the scheme is not echoed either).
+    let target = host_only(&url);
+    let parsed_url = reqwest::Url::parse(&url).context("http_request: invalid URL")?;
     ensure!(
         matches!(parsed_url.scheme(), "http" | "https"),
-        "http_request: URL `{target}` must use http or https"
+        "http_request: URL must use http or https"
     );
     let method = request_method(&method)?;
     let method_name = method.as_str().to_string();
@@ -83,7 +78,7 @@ pub(super) async fn perform(
     let mut response = request.send().await.map_err(|error| {
         anyhow::anyhow!(
             "http_request {method_name} {target} failed: {}",
-            error.without_url()
+            strip_and_describe(error).1
         )
     })?;
     let status = response.status();
@@ -97,7 +92,7 @@ pub(super) async fn perform(
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         anyhow::anyhow!(
             "http_request {method_name} {target} could not read the response: {}",
-            error.without_url()
+            strip_and_describe(error).1
         )
     })? {
         let remaining = limit.saturating_sub(bytes.len());

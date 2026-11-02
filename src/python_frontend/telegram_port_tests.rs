@@ -8,8 +8,8 @@ const PYTHON: &str =
 const TESTS: &str =
     include_str!("../../tests/fixtures/telegram-python-port/python/test_telegram_bot.py");
 const FROZEN: &str = include_str!("../../tests/fixtures/python-parity/library/TelegramBot.ax");
-const TELEGRAM_CASES: usize = 84;
-const FORMAT_CASES: usize = 38;
+const TELEGRAM_CASES: usize = 125;
+const FORMAT_CASES: usize = 77;
 mod io_contracts;
 mod intake;
 mod lifecycle;
@@ -19,6 +19,7 @@ mod media;
 mod qualification;
 mod routing;
 mod send_chain;
+mod stored_tests;
 mod wrapper_contract;
 mod voice;
 
@@ -124,6 +125,17 @@ fn run_paired(
     check_vm: bool,
 ) -> (usize, Vec<String>) {
     assert_paired_coverage(program, tests);
+    run_cases(program, tests, check_vm)
+}
+
+/// Execute pure test declarations (tree, plus direct VM when asked) WITHOUT the
+/// whole-module coverage assertion, so a subset such as the carried original stored
+/// cases can reuse exactly the same runner.
+fn run_cases(
+    program: &ast::Program,
+    tests: &[parser::Operation],
+    check_vm: bool,
+) -> (usize, Vec<String>) {
     let mut count = 0;
     let mut failures = Vec::new();
     for operation in tests {
@@ -316,12 +328,15 @@ fn telegram_port_provenance_inventory_is_explicit_and_partial() {
             .map(|x| x.as_str().unwrap())
             .collect::<BTreeSet<_>>();
         assert!(done.is_disjoint(&pending));
+        // A module may empty its pending inventories only by naming explicit open
+        // items: the port stays partial (full_port_complete is asserted false above).
         assert!(
             !pending.is_empty()
                 || !module["pending_non_function_surface"]
                     .as_array()
                     .unwrap()
                     .is_empty()
+                || !module["open_items"].as_array().unwrap_or(&vec![]).is_empty()
         );
         assert_eq!(actual, done.union(&pending).copied().collect());
         let origin_path = root

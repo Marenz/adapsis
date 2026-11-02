@@ -177,6 +177,95 @@ fn find_type_in_module(modules: &[a::Module], name: &str) -> Option<a::TypeDecl>
     None
 }
 
+/// Test-only: print a TOP-LEVEL type (owner "") as Python, then prove the text lowers
+/// back, through the module-less surface, to an identical declaration. Only
+/// `program.types` is consulted: a module type with the same bare name is a
+/// different declaration with a different owner and is never picked.
+#[cfg(test)]
+pub(crate) fn print_toplevel_type(program: &a::Program, name: &str) -> Result<String, Diagnostic> {
+    let error = |message: String| Diagnostic {
+        module: "<top-level>".into(),
+        line: 1,
+        column: 1,
+        message: format!(
+            "cannot print top-level type {name} as Python: {message}; inspect Adapsis source instead"
+        ),
+    };
+    let decl = program
+        .types
+        .iter()
+        .find(|t| t.name() == name)
+        .ok_or_else(|| error("top-level type not found".into()))?
+        .clone();
+    let printer = Printer::new(program);
+    let text = printer.type_decl(&decl).map_err(&error)?;
+    // Collision rules compare against the REST of the program; the validator rejects
+    // duplicates, so the type under test must not be present while re-applying it.
+    let mut rest = program.clone();
+    rest.types.retain(|t| t.name() != name);
+    let lowered = super::lower_toplevel(&text, &rest).map_err(|e| error(e.message))?;
+    let [p::Operation::Type(lowered_type)] = lowered.operations.as_slice() else {
+        return Err(error("internal top-level type roundtrip mismatch".into()));
+    };
+    let converted =
+        crate::validator::convert_type_decl(lowered_type).map_err(|e| error(e.to_string()))?;
+    if !super::ast_equality::ty(&decl, &converted) {
+        return Err(error(
+            "unsupported AST semantics (Python roundtrip changed the type)".into(),
+        ));
+    }
+    Ok(text)
+}
+
+/// Test-only: print a TOP-LEVEL function (owner "") as Python, then prove the text lowers
+/// back, through the module-less surface, to an identical declaration. Only
+/// `program.functions` is consulted: a module function with the same bare name is a
+/// different declaration and is never picked. Calls to other top-level functions print
+/// bare (the runtime resolves a bare name to a top-level function first); every other
+/// non-builtin call must already be module-qualified.
+#[cfg(test)]
+pub(crate) fn print_toplevel_function(program: &a::Program, name: &str) -> Result<String, Diagnostic> {
+    let error = |message: String| Diagnostic {
+        module: "<top-level>".into(),
+        line: 1,
+        column: 1,
+        message: format!(
+            "cannot print top-level function {name} as Python: {message}; inspect Adapsis source instead"
+        ),
+    };
+    if !super::identifier(name) {
+        return Err(error("unsupported target identifier".into()));
+    }
+    let function = program
+        .functions
+        .iter()
+        .find(|f| f.name == name)
+        .ok_or_else(|| error("top-level function not found".into()))?
+        .clone();
+    let text = Printer::new(program).function(&function).map_err(&error)?;
+    // The validator rejects duplicates, so the function under test must be absent while
+    // its re-lowering is applied.
+    let mut rest = program.clone();
+    rest.functions.retain(|f| f.name != name);
+    rest.rebuild_function_index();
+    let lowered = super::lower_toplevel(&text, &rest).map_err(|e| error(e.message))?;
+    let mut fresh = rest;
+    for operation in &lowered.operations {
+        crate::validator::apply_and_validate(&mut fresh, operation).map_err(|e| error(e.to_string()))?;
+    }
+    let rebuilt = fresh
+        .functions
+        .iter()
+        .find(|f| f.name == name)
+        .ok_or_else(|| error("function missing after Python re-lowering".into()))?;
+    if !super::ast_equality::function(&function, rebuilt) {
+        return Err(error(
+            "Python roundtrip is not exact (only typed NodeIds may differ; callee spelling, effects, documentation and tests must be preserved)".into(),
+        ));
+    }
+    Ok(text)
+}
+
 pub(super) fn collect_signatures(
     modules: &[a::Module],
     prefix: &str,
@@ -189,26 +278,37 @@ pub(super) fn collect_signatures(
             format!("{prefix}.{}", module.name)
         };
         for f in &module.functions {
-            if let (Ok(params), Ok(result), Ok(effects)) = (
-                f.params
-                    .iter()
-                    .map(|p| Ok::<_, String>(super::types::ast_type_to_ty_in(&p.ty, &path)))
-                    .collect::<Result<Vec<_>, _>>(),
-                Ok::<_, String>(super::types::ast_type_to_ty_in(&f.return_type, &path)),
-                effect_names(&f.effects),
-            ) {
-                out.insert(
-                    format!("{path}.{}", f.name),
-                    Signature {
-                        params,
-                        result,
-                        effects,
-                    },
-                );
+            if let Some(signature) = function_signature(f, &path) {
+                out.insert(format!("{path}.{}", f.name), signature);
             }
         }
         collect_signatures(&module.modules, &path, out);
     }
+}
+
+/// Test-only: top-level functions under their BARE names (owner ""), the form the
+/// runtime resolves first for an unqualified call.
+#[cfg(test)]
+pub(super) fn collect_toplevel_signatures(
+    functions: &[std::sync::Arc<a::FunctionDecl>],
+    out: &mut HashMap<String, Signature>,
+) {
+    for f in functions {
+        if let Some(signature) = function_signature(f, "") {
+            out.insert(f.name.clone(), signature);
+        }
+    }
+}
+
+fn function_signature(f: &a::FunctionDecl, owner: &str) -> Option<Signature> {
+    let params = f
+        .params
+        .iter()
+        .map(|p| super::types::ast_type_to_ty_in(&p.ty, owner))
+        .collect();
+    let result = super::types::ast_type_to_ty_in(&f.return_type, owner);
+    let effects = effect_names(&f.effects).ok()?;
+    Some(Signature { params, result, effects })
 }
 
 fn type_text(ty: &a::Type) -> Result<String, String> {
@@ -773,6 +873,18 @@ impl<'a> Printer<'a> {
         Ok(format!("{}({})", super::emit::name(bare)?, args.join(", ")))
     }
 
+    /// TEST-ONLY surface: a bare callee is printable only from top-level code (owner "")
+    /// and only when it names an actual top-level function, which the runtime resolves
+    /// before any module function (`Program::get_function`). Inside a module a bare
+    /// non-builtin call stays unprintable, exactly as before.
+    fn toplevel_callee(&self, name: &str) -> bool {
+        cfg!(test)
+            && self.current_module.is_empty()
+            && !name.contains('.')
+            && !crate::builtins::is_builtin(name)
+            && self.program.functions.iter().any(|f| f.name == name)
+    }
+
     fn call(&self, c: &a::CallExpr, hint: Option<&a::Type>) -> Result<String, String> {
         let name = super::emit::name(&c.callee)?;
         if !name.contains('.') {
@@ -802,28 +914,30 @@ impl<'a> Printer<'a> {
                 Ok(None) => {}
                 Err(message) => return Err(message),
             }
-            if !crate::builtins::is_builtin(&name) {
-                return Err(format!("unqualified user call {name} has no exact Python roundtrip surface; qualification could change runtime resolution"));
-            }
-            if shadowed(self.program, &name) {
-                return Err(format!(
-                    "builtin/helper {name} is shadowed by a runtime function or union variant"
-                ));
-            }
-            if constructor_builtin(&name) {
-                // Ok/Err/Some unwrap the enclosing Result/Option hint for their
-                // single payload, so `Ok(Point(x=1))` prints the struct name.
-                let inner = match (name.as_str(), hint) {
-                    ("Ok" | "Err", Some(a::Type::Result(inner))) => Some(inner.as_ref()),
-                    ("Some", Some(a::Type::Option(inner))) => Some(inner.as_ref()),
-                    _ => None,
-                };
-                let args = c
-                    .args
-                    .iter()
-                    .map(|e| self.expr(e, inner))
-                    .collect::<Result<Vec<_>, _>>()?;
-                return Ok(format!("{name}({})", args.join(", ")));
+            if !self.toplevel_callee(&name) {
+                if !crate::builtins::is_builtin(&name) {
+                    return Err(format!("unqualified user call {name} has no exact Python roundtrip surface; qualification could change runtime resolution"));
+                }
+                if shadowed(self.program, &name) {
+                    return Err(format!(
+                        "builtin/helper {name} is shadowed by a runtime function or union variant"
+                    ));
+                }
+                if constructor_builtin(&name) {
+                    // Ok/Err/Some unwrap the enclosing Result/Option hint for their
+                    // single payload, so `Ok(Point(x=1))` prints the struct name.
+                    let inner = match (name.as_str(), hint) {
+                        ("Ok" | "Err", Some(a::Type::Result(inner))) => Some(inner.as_ref()),
+                        ("Some", Some(a::Type::Option(inner))) => Some(inner.as_ref()),
+                        _ => None,
+                    };
+                    let args = c
+                        .args
+                        .iter()
+                        .map(|e| self.expr(e, inner))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(format!("{name}({})", args.join(", ")));
+                }
             }
         }
         let hints = self.param_type_hints(&name, c.args.len())?;
@@ -843,7 +957,14 @@ impl<'a> Printer<'a> {
     /// argument can be printed with the right constructor name.
     fn param_type_hints(&self, callee: &str, arg_count: usize) -> Result<Vec<Option<a::Type>>, String> {
         let mut hints = Vec::new();
-        if let Some((owner, _)) = callee.rsplit_once('.') {
+        if self.toplevel_callee(callee) {
+            if let Some(function) = self.program.functions.iter().find(|f| f.name == callee) {
+                hints = function.params.iter().map(|param| {
+                    let ty = super::types::ast_type_to_ty_in(&param.ty, "");
+                    super::types::resolve_ty(&self.types, &ty).map(|ty| Some(super::types::ty_to_ast(&ty)))
+                }).collect::<Result<Vec<_>, _>>()?;
+            }
+        } else if let Some((owner, _)) = callee.rsplit_once('.') {
             if let Some(function) = self.program.get_function(callee) {
                 hints = function.params.iter().map(|param| {
                     let ty = super::types::ast_type_to_ty_in(&param.ty, owner);

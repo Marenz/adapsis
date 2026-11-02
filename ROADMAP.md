@@ -1,5 +1,55 @@
 # AdapsisOS Roadmap
 
+## Release integration 2026-11-02 — `108e4dc`, pending manager review
+
+- Release writer: session `ses_e67e01ef9ffettWZDQAXWveOxc`, scoped exclusively to
+  `/home/marenz/Projects/adapsis-release`; manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`.
+- Starting release HEAD `3969170` contains deployed binary checkpoint `1ed6424`
+  plus deployment/gateway history notes. Exact incoming checkpoint: `108e4dc`.
+  `git merge --no-ff --no-commit 108e4dc` merged without conflicts. Merge remains
+  uncommitted; independent integration review, commit and deployment belong to manager.
+- Production delta since `1ed6424`: G2 permits `input` as a binding only; #114
+  rejects unproven VM field accesses before execution; G1 admits typed Python
+  pseudo-field properties; #112 structurally redacts task status (including Debug,
+  with raw Serialize removed); #116 strips request URLs from HTTP transport errors.
+  Module-less Python surfaces and stored-test printing remain test-only. The
+  strict parity harness now expects 324 verified / 58 invalid / 191 unsupported.
+- #87 turn-bound native memory tools, #88 private logging, TUI and #89 opt-in
+  native routing are retained. No native-default flip or capability-parity claim.
+  Historical pending/deployment sections below describe their own checkpoints;
+  this integration section is the current candidate status, not a deployment record.
+- Audit: auto-merges in AGENTS.md, ROADMAP.md, native tool test registration,
+  API tests, coroutine runtime and native prompt. No manual conflict resolution
+  or production integration fixes needed. Incoming runtime changes preserve
+  guarded logging and memory dispatch; pseudo-field lowering keeps exact AST
+  shape and relies on pre-execution tree fallback, never post-IO replay.
+- Measured offline gates on the merged candidate (2026-11-02):
+  - `cargo build --release`: passed, 34.53s, own `target/`.
+  - `cargo test --release --no-fail-fast`: 1986 passed / 1 failed / 2 ignored;
+    CLI integration 5 passed / 0 failed. ONLY failure: `python_parity`.
+    `PARITY_SUMMARY files=54 entries=573 verified=324 invalid=58 input_errors=0 unsupported=191 ast_mismatches=0 non_idempotent=0`.
+  - `cargo run --release -- memory-eval`: 6 cases, recall 1.000000; duplicate,
+    precedence, contradiction, ACL, citation, stale and omission counts all 0;
+    `passed=true`.
+  - All `examples/*.ax`: 28 files / 0 failures (counted, loop returns nonzero on
+    any failure). Python CLI basic: 2 passed / 0 failed; flow: 7 passed / 0 failed.
+  - `cargo test --release <filter>`: native_ 162, takeover_native 13,
+    task_status 9, http_error_text 5, field_admission 14 passed; no failures or
+    ignored tests in these filtered runs (CLI tests filtered out).
+  - `git diff --check` and `git diff --cached --check`: clean.
+  - Logs: `/tmp/opencode/release-108e4dc-{full,memory,native_,takeover_native,task_status,http_error_text,field_admission}.log`.
+- Artifact: `target/release/adapsis`, SHA-256
+  `7a91463243d68a2c12bdd40d0906e1c99dcaca5fd95cc51ebae4c241cca341f3`.
+  `/home` has 16 GB free (99% used) after gates.
+- Residuals: strict Python parity remains red; test-only module-less support is
+  not a new native capability. #114 trades VM coverage for safe tree fallback;
+  field/Result/JIT parity is not complete. Task locals (#115) and attachment
+  filename derivation remain outside the redaction fixes. No live provider or
+  bot delivery certification follows from offline tests. Existing historical
+  deployment and gateway notes below have not been re-verified by this worker.
+- Live model verification and deployment remain manager gates. This worker makes
+  no live calls, config edits, installation, service restart, commit or push.
+
 ## Deployed 2026-11-01 19:34 CET — here (Kronk), release/2026-11-01 `1ed6424`
 
 - Binary sha256 `1c3e5285925e0cc42bf98e1eb33e08d9c26c01cf17bdb087e36d9dc6db64f39e`
@@ -33,30 +83,208 @@ side: the first block is the #86 Python-parity line, the second the #87/#88/TUI 
 
 ## Recovery — Python parity #86 (current: 2026-10-28, red)
 
-### Current pending slice — D1 (module doc, shared paths, startup, route), baseline `9fa4da2`
+### Current pending slice — G1 (Python pseudo-field properties), baseline `5fb1ca8`
 
-- Fixtures/tests/docs only. Exact module doc (docstring), token_path/allowed_path (all 9
-  shared in frozen order), `+startup` (qualification of 2 sites + effect spelling
-  [io,mut,async]; NO semantic repair) and `+route POST /webhook/telegram` ported in ax+py.
-  Probes passed with no frontend change: `length(str)` keeps its spelling, shared assignment
-  and file awaits inside a lifecycle body lower fine.
-- Equality: whole-Program serialization covers doc/shared/startup/routes; pending_routes
-  (#[serde(skip)]) asserted explicitly; frozen-subset gate extended to doc, routes, shared and
-  startup (startup via a FunctionDecl wrapper + inverse qualification proof).
-- Startup tests through the production call shape (task-tracked handle, `__module_name`,
-  qualified name), intercepted FileRead/FileExists/Spawn, token never echoed (byte length
-  only). Route: dispatch replica + real HTTP via router_with_llm/oneshot (200 `{}` + spawn,
-  404 for GET/PUT/trailing slash/other paths, 500 without io_sender, #108 header pin).
-- Targeted 66/66; ONE full gate 1853 passed / strict parity 1 failed / 2 ignored; CLI 5/5.
-  Strict PARITY_SUMMARY/GROUPS lines byte-identical to slice C (116/58/399, 54 files, 573
-  entries). Log /tmp/opencode/full_gate_d1.log. AGENTS.md len/str note corrected.
-- Authored manifest/origin/Python blobs:
-  `35d7b341e83f2dae6b3e2efbb2fc548e2b650427`,
-  `7fec607188955ad6f06eeffeab99c05ce7bdd77c`,
-  `da4575bb24b570ba57988cbd95d71b8ee3ed6ecf`.
-  Frozen for review; no commit. Next: D2 (carry original stored tests; manifest-driven
-  61-case disposition test). Claims: all frozen module members except the stored tests are
-  ported; #86 not complete.
+- PRODUCTION frontend change (native mutate/test/evaluate/inspect), owner-approved choices:
+  names `len`, `is_empty`, `is_ok`, `is_err`, `unwrap` only; PROPERTY form lowering to the
+  same `FieldAccess` AST the `.ax` source has; type-gated (str/list for `len`/`is_empty`,
+  Result for `is_ok`/`is_err`/`unwrap`); a real struct field of the same name wins (the
+  pseudo-field table is only consulted for a non-struct base); everything else keeps a
+  refusal, with dedicated reasons for Map/Set and for `.len` on a Result. Documented as
+  NOT runnable CPython (README, native prompt, `pseudo_fields.rs`).
+- Code: new `python_frontend/pseudo_fields.rs` (type table + refusal text) and a
+  7-line branch in `expressions.rs::field_access`. The printer already emitted
+  `base.field`; the preflight `surface::attribute_access` already accepted these names
+  (it never type-gated), so no other production file changed. Execution: the VM's
+  `GetField` is untouched; #114's `field_admission` routes these functions to the tree.
+- Strict PARITY before -> after (54 files / 573 entries): verified 298 -> 324 (+26),
+  unsupported 217 -> 191, invalid 58, mismatches 0, non-idempotent 0. Entry diff: 21
+  `function` and 5 `program` Unsupported -> Verified, plus 12 entries that stay
+  Unsupported with a later reason; no Verified entry lost. Programs gained: expr_parser,
+  http_server, imperative, self_read, tokenizer. Identical to the earlier probe. Residual
+  top-level function blockers: G3 anonymous literal 4, Int/Str type-mismatch + comparison
+  (G4 json_get typing) 3, G7 implicit Ok wrap 7, G5 shared `Some` 2.
+- Evidence: 8 frontend tests (`pseudo_field_tests.rs`: AST equality with `.ax` for every
+  form + tree results, print/reprint identity, chains/conditions/loops, same-name struct
+  field precedence incl. VM compile, 17-case refusal matrix, native-entry agreement, VM
+  refusal + async-after-IO tree result), 3 native tests (`python_pseudo_field_tests.rs`:
+  mutate+test+evaluate+inspect, six refusals leaving the program unchanged, async
+  `.len` after an awaited read with one synthetic FileRead), 1 harness test. 19 mutations
+  (every table row, wrong result types, three leaks, both refusal texts, struct-field
+  precedence x2, field renaming, #114 admission disabled) all fail tests; each restored.
+
+### Accepted slice — G2 (`input` as a binding name), baseline `762de63`
+
+- PRODUCTION frontend change (native mutate/test/inspect, `adapsis test --language python`),
+  owner-approved. `mod.rs::forbidden_binding(name)` = `forbidden` minus `input`, used at
+  exactly five binding sites: parameters (`lower.rs::ordinary_args`), locals/loop targets
+  (`Lower::bind`), match captures, value names and field-access bases (`surface.rs`).
+  Every other role keeps full `forbidden`: callee (`direct_name`), function, type, member,
+  shared-variable, annotation and attribute names. `input` is Python's stdin builtin, not an
+  execution escape, and not an Adapsis builtin; the non-executing frontend can only shadow
+  it. The A3 test exemplar for "unprintable member" moved from `input` to `eval`.
+- Strict PARITY before -> after (54 files / 573 entries): verified 291 -> 298 (+7),
+  unsupported 224 -> 217, invalid 58, mismatches 0, non-idempotent 0. Entry diff: 30 entries
+  changed, no Verified entry lost. 7 `function` Unsupported -> Verified (adapsis_in_adapsis
+  parse_atom/parse_let/parse_return, expr_parser parse/calc/parse_atom, Peer.eval_payload);
+  23 stay Unsupported with a NEW next reason: 18 functions and 5 programs now stop on
+  pseudo-field access (G1, deferred behind #114). Identical to the earlier read-only probe.
+- Evidence: 7 frontend tests (`input_binding_tests.rs`: bindings at every site through the
+  free and the native entry, callable refusal bound/unbound, an existing `.ax` `+fn input`
+  never callable qualified or bare, function/type/member/shared/annotation/attribute
+  refusals, other escape names unchanged, `input=` test keyword, `.ax` print roundtrip),
+  2 native tests (`python_input_name_tests.rs`: mutate+test+evaluate+inspect with an `input`
+  parameter and local; five refusals leave the program unchanged), 1 harness test. 13
+  mutations (each of the 5 sites, exemption widened to `eval`, and exemption leaking into
+  each of callee/function/type/member/shared/annotation/attribute) each fail the intended
+  tests; files restored and verified.
+
+### Accepted slice — A3+B2 (whole programs + module-less stored tests), baseline `58b6999`
+
+- `#[cfg(test)]` / harness only; no runtime, validator, native-tool, fixture, `lower.rs`,
+  `expressions.rs`, `types.rs` or `printer.rs` change; `success()` untouched.
+- A3 `check_program`: top-level types + functions are printed as ONE module-less submission
+  (`parity/top_level.rs::print_all`: types in program order, then functions), lowered by
+  `lower_toplevel` against the program WITHOUT them, and rebuilt in the order top-level types
+  -> modules (unchanged `print_module`/`lower_module_with_program` path) -> top-level
+  functions. Then `equality::program` over the whole Program, the module reprints and the
+  top-level reprint must be byte-identical. Module-only programs are unchanged. Per-member
+  exactness is already enforced inside `print_toplevel_type/function`, so a failing member
+  surfaces its own reason as the program's reason.
+- B2 `parity/test_blocks.rs`: owner-"" blocks are exact BY CONSTRUCTION. The runtime runs
+  `+test name` against `name` verbatim (`Program::get_function`: top-level first, else the
+  first module), and the new test-only `tests_lower::lower_tests_toplevel` keeps a bare
+  target bare and a dotted target dotted (`qualify` now uses `types::owned_name`, identical
+  to the old `format!` for every module). The harness requires the target to exist
+  (InvalidProgram otherwise) and every lowered declaration to carry exactly the runtime
+  string (AstMismatch otherwise). Module-scoped blocks keep the session rule (#110).
+  `tests_lower.rs` is the one non-harness file touched (behavior-neutral refactor +
+  the cfg(test) entry). The Python test-data literal policy is unchanged.
+- #111: `tests_print::literal` refuses any NEGATIVE numeric constant node (`Int(<0)`,
+  sign-negative `Float`) with an explicit reason. The parser yields such a node only for
+  keyword shorthand (`+with a=-1`); `{a:-1}`, positional, list items and expectations are
+  `Unary Neg`, which Python's `-1` also lowers to. Without the refusal two corpus blocks
+  (`simple_syntax` #4, #5) are AstMismatch; with it they are Unsupported (#111).
+- Strict PARITY before -> after (same 54 files / 573 entries): verified 251 -> 291 (+40),
+  unsupported 264 -> 224, invalid 58, mismatches 0, non-idempotent 0. Entry-by-entry diff
+  (67 entries changed, none left Verified): 30 top-level `Test` Unsupported -> Verified,
+  10 `program` Unsupported -> Verified, 13 `Test` and 14 `program` stay Unsupported with a
+  concrete reason (test data outside the literal policy: `Some`, records, calls; `input`,
+  pseudo-field, anonymous-literal, `vars` blockers; unprintable module bare calls).
+- Evidence: 9 new unit/harness tests (6 in `parity/tests.rs`, 3 in
+  `tests_print_tests.rs`) plus 2 changed existing `parity/tests.rs` tests. 11 mutations (negative Int, negative Float, target existence,
+  target-string equality, module entry for owner "", `qualify`, top-level function rebuild,
+  top-level type rebuild, catalog keeping top-level functions, type ordering) each fail
+  the intended tests; files restored and verified. ONE surviving mutation, documented:
+  dropping the top-level REPRINT comparison in `check_program` is undetected because no
+  natural fixture produces a non-deterministic printer (the equivalent module check is
+  likewise covered only through `same_text` itself); `print_all` determinism across a
+  rebuild is asserted directly instead.
+
+### Accepted slice — A2 (module-less functions, owner ""), baseline `5057d8a`
+
+- `#[cfg(test)]` surface only; no authority model, never reachable from native tools or any
+  runtime path. `success()` untouched; frozen corpus untouched.
+- `top_level.rs::lower` now also accepts annotated `def`/`async def` (types and functions mix,
+  emitted in source order). Signatures: qualified `Module.f` keys for module functions
+  (unchanged `collect_signatures`) plus BARE keys for top-level functions only
+  (`collect_toplevel_signatures`, plus the submitted functions after a first pass, so
+  recursion, mutual recursion and forward references resolve). A bare callee that is not a
+  top-level function is refused ("unknown local callable"); module functions stay reachable
+  qualified only, even though `Program::get_function` would fall back to the first module.
+  An unresolvable qualified callee is refused at the top level (module behavior unchanged).
+- Only non-test-surface edit: `expressions.rs::call` now decides `Target::User` from
+  "bare name with a signature" (`local_user`) instead of `resolved.contains('.')`, and builds
+  `resolved` with `types::owned_name` (bare at owner ""; identical to the old
+  `Module.name` for every module, whose name is non-empty). Printer: a bare user call is
+  printable only at owner "" and only for a real `program.functions` entry
+  (`toplevel_callee`, `cfg!(test)`), and `param_type_hints` has the matching bare branch;
+  module printing keeps refusing every unqualified non-builtin call. `lower.rs` gained one
+  `#[cfg(test)]` fn (`toplevel_functions`); `printer.rs::collect_signatures` was refactored
+  through the shared `function_signature` helper (behavior-neutral).
+- Declaration collision rules (explicit messages): builtin/alias/IO builtin, frontend helper,
+  Python-reserved/forbidden names (existing `Definition::from_stmt`), `startup`/`shutdown`,
+  `@route`/`@source`, duplicate in the submission, existing top-level function, module name,
+  ANY union variant (existing or submitted) and ANY type name. Two unions sharing a variant
+  stay accepted; using it is reported at the use site ("ambiguous union variant").
+  Local bindings named like a top-level function are refused by the existing bind rule.
+- Harness `parity/top_level.rs::check_function`: print -> lower into the program WITHOUT the
+  function -> `equality::function` -> second print byte-identical -> second lowering equal.
+  `print_toplevel_function` picks `program.functions` only.
+- Strict PARITY before -> after (same 54 files / 573 entries): verified 207 -> 251 (+44),
+  unsupported 308 -> 264, invalid 58, mismatches 0, non-idempotent 0. 44 function entries
+  moved Unsupported -> Verified; the other 43 top-level function entries stay Unsupported
+  with concrete reasons instead of "no top-level scope surface": `input` parameter (G2) 24,
+  pseudo-field access (G1) 10, anonymous struct literal (G3) 4, json_get typing (G4) 3, shared
+  `Some` ambiguity (G5) 2. The probe predicted ~43 (44 measured; the cause of the
+  one-entry difference was not investigated).
+  Programs (A3) and top-level stored tests (B2) are untouched.
+- Evidence: 13 new unit tests (`top_level_function_tests.rs`: unwrapped ops, recursion on
+  tree and VM, mutual recursion + forward reference, call of an earlier submission, struct
+  literal argument hint through a bare callee, types+functions order, qualified/unknown
+  callees, a 15-case name-collision matrix plus duplicates/decorators/binding, shared
+  variants, effect/await rules for bare user calls, module regression: module-local bare
+  calls still qualified/refused and a module function still cannot print a bare call).
+  15 mutations (printer owner guard, top-level-function guard, hints, `Target::User`, resolved
+  qualification, dotted-callee guard, bare signatures, every collision rule, lifecycle,
+  decorators, duplicate, type catalog) each fail exactly the targeted test(s); every file
+  restored and verified.
+
+### Accepted slice — A1 (module-less type surface, owner ""), baseline `d1ae977`
+
+- `#[cfg(test)]` only; no runtime, validator, native-tool, fixture, `lower.rs`, `types.rs` or
+  `expressions.rs` change, parity.rs `success()` untouched. Only non-test source touched:
+  `Context::error` labels an empty module owner `<top-level>` (unreachable for modules,
+  whose names must be non-empty identifiers).
+- New `top_level.rs`: `lower_toplevel(source, &Program)` returns UNWRAPPED
+  `Operation::Type`s with `Context.module == ""`, which is the real catalog owner
+  (`owned_name("", n) == n`, `catalog_from_program` inserts `program.types` with owner "").
+  It refuses shared variables, functions (A2), docstrings, imports and statements with named
+  reasons. `print_toplevel_type` (printer.rs) picks `program.types` only (a module type with
+  the same bare name is a different owner) and proves the text re-lowers to an identical type.
+  Harness `parity/top_level.rs::check_type`: print -> lower into the program WITHOUT the type
+  (the validator's own duplicate rule stays in force) -> `equality::ty` -> second print
+  byte-identical -> second lowering equal.
+- Declaration-time TYPE collision rules (new, explicit messages): type vs module name; type
+  vs any union variant (existing top-level or module types, or submitted) and the symmetric
+  variant vs any type name. Existing member rules still apply (builtin/syntax/keyword/dunder
+  type names, duplicates). Two unions sharing a variant (`Some`) stay accepted: the ambiguity
+  is a use-site fact (A2). Replacement is not simulated: the validator rejects duplicate
+  top-level types.
+- Strict PARITY before -> after (same 54 files / 573 entries): verified 184 -> 207 (+23),
+  unsupported 331 -> 308 (-23), invalid 58, mismatches 0, non-idempotent 0. Only `type`
+  entries moved: Unsupported/type 24 -> 1, Verified/type 0 -> 23 (entry-by-entry diff:
+  exactly 24 entries changed, all `type`). Remaining: `adapsis_in_adapsis.Env` (member
+  `vars` is an unsafe member name, G6). Matches the sizing probe (+23) exactly.
+- The harness's pre-existing repeated-target rule already reports a module and a type
+  sharing a spelling in one file as Unsupported ("repeated declaration"); the lowering rule
+  is covered separately in unit tests.
+- Evidence: 7 unit tests (unwrapped ops; owner "" vs module owner; every type shape incl.
+  recursive, Option/None_, builtin-named variants roundtrips + identical reprint; 26-case
+  collision/rejection matrix incl. builtin, syntax, keyword, dunder, duplicate, module,
+  variant-vs-type both directions, shared/function/docstring/import/empty; legitimate
+  overlaps; unprintable member) + 1 harness test. Mutation checks (drop module rule, drop
+  variant rule, wrong owner) each fail tests; files restored byte-for-byte. Targeted
+  `python_` 308 passed + the expected strict-corpus failure; ONE full gate 1874 passed /
+  strict parity 1 failed / 2 ignored; CLI 5/5. Log /tmp/opencode/full_gate_a1.log.
+- `#110` is now referenced in the bare-test-target reason text (detail strings of 3 entries
+  changed, statuses and group counts unchanged).
+- Frozen for review; no commit. Next (approved): A2 (top-level functions), then A3+B2
+  (sign quirk #111: refuse negative numeric in keyword shorthand).
+
+### Accepted checkpoint `d1ae977` — B1 (module stored-test printer, strict 184/58/331)
+
+### Accepted checkpoint `2e1e018` — D3 (TgFormat stored tests: 39 carried, 17 ax-only, 1 redacted)
+
+### Accepted checkpoint `fae91e7` — D2 (TelegramBot original stored tests)
+
+- All 61 TelegramBot stored cases dispositioned (41 carried, 2 ax-only, 1 covered elsewhere,
+  14 redacted, 3 obsolete); manifest-driven gate with set equality.
+
+### Accepted checkpoint `a4ab092` — D1 (doc, shared paths, startup, route)
+
+- Exact module doc, all 9 shared in frozen order, startup (qualification + effect spelling,
+  no semantic repair), webhook route; real-HTTP route test; #108 pinned.
 
 ### Accepted checkpoint `9fa4da2` — polling slice C (poll_loop), 42/42 functions
 

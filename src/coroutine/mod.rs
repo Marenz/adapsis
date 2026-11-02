@@ -8,12 +8,12 @@
 //! using oneshot channels: the evaluator blocks on a channel receive, the
 //! runtime completes the IO and sends the result back.
 
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::{Result, bail};
-use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -26,11 +26,12 @@ async fn bounded_upload_response(response: reqwest::Response) -> Result<String> 
     use futures::StreamExt;
 
     let status = response.status();
+    let url = response.url().to_string();
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     let mut truncated = false;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(|e| task_status::transport_error(e, &url))?;
         let remaining = MAX_HTTP_UPLOAD_RESPONSE_BYTES.saturating_sub(body.len());
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
@@ -59,6 +60,11 @@ mod http_policy;
 #[cfg(test)]
 mod http_policy_tests;
 mod matching;
+mod task_status;
+#[cfg(test)]
+mod task_status_tests;
+#[cfg(test)]
+mod http_error_text_tests;
 pub use matching::pattern_matches;
 #[cfg(test)]
 mod scoped_tests;
@@ -71,7 +77,13 @@ pub type Handle = i64;
 pub type TaskId = i64;
 
 /// What a task is currently waiting on.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Neither `Debug` nor `Serialize` is derived (#112): both would print the raw payloads.
+/// `Debug` is the redacted `Display`; there is deliberately no serialization.
+// Payloads of the file/shell/takeover variants are kept for a future explicitly-named
+// internal accessor; no rendering reads them (#112), hence the dead-code allowance.
+#[allow(dead_code)]
+#[derive(Clone)]
 pub enum WaitReason {
     Running,
     TcpListen(u16),
@@ -94,6 +106,14 @@ pub enum WaitReason {
     Failed(String),
 }
 
+impl std::fmt::Debug for WaitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+/// Redacted by construction (#112): no variant prints its payload except non-sensitive
+/// numbers and `host:port`. See `task_status.rs`.
 impl std::fmt::Display for WaitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -103,25 +123,33 @@ impl std::fmt::Display for WaitReason {
             WaitReason::TcpRead(h) => write!(f, "tcp_read(h{h})"),
             WaitReason::TcpWrite(h) => write!(f, "tcp_write(h{h})"),
             WaitReason::TcpConnect(host, port) => write!(f, "tcp_connect({host}:{port})"),
-            WaitReason::FileRead(p) => write!(f, "file_read({p})"),
-            WaitReason::FileWrite(p) => write!(f, "file_write({p})"),
-            WaitReason::ShellExec(cmd) => write!(f, "shell({cmd})"),
+            WaitReason::FileRead(_) => write!(f, "file_read"),
+            WaitReason::FileWrite(_) => write!(f, "file_write"),
+            WaitReason::ShellExec(_) => write!(f, "shell"),
             WaitReason::Sleep(ms) => write!(f, "sleep({ms}ms)"),
             WaitReason::LlmCall => write!(f, "llm_call"),
             WaitReason::LlmAgent => write!(f, "llm_agent"),
-            WaitReason::LlmTakeover(ctx) => write!(f, "llm_takeover({ctx})"),
+            WaitReason::LlmTakeover(_) => write!(f, "llm_takeover"),
             WaitReason::StdinRead => write!(f, "stdin_read"),
-            WaitReason::HttpGet(url) => write!(f, "http_get({})", url.chars().take(50).collect::<String>()),
-            WaitReason::HttpPost(url) => write!(f, "http_post({})", url.chars().take(50).collect::<String>()),
-            WaitReason::HttpRequest(method, url) => write!(f, "http_request({} {})", method, url.chars().take(50).collect::<String>()),
-            WaitReason::Completed(v) => write!(f, "done: {}", v.chars().take(50).collect::<String>()),
-            WaitReason::Failed(e) => write!(f, "failed: {}", e.chars().take(50).collect::<String>()),
+            WaitReason::HttpGet(url) => write!(f, "http_get({})", task_status::host_only(url)),
+            WaitReason::HttpPost(url) => write!(f, "http_post({})", task_status::host_only(url)),
+            WaitReason::HttpRequest(method, url) => {
+                write!(f, "http_request({} {})", sanitize_method(method), task_status::host_only(url))
+            }
+            WaitReason::Completed(_) => write!(f, "done"),
+            WaitReason::Failed(_) => write!(f, "failed"),
         }
     }
 }
 
+/// An HTTP method token, or `?` when the caller supplied something else.
+fn sanitize_method(method: &str) -> &str {
+    const KNOWN: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+    KNOWN.iter().copied().find(|k| k.eq_ignore_ascii_case(method)).unwrap_or("?")
+}
+
 /// Info about a running or completed task.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TaskInfo {
     pub id: TaskId,
     pub function_name: String,
@@ -613,10 +641,10 @@ impl Runtime {
                         Ok(resp) => {
                             match resp.text().await {
                                 Ok(body) => { let _ = reply.send(Ok(body)); }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                                Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                             }
                         }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -644,10 +672,10 @@ impl Runtime {
                         Ok(resp) => {
                             match resp.text().await {
                                 Ok(body) => { let _ = reply.send(Ok(body)); }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                                Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                             }
                         }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -694,10 +722,10 @@ impl Runtime {
                                         Err(e) => { let _ = reply.send(Err(anyhow::anyhow!("attachment error: {e}"))); }
                                     }
                                 }
-                                Err(e) => { let _ = reply.send(Err(e.into())); }
+                                Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                             }
                         }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -740,7 +768,7 @@ impl Runtime {
                     }
                     match client.post(&url).multipart(form).send().await {
                         Ok(resp) => { let _ = reply.send(bounded_upload_response(resp).await); }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
@@ -761,7 +789,7 @@ impl Runtime {
                     }
                     match client.post(&url).multipart(form).send().await {
                         Ok(resp) => { let _ = reply.send(bounded_upload_response(resp).await); }
-                        Err(e) => { let _ = reply.send(Err(e.into())); }
+                        Err(e) => { let _ = reply.send(Err(task_status::transport_error(e, &url))); }
                     }
                 });
             }
