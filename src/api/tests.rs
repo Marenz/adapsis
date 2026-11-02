@@ -2315,3 +2315,104 @@ fn shared_vars_clone_is_isolated() {
         "fork must observe its own mutation"
     );
 }
+
+// ── #112: task status surfaces never print an operation argument ──────────
+
+fn secret_task_registry() -> crate::coroutine::TaskRegistry {
+    use crate::coroutine::{TaskInfo, WaitReason};
+    let tasks = [
+        (1, WaitReason::HttpGet("https://api.telegram.org/bot123456:SECRET-TOKEN_abc/getUpdates?offset=5".into())),
+        (2, WaitReason::FileRead("/home/u/SECRET_PATH".into())),
+        (3, WaitReason::ShellExec("curl --token SECRET_CMD".into())),
+        (4, WaitReason::Failed("error sending request for url (https://x/botSECRET_ERR)".into())),
+        (5, WaitReason::Completed("SECRET_RESULT".into())),
+        (6, WaitReason::Running),
+    ];
+    let map = tasks
+        .into_iter()
+        .map(|(id, status)| {
+            (id, TaskInfo { id, function_name: format!("Mod.task{id}"), status, started_at: "2026-01-01T00:00:00Z".into() })
+        })
+        .collect();
+    std::sync::Arc::new(std::sync::Mutex::new(map))
+}
+
+fn assert_no_secret(text: &str) {
+    for secret in ["bot123456", "SECRET", "getUpdates", "offset", "/home/u"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+}
+
+async fn http_json(router: axum::Router, method: &str, uri: &str, body: Option<serde_json::Value>) -> serde_json::Value {
+    let request = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(match body {
+            Some(body) => axum::body::Body::from(serde_json::to_string(&body).unwrap()),
+            None => axum::body::Body::empty(),
+        })
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 64).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn api_tasks_and_task_queries_redact_operation_arguments() {
+    let mut config = test_config();
+    config.task_registry = Some(secret_task_registry());
+    let snapshots: crate::coroutine::TaskSnapshotRegistry = Default::default();
+    config.snapshot_registry = Some(snapshots.clone());
+    let router = router_with_llm(config.clone());
+
+    let listing = http_json(router.clone(), "GET", "/api/tasks", None).await;
+    let rendered = serde_json::to_string(&listing).unwrap();
+    assert_no_secret(&rendered);
+    let by_id = |id: i64| listing["tasks"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
+    assert_eq!(by_id(1)["status"], "http_get(https://api.telegram.org)");
+    assert_eq!(by_id(1)["function"], "Mod.task1");
+    assert_eq!(by_id(1)["started_at"], "2026-01-01T00:00:00Z");
+    assert_eq!(by_id(2)["status"], "file_read");
+    assert_eq!(by_id(3)["status"], "shell");
+    assert_eq!(by_id(4)["status"], "failed");
+    assert_eq!(by_id(5)["status"], "done");
+    assert_eq!(by_id(6)["status"], "running");
+
+    // `?tasks` through POST /api/query (the surface LLM prompts and the UI read).
+    let tasks = http_json(router.clone(), "POST", "/api/query", Some(serde_json::json!({"query": "?tasks"}))).await;
+    let text = serde_json::to_string(&tasks).unwrap();
+    assert_no_secret(&text);
+    assert!(text.contains("task 1 [Mod.task1]") && text.contains("http_get(https://api.telegram.org)"), "{text}");
+
+    // `?inspect task N`: status line and the snapshot's wait reason.
+    snapshots.lock().unwrap().insert(
+        1,
+        crate::coroutine::TaskSnapshot {
+            task_id: 1,
+            function_name: "Mod.task1".into(),
+            current_stmt_id: None,
+            frame_depth: 1,
+            locals: vec![],
+            wait_reason: "http_get(https://api.telegram.org)".into(),
+        },
+    );
+    let inspected = http_json(router, "POST", "/api/query", Some(serde_json::json!({"query": "?inspect task 1"}))).await;
+    let text = serde_json::to_string(&inspected).unwrap();
+    assert_no_secret(&text);
+    assert!(text.contains("status:   http_get(https://api.telegram.org)"), "{text}");
+}
+
+#[test]
+fn format_tasks_and_inspect_redact_every_variant() {
+    let registry = Some(secret_task_registry());
+    let listing = format_tasks(&registry);
+    assert_no_secret(&listing);
+    assert!(listing.contains("task 6 [Mod.task6] — running"), "{listing}");
+    for id in 1..=6 {
+        let detail = format_inspect_task(&registry, &None, id);
+        assert_no_secret(&detail);
+        assert!(detail.contains(&format!("Task {id}")) && detail.contains("function:"), "{detail}");
+    }
+}

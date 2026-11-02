@@ -59,6 +59,9 @@ mod http_policy;
 #[cfg(test)]
 mod http_policy_tests;
 mod matching;
+mod task_status;
+#[cfg(test)]
+mod task_status_tests;
 pub use matching::pattern_matches;
 #[cfg(test)]
 mod scoped_tests;
@@ -94,6 +97,8 @@ pub enum WaitReason {
     Failed(String),
 }
 
+/// Redacted by construction (#112): no variant prints its payload except non-sensitive
+/// numbers and `host:port`. See `task_status.rs`.
 impl std::fmt::Display for WaitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -103,21 +108,29 @@ impl std::fmt::Display for WaitReason {
             WaitReason::TcpRead(h) => write!(f, "tcp_read(h{h})"),
             WaitReason::TcpWrite(h) => write!(f, "tcp_write(h{h})"),
             WaitReason::TcpConnect(host, port) => write!(f, "tcp_connect({host}:{port})"),
-            WaitReason::FileRead(p) => write!(f, "file_read({p})"),
-            WaitReason::FileWrite(p) => write!(f, "file_write({p})"),
-            WaitReason::ShellExec(cmd) => write!(f, "shell({cmd})"),
+            WaitReason::FileRead(_) => write!(f, "file_read"),
+            WaitReason::FileWrite(_) => write!(f, "file_write"),
+            WaitReason::ShellExec(_) => write!(f, "shell"),
             WaitReason::Sleep(ms) => write!(f, "sleep({ms}ms)"),
             WaitReason::LlmCall => write!(f, "llm_call"),
             WaitReason::LlmAgent => write!(f, "llm_agent"),
-            WaitReason::LlmTakeover(ctx) => write!(f, "llm_takeover({ctx})"),
+            WaitReason::LlmTakeover(_) => write!(f, "llm_takeover"),
             WaitReason::StdinRead => write!(f, "stdin_read"),
-            WaitReason::HttpGet(url) => write!(f, "http_get({})", url.chars().take(50).collect::<String>()),
-            WaitReason::HttpPost(url) => write!(f, "http_post({})", url.chars().take(50).collect::<String>()),
-            WaitReason::HttpRequest(method, url) => write!(f, "http_request({} {})", method, url.chars().take(50).collect::<String>()),
-            WaitReason::Completed(v) => write!(f, "done: {}", v.chars().take(50).collect::<String>()),
-            WaitReason::Failed(e) => write!(f, "failed: {}", e.chars().take(50).collect::<String>()),
+            WaitReason::HttpGet(url) => write!(f, "http_get({})", task_status::host_only(url)),
+            WaitReason::HttpPost(url) => write!(f, "http_post({})", task_status::host_only(url)),
+            WaitReason::HttpRequest(method, url) => {
+                write!(f, "http_request({} {})", sanitize_method(method), task_status::host_only(url))
+            }
+            WaitReason::Completed(_) => write!(f, "done"),
+            WaitReason::Failed(_) => write!(f, "failed"),
         }
     }
+}
+
+/// An HTTP method token, or `?` when the caller supplied something else.
+fn sanitize_method(method: &str) -> &str {
+    const KNOWN: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+    KNOWN.iter().copied().find(|k| k.eq_ignore_ascii_case(method)).unwrap_or("?")
 }
 
 /// Info about a running or completed task.

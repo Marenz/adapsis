@@ -124,6 +124,15 @@ POST /api/sessions/:id/eval — eval in a specific session
 POST /api/sessions/:id/mutate — mutate in a specific session
 ```
 
+**Task status is redacted by construction (#112).** `WaitReason`'s `Display`
+(`coroutine/task_status.rs`) is the only rendering used by `/api/tasks`, `?tasks`,
+`query_tasks`, `?inspect task N` and the snapshot `wait_reason`. HTTP operations show
+`scheme://host[:port]` only (`<invalid url>` when unparsable or non-http), file/shell/takeover
+operations show the operation name, and `Completed`/`Failed` show `done`/`failed` with no
+payload. The stored values stay intact (callback acknowledgement in `main.rs` reads them), so
+never print a `WaitReason` payload directly. Out of scope and tracked separately: task locals
+in `?inspect task N` (#115) and the full URL inside `http_get`/`http_post` error text (#116).
+
 ## Architecture
 ```
 src/
