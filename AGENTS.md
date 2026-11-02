@@ -9,6 +9,14 @@ Adapsis is an AI-native programming language and live agentic environment. Progr
   `108e4dc` (G2/#114/G1/#112/#116). See ROADMAP.md's top release section for merge
   state, worker ownership and measured gates; historical branch guidance below
   does not authorize switching this release worktree or touching the main checkout.
+- Current here deployment (2026-11-02): manager installed release `e424fc9`;
+  `/proc` binary SHA-256 `7a91463243d68a2c12bdd40d0906e1c99dcaca5fd95cc51ebae4c241cca341f3`
+  verified. Here's runtime and service default model are `chatgpt/gpt-6-astra`
+  (no explicit reasoning-effort variant), replacing the previous deepseek alias
+  selection on this node only. Permissions/context files unchanged, native still
+  opt-in. ROADMAP.md records rollback paths, worker IDs, full offline gates and
+  live status/pure-eval/provider smoke. Strict parity remains red (324/58/191);
+  no live Telegram reply or complete native-provider/task-quality certification yet.
 - Started on `work/issue-42` at `22d93d6`; the consolidated, sanitized upstream
   baseline is `origin/master` at `6667139`. Continue on `work/native-tools`.
 - Old feature branches already have their functionality integrated upstream

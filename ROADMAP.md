@@ -1,13 +1,14 @@
 # AdapsisOS Roadmap
 
-## Release integration 2026-11-02 — `108e4dc`, pending manager review
+## Deployed 2026-11-02 — here (Kronk), release `e424fc9`, Astra default
 
 - Release writer: session `ses_e67e01ef9ffettWZDQAXWveOxc`, scoped exclusively to
   `/home/marenz/Projects/adapsis-release`; manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`.
 - Starting release HEAD `3969170` contains deployed binary checkpoint `1ed6424`
   plus deployment/gateway history notes. Exact incoming checkpoint: `108e4dc`.
-  `git merge --no-ff --no-commit 108e4dc` merged without conflicts. Merge remains
-  uncommitted; independent integration review, commit and deployment belong to manager.
+  `git merge --no-ff --no-commit 108e4dc` merged without conflicts. Manager accepted
+  integration, committed/pushed `e424fc9`, installed it and restarted here.
+  Release writer independently verified the running binary and read-only API below.
 - Production delta since `1ed6424`: G2 permits `input` as a binding only; #114
   rejects unproven VM field accesses before execution; G1 admits typed Python
   pseudo-field properties; #112 structurally redacts task status (including Debug,
@@ -17,7 +18,7 @@
 - #87 turn-bound native memory tools, #88 private logging, TUI and #89 opt-in
   native routing are retained. No native-default flip or capability-parity claim.
   Historical pending/deployment sections below describe their own checkpoints;
-  this integration section is the current candidate status, not a deployment record.
+  this section records the current deployment and retains its measured candidate gates.
 - Audit: auto-merges in AGENTS.md, ROADMAP.md, native tool test registration,
   API tests, coroutine runtime and native prompt. No manual conflict resolution
   or production integration fixes needed. Incoming runtime changes preserve
@@ -47,8 +48,37 @@
   filename derivation remain outside the redaction fixes. No live provider or
   bot delivery certification follows from offline tests. Existing historical
   deployment and gateway notes below have not been re-verified by this worker.
-- Live model verification and deployment remain manager gates. This worker makes
-  no live calls, config edits, installation, service restart, commit or push.
+- Deployment verification: service active/running, PID 1468478, NRestarts=0;
+  `/proc/1468478/exe` SHA-256 matches the artifact above. Binary rollback:
+  `/home/marenz/.local/bin/adapsis.bak-1ed6424-20261102-113203`.
+- Here's runtime AND configured service model are now `chatgpt/gpt-6-astra`, with
+  no explicit reasoning-effort variant. Manager changed only the unit's model
+  argument and ran daemon-reload; runtime `llm_set_model` applied the same model
+  without a second restart. Unit backup: `adapsis.service.bak-before-astra-20261102`.
+  No permissions/context changes. Actual configured permissions path remains
+  `/home/marenz/.config/adapsis/permissions.toml`. This overrides the earlier
+  here-node alias/model notes below; no other node's model is changed.
+- Read-only deployment-input preflight: one real creative principal is shape-
+  equivalent to the sanitized reviewed placeholder, 10 allowed tools and the
+  creative model table match exactly; actual creative context matches the ignored
+  local reference byte-for-byte (4959 bytes, SHA-256
+  `7790ad3a34f6fbed4abb127367e9ed8b8fcdb58593999100ba2488acc4528826`).
+- Live verification after deployment (writer session above): `/api/status` HTTP200,
+  revision 237, mutations 237, history entries 120, one route. Top-level functions
+  and types count 0 (these arrays do not enumerate module members). `/api/tasks`
+  HTTP200: one active poll task, zero active non-poll tasks, redacted status exactly
+  `http_get(https://api.telegram.org)` (#112). `llm_get_model()` returns
+  `"chatgpt/gpt-6-astra"`, success=true. No private program source printed.
+- Controlled pure `/api/eval` smoke: `json_valid("{")` -> false and
+  `json_kind("true", "")` -> `"bool"`, each HTTP200/success=true, using the required
+  `function:""` field. Manager's earlier omitted-function request returned 422
+  before execution; corrected request succeeded.
+- Provider smoke before deployment: local gateway HTTP200 for
+  `chatgpt/gpt-6-astra`, benign "Reply OK", max_tokens128, exact-OK content category.
+  This checks basic generation only, not native tool protocol or task quality.
+  **No live Telegram reply certification yet.** Offline residuals above remain.
+  Deployment/config changes were manager actions; this writer only performed
+  authorized read-only checks, pure eval/provider smoke and release-doc edits.
 
 ## Deployed 2026-11-01 19:34 CET — here (Kronk), release/2026-11-01 `1ed6424`
 
