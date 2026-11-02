@@ -8,12 +8,12 @@
 //! using oneshot channels: the evaluator blocks on a channel receive, the
 //! runtime completes the IO and sends the result back.
 
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::{Result, bail};
-use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -74,7 +74,13 @@ pub type Handle = i64;
 pub type TaskId = i64;
 
 /// What a task is currently waiting on.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Neither `Debug` nor `Serialize` is derived (#112): both would print the raw payloads.
+/// `Debug` is the redacted `Display`; there is deliberately no serialization.
+// Payloads of the file/shell/takeover variants are kept for a future explicitly-named
+// internal accessor; no rendering reads them (#112), hence the dead-code allowance.
+#[allow(dead_code)]
+#[derive(Clone)]
 pub enum WaitReason {
     Running,
     TcpListen(u16),
@@ -95,6 +101,12 @@ pub enum WaitReason {
     LlmTakeover(String),
     Completed(String),
     Failed(String),
+}
+
+impl std::fmt::Debug for WaitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 /// Redacted by construction (#112): no variant prints its payload except non-sensitive
@@ -134,7 +146,7 @@ fn sanitize_method(method: &str) -> &str {
 }
 
 /// Info about a running or completed task.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TaskInfo {
     pub id: TaskId,
     pub function_name: String,

@@ -197,3 +197,50 @@ fn query_tasks_builtin_and_snapshot_wait_reason_are_redacted() {
         .clone();
     assert_eq!(reason, "http_get(https://api.telegram.org)");
 }
+
+#[test]
+fn debug_is_the_redacted_display_for_every_variant() {
+    let all = [
+        WaitReason::Running,
+        WaitReason::TcpListen(80),
+        WaitReason::TcpAccept(1),
+        WaitReason::TcpRead(2),
+        WaitReason::TcpWrite(3),
+        WaitReason::TcpConnect("db.internal".into(), 5432),
+        WaitReason::FileRead("/home/u/SECRET_PATH".into()),
+        WaitReason::FileWrite("/home/u/SECRET_PATH".into()),
+        WaitReason::ShellExec("curl --token SECRET_CMD".into()),
+        WaitReason::Sleep(5),
+        WaitReason::LlmCall,
+        WaitReason::LlmAgent,
+        WaitReason::StdinRead,
+        WaitReason::HttpGet(TELEGRAM.into()),
+        WaitReason::HttpPost(TELEGRAM.into()),
+        WaitReason::HttpRequest("GET".into(), TELEGRAM.into()),
+        WaitReason::LlmTakeover("telegram:user:SECRET".into()),
+        WaitReason::Completed("SECRET_RESULT".into()),
+        WaitReason::Failed("failed for https://x/botSECRET_ERR".into()),
+    ];
+    for reason in all {
+        let debug = format!("{reason:?}");
+        assert_eq!(
+            debug,
+            format!("{reason}"),
+            "Debug must be the redacted Display"
+        );
+        for secret in ["SECRET", "bot123456", "getUpdates", "offset", "/home/u"] {
+            assert!(!debug.contains(secret), "{secret} leaked in {debug}");
+        }
+        // Containers that derive Debug over a WaitReason inherit the redaction.
+        let info = TaskInfo {
+            id: 1,
+            function_name: "Mod.f".into(),
+            status: reason.clone(),
+            started_at: "t".into(),
+        };
+        let nested = format!("{info:?}") + &format!("{:#?}", info);
+        for secret in ["SECRET", "bot123456", "getUpdates", "offset", "/home/u"] {
+            assert!(!nested.contains(secret), "{secret} leaked in {nested}");
+        }
+    }
+}
