@@ -108,20 +108,31 @@ fn python_cases(s: &Subject) -> Vec<(String, String, parser::TestCase)> {
     let lowered = super::super::lower_tests(s.tests, s.module).unwrap();
     assert_eq!(
         names.len(),
-        lowered.operations.len(),
-        "one operation per def"
+        lowered.source_map.len(),
+        "one source span per def"
     );
-    names
+    let mut consumed = vec![0; lowered.operations.len()];
+    let cases = names
         .into_iter()
-        .zip(lowered.operations)
-        .map(|(name, operation)| {
-            let parser::Operation::Test(test) = operation else {
+        .zip(&lowered.source_map)
+        .map(|(name, span)| {
+            assert!(s.tests[span.start..span.end].starts_with(&format!("def {name}(")));
+            let parser::Operation::Test(test) = &lowered.operations[span.operation_index] else {
                 panic!("only test declarations")
             };
-            assert_eq!(test.cases.len(), 1);
-            (name, test.function_name, test.cases[0].clone())
+            let index = &mut consumed[span.operation_index];
+            let case = test.cases[*index].clone();
+            *index += 1;
+            (name, test.function_name.clone(), case)
         })
-        .collect()
+        .collect();
+    for (operation, count) in lowered.operations.iter().zip(consumed) {
+        let parser::Operation::Test(test) = operation else {
+            panic!("only tests")
+        };
+        assert_eq!(test.cases.len(), count, "every grouped case consumed once");
+    }
+    cases
 }
 
 fn manifest() -> Json {

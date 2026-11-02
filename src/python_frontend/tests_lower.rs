@@ -68,6 +68,7 @@ fn lower_tests_in(cx: &Context<'_>) -> Result<LoweredSource, Diagnostic> {
     let mut operations = Vec::new();
     let mut source_map = Vec::new();
     let mut names = HashSet::new();
+    let mut targets = HashMap::<String, usize>::new();
     for stmt in &suite {
         let py::Stmt::FunctionDef(f) = stmt else {
             return Err(cx.at(
@@ -110,9 +111,20 @@ fn lower_tests_in(cx: &Context<'_>) -> Result<LoweredSource, Diagnostic> {
         let first = iter
             .next()
             .ok_or_else(|| cx.at(stmt, "test body must contain an assertion"))?;
-        let op = test_assertion(&cx, stmt, first, iter)?;
-        source_map.push(cx.span(stmt, operations.len()));
-        operations.push(op);
+        let p::Operation::Test(test) = test_assertion(&cx, stmt, first, iter)? else {
+            return Err(cx.at(stmt, "expected a test assertion"));
+        };
+        // One replacement set per exact target per submission. Interleaved targets
+        // execute in first-seen target order; cases retain their per-target order.
+        let index = *targets
+            .entry(test.function_name.clone())
+            .or_insert(operations.len());
+        source_map.push(cx.span(stmt, index));
+        if let Some(p::Operation::Test(existing)) = operations.get_mut(index) {
+            existing.cases.extend(test.cases);
+        } else {
+            operations.push(p::Operation::Test(test));
+        }
     }
     if operations.is_empty() {
         return Err(cx.error(0, "provide at least one test function"));
