@@ -613,6 +613,21 @@ fn restore_tests_from_operations(
     }
 }
 
+#[cfg(test)]
+#[test]
+fn telegram_migration_library_targets_must_be_bare() {
+    // Pin the existing library contract; the migration exporter adapts its artifacts,
+    // rather than changing library restoration or normalizing frozen test fixtures.
+    let declaration = "+module MigrationLibraryProbe\n+fn twice (x:Int)->Int\n  +return x*2\n+end\n";
+    for (target, expected) in [("twice", 2), ("MigrationLibraryProbe.twice", 0)] {
+        let source = format!("{declaration}+test {target}\n+with 1 -> expect 2\n+with 2 -> expect 4\n");
+        let mut program = ast::Program::default();
+        load_module_source(&mut program, &source).unwrap();
+        let function = program.get_function("MigrationLibraryProbe.twice").unwrap();
+        assert_eq!(function.tests.len(), expected);
+    }
+}
+
 /// Persist a module's reconstructed source to the library directory.
 /// Uses atomic write and refuses to overwrite a file changed since this process saw it.
 pub fn persist_module(module: &ast::Module, lib_state: Option<&LibraryState>) -> Result<()> {

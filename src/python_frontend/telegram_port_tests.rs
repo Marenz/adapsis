@@ -22,6 +22,7 @@ mod send_chain;
 mod stored_tests;
 mod wrapper_contract;
 mod voice;
+mod migration;
 
 fn program(operations: &[parser::Operation]) -> ast::Program {
     let mut program = ast::Program::default();
