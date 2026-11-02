@@ -27,6 +27,7 @@ mod repl;
 mod server;
 mod session;
 mod shared_state;
+mod task_foundation;
 mod typeck;
 mod tui;
 mod validator;
