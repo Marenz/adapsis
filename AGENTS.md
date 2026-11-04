@@ -198,7 +198,8 @@ Check/propagation failures. Operational/internal errors stay Rust Err. Ordinary 
 user await preserve Result. `+call T` unwraps one Ok or propagates explicit Err; `+call
 Result<T>` captures only typed language failure, with argument evaluation outside its catch
 scope. Nested Result requires explicit outer wrappers, not recursive flattening. No general
-payload type inference is added; Python G7/user-Result-await admission remains a later gate.
+payload type inference is added. Python now admits Result user awaits and exact-known-inner
+returns (G7); this does not lift production VM/JIT Result quarantine.
 Raw lifecycle/blocks keep `eval_function_body_named` without signature lookup. CLI
 `run-async` retains its legacy unframed entry setup through
 `eval_declared_function_unframed`; unlike framed entry it cannot resolve root +shared
@@ -745,7 +746,7 @@ replaces that branch with one composer.
   `types::owned_name`; do not return to `resolved.contains('.')`, which misclassifies owner
   "". The printer prints a bare user call only at owner "" for a real `program.functions`
   entry. It has no authority model and must never be exposed to native tools. Current
-  strict counts: 324 verified / 58 invalid / 191 unsupported (54 files, 573 entries). G2
+  strict counts after G7: 334 verified / 58 invalid / 181 unsupported (54 files, 573 entries). G2
   allows `input` as a parameter/local/capture/value/field-base name ONLY
   (`forbidden_binding`); as a callee, function, type, member, shared, annotation or attribute
   name it stays forbidden. A3
@@ -755,8 +756,17 @@ replaces that branch with one composer.
   the #110 session rule). The test printer refuses negative numeric CONSTANT nodes (#111,
   keyword shorthand only; `Unary Neg` spellings are exact). The
   remaining top-level function blockers are G3 anonymous struct literals, G4 json_get
-  typing, G5 shared `Some`, and G7 implicit Ok wrap in `[fail]` Result returns (owner
-  decisions). G1 is done (`pseudo_fields.rs`): `.len`/`.is_empty` on str/list and
+  typing and G5 shared `Some` (owner decisions). G7 now permits a plain exact-known
+  inner T return under Result[T], preserving the Return AST; `result_returns.rs` owns
+  this return-only rule. Unknown-containing types do not qualify for this new rule,
+  and nested Result/outer Option require explicit wrappers (Some shares Value::Ok).
+  List[Option[T]] retains its distinct outer representation and is admitted.
+  Native Python test/evaluate checks current reachable user-await outer Result agreement
+  in both directions before execution. The iterative snapshot-local walker reuses tree
+  lookup and function identity; categorical errors disclose no hidden callee metadata.
+  This is not full payload checking or transitive authorization. General compatibility, arguments,
+  assignments and explicit-constructor payload admission are unchanged. G1 is done
+  (`pseudo_fields.rs`): `.len`/`.is_empty` on str/list and
   `.is_ok`/`.is_err`/`.unwrap` on a Result lower as PROPERTIES to the same `FieldAccess`
   AST, only for a non-struct base (a struct field of the same name wins); Map/Set `.len`,
   Result `.len`, `error`/`unwrap_err`/`is_some`/`is_none` stay refused. The text is not
@@ -783,8 +793,7 @@ replaces that branch with one composer.
   explicit `[fail]` argument callees, including nested arguments, pending #97.
   #97 scalar Check now unwinds with a typed language failure instead of returning Err
   as data to a caller that could continue effects. Result/capture graphs select the
-  normalized interpreter path; lifting VM quarantine and frontend guard relaxation are
-  still separate acceptance gates.
+  normalized interpreter path; lifting VM quarantine remains a separate acceptance gate.
   JIT Check/fallible graphs refuse before compilation rather than executing the historical
   native trap. #96 JIT relocation remains open too.
   Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
@@ -875,7 +884,8 @@ replaces that branch with one composer.
   returns builtin Result and BOTH its success/failure cases hit the String consumer error
   after exactly one request. Its characterization was deliberately updated; frozen bytes
   were not. This is not the corrected/live app-union port, whose behavior remains tested.
-  The frontend Result-user-await guard remains in place.
+  The later frontend acceptance permits Result user awaits with Result bindings;
+  the frozen misannotated String wrapper remains a distinct characterization.
   Direct-tree success alone is not normal-dispatch evidence. IO contract fixtures use in-memory IoRequest
   replies, not the real Runtime IO loop or live services.
   Pure port expansion permits only ledgered local-call qualification, proved by
@@ -891,7 +901,7 @@ replaces that branch with one composer.
   and empty/out-of-range inputs cannot manufacture Sent from a prior response.
   Both-origin normal-async request fixtures prove local ordering/count, not
   exactly-once remote delivery. Frozen wrapper characterization remains unchanged;
-  no global Result-user-await or frontend catalog relaxation is implied.
+  that send-chain checkpoint did not relax Result user awaits or the frontend catalog.
   The higher corrected send_message/send_reply callers propagate the app outcome
   unchanged with no additional retry; combined-module tests include TgFormat.
   This is not callback acknowledgement certification: #104 tracks generic spawned
@@ -954,8 +964,8 @@ replaces that branch with one composer.
   locations. For targets cannot escape/reuse; `len`/`length` accept a statically known
   list, str, Map or Set (str length is BYTES). Pure async calls
   need await; synchronous calls cannot be awaited. IO await also needs the inert
-  io effect declaration. Awaiting Result-returning user functions is refused
-  pending the separate frontend acceptance gate (#82); direct IO builtin
+  io effect declaration. Awaiting Result-returning user functions is admitted
+  only when bound as Result, preserving the wrapper (#82); direct IO builtin
   Result awaits remain supported and their actual wrapper is covered by an
   in-memory IoRequest reply fixture. Trusted offline fixtures introduce no live
   IO or Python mock installation. Numeric literals exclude i64::MIN because canonical

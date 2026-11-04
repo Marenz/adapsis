@@ -68,8 +68,9 @@ live-provider certification; native tools retain their additional admission rule
   `@source(name, type=..., k=v)` decorators; reserved `async def startup()/shutdown() -> None`.
 - Effects: `@effects("io", "fail", "mut", "rand", "yield", "parallel", "unsafe")`
   plus `async` from `async def`. Await requires an annotated direct-call binding.
-  Awaiting a Result-returning **user function** is rejected ([#82]); direct IO
-  builtin awaits keep their Result wrapper.
+  Awaiting a Result-returning **user function** preserves its Result wrapper ([#82]);
+  bind it as `Result[T]`, then match it. A plain `T` await binding is refused. Direct
+  IO builtin awaits retain their existing Result behavior.
 - Call-site exceptions apply only to the root call. A direct unshadowed IO builtin
   match subject needs an `io`+`async` caller; a user async function cannot use that
   exception. Nested call arguments keep ordinary call rules. `spawn` requires an
@@ -159,13 +160,45 @@ def usable(body: str) -> bool:
     return json_valid(body)
 ```
 
-## Direct IO match runtime limitation (#94)
+## Result returns and IO boundaries (#82, #86 G7)
 
-The no-await direct builtin `match http_get(url):` form is admitted by the
-frontend, but it is **not VM-portable after an earlier IO operation in the same
-function**. The VM's compiled direct IO expression has no coroutine handle, and
-whole-function fallback is deliberately forbidden after IO because it would
-replay completed side effects. Prefer binding the result first:
+A function declaring `Result[T]` may return a plain, statically known value of **exactly T**.
+The runtime wraps it once at invocation; lowering keeps the original Return AST and does
+not insert `Ok(...)`. This is an **Adapsis-specific return rule, not CPython inference**.
+It does not widen assignments, arguments, numeric conversions or general `compatible()`
+checking. Named types retain declaration owners. `Result[Result[T]]` and
+`Result[Option[T]]` require explicit outer wrapping, e.g. `return Ok(inner)`:
+Some and Result success share the runtime's `Value::Ok` representation. A
+`Result[list[Option[T]]]` can still implicitly wrap a known list (its outer value is distinct).
+Existing explicit-constructor/catalog payload-validation limitations remain unchanged;
+runtime nested-wrapper checks still apply.
+
+```python
+async def checked_value(n: int) -> Result[int]:
+    return n
+
+async def consume(n: int) -> int:
+    result: Result[int] = await checked_value(n)
+    match result:
+        case Ok(value):
+            return value
+        case Err(error):
+            return 0
+```
+
+The same-source, existing-signature and inspection/resubmission paths use this rule.
+Async and IO-effect requirements still apply; user Result awaits do not confer authority.
+Native tests remain literal-data-only: use scalar consumers when checking Result behavior.
+Native Python evaluate/test preflights the current entry's reachable user awaits for
+outer Result/non-Result binding agreement, in both directions after legacy edits.
+This is neither general payload-type validation nor a new transitive permission policy;
+diagnostics do not disclose hidden callee names or schemas.
+
+The no-await direct builtin `match http_get(url):` form is admitted by the frontend.
+Non-Await builtin IO, user awaits and declared Result graphs select the interpreter
+before execution; the VM's direct IO expression has no coroutine handle. Whole-function
+fallback after execution is forbidden because it would replay completed effects.
+An annotated binding makes the wrapper explicit:
 
 ```python
 @effects("io")
@@ -179,10 +212,9 @@ async def fetch_ok(url: str) -> str:
 ```
 
 This form is covered by native mutation/evaluation with an in-memory HTTP
-fixture. It uses a **direct runtime IO builtin** await; awaiting a
-Result-returning user function remains unsupported (#82). Never retry the whole
-function or fall back after IO. #93 fixes dedicated Result value matching, not
-IO expression portability.
+fixture. User Result-returning awaits now preserve the same wrapper, but production VM/JIT
+Result quarantine is not lifted by frontend acceptance. Never retry a whole function or
+fall back after IO. This does not certify every #94 runtime/VM combination.
 
 ## Shared declarations and constructor-name safety
 

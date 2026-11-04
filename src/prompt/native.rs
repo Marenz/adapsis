@@ -109,17 +109,20 @@ literal-data and explicit completion/test gates always apply.
 
 The inert @effects(...) decorator takes io, fail, mut, rand, yield, parallel,
 unsafe (async comes from async def). Await is allowed only in an annotated
-direct-call binding. Awaiting Result-returning user functions is currently
-unsupported (#82); direct runtime IO builtin awaits can preserve Result values.
+direct-call binding. User Result-returning awaits preserve Result: bind as Result[T],
+never plain T, then match. Direct runtime IO builtin awaits keep their Result behavior.
+A Result[T] function may return a plain statically known EXACT T; invocation wraps it
+once. This is Adapsis semantics, not CPython inference or a general coercion. Nested
+Result and outer Option payloads require explicit wrapping: return Ok(inner) for
+Result[Result[T]] or Result[Option[T]]. List[Option[T]] has a distinct outer value.
 Effectful tests need trusted runtime-provided IO mocks; Python cannot install mocks.
 The no-await match exception applies ONLY to a direct, unshadowed runtime IO
-builtin in an io+async function. It is admitted syntax but NOT VM-portable after
-an earlier IO operation in the same function (#94), and the runtime never
-replays a whole function after IO. Prefer binding first:
+builtin in an io+async function. Non-Await builtin IO and user awaits select the tree
+before execution; the runtime never replays an executed function. Prefer binding first:
 `response: Result[str] = await http_get(url)` then `match response:` (direct
-builtin await; awaiting Result-returning user functions is unsupported, #82).
+runtime IO builtin await).
 User async calls still require annotated await; matching them does not bypass
-that rule or the Result-await restriction. Nested arguments never inherit a
+that rule. Nested arguments never inherit a
 match/await/spawn exception. spawn(Module.function(...)) schedules a qualified
 runtime function, not an agent; its caller must be async and also declare io when
 the target has io effects. Target argument counts are checked against the current

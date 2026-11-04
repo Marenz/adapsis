@@ -26,7 +26,6 @@ impl Effects {
 #[derive(Clone, Copy)]
 pub(super) struct UserSignature {
     pub effects: Effects,
-    pub returns_result: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -73,11 +72,6 @@ pub(super) fn check(site: Site, target: Target, caller: Effects) -> Result<(), &
                     if !s.effects.asynchronous {
                         return Err(
                             "await requires an async function or runtime IO builtin; synchronous calls are not awaitable",
-                        );
-                    }
-                    if s.returns_result {
-                        return Err(
-                            "awaiting Result-returning user functions is unsupported until runtime Result unwrapping is reconciled (#82)",
                         );
                     }
                     s.effects.io

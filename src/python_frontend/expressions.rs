@@ -771,7 +771,6 @@ impl Expressions<'_, '_> {
         let target = if local_user || resolved.contains('.') {
             Target::User(sig.map(|s| UserSignature {
                 effects: Effects::from_names(&s.effects),
-                returns_result: matches!(s.result, Ty::Result(_)),
             }))
         } else {
             Target::BuiltinOrConstructor {

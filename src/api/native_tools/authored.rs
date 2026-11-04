@@ -91,6 +91,7 @@ pub(super) fn runtime_targets(
             let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
             if *python {
                 super::literals::require_python_entry(program, function)?;
+                crate::python_frontend::validate_entry_await_contract(program, function)?;
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }
             for op in ops {
@@ -112,6 +113,7 @@ pub(super) fn runtime_targets(
             if *python {
                 for target in targets {
                     super::literals::require_python_entry(program, target)?;
+                    crate::python_frontend::validate_entry_await_contract(program, target)?;
                 }
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }

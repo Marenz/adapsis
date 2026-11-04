@@ -1,6 +1,51 @@
 # AdapsisOS Roadmap
 
-## CURRENT recovery — C-core activation checkpoint
+## CURRENT — bounded Python Result acceptance (review pending)
+
+- Baseline `aa8f7f4` includes accepted C-core `113f80f` and the synthetic legacy
+  String-wrapper regression. This frontend slice admits user Result awaits with
+  Result bindings and plain exact-known-inner returns under Result[T] (G7).
+  Nested Result and outer Option need explicit wrappers (Some shares Value::Ok).
+  List[Option] remains admissible. Assignment/argument compatibility,
+  explicit-constructor payload policy, async/IO/arity and native authority gates remain.
+- Actual dispatch-signature checks refuse outer Result mismatch in either direction.
+  Native Python evaluate/test additionally preflight the current reachable stored graph
+  before IO, using the shared iterative AST walker and tree lookup, snapshot-local pointer
+  identity, and categorical diagnostics without hidden names. This is not payload typing
+  or transitive authorization. Inspection/resubmission and nested binding tests accompany native scalar
+  consumers, typed Check/operational-error separation, and synthetic scoped IO tests.
+  No live-memory IO or runtime/quarantine changes are included.
+- Strict parity: **334 verified / 58 invalid / 181 unsupported**, 54 files/573 entries;
+  zero AST mismatches/non-idempotence. Ten promotions from 324/58/191: seven functions
+  (`complex_system.validate_name/validate_age`, `multi_param_chain.validate_request`,
+  `result_chain.validate`, `simple_syntax.validate_user`, `trace_test.validate`,
+  `validate.validate`) and three programs (`simple_syntax`, `trace_test`, `validate`).
+  Two still-Unsupported programs change diagnostics (`multi_param_chain`, `result_chain`).
+  Frozen fixture bytes and parity success criteria are unchanged.
+- Freeze validation: focused Result matrix 13/13. One full
+  `cargo test --release --no-fail-fast`: 2032 passed, the known strict parity gate
+  alone failed, 2 ignored; Python CLI 5/5 and Result-contract CLI 4/4 passed.
+  Log: `/tmp/opencode/full_gate_frontend_result.log`. Strict parity remains RED;
+  frontend acceptance and deployment still require their separate reviews.
+- Review correction evidence: both defects failed before correction (outer Option
+  implicit return admitted, reverse signature drift accepted); the installed native
+  caller also reached inert IO before the new entry preflight. Corrected focused gate
+  (`result_returns native_ python_call_ vm_user_await python_parity`) has 206 passed,
+  only the known strict parity failure; parity stays 334/58/181. Log:
+  `/tmp/opencode/frontend_result_review_final.log`. No second full suite. Tests cover
+  unchanged callers after Result→Int/Bool and Int→Result edits, direct/transitive native
+  evaluate/test refusal with zero IO and unchanged Program, cycles/bare vs qualified
+  same-name lookup, unrelated-graph isolation, and explicit Ok(Some)/Ok(None).
+- #121 makes Python authoritative maintained source, with .ax a temporary importer;
+  serializer/direct-IR/persistence work remains separately owned. This slice does not
+  change LoweredSource or canonical APIs. Historical parity is evidence, not that goal.
+- C deployment remains blocked: `Chronica.pull_page` forwards Result under a String
+  signature and its writer consumes String. Four other audited String wrappers have
+  unknown external consumers. Option A (accurate Result[String] signatures plus explicit
+  callers) is selected, but private migration needs separate authorization after frontend
+  acceptance and persisted Python source support. No further live reads or migration here.
+
+## Historical recovery — C-core activation checkpoint
 
 - Owner authorizes the broader work and deployment toward a useful programming/task/agent
   bot that can eventually replace OpenCode. Current worker scope is the approved bounded

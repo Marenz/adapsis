@@ -902,7 +902,11 @@ impl Lower<'_, '_> {
             py::Stmt::Return(r) => {
                 let value = r.value.as_deref().ok_or_else(|| self.cx.at(s, "bare return is unsupported; runtime has no None/unit value"))?;
                 let (expr, ty) = self.expressions().lower(value)?;
-                self.check_type(&self.result, &ty, value)?;
+                let expected = super::types::resolve_ty(self.types, &self.result).map_err(|e| self.cx.at(value, e))?;
+                let actual = super::types::resolve_ty(self.types, &ty).map_err(|e| self.cx.at(value, e))?;
+                if !super::result_returns::implicit_inner_matches(&expected, &actual) {
+                    self.check_type(&self.result, &ty, value)?;
+                }
                 Ok(p::Operation::Return(p::ReturnDecl { expr }))
             }
             py::Stmt::If(v) => self.if_statement(v),
