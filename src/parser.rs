@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 mod test_values;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PlanAction {
     Set(Vec<String>),
     Progress(usize),
@@ -9,7 +9,7 @@ pub enum PlanAction {
     Show,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RoadmapAction {
     Show,
     Add(String),
@@ -17,7 +17,7 @@ pub enum RoadmapAction {
     Remove(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Operation {
     Module(ModuleDecl),
     Type(TypeDecl),
@@ -126,7 +126,7 @@ pub enum Operation {
 }
 
 /// Module-level source declaration: `+source sync_timer timer interval=300000 -> on_tick`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModuleSourceDecl {
     pub name: String,
     pub source_type: String,
@@ -134,7 +134,7 @@ pub struct ModuleSourceDecl {
     pub handler: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SandboxAction {
     Enter,
     Merge,
@@ -143,7 +143,7 @@ pub enum SandboxAction {
 }
 
 /// A shared variable declaration at the parser level.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SharedVarDecl {
     pub name: String,
     pub ty: TypeExpr,
@@ -151,7 +151,7 @@ pub struct SharedVarDecl {
 }
 
 /// `+source add timer(300000) as poll -> on_tick`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourceAddDecl {
     pub kind_text: String,
     pub alias: String,
@@ -159,7 +159,7 @@ pub struct SourceAddDecl {
 }
 
 /// `+source replace poll timer(600000) -> on_tick`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourceReplaceDecl {
     pub alias: String,
     pub kind_text: String,
@@ -167,26 +167,26 @@ pub struct SourceReplaceDecl {
 }
 
 /// `+event register new_message(String)`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventRegisterDecl {
     pub name: String,
     pub payload_type: String,
 }
 
 /// `+event emit new_message expr`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventEmitDecl {
     pub name: String,
     pub value: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MatchDecl {
     pub expr: Expr,
     pub arms: Vec<MatchArmDecl>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MatchArmDecl {
     pub variant: String,
     pub bindings: Vec<String>,
@@ -195,7 +195,7 @@ pub struct MatchArmDecl {
 }
 
 /// Parsed pattern for nested matching inside +case arms.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MatchPatternDecl {
     /// Simple binding: `x` or `_`
     Binding(String),
@@ -210,33 +210,33 @@ pub enum MatchPatternDecl {
     LiteralString(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AwaitDecl {
     pub name: String,
     pub ty: TypeExpr,
     pub call: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpawnDecl {
     pub call: Expr,
     /// Optional binding for the task handle: +spawn t:Int = func(args)
     pub binding: Option<(String, TypeExpr)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SetDecl {
     pub name: String,
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WhileDecl {
     pub condition: Expr,
     pub body: Vec<Operation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EvalMutation {
     pub function_name: String,
     pub input: Expr,
@@ -244,13 +244,13 @@ pub struct EvalMutation {
     pub inline_expr: Option<Expr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TraceMutation {
     pub function_name: String,
     pub input: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModuleDecl {
     pub name: String,
     pub body: Vec<Operation>,
@@ -258,32 +258,32 @@ pub struct ModuleDecl {
     pub doc: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeDecl {
     pub name: String,
     pub body: TypeBody,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TypeBody {
     Struct(Vec<FieldType>),
     Union(Vec<VariantType>),
     Alias(TypeExpr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FieldType {
     pub name: String,
     pub ty: TypeExpr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantType {
     pub name: String,
     pub payload: Vec<TypeExpr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FunctionDecl {
     pub name: String,
     pub params: Vec<Param>,
@@ -294,34 +294,34 @@ pub struct FunctionDecl {
     pub doc: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Param {
     pub name: String,
     pub ty: TypeExpr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LetDecl {
     pub name: String,
     pub ty: TypeExpr,
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallDecl {
     pub name: String,
     pub ty: TypeExpr,
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CheckDecl {
     pub name: String,
     pub expr: Expr,
     pub err_label: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub struct BranchDecl {
     pub name: String,
@@ -329,18 +329,18 @@ pub struct BranchDecl {
     pub arms: Vec<BranchArm>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BranchArm {
     pub pattern: Expr,
     pub target: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReturnDecl {
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EachDecl {
     pub collection: Expr,
     pub item: String,
@@ -348,7 +348,7 @@ pub struct EachDecl {
     pub body: Vec<Operation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IfDecl {
     pub condition: Expr,
     pub then_body: Vec<Operation>,
@@ -356,19 +356,19 @@ pub struct IfDecl {
     pub else_body: Vec<Operation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReplaceMutation {
     pub target: String,
     pub body: Vec<Operation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TestMutation {
     pub function_name: String,
     pub cases: Vec<TestCase>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TestCase {
     pub input: Expr,
     pub expected: Expr,
@@ -379,7 +379,7 @@ pub struct TestCase {
 }
 
 /// Flexible test matchers — used instead of exact value comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TestMatcher {
     /// Result string contains substring
     Contains(String),
@@ -394,7 +394,7 @@ pub enum TestMatcher {
 }
 
 /// Post-execution side-effect check: `+after <target> <matcher> "<value>"`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AfterCheck {
     /// What to inspect: "routes", "tasks", "modules", "mocks"
     pub target: String,
@@ -404,14 +404,14 @@ pub struct AfterCheck {
     pub value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TypeExpr {
     Named(String),
     Generic { name: String, args: Vec<TypeExpr> },
     Struct(Vec<FieldType>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
     Int(i64),
     Float(f64),
@@ -443,13 +443,13 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FieldValue {
     pub name: String,
     pub value: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -466,7 +466,7 @@ pub enum BinaryOp {
     Or,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum UnaryOp {
     Not,
     Neg,

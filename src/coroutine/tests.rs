@@ -9,6 +9,7 @@ fn setup_roadmap_runtime() -> (CoroutineHandle, crate::session::SharedMeta) {
     let mut initial_meta = crate::session::SessionMeta::new();
     // Seed a successful mutation so roadmap_done_checked passes
     initial_meta.mutations.push(crate::session::MutationEntry {
+        origin: Default::default(),
         revision: 1,
         timestamp: String::new(),
         source: String::new(),
@@ -2598,6 +2599,7 @@ fn test_run_with_stored_tests() {
                         .cases
                         .iter()
                         .map(|c| crate::ast::TestCase {
+                            typed: None,
                             input: crate::session::format_expr_pub(&c.input),
                             expected: crate::session::format_expr_pub(&c.expected),
                             passed: true,

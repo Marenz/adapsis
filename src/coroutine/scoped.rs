@@ -156,18 +156,22 @@ fn optional_bool(args: &[Value], index: usize, default: bool) -> Result<bool> {
 pub fn validate_guest_code(code: &str, tools: &[String], program: &crate::ast::Program) -> Result<()> {
     let ops = crate::parser::parse(code)
         .map_err(|e| anyhow::anyhow!("guest code did not parse: {e}"))?;
+    validate_guest_operations(&ops, tools, program)
+}
+
+pub fn validate_guest_operations(ops: &[crate::parser::Operation], tools: &[String], program: &crate::ast::Program) -> Result<()> {
     for op in ops {
         match op {
             crate::parser::Operation::Done => {},
             crate::parser::Operation::Eval(ev) => {
-                let Some(crate::parser::Expr::Call { callee, args }) = ev.inline_expr else {
+                let Some(crate::parser::Expr::Call { callee, args }) = ev.inline_expr.as_ref() else {
                     bail!("guest tools require !eval tool_name(literal_arguments)");
                 };
-                let crate::parser::Expr::Ident(name) = *callee else {
+                let crate::parser::Expr::Ident(name) = callee.as_ref() else {
                     bail!("guest tools must be native tool names, not module functions");
                 };
-                ensure!(GUEST_TOOLS.contains(&name.as_str()) && tools.contains(&name)
-                    && program.get_function(&name).is_none(),
+                ensure!(GUEST_TOOLS.contains(&name.as_str()) && tools.contains(name)
+                    && program.get_function(name).is_none(),
                     "permission denied: {name} is not an available guest tool");
                 ensure!(args.iter().all(|a| matches!(a, crate::parser::Expr::String(_) | crate::parser::Expr::Int(_) | crate::parser::Expr::Bool(_) | crate::parser::Expr::Float(_))),
                     "guest tool arguments must be literal strings, numbers or booleans, not nested expressions");

@@ -131,6 +131,7 @@ fn binary(op: &p::BinaryOp) -> Result<&'static str, String> {
 }
 
 pub(super) fn operations(ops: &[p::Operation]) -> Result<String, String> {
+    available()?;
     let mut out = String::new();
     block(ops, 0, &mut out)?;
     Ok(out)
@@ -522,8 +523,20 @@ fn match_pattern(pattern: &p::MatchPatternDecl) -> Result<String, String> {
 }
 
 pub(super) fn input(value: &p::Expr) -> Result<String, String> {
+    available()?;
     if matches!(value, p::Expr::StructLiteral(f) if f.is_empty()) {
         return Ok(String::new());
     }
     expr(value)
+}
+
+fn available() -> Result<(), String> {
+    #[cfg(test)]
+    {
+        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DISABLED.get_or_init(|| std::env::var_os("ADAPSIS_TEST_DENY_LEGACY_EXPORT").is_some()) {
+            return Err("legacy exporter unavailable in fixture".into());
+        }
+    }
+    Ok(())
 }

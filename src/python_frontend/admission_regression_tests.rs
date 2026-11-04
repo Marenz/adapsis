@@ -96,7 +96,7 @@ fn python_await_reuses_sibling_name_without_relaxing_effect_or_type_checks() {
     let lowered = lower_module(source, "ScopeProbe").unwrap();
     assert_eq!(
         lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .matches("+await text:String")
             .count(),
         2

@@ -280,6 +280,48 @@ async fn assert_autoretest(config: &AppConfig, streaming: bool, module: &str) {
     assert_eq!(envelope(&messages, "regress")["success"], false);
     assert_evaluation(&messages, "retained", module);
     assert_eq!(result.completed, Some(true));
+    let meta = fixture.config.meta.lock().unwrap().clone();
+    let replayed = crate::session::replay::reconstruct(&meta.sources, &meta.mutations, meta.revision).unwrap();
+    let current = fixture.config.program.read().await;
+    assert_eq!(replayed.get_function(&format!("{module}.total")), current.get_function(&format!("{module}.total")));
+}
+
+#[tokio::test]
+async fn native_python_typed_execution_recovery_and_replay_without_legacy_exporter() {
+    if !crate::logging::tests::child() {
+        crate::logging::tests::capture_with_env(
+            "api::tests::native_turn_tests::native_repair_turn_tests::native_python_typed_execution_recovery_and_replay_without_legacy_exporter",
+            false, &[("ADAPSIS_TEST_DENY_LEGACY_EXPORT", "1")]);
+        return;
+    }
+    let lowered = crate::python_frontend::lower_module(BUGGY, "NoExporterControl").unwrap();
+    assert_eq!(lowered.legacy_export().unwrap_err().message, "legacy exporter unavailable in fixture");
+    repair(false, "TypedNoExporterHttp", true).await;
+    repair(true, "TypedNoExporterSse", true).await;
+}
+
+#[tokio::test]
+async fn native_python_typed_mixed_rewound_submission_refuses_before_io() {
+    let fixture = Fixture::new(vec![], "+module TypedNoEffects\n+fn read ()->String [io,async]\n +await text:String = read_file(\"never\")\n +return text\n+end").await;
+    let mut config = fixture.config.clone();
+    let (sender, mut requests) = tokio::sync::mpsc::channel(4);
+    config.io_sender = Some(sender);
+    let mut ws = config.snapshot_working_set().await;
+    ws.meta.revision = 0; // Its one recorded source remains; branch is unresolved.
+    let before_program = serde_json::to_value(&ws.program).unwrap();
+    let before_meta = serde_json::to_value(&ws.meta).unwrap();
+    let mut operations = vec![crate::parser::Operation::Eval(crate::parser::EvalMutation {
+        function_name: "TypedNoEffects.read".into(), input: crate::parser::Expr::StructLiteral(vec![]), inline_expr: None,
+    })];
+    operations.extend(crate::python_frontend::lower_module("def value() -> int:\n    return 1\n", "TypedNoEffects").unwrap().operations);
+    let result = crate::api::execute::execute_operations_with_baseline(operations,
+        &crate::session::replay::Submission::python("TypedNoEffects", "original fixture source"),
+        &config, &mut ws, None, None).await;
+    assert!(result.has_errors);
+    assert!(result.mutation_results[0].message.contains("history branch policy"));
+    assert_eq!(before_program, serde_json::to_value(&ws.program).unwrap());
+    assert_eq!(before_meta, serde_json::to_value(&ws.meta).unwrap());
+    assert!(requests.try_recv().is_err());
 }
 
 #[tokio::test]

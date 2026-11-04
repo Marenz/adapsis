@@ -26,8 +26,8 @@ fn reject(source: &str, fragment: &str) -> Diagnostic {
 fn shared_var_read_and_write_lower_to_bare_ident_and_set() {
     let source = "count: int = 0\n\n@effects('mut')\ndef incr() -> int:\n    count = count + 1\n    return count\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+shared count:Int = 0"));
-    assert!(lowered.canonical_adapsis.contains("+set count = (count + 1)"));
+    assert!(lowered.legacy_export().unwrap().contains("+shared count:Int = 0"));
+    assert!(lowered.legacy_export().unwrap().contains("+set count = (count + 1)"));
     let original = program(source);
     let printed = printer::print_module(&original, "Example").unwrap();
     assert!(printed.contains("count: int = 0"));
@@ -48,7 +48,7 @@ fn shared_var_defaults_reject_function_calls() {
 fn route_decorator_roundtrips() {
     let source = "@route(\"POST\", \"/webhook\")\ndef handle(body: str) -> str:\n    return body\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+route POST \"/webhook\" -> handle"));
+    assert!(lowered.legacy_export().unwrap().contains("+route POST \"/webhook\" -> handle"));
     let original = program(source);
     let printed = printer::print_module(&original, "Example").unwrap();
     assert!(printed.contains("@route(\"POST\", \"/webhook\")"));
@@ -63,10 +63,10 @@ fn route_decorator_roundtrips() {
 fn source_decorator_and_inbody_helpers_roundtrip() {
     let source = "@source(\"heartbeat\", type=\"timer\", interval=\"60000\")\ndef on_heartbeat() -> str:\n    return \"beat\"\n\n@effects(\"io\")\nasync def setup() -> str:\n    source_add(\"timer(300000)\", \"poll\", \"on_tick\")\n    source_add(\"channel\", \"inbox\", \"on_message\")\n    source_remove(\"poll\")\n    source_replace(\"inbox\", \"timer(60000)\", \"on_message\")\n    source_list()\n    event_register(\"new_message\", \"String\")\n    event_emit(\"new_message\", \"hi\")\n    return \"ok\"\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+source heartbeat timer interval=60000 -> on_heartbeat"));
-    assert!(lowered.canonical_adapsis.contains("+source add timer(300000) as poll -> on_tick"));
-    assert!(lowered.canonical_adapsis.contains("+event register new_message(String)"));
-    assert!(lowered.canonical_adapsis.contains("+event emit new_message \"hi\""));
+    assert!(lowered.legacy_export().unwrap().contains("+source heartbeat timer interval=60000 -> on_heartbeat"));
+    assert!(lowered.legacy_export().unwrap().contains("+source add timer(300000) as poll -> on_tick"));
+    assert!(lowered.legacy_export().unwrap().contains("+event register new_message(String)"));
+    assert!(lowered.legacy_export().unwrap().contains("+event emit new_message \"hi\""));
     let original = program(source);
     let printed = printer::print_module(&original, "Example").unwrap();
     assert!(printed.contains("@source(\"heartbeat\", type=\"timer\", interval=\"60000\")"));
@@ -83,8 +83,8 @@ fn source_decorator_and_inbody_helpers_roundtrip() {
 fn startup_shutdown_roundtrip() {
     let source = "@effects(\"io\")\nasync def startup() -> None:\n    source_add(\"timer(300000)\", \"poll\", \"on_tick\")\n    return \"started\"\n\n@effects(\"io\")\nasync def shutdown() -> None:\n    source_remove(\"poll\")\n    return \"stopped\"\n\ndef on_tick() -> str:\n    return \"tick\"\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+startup [io, async]"));
-    assert!(lowered.canonical_adapsis.contains("+shutdown [io, async]"));
+    assert!(lowered.legacy_export().unwrap().contains("+startup [io, async]"));
+    assert!(lowered.legacy_export().unwrap().contains("+shutdown [io, async]"));
     let original = program(source);
     let printed = printer::print_module(&original, "Example").unwrap();
     assert!(printed.contains("async def startup() -> None:"));
@@ -100,8 +100,8 @@ fn startup_shutdown_roundtrip() {
 fn keyword_variant_option_roundtrip() {
     let source = "@union\nclass Option:\n    Some: tuple[int]\n    None_: tuple[()]\n\ndef unwrap_or(o: Option, default: int) -> int:\n    match o:\n        case Some(val):\n            return val\n        case None:\n            return default\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+type Option = Some(Int) | None"));
-    assert!(lowered.canonical_adapsis.contains("+case None"));
+    assert!(lowered.legacy_export().unwrap().contains("+type Option = Some(Int) | None"));
+    assert!(lowered.legacy_export().unwrap().contains("+case None"));
     let original = program(source);
     let printed = printer::print_type(&original, "Example.Option").unwrap();
     assert!(printed.contains("None_: tuple[()]"));

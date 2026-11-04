@@ -58,8 +58,8 @@ fn functions_lower_to_unwrapped_top_level_operations() {
     assert!(
         matches!(lowered.operations.as_slice(), [parser::Operation::Function(f)] if f.name == "double")
     );
-    assert!(lowered.canonical_adapsis.contains("+fn double"));
-    assert!(!lowered.canonical_adapsis.contains("+module"));
+    assert!(lowered.legacy_export().unwrap().contains("+fn double"));
+    assert!(!lowered.legacy_export().unwrap().contains("+module"));
     let mut fresh = ast::Program::default();
     apply(&mut fresh, source);
     assert_eq!(fresh.functions.len(), 1);
@@ -272,9 +272,9 @@ fn module_scoped_lowering_and_printing_are_unchanged() {
     )
     .unwrap();
     assert!(
-        lowered.canonical_adapsis.contains("M.a("),
+        lowered.legacy_export().unwrap().contains("M.a("),
         "{}",
-        lowered.canonical_adapsis
+        lowered.legacy_export().unwrap()
     );
     // An unknown bare callee is refused exactly as before.
     let message = lower_module("def b(n: int) -> int:\n    return a(n)\n", "M")

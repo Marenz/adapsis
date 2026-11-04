@@ -244,8 +244,8 @@ fn module_less_test_lowering_keeps_the_runtime_target_string() {
         .collect();
     assert_eq!(names, [("f".into(), 2), ("M.f".into(), 1)]);
     assert!(
-        lowered.canonical_adapsis.contains("+test f")
-            && !lowered.canonical_adapsis.contains("+module")
+        lowered.legacy_export().unwrap().contains("+test f")
+            && !lowered.legacy_export().unwrap().contains("+module")
     );
     // Module lowering is unchanged: bare targets are qualified, dotted ones kept.
     let lowered = lower_tests(text, "M").unwrap();

@@ -41,13 +41,26 @@ rechecked after edits. Calls, fields/pseudo-fields, constructors, effects, contr
 flow, list data and unproved defaults still use the conservative collision gate;
 this is a bounded exception, not complete support for legacy helper collisions.
 
-The lowerer also validates the structural operation IR before canonical emission:
+The lowerer validates the structural operation IR before execution:
 unsupported casts, misplaced operations, malformed call/pattern/type shapes and
 source/event fragment injection are refused independently of the `.ax` roundtrip.
 This is an additional guard, not a replacement for type/effect checking or native
 authorization. Structural-IR errors currently report a submission-level location
-and operation path. Emission/reparse, normal execution and persistence still use
-the existing paths; maintained `.py` authority is separate #121 work.
+and operation path. Native Python and CLI tests now use these typed operations
+directly. `legacy_export()` is an explicit, fallible compatibility export/oracle;
+it is not an execution or replay fallback. Library `.py` activation remains a
+separate #121 gate; retained legacy library hooks can still write `.ax`.
+
+Python mutation history keeps exact submitted source and module/version metadata
+alongside the actual affected-module outcome, including rejected/partial updates.
+New stored tests carry typed data for save/load and automatic re-testing. Old
+session strings remain readable as legacy input. Rewind is staged and fails
+without replacing live state if historical outcomes cannot be reconstructed.
+New Python declaration edits after rewinding to an earlier revision are currently
+refused until an explicit history-branch policy exists; inspection/evaluation/tests
+remain available. Future history is not silently deleted. This is completed-state
+recovery, not in-flight exactly-once execution or a replacement for library conflict
+checks, and it does not reconstruct historical standalone test events.
 
 Omitting `language` or source `format` preserves Adapsis syntax. Python `module`
 metadata selects a namespace, never permission. Live gateway compatibility is

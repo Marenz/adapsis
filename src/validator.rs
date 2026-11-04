@@ -3150,6 +3150,7 @@ mod tests {
         // Manually add tests to the function (simulating what store_test does)
         let func = program.get_function_mut("Calc.add").unwrap();
         func.tests = vec![ast::TestCase {
+            typed: None,
             input: "a=1 b=2".to_string(),
             expected: "3".to_string(),
             passed: true,

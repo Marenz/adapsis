@@ -6,7 +6,7 @@ use super::*;
 fn test_matchers_roundtrip_to_adapsis() {
     let source = "def test_f():\n    assert contains(f('x'), 'sub')\n    assert_after('routes', 'contains', '/chat')\n\ndef test_g():\n    assert starts_with(g('x'), 'pre')\n\ndef test_h():\n    assert is_ok(h(1))\n\ndef test_i():\n    assert is_err(i(1))\n\ndef test_j():\n    assert j(1) == Err('oops')\n\ndef test_k():\n    assert k(1) == Err(err_label)\n";
     let lowered = lower_tests(source, "Example").unwrap();
-    let canonical = lowered.canonical_adapsis;
+    let canonical = lowered.legacy_export().unwrap();
     assert!(canonical.contains("expect contains(\"sub\")"), "{canonical}");
     assert!(canonical.contains("+after routes contains \"/chat\""), "{canonical}");
     assert!(canonical.contains("expect starts_with(\"pre\")"), "{canonical}");

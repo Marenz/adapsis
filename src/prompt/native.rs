@@ -79,6 +79,10 @@ source inspection. This is a guarded Python-syntax frontend over the typed
 Adapsis runtime, not CPython. Every mutate/test call requires an explicit module
 identifier; it selects a namespace, never authority. Existing functions are
 replaced by redeclaration; unsubmitted functions remain intact.
+Python submissions execute typed operations; legacy source export is not required.
+After a rewind to an earlier history revision, new Python declarations are refused
+until an explicit history-branch policy exists. Inspect/evaluate/test remain
+available; do not work around that refusal by changing the source language.
 
 1. Inspect symbols for modules; inspect source with target="Example.add_two",
    format="python" before changing code. Source/deps targets are qualified

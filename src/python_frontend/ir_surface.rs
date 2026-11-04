@@ -1,6 +1,7 @@
 //! Step A: structural validation independent of whole-source .ax emission/reparse.
 //! This is NOT type checking, authority, or runtime validation. All existing
-//! frontend/native/validator checks and the legacy roundtrip oracle still run.
+//! frontend/native/validator checks remain; legacy roundtrips are explicit
+//! exporter/test oracles, not a required execution intermediate.
 #[cfg(test)]
 mod tests;
 mod values;
@@ -17,7 +18,7 @@ enum Place {
     Body,
 }
 
-pub(super) fn validate(operations: &[p::Operation]) -> Checked {
+pub(crate) fn validate(operations: &[p::Operation]) -> Checked {
     if operations.is_empty() {
         return Err("empty submission".into());
     }

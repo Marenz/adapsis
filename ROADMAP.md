@@ -1,5 +1,32 @@
 # AdapsisOS Roadmap
 
+## Current acceptance checkpoint — typed Python execution/replay (#121/#122)
+
+- Uncommitted candidate on manager-integrated baseline `8911fba`: typed operations
+  share the existing executor/session application, while legacy string wrappers
+  parse and delegate. Native pinned authorization, #87/#88, #83, #118 and Result
+  activation semantics remain. `legacy_export()` is explicit and fallible, not
+  required by normal Python execution, history reconstruction or typed re-tests.
+- Exact original Python mutation text/module is retained with versioned requested
+  IR and the actual affected-module after-state. Rejected/partial updates restore
+  their actual outcome rather than replaying rejected code. Rewind is staged,
+  never executes historical effects, and refuses uncertain legacy outcomes.
+- Approved #122 residual: Python declaration edits after an earlier rewind refuse
+  before submission effects; future history is not deleted or branched implicitly.
+  Evaluation/tests remain usable. Standalone historical test-event reconstruction
+  and unrecorded library baselines are not newly provided by full rewind.
+- Library serializers/loaders are separate owners. Existing `.ax` persistence hooks
+  remain until their reviewed Python backend integrates; this is not live maintained
+  `.py` authority or in-flight exactly-once recovery. No deployment by this worker.
+- Gates: typed fixtures 27 passed; native 175 passed; session 53 passed; scoped 23
+  passed; Python 375 passed plus CLI 5; Result CLI 4. One full release gate:
+  **2091 passed / 1 known strict-parity failure / 2 ignored**, Python CLI 5 and
+  Result CLI 4 passed. Strict inventory unchanged: 324 verified / 58 invalid /
+  191 unsupported, zero mismatches/non-idempotence. Log: `/tmp/opencode/typed-full.log`.
+- Exporter-unavailable child-process tests use the actual HTTP/SSE and CLI core;
+  completed-work save/load, two-case automatic re-test and checkpoint replay work
+  while explicit legacy export fails. No alternate test-only execution path.
+
 ## Current acceptance integration — `b0ffd8c` + `113f80f`
 
 - This isolated worktree combines accepted Result C-core `113f80f` with release

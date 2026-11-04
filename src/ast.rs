@@ -952,6 +952,8 @@ pub struct AfterCheck {
 /// A test case stored alongside its function declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TestCase {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed: Option<crate::session::replay::TypedTestCase>,
     pub input: String,
     pub expected: String,
     #[serde(default)]
@@ -2404,6 +2406,7 @@ mod tests {
     #[test]
     fn test_case_construction() {
         let tc = TestCase {
+            typed: None,
             input: "x=5".to_string(),
             expected: "10".to_string(),
             passed: false,

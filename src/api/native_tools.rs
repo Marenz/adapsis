@@ -5,7 +5,7 @@
 //! "native tool" may act on the program. Every tool is re-derived down to a
 //! small, auditable set of Adapsis operations (`+module`, `+test`, `!eval`,
 //! `!done`, and read-only inspection) and pushed through the *same* guarded
-//! executor — [`execute_code_with_baseline`] — used by conversational turns, so
+//! executor — [`execute_operations_with_baseline`] — used by conversational turns, so
 //! mutation semantics, the test gate, per-function CoW write-back and the
 //! immutable completion baseline stay authoritative.
 //!
@@ -41,7 +41,7 @@
 //! permission snapshot is the single authority; this module consumes it, it
 //! does not re-derive it.
 
-use super::execute::{execute_code_with_baseline, CodeExecutionResult};
+use super::execute::{execute_operations_with_baseline, CodeExecutionResult};
 use super::{AppConfig, MutationResult, WorkingSet};
 use crate::ast::Program;
 use crate::permissions::PermissionLevel;
@@ -279,10 +279,10 @@ enum InspectKind {
 
 enum ParsedTool {
     Inspect { kind: InspectKind, target: Option<String>, format: frontend::SourceFormat },
-    Mutate { source: String, modules: Vec<String>, python: bool, roles: Option<crate::python_frontend::NativeReferences> },
+    Mutate { source: crate::session::replay::Submission, operations: Vec<parser::Operation>, modules: Vec<String>, python: bool, roles: Option<crate::python_frontend::NativeReferences> },
     PythonMutate { source: String, module: String, preflight: crate::python_frontend::NativePreflight },
-    Test { source: String, targets: Vec<String>, python: bool },
-    Evaluate { function: String, source: String, python: bool },
+    Test { source: crate::session::replay::Submission, operations: Vec<parser::Operation>, targets: Vec<String>, python: bool },
+    Evaluate { function: String, source: crate::session::replay::Submission, operations: Vec<parser::Operation>, python: bool },
     MemoryInspect { query: String },
     MemoryRemember { content: String, scope: String },
     MemoryCorrect {
@@ -687,7 +687,7 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
             }
             InspectKind::Tasks | InspectKind::Library => {}
         },
-        ParsedTool::Mutate { modules, source, roles, .. } => {
+        ParsedTool::Mutate { modules, operations, roles, .. } => {
             for m in modules {
                 if resolve_module(config, &model, m) < PermissionLevel::Write {
                     return Err(format!(
@@ -695,8 +695,7 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
                     ));
                 }
             }
-            let ops = parser::parse(source).map_err(|e| e.to_string())?;
-            authored::check_operations(&ops, config, model, None, roles.as_ref())?;
+            authored::check_operations(operations, config, model, None, roles.as_ref())?;
         }
         ParsedTool::Test { targets, .. } => {
             for t in targets {
@@ -1197,7 +1196,7 @@ fn memory_ok_result(name: &str, output: String, as_query: bool) -> NativeToolRes
 
 /// Execute a single native tool against a caller-prepared working snapshot.
 ///
-/// All tools run through [`execute_code_with_baseline`] with the *same*
+/// Code tools run through [`execute_operations_with_baseline`] with the *same*
 /// immutable completion baseline, so the executor's mutation semantics, test
 /// gate and per-function CoW write-back remain authoritative. Inspection is
 /// read-only and permission-filtered. Memory tools bypass the code executor and
@@ -1217,9 +1216,9 @@ pub async fn execute_native_tool(
     match parsed {
         ParsedTool::PythonMutate { .. } => denied_result(name, "Python mutation was not finalized".into()),
         ParsedTool::Inspect { kind, target, format } => execute_inspect(config, session, &model, kind, target, format),
-        ParsedTool::Mutate { source, .. } => {
+        ParsedTool::Mutate { source, operations, .. } => {
             let code =
-                execute_code_with_baseline(&source, config, session, None, Some(completion_baseline))
+                execute_operations_with_baseline(operations, &source, config, session, None, Some(completion_baseline))
                     .await;
             let output = truncate_chars(&summarize_mutations(&code), MAX_OUTPUT_CHARS);
             let content = build_envelope(name, &code, &output, None, None);
@@ -1228,9 +1227,9 @@ pub async fn execute_native_tool(
                 content,
             }
         }
-        ParsedTool::Test { source, .. } => {
+        ParsedTool::Test { source, operations, .. } => {
             let code =
-                execute_code_with_baseline(&source, config, session, None, Some(completion_baseline))
+                execute_operations_with_baseline(operations, &source, config, session, None, Some(completion_baseline))
                     .await;
             let output = truncate_chars(&summarize_tests(&code), MAX_OUTPUT_CHARS);
             let content = build_envelope(name, &code, &output, None, None);
@@ -1239,9 +1238,9 @@ pub async fn execute_native_tool(
                 content,
             }
         }
-        ParsedTool::Evaluate { source, .. } => {
+        ParsedTool::Evaluate { source, operations, .. } => {
             let code =
-                execute_code_with_baseline(&source, config, session, None, Some(completion_baseline))
+                execute_operations_with_baseline(operations, &source, config, session, None, Some(completion_baseline))
                     .await;
             let eval_msg = code
                 .mutation_results
@@ -1258,7 +1257,9 @@ pub async fn execute_native_tool(
         }
         ParsedTool::Finish => {
             let code =
-                execute_code_with_baseline("!done", config, session, None, Some(completion_baseline))
+                execute_operations_with_baseline(vec![parser::Operation::Done],
+                    &crate::session::replay::Submission::adapsis("!done"),
+                    config, session, None, Some(completion_baseline))
                     .await;
             let output = if code.done_accepted && !code.has_errors {
                 "done accepted".to_string()

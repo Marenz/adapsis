@@ -1,8 +1,10 @@
 //! A deliberately non-executing Python syntax frontend for the Adapsis AST.
 //! No Python interpreter, imports, source sidecars, or authority decisions live here.
 
+#[allow(dead_code)] // Explicit legacy exporter/oracle; normal Python paths do not call it.
 mod emit;
 mod ir_surface;
+pub(crate) use ir_surface::validate as validate_operation_ir;
 mod ast_equality;
 mod expressions;
 mod lower;
@@ -81,7 +83,9 @@ pub use lower::Preflight as NativePreflight;
 pub(crate) use references::COLLISION as CONSTRUCTOR_ROLE_ERROR;
 pub(crate) use call_sites::runtime_shadowed;
 pub use type_bindings::check_native_type_bindings;
-pub use tests_lower::{lower_input, lower_tests};
+#[allow(unused_imports)] // Kept as the explicit legacy input export adapter.
+pub use tests_lower::lower_input;
+pub use tests_lower::{lower_input_expr, lower_tests};
 #[cfg(test)]
 pub(crate) use tests_lower::lower_tests_toplevel;
 /// Test-only: module-less (top-level) lowering/printing. See `top_level.rs`.
@@ -126,8 +130,24 @@ pub struct SourceSpan {
 #[allow(dead_code)] // `source_map` is diagnostic metadata.
 pub struct LoweredSource {
     pub operations: Vec<crate::parser::Operation>,
-    pub canonical_adapsis: String,
     pub source_map: Vec<SourceSpan>,
+}
+
+impl LoweredSource {
+    /// Optional legacy export and transition oracle, never a typed execution API.
+    #[allow(dead_code)]
+    pub fn legacy_export(&self) -> Result<String, Diagnostic> {
+        let exported = emit::operations(&self.operations).map_err(|message| Diagnostic {
+            module: "<export>".into(), line: 1, column: 1, message,
+        })?;
+        let parsed = crate::parser::parse(&exported).map_err(|_| Diagnostic {
+            module: "<export>".into(), line: 1, column: 1, message: "legacy export cannot be reparsed".into(),
+        })?;
+        if format!("{:?}", self.operations) != format!("{parsed:?}") {
+            return Err(Diagnostic { module: "<export>".into(), line: 1, column: 1, message: "legacy export structural mismatch".into() });
+        }
+        Ok(exported)
+    }
 }
 
 pub fn lower_module(source: &str, module: &str) -> Result<LoweredSource, Diagnostic> {
@@ -210,25 +230,8 @@ impl<'a> Context<'a> {
         // nodes. The guard supplies an operation path, never fabricated .ax lines.
         ir_surface::validate(&operations)
             .map_err(|error| self.error(0, format!("Python operation IR: {error}")))?;
-        let canonical_adapsis = emit::operations(&operations).map_err(|e| self.error(0, e))?;
-        let reparsed = crate::parser::parse(&canonical_adapsis).map_err(|e| {
-            self.error(
-                0,
-                format!("canonical Adapsis cannot represent this source: {e}"),
-            )
-        })?;
-        // Parser operations have no NodeIds. Their Debug form is a complete structural
-        // representation, so this verifies docs, names, types and all expression nodes,
-        // not merely that the generated source happens to parse.
-        if format!("{operations:?}") != format!("{reparsed:?}") {
-            return Err(self.error(
-                0,
-                "canonical Adapsis structural roundtrip mismatch; source rejected",
-            ));
-        }
         Ok(LoweredSource {
             operations,
-            canonical_adapsis,
             source_map,
         })
     }

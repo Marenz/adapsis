@@ -256,7 +256,7 @@ fn python_ir_timer_literal_semicolon_actual_python_setup_preserves_legacy_ast() 
     assert_legacy_oracle(&lowered.operations);
     assert!(
         lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .contains("timer(len(\"a;b\") + 1)")
     );
 }
@@ -294,7 +294,7 @@ fn python_ir_supported_frontend_operations_keep_the_legacy_oracle() {
     ] {
         let lowered = super::super::lower_module(source, module).unwrap();
         validate(&lowered.operations).unwrap();
-        let parsed = p::parse(&lowered.canonical_adapsis).unwrap();
+        let parsed = p::parse(&lowered.legacy_export().unwrap()).unwrap();
         assert_eq!(format!("{:?}", lowered.operations), format!("{parsed:?}"));
         let mut direct = crate::ast::Program::default();
         let mut legacy = crate::ast::Program::default();

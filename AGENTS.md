@@ -464,6 +464,38 @@ gateway resolves via `model_aliases` or `virtual_models`.
 
 ## Test Infrastructure
 
+- #121/#122 typed persistence: new Python test submissions store optional versioned
+  `ast::TestCase.typed` payloads; input/expectation strings remain display/legacy
+  import data. Present invalid typed data errors, never falls back. Legacy absent
+  payloads retain their importer. Re-test/rollback is shared in `session/retest.rs`.
+  A Python module loader must attach verified cases with `store_test_payload(...,
+  true)`; `store_test` deliberately remains the legacy adapter.
+- `session/replay.rs` records original Python source, explicit module/version,
+  requested operation IR and the ACTUAL affected-module after-state, including
+  stored tests/NodeIds. The outcome is accepted/rejected/partial: rejected requested
+  bodies are never reapplied (#122). No unrelated module/global authority is copied
+  into the checkpoint. This duplicates the affected module per mutation; it is
+  recovery data, not maintained Python source or a history-retention policy.
+  Old `sources: Vec<String>` entries decode and serialize as strings. Mutation
+  entries default to Adapsis origin; new Python entries retain exact submitted
+  text and explicit origin via one recording helper.
+- Rewind builds a fresh Program and swaps only on success; it never runs historical
+  tests, initializers, startup, eval or IO. New checkpoints restore their actual
+  outcomes and rebuild indexes. Legacy failed/missing/misaligned outcome records
+  refuse categorically rather than invent accepted state. Full rewind still resets
+  runtime; standalone historical test events are not newly reconstructed.
+  Editing after an EARLIER rewind is intentionally unsupported for new Python
+  declarations: `revision != sources.len()` refuses before submission effects,
+  preserving future history. Reads/evaluation/tests remain available. No branch
+  lineage or future-history deletion is invented; #122 retains this residual.
+- Python replay source is capped at 1 MiB before copying it into a record. Typed
+  persistence work checks use 96 levels, 200,000 JSON-value nodes and 16 MiB text;
+  prospective mutation checks budget both old/candidate module states before
+  application (retest may combine them). These are structural-work budgets after
+  deserialization, not a cap on whole-session file allocation or hostile-file
+  hardening. Keep serde_json's default recursion limit enabled. Unknown versions,
+  malformed payloads and scope mismatches fail closed without private payload text.
+
 - Python test submissions group cases by exact lowered target (#118) before
   canonical emission. Targets execute in first-seen order (interleaved targets
   regroup); cases retain per-target source order. Each def keeps its SourceSpan,
@@ -755,18 +787,23 @@ replaces that branch with one composer.
 - **Python-subset frontend (#81, #86 parity work in progress):** exact
   `rustpython-parser = "=0.4.0"` parses
   syntax without a Python interpreter. `src/python_frontend/` lowers a bounded
-  typed subset into `parser::Operation`, emits canonical `.ax`, and requires a
-  complete structural reparse match. #121 Step A additionally runs the independent
-  `python_frontend/ir_surface.rs` structural guard BEFORE emission: supported IR
+  typed subset directly into `parser::Operation`. #121's independent
+  `python_frontend/ir_surface.rs` structural guard checks supported IR
   placement, names/types/effects, direct call shapes, pattern/binding coherence,
   test-data/matcher shapes and inert source/event fragments. It rejects casts
   (runtime conversion otherwise erases them). The guard uses existing identifier,
   effect, type-fragment parsing and conversion helpers; it is NOT type checking,
   authority, or runtime admission. Current errors identify an IR operation path
   at submission line 1; existing SourceSpans are unchanged and are not a nested
-  node-location map. The legacy emit/reparse oracle and all native guards remain.
-  Normal execution/replay/library storage still depend on `.ax`; this checkpoint
-  does not activate maintained Python source or change persistence. #86 adds forms toward `.ax` parity:
+  node-location map. All native guards remain. `LoweredSource.operations` and
+  `source_map` are execution data; `legacy_export()` is a fallible, explicit
+  emit/reparse oracle/export, never an execution fallback. Native Python and CLI
+  test paths use typed operations; legacy string entry points parse then delegate
+  to the same executor/session application. Python evaluate has typed literal
+  inputs, without constructing an `!eval` string. Library format activation is
+  separate work: retained legacy library hooks still write `.ax` until the
+  reviewed Python backend is integrated. No maintained `.py` authority follows
+  merely from this execution change. #86 adds forms toward `.ax` parity:
   `@dataclass`/`@union` types, `match`/`case`, `+shared`, `+call`/`+check`/`+spawn`
   via `propagate`/`check`/`spawn`, `div`/`rem` helpers, all eight effects, and
   source/event/route/lifecycle declarations. `src/python_frontend/parity.rs`
