@@ -12,6 +12,10 @@ use crate::vm;
 mod json;
 mod jit_dispatch;
 mod invocation;
+mod statement_execution;
+mod tracing;
+pub use tracing::trace_function;
+pub(crate) use statement_execution::eval_function_body;
 pub use invocation::{eval_declared_function, eval_declared_function_unframed};
 pub(crate) mod result_contract;
 #[cfg(test)]
@@ -689,11 +693,11 @@ pub fn eval_compiled_or_interpreted_cached(
         return Ok((result, true));
     }
 
-    // Only a pre-execution refusal authorizes tree fallback. Preserve the existing
-    // synchronous Err(...) presentation without re-executing a failed VM invocation.
+    // Only a pre-execution refusal authorizes tree fallback. Execution errors remain
+    // structural errors so API/native callers cannot mistake them for successful text.
     match try_vm_execute(program, func, input) {
         vm::VmAttempt::Executed(Ok(value)) => return Ok((format!("{value}"), false)),
-        vm::VmAttempt::Executed(Err(error)) => return Ok((format!("Err({error})"), false)),
+        vm::VmAttempt::Executed(Err(error)) => return Err(error),
         vm::VmAttempt::NotAdmitted(_) => {}
     }
 
@@ -806,19 +810,10 @@ pub fn eval_call_with_input(
         env.populate_shared_from_program(program);
         bind_input_to_params(program, func, &input_val, &mut env);
 
-        let returns_result = matches!(&func.return_type, ast::Type::Result(_));
-
         let body_result = eval_declared_function(program, function_name, func, &mut env);
         return match body_result {
-            Ok(val) => {
-                let result = if returns_result {
-                    result_contract::wrap_success(val)
-                } else {
-                    val
-                };
-                Ok(format!("{result}"))
-            }
-            Err(e) => Ok(format!("Err({e})")),
+            Ok(value) => Ok(format!("{value}")),
+            Err(error) => Err(error),
         };
     }
 
@@ -1572,28 +1567,22 @@ pub async fn eval_test_case_async(
     Ok(eval_result)
 }
 
-/// Compare the eval result against expected, handling Result<T> wrapping.
+/// Compare an already-normalized invocation outcome against an expected test observation.
+/// Error matchers may ASSERT an execution failure; this observer never resumes evaluated
+/// code or turns that error into an in-language catchable value.
 /// When a `TestMatcher` is present, it overrides exact comparison.
 fn check_test_result(
     result: Result<Value>,
-    return_type: &ast::Type,
+    _return_type: &ast::Type,
     input: &Value,
     expected: &Value,
     matcher: Option<&parser::TestMatcher>,
 ) -> Result<String> {
-    let returns_result = matches!(return_type, ast::Type::Result(_));
-
     let actual = match result {
-        Ok(val) => {
-            if returns_result {
-                // Wrap in Ok if not already a result type
-                result_contract::wrap_success(val)
-            } else {
-                val
-            }
-        }
+        Ok(value) => value,
         Err(err) => {
-            // Check failures produce Err with the label
+            // Diagnostic-only observation for test assertions. This does not resume
+            // evaluated code or introduce an in-language operational-error catch.
             let err_str = err.to_string();
             Value::Err(err_str.into())
         }
@@ -1755,19 +1744,18 @@ pub fn eval_function_body_named(
     body: &[ast::Statement],
     env: &mut Env,
 ) -> Result<Value> {
-    let qualified = program.qualify_function_name(function_name);
-    FN_NAME_STACK.with(|s| s.borrow_mut().push(qualified));
-    let result = eval_function_body(program, body, env);
-    FN_NAME_STACK.with(|s| s.borrow_mut().pop());
-    result
+    invocation::with_named_frame(program, function_name, || eval_function_body(program, body, env))
 }
 
-pub(crate) fn eval_function_body(
+/// Execute one statement using the same semantics for ordinary and observed evaluation.
+/// None means fallthrough (except an explicit Return); nested blocks recurse through the
+/// ordinary body runner, so an observer never inherits nested private invocation events.
+fn execute_statement(
     program: &ast::Program,
-    body: &[ast::Statement],
+    stmt: &ast::Statement,
     env: &mut Env,
 ) -> Result<Value> {
-    for stmt in body {
+    {
         // Update task snapshot if this is a tracked coroutine task.
         if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
             if handle.task_id.is_some() {
@@ -1792,37 +1780,9 @@ pub(crate) fn eval_function_body(
                 env.set(name, val);
             }
             ast::StatementKind::Call { binding, call } => {
-                let wants_result = binding
-                    .as_ref()
-                    .is_some_and(|b| matches!(&b.ty, ast::Type::Result(_)));
-
-                if wants_result {
-                    // Binding is Result<T> — catch errors instead of propagating
-                    match eval_call(program, call, env) {
-                        Ok(val) => {
-                            if let Some(binding) = binding {
-                                // Wrap success in Ok
-                                let wrapped = result_contract::wrap_success(val);
-                                env.set(&binding.name, wrapped);
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(binding) = binding {
-                                env.set(&binding.name, Value::Err(e.to_string().into()));
-                            }
-                        }
-                    }
-                } else {
-                    // Binding is plain T — errors propagate (like Rust's ?)
-                    let val = eval_call(program, call, env)?;
-                    // Unwrap Ok() if the function returned a Result but the caller wants plain T
-                    let val = match val {
-                        Value::Ok(inner) => *inner,
-                        other => other,
-                    };
-                    if let Some(binding) = binding {
-                        env.set(&binding.name, val);
-                    }
+                let value = invocation::eval_bound_call(program, call, binding.as_ref(), env)?;
+                if let Some(binding) = binding {
+                    env.set(&binding.name, value);
                 }
             }
             ast::StatementKind::Check {
@@ -2083,10 +2043,6 @@ pub(crate) fn eval_function_body(
                 // If so, call it normally (it will use +await internally for IO)
                 if program.get_function(&call.callee).is_some() {
                     let val = eval_call(program, call, env)?;
-                    let val = match val {
-                        Value::Ok(inner) => *inner,
-                        other => other,
-                    };
                     // Use set_existing so `+await text:String = f()` reassigns an
                     // outer-scope `text` when one exists (e.g. inside a nested
                     // +if) instead of shadowing it in the block scope and losing
@@ -2386,22 +2342,7 @@ std::thread_local! {
 const MAX_CALL_DEPTH: usize = 256;
 
 fn eval_call(program: &ast::Program, call: &ast::CallExpr, env: &mut Env) -> Result<Value> {
-    let depth = CALL_DEPTH.with(|d| {
-        let v = d.get();
-        d.set(v + 1);
-        v
-    });
-    if depth >= MAX_CALL_DEPTH {
-        CALL_DEPTH.with(|d| d.set(0));
-        bail!(
-            "maximum call depth ({MAX_CALL_DEPTH}) exceeded — possible infinite recursion in `{}`",
-            call.callee
-        );
-    }
-
-    let result = eval_call_inner(program, call, env);
-    CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-    result
+    invocation::with_call_depth(&call.callee, || eval_call_inner(program, call, env))
 }
 
 /// Evaluate a builtin call with pre-evaluated args. Public for !eval on builtins.
@@ -4127,150 +4068,6 @@ impl std::fmt::Display for TraceStep {
             self.stmt_id, self.description, self.result, marker
         )
     }
-}
-
-/// Execute a function with tracing, returning each step.
-pub fn trace_function(
-    program: &ast::Program,
-    function_name: &str,
-    input: &parser::Expr,
-) -> Result<Vec<TraceStep>> {
-    let func = program.get_function(function_name).ok_or_else(|| {
-        anyhow!(
-            "function `{function_name}` not found{}",
-            crate::eval::suggest_similar(program, function_name)
-        )
-    })?;
-
-    let input_val = eval_parser_expr_standalone(input)?;
-    let mut env = Env::new_with_shared_interner(&program.shared_interner);
-    bind_input_to_params(program, func, &input_val, &mut env);
-
-    let mut steps = vec![];
-    trace_body(program, &func.body, &mut env, &mut steps);
-    Ok(steps)
-}
-
-fn trace_body(
-    program: &ast::Program,
-    body: &[ast::Statement],
-    env: &mut Env,
-    steps: &mut Vec<TraceStep>,
-) -> Option<Value> {
-    for stmt in body {
-        match &stmt.kind {
-            ast::StatementKind::Let { name, value, ty } => {
-                match eval_ast_expr(program, value, env) {
-                    Ok(val) => {
-                        steps.push(TraceStep {
-                            stmt_id: stmt.id.clone(),
-                            description: format!("let {name}:{ty:?}"),
-                            result: format!("{val}"),
-                            status: TraceStatus::Pass,
-                        });
-                        env.set(name, val);
-                    }
-                    Err(e) => {
-                        steps.push(TraceStep {
-                            stmt_id: stmt.id.clone(),
-                            description: format!("let {name}:{ty:?}"),
-                            result: format!("ERROR: {e}"),
-                            status: TraceStatus::Fail,
-                        });
-                        return Some(Value::Err(e.to_string().into()));
-                    }
-                }
-            }
-            ast::StatementKind::Call { binding, call } => match eval_call(program, call, env) {
-                Ok(val) => {
-                    let desc = if let Some(b) = binding {
-                        format!("call {}:{:?} = {}()", b.name, b.ty, call.callee)
-                    } else {
-                        format!("call {}()", call.callee)
-                    };
-                    steps.push(TraceStep {
-                        stmt_id: stmt.id.clone(),
-                        description: desc,
-                        result: format!("{val}"),
-                        status: TraceStatus::Pass,
-                    });
-                    if let Some(b) = binding {
-                        env.set(&b.name, val);
-                    }
-                }
-                Err(e) => {
-                    steps.push(TraceStep {
-                        stmt_id: stmt.id.clone(),
-                        description: format!("call {}()", call.callee),
-                        result: format!("ERROR: {e}"),
-                        status: TraceStatus::Fail,
-                    });
-                    return Some(Value::Err(e.to_string().into()));
-                }
-            },
-            ast::StatementKind::Check {
-                label,
-                condition,
-                on_fail,
-            } => match eval_ast_expr(program, condition, env) {
-                Ok(val) => {
-                    let is_true = val.is_truthy();
-                    steps.push(TraceStep {
-                        stmt_id: stmt.id.clone(),
-                        description: format!("check {label}"),
-                        result: format!("{val} = {is_true}"),
-                        status: if is_true {
-                            TraceStatus::Pass
-                        } else {
-                            TraceStatus::Fail
-                        },
-                    });
-                    if !is_true {
-                        return Some(Value::Err(on_fail.clone()));
-                    }
-                }
-                Err(e) => {
-                    steps.push(TraceStep {
-                        stmt_id: stmt.id.clone(),
-                        description: format!("check {label}"),
-                        result: format!("ERROR: {e}"),
-                        status: TraceStatus::Fail,
-                    });
-                    return Some(Value::Err(e.to_string().into()));
-                }
-            },
-            ast::StatementKind::Return { value } => match eval_ast_expr(program, value, env) {
-                Ok(val) => {
-                    steps.push(TraceStep {
-                        stmt_id: stmt.id.clone(),
-                        description: "return".to_string(),
-                        result: format!("{val}"),
-                        status: TraceStatus::Return,
-                    });
-                    return Some(val);
-                }
-                Err(e) => {
-                    steps.push(TraceStep {
-                        stmt_id: stmt.id.clone(),
-                        description: "return".to_string(),
-                        result: format!("ERROR: {e}"),
-                        status: TraceStatus::Fail,
-                    });
-                    return Some(Value::Err(e.to_string().into()));
-                }
-            },
-            _ => {
-                // Branch, Each, Yield — simplified tracing
-                steps.push(TraceStep {
-                    stmt_id: stmt.id.clone(),
-                    description: format!("{:?}", std::mem::discriminant(&stmt.kind)),
-                    result: "...".to_string(),
-                    status: TraceStatus::Pass,
-                });
-            }
-        }
-    }
-    None
 }
 
 /// Try to execute a function via the bytecode VM with async IO support.

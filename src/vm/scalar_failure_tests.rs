@@ -54,14 +54,13 @@ fn scalar_failure_stops_later_arguments_operands_loops_and_recursive_calls() {
         let error =
             eval::eval_declared_function(&program, "root", root, &mut env).unwrap_err();
         assert_check(&error, "stop");
-        let (text, jit) = eval::eval_compiled_or_interpreted(
+        let error = eval::eval_compiled_or_interpreted(
             &program,
             "root",
             &parser::parse_single_expr("{}").unwrap(),
         )
-        .unwrap();
-        assert!(!jit);
-        assert_eq!(text, "Err(stop)", "legacy sync formatting without rerun");
+        .unwrap_err();
+        assert_check(&error, "stop");
     }
 }
 
@@ -149,20 +148,17 @@ fn result_capture_graphs_are_refused_and_normal_tree_catching_remains_compatible
 }
 
 #[test]
-fn quarantined_legacy_capture_keeps_operational_catching_until_combined_migration() {
+fn result_capture_does_not_recover_an_operational_error_after_c_activation() {
     let program = program("+fn broken ()->Int\n  +return 1 / 0\n+end\n+fn root ()->Int\n  +call result:Result<Int> = broken()\n  +match result\n  +case Ok(value)\n    +return value\n  +case Err(error)\n    +return 8\n  +end\n+end\n");
     assert!(vm::compile_function(program.get_function("root").unwrap(), &program).is_err());
-    let (value, jit) = eval::eval_compiled_or_interpreted(
+    let error = eval::eval_compiled_or_interpreted(
         &program,
         "root",
         &parser::parse_single_expr("{}").unwrap(),
     )
-    .unwrap();
-    assert_eq!(
-        value, "8",
-        "do not half-activate the new typed-only catch policy in legacy tree paths"
-    );
-    assert!(!jit);
+    .unwrap_err();
+    assert!(error.to_string().contains("division by zero"));
+    assert!(error.downcast_ref::<eval::result_contract::LanguageFailure>().is_none());
 }
 
 #[test]

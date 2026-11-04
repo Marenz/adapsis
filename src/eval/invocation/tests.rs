@@ -1,6 +1,5 @@
-//! Plumbing-only characterizations. Raw Result outcomes, catch-all +call Result and
-//! user-await unwrapping are deliberately NOT corrected in this checkpoint. Legacy trace
-//! is still partial; tests below explicitly prove it skips branches rather than claim parity.
+//! C-core activation matrix. The prior plumbing characterizations are deliberately
+//! replaced by structural normalization, typed catching and real trace execution tests.
 use super::*;
 use crate::{coroutine::CoroutineHandle, eval, parser, session, validator};
 
@@ -39,6 +38,10 @@ impl OutcomeObserver for Capture {
 fn declared(program: &ast::Program, name: &str) -> Result<Value> {
     let mut env = Env::new_with_shared_interner(&program.shared_interner);
     eval_declared_function(program, name, program.get_function(name).unwrap(), &mut env)
+}
+
+fn assert_ok_int(value: Value, expected: i64) {
+    assert!(matches!(value, Value::Ok(inner) if matches!(*inner, Value::Int(n) if n == expected)));
 }
 
 #[test]
@@ -100,7 +103,7 @@ fn cli_unframed_declared_entry_keeps_its_existing_frame_behavior() {
 }
 
 #[test]
-fn observer_sees_one_raw_outcome_and_no_nested_callee_body_or_events() {
+fn observer_sees_one_normalized_outcome_and_no_nested_callee_body_or_events() {
     let program = program("+module PrivateInvocation\n+fn hidden ()->Int\n  +return 14\n+end\n+module PublicInvocation\n+fn outer ()->Result<Int>\n  +return PrivateInvocation.hidden()\n+end\n");
     let function = program.get_function("PublicInvocation.outer").unwrap();
     let mut env = Env::new_with_shared_interner(&program.shared_interner);
@@ -114,15 +117,13 @@ fn observer_sees_one_raw_outcome_and_no_nested_callee_body_or_events() {
         Some(&mut capture),
     )
     .unwrap();
-    assert!(
-        matches!(value, Value::Int(14)),
-        "no Result normalization in plumbing slice"
-    );
+    assert_ok_int(value, 14);
     assert_eq!(
         capture.functions,
         [("outer".into(), ast::Type::Result(Box::new(ast::Type::Int)))]
     );
-    assert!(matches!(capture.values.as_slice(), [Value::Int(14)]));
+    assert_eq!(capture.values.len(), 1);
+    assert_ok_int(capture.values.remove(0), 14);
     assert_eq!(
         eval::FN_NAME_STACK.with(|stack| stack.borrow().clone()),
         before
@@ -130,33 +131,34 @@ fn observer_sees_one_raw_outcome_and_no_nested_callee_body_or_events() {
 }
 
 #[test]
-fn typed_and_operational_errors_reach_observer_and_caller_unchanged() {
+fn declared_result_catches_typed_failure_but_never_operational_failure() {
     let program = program("+fn checked ()->Result<Int> [fail]\n  +check ready false ~not_ready\n  +return 1\n+end\n+fn broken ()->Result<Int>\n  +return 1 / 0\n+end\n");
     for (name, language) in [("checked", true), ("broken", false)] {
         let function = program.get_function(name).unwrap();
         let mut env = Env::new_with_shared_interner(&program.shared_interner);
         let mut capture = Capture::default();
         let before = eval::FN_NAME_STACK.with(|stack| stack.borrow().clone());
-        let error = invoke(
+        let outcome = invoke(
             &program,
             name,
             function,
             Body::Declared(&mut env),
             Some(&mut capture),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error
+        );
+        if language {
+            assert!(matches!(outcome.unwrap(), Value::Err(label) if label == "not_ready"));
+            assert!(capture.errors.is_empty());
+            assert!(
+                matches!(capture.values.as_slice(), [Value::Err(label)] if label == "not_ready")
+            );
+        } else {
+            let error = outcome.unwrap_err();
+            assert!(error
                 .downcast_ref::<eval::result_contract::LanguageFailure>()
-                .is_some(),
-            language
-        );
-        assert_eq!(capture.errors.len(), 1);
-        assert_eq!(capture.errors[0].is_some(), language);
-        assert!(
-            capture.values.is_empty(),
-            "no conversion to a recoverable value here yet"
-        );
+                .is_none());
+            assert_eq!(capture.errors, [None]);
+            assert!(capture.values.is_empty());
+        }
         assert_eq!(
             eval::FN_NAME_STACK.with(|stack| stack.borrow().clone()),
             before
@@ -165,16 +167,10 @@ fn typed_and_operational_errors_reach_observer_and_caller_unchanged() {
 }
 
 #[test]
-fn current_raw_named_parser_and_async_result_discrepancies_are_preserved() {
-    let program = program("+fn plain ()->Result<Int>\n  +return 7\n+end\n+fn wrapped ()->Result<Int>\n  +return Ok(7)\n+end\n+fn ordinary ()->Int\n  +return plain()\n+end\n+fn awaited ()->Int [async]\n  +await value:Result<Int> = wrapped()\n  +return value\n+end\n+module InvocationParser\n+fn plain ()->Result<Int>\n  +return 7\n+end\n");
-    assert!(matches!(
-        declared(&program, "plain").unwrap(),
-        Value::Int(7)
-    ));
-    assert!(matches!(
-        declared(&program, "ordinary").unwrap(),
-        Value::Int(7)
-    ));
+fn named_parser_nested_and_async_invocations_agree_and_user_await_preserves_result() {
+    let program = program("+fn plain ()->Result<Int>\n  +return 7\n+end\n+fn wrapped ()->Result<Int>\n  +return Ok(7)\n+end\n+fn ordinary ()->Result<Int>\n  +return plain()\n+end\n+fn awaited ()->Int [async]\n  +await value:Result<Int> = wrapped()\n  +match value\n  +case Ok(inner)\n    +return inner\n  +case Err(error)\n    +return 0\n  +end\n+end\n+module InvocationParser\n+fn plain ()->Result<Int>\n  +return 7\n+end\n");
+    assert_ok_int(declared(&program, "plain").unwrap(), 7);
+    assert_ok_int(declared(&program, "ordinary").unwrap(), 7);
     for expression in [
         "plain",
         "plain()",
@@ -182,12 +178,9 @@ fn current_raw_named_parser_and_async_result_discrepancies_are_preserved() {
         "InvocationParser.plain()",
     ] {
         let input = parser::parse_single_expr(expression).unwrap();
-        assert!(
-            matches!(
-                eval::eval_parser_expr_with_program(&input, &program).unwrap(),
-                Value::Int(7)
-            ),
-            "{expression}"
+        assert_ok_int(
+            eval::eval_parser_expr_with_program(&input, &program).unwrap(),
+            7,
         );
     }
     let input = parser::parse_single_expr("{}").unwrap();
@@ -195,11 +188,11 @@ fn current_raw_named_parser_and_async_result_discrepancies_are_preserved() {
         eval::eval_call_with_input(&program, "plain", &input).unwrap(),
         "Ok(7)"
     );
-    assert!(matches!(
+    assert_ok_int(
         eval::eval_async_function(&program, "plain", &input, CoroutineHandle::new_mock(vec![]))
             .unwrap(),
-        Value::Int(7)
-    ));
+        7,
+    );
     assert!(
         matches!(
             eval::eval_async_function(
@@ -211,12 +204,12 @@ fn current_raw_named_parser_and_async_result_discrepancies_are_preserved() {
             .unwrap(),
             Value::Int(7)
         ),
-        "user await still unwraps in this plumbing-only slice"
+        "the awaited value must reach the Ok arm, not arrive as an unwrapped Int"
     );
 }
 
 #[test]
-fn qualified_stub_lookup_wins_and_stubs_keep_raw_values_and_no_extra_io_authority() {
+fn qualified_stub_lookup_wins_and_stubs_normalize_without_extra_io_authority() {
     let program =
         program("+module InvocationStub\n+fn target ()->Result<Int>\n  +return 7\n+end\n");
     let mut env = Env::new_with_shared_interner(&program.shared_interner);
@@ -236,10 +229,10 @@ fn qualified_stub_lookup_wins_and_stubs_keep_raw_values_and_no_extra_io_authorit
         "__coroutine_handle",
         Value::CoroutineHandle(CoroutineHandle::new_mock_with_stubs(vec![], stubs)),
     );
-    assert!(matches!(
+    assert_ok_int(
         eval::eval_builtin_or_user(&program, "target", vec![], &mut env).unwrap(),
-        Value::Int(11)
-    ));
+        11,
+    );
     let function = program.get_function("InvocationStub.target").unwrap();
     let mut capture = Capture::default();
     let value = invoke(
@@ -325,7 +318,7 @@ fn existing_call_depth_guard_is_not_bypassed_by_the_wrapper() {
 }
 
 #[test]
-fn legacy_trace_skips_branches_and_does_not_observe_a_real_invocation_yet() {
+fn trace_executes_branches_and_checks_instead_of_skipping_them() {
     let program = program("+fn branch ()->Int\n  +if true\n    +return 7\n  +end\n  +return 9\n+end\n+fn checked_branch ()->Int [fail]\n  +if true\n    +check ready false ~not_ready\n  +end\n  +return 9\n+end\n");
     assert!(matches!(
         declared(&program, "branch").unwrap(),
@@ -335,17 +328,15 @@ fn legacy_trace_skips_branches_and_does_not_observe_a_real_invocation_yet() {
     for name in ["branch", "checked_branch"] {
         let steps = eval::trace_function(&program, name, &parser::parse_single_expr("{}").unwrap())
             .unwrap();
-        assert!(
-            steps.iter().any(|s| s.result == "..."),
-            "legacy skipped-block placeholder"
-        );
-        assert!(steps
-            .iter()
-            .any(|s| matches!(s.status, eval::TraceStatus::Return) && s.result == "9"));
-        assert!(!steps
-            .iter()
-            .any(|s| matches!(s.status, eval::TraceStatus::Fail)));
+        assert!(!steps.iter().any(|s| s.result == "..." || s.result == "9"));
+        let terminal = steps.last().unwrap();
+        if name == "branch" {
+            assert!(matches!(terminal.status, eval::TraceStatus::Return));
+            assert_eq!(terminal.result, "7");
+        } else {
+            assert!(matches!(terminal.status, eval::TraceStatus::Fail));
+            assert!(terminal.result.contains("not_ready"));
+        }
     }
-    // This intentionally pins a defect pending the trace/common-executor C correction,
-    // not trace parity. There is no observer installation or behavior change in A-plumbing.
+    // Deliberate correction of the plumbing checkpoint's partial-trace characterization.
 }

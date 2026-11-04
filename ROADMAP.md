@@ -1,27 +1,28 @@
 # AdapsisOS Roadmap
 
-## CURRENT recovery — 2026-11-02
+## CURRENT recovery — C-core activation checkpoint
 
 - Owner authorizes the broader work and deployment toward a useful programming/task/agent
   bot that can eventually replace OpenCode. Current worker scope is the approved bounded
-  behavior-preserving C invocation/observer plumbing checkpoint, after accepted Result A,
-  JIT/cache and scalar VM safety. Result activation and trace correction are a later
-  coherent checkpoint. No commit, push, service changes, live-module access or live IO.
-- Model rule: OpenAI only for now, `openai/gpt-6-astra`, default variant (no explicit high
-  effort); no Anthropic. This supersedes historical model-routing notes below.
-- Main checkout baseline `bbfe932`. Manager reports live release `88b4275`, binary SHA
-  `4ef591486f0d74850d78affde7b6b77f2e3e2c8bb3b7133fdbfbc42b41ab0414`, deployment record
-  `2019299`, service and runtime model `chatgpt/gpt-6-astra` with default effort;
-  this worker has not re-verified production. Host-only poll status and pure JSON smoke
-  passed. A no-change native turn had `completed=true` but an empty reply: not full
-  conversational success. Historical DeepInfra 402 caused an alias rollback to direct
-  DeepSeek; the current runtime selection is Astra, and worker policy stays OpenAI-only.
+  interpreter-only C-core activation, after accepted Result A, JIT/cache, scalar VM safety
+  and invocation plumbing. Result normalization, typed call modes, preserved user-await
+  Results, shared trace execution and structural adapter errors are approved together.
+  No commit, push, service changes, live-module access or live IO in this writer's scope.
+- Model rule: owner now permits OpenAI and DeepSeek; manager/default remains
+  `openai/gpt-6-astra`, default variant (no explicit high effort), no Anthropic.
+  This supersedes the earlier OpenAI-only and historical model-routing notes below.
+- Main checkout baseline `8d8cfaa`. Manager reports current live release `6ddcfc1`, healthy
+  service, model `chatgpt/gpt-6-astra` with default effort; no live re-verification by this
+  writer. Earlier `88b4275`/deployment record `2019299` and its SHA belong to historical
+  release evidence, not this current activation. Historical DeepInfra 402 caused an alias rollback to direct
+   DeepSeek; the current reported runtime selection is Astra.
 - Subsequent manager/release evidence: Python-authored live TelegramBot/TgFormat installed
   via tooling `9ffd3fa`, exact AST + 221 cases verified; real Telegram marker message
   542631/reply 542632 exactly `PYTHONLIVE7429`, release record `5b788be`, binary `88b4275`
   unchanged. This is a real text-reply proof, not proof of the new C runtime. Broader
   programming smoke exposed #83 restart-helper collision (native Python test/eval denied;
-  .ax repaired the module and stored two cases), not a Result regression.
+  .ax repaired the module and stored two cases), not a Result regression. Manager now
+  reports live Python repair, restart and photo paths proven; none certifies pending C-core.
 - Ownership: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; sole main-checkout writer
   `ses_e8b17a23affedgH4V52JdwxNDL`; release writer `ses_e67e01ef9ffettWZDQAXWveOxc`.
   Main writer must not touch the release checkout. Review session
@@ -30,16 +31,22 @@
   live Python TelegramBot investigation is separate: this writer must not touch live modules.
 - Accepted main work: G1 `fce692c`; #114 `5fb1ca8`; #112 `ce9096a` + structural hardening
   `56ce420`; #116 `ab2000a`; Result slice A `75da3aa`; JIT safety `2e9b3fc`; scalar VM
-  safety `bbfe932`. A/B are excluded from the current
-  release integration; historical commit presence alone is not activation evidence.
+  safety `bbfe932`; invocation plumbing `8d8cfaa`. #97/#119/#86 source-fix status is
+  distinct from deployment; this uncommitted C-core must not activate automatically.
   Strict parity remains RED: 324 verified / 58 invalid / 191 unsupported (573 entries).
+- Superseding owner direction (#121): Python is the authoritative maintained source;
+  .ax becomes a temporary importer. Separate Astra/DeepSeek worktrees handle serializer
+  and persistence; no overlap with this C writer. Historical strict parity remains useful
+  evidence, but preserving .ax spelling is no longer the ultimate acceptance goal. C does
+  not change frontend guards, source formats or parity success criteria.
 - Approved next sequence: Result contract A, then B (VM Check/unwind and fail-closed JIT
   admission), C (invocation/await normalization), then G7 frontend admission. Parked:
   G3 anonymous literals, G4 json_get typing,
   G5 shared Some, G6 vars, QualifiedEquivalent classification and the strict success
   definition. Preserve frozen fixtures and existing acceptance criteria pending decisions.
-- Plan/roadmap FEATURE design is explicitly owner-HOLD; this recovery document update
-  does not authorize proposing or implementing those features.
+- Task/workspace implementation in the Python domain (#120) and model/turn permission
+  changes are separately authorized/owned, not this writer's scope. No crossover into
+  task/project/plan features here. Idle watchdog is explicitly disabled; do not arm it.
 - Adoption is behavioral: #76 manager-workflow gates and #89's latest owner correction
   require native conversation capability parity before a default flip; retain legacy and
   the guarded OpenCode integration. Language parity alone is not cutover evidence.
@@ -166,7 +173,7 @@ invocation migration or release activation follows from this helper-only checkpo
   1995 passed / strict parity 1 failed / 2 ignored; CLI 5/5, strict still 324/58/191.
   Full log `/tmp/opencode/full_gate_vm_scalar.log`. No broad mutation campaign.
 
-### Current C invocation/observer plumbing — behavior-preserving (uncommitted)
+### Accepted C invocation/observer plumbing — behavior-preserving (`8d8cfaa`)
 
 - `eval/invocation.rs` receives the actual FunctionDecl and a declared or selected-stub
   body, returns the existing raw outcome, and optionally calls a trusted Rust observer.
@@ -196,6 +203,43 @@ invocation migration or release activation follows from this helper-only checkpo
   VM 91, native 149 and Telegram port 73 passed. One full release gate: 2005 passed /
   strict parity 1 failed / 2 ignored, CLI 5/5; strict unchanged324/58/191. Log:
   `/tmp/opencode/full_gate_c_plumbing.log`. No expanded mutation campaign.
+
+### Current C-core activation — interpreter-only (uncommitted)
+
+- The actual-FunctionDecl wrapper now calls complete_invocation once for declared bodies
+  and selected stubs. Ordinary calls/user await preserve Result; +call T propagates explicit
+  Err and unwraps one Ok; +call Result captures typed language failure only. Arguments are
+  evaluated before the target's catch scope. Lifecycle/raw blocks have no inferred contract;
+  CLI's legacy unframed setup remains, but its declared return contract is normalized.
+- Shared statement_execution/tracing modules replace the partial trace interpreter.
+  Branch/loop/match bodies really execute; root-only observation does not inherit into
+  private callees and never re-evaluates expressions for logging. Trace appends normalized
+  invocation output and gains no IO handle. Test/trace observers can assert/report an
+  operational error without exposing it as a recoverable language value.
+- Deliberate compatibility changes: broad operational +call Result capture is removed.
+  Division-error recovery now aborts with zero recovery requests; an explicit domain Check
+  counterpart recovers once. Named and VM sync adapters preserve Rust Err structurally,
+  so API/native flags now report execution failure; application Value::Err and error-looking
+  Strings remain success data. CLI eval success=false and run-async Rust Err exit nonzero;
+  app Err values still exit successfully. No generic task ACK #104 reinterpretation.
+- Frozen legacy Telegram wrapper is misannotated String but returns builtin Result. User
+  await now preserves it, so BOTH success/failure reach the String consumer error after
+  one request. Only its characterization changed, not frozen bytes. Corrected app-union
+  port and migrated 48/18 metadata are distinct and retain their existing IO contracts.
+- Structural/IO matrix covers declaration, parser/named, nested/stub, async/tracked-task,
+  trace, test, API/session/native, route and CLI entries. Validation→write emits zero writes
+  on domain failure, one on success. Before/fail/after and argument-failure cases suppress
+  later effects; intended typed recovery emits once. Operational failure after earlier IO
+  reports success=false with one request and unchanged Program snapshot.
+- Result graphs stay quarantined off production VM/JIT. No Python G7/user-Result-await
+  guard relaxation, fixture exemptions, task feature changes or deployment. Other live
+  signatures, routes and operational-catch consumers require a separately authorized
+  metadata/source audit before activation. Existing successful live smoke is not C proof.
+- Review freeze: 14 new unit/boundary tests and four new CLI tests. Focused eval350 /
+  1 ignored, API241, VM91, native/port gates included in the full run. One full release
+  --no-fail-fast: 2019 passed / strict parity 1 failed / 2 ignored; existing Python CLI5/5
+  and Result-contract CLI4/4. Strict unchanged324/58/191 (zero AST mismatches/non-idempotence).
+  Log `/tmp/opencode/full_gate_c_core.log`. No expanded mutation campaign or deployment.
 
 ## Historical recovery — Python parity #86 (2026-10-28 onward, red)
 

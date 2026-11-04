@@ -190,18 +190,30 @@ web/
 ## Execution Tiers
 Function evaluation goes through up to three tiers (fastest first):
 
-**Interpreter invocation plumbing (C prerequisite, not contract activation):** genuine
-declared calls use `eval/invocation.rs::eval_declared_function` with the actual
-`FunctionDecl`, including selected stubs, parser/named/async/test/task/source/route
-paths. Outcomes are still raw; existing adapters retain wrapping/catching/await behavior.
-The trusted outcome observer is not installed by production callers and is not inherited
-by nested callees. Raw lifecycle/blocks keep `eval_function_body_named` without signature
-lookup. CLI `run-async` explicitly retains its legacy unframed entry setup through
+**Interpreter Result contract (#82/#97 C-core):** genuine declared calls use
+`eval/invocation.rs` with the actual FunctionDecl, including selected stubs and
+parser/named/async/test/task/source/route paths. `complete_invocation` wraps a successful
+plain T once for Result<T>, preserves explicit Ok/Err, and catches only typed language
+Check/propagation failures. Operational/internal errors stay Rust Err. Ordinary calls and
+user await preserve Result. `+call T` unwraps one Ok or propagates explicit Err; `+call
+Result<T>` captures only typed language failure, with argument evaluation outside its catch
+scope. Nested Result requires explicit outer wrappers, not recursive flattening. No general
+payload type inference is added; Python G7/user-Result-await admission remains a later gate.
+Raw lifecycle/blocks keep `eval_function_body_named` without signature lookup. CLI
+`run-async` retains its legacy unframed entry setup through
 `eval_declared_function_unframed`; unlike framed entry it cannot resolve root +shared
 reads, a separately characterized exception to the named-frame invariant above.
-Legacy `trace_function` is still partial (it skips branches, including checks inside them).
-Correct trace execution and Result activation must land together later; these plumbing
-tests are not a trace-parity or invocation-normalization certificate.
+`statement_execution.rs` runs the same statements for ordinary evaluation and tracing;
+`tracing.rs` observes root statements only, executes control flow instead of skipping it,
+and appends the normalized invocation outcome. No nested private-body events or extra IO
+authority are inherited. Test/trace observers may assert/report an operational error, but
+never resume evaluated code or create a recoverable in-language error value.
+**Compatibility:** named/sync VM operational errors now propagate structurally; API/native
+success flags reflect failure instead of successful `Err(...)` text. Application Value::Err
+and ordinary error-looking Strings remain data. CLI `eval` exits nonzero on API success=false;
+`run-async` exits nonzero on Rust Err, but application Err values still exit successfully.
+Generic callback ACK/app-outcome interpretation (#104) is unchanged. Other live module
+signatures/catch consumers must be audited separately before deployment.
 
 1. **Cranelift JIT** (`compiler.rs`) — numeric/string functions only
    (`is_compilable_function` gate; bails on each/await/spawn/yield/List/Map/Union).
@@ -231,13 +243,13 @@ tests are not a trace-parity or invocation-normalization certificate.
   - **Scalar failure checkpoint (#97):** `vm/execution.rs::VmAttempt` distinguishes
     `NotAdmitted(error)` (no instruction/effect ran) from `Executed(Result<Value>)`.
     Only the former permits tree fallback; executed operational OR language failure
-    never retries, even before the first IO. Synchronous dispatch retains legacy
-    `Err(...)` presentation without calling the tree again; async returns the error.
+    never retries, even before the first IO. Both synchronous and async dispatch now
+    propagate structural execution errors without calling the tree again.
     Check emits `RaiseCheck`, yielding typed `LanguageFailure::Check` and discarding
     the whole scalar VM state/frames, never returning an Err value to a scalar caller.
   - `vm/scalar_admission.rs` temporarily quarantines reachable Result signatures,
-    binding/capture types and constructors until combined invocation/catch migration.
-    Existing tree catches (including catch-all operational handling) remain unchanged.
+    binding/capture types and constructors until a separate value-capable VM migration.
+    These graphs use the interpreter's normalized, typed-only catching contract.
     Non-Await builtin IO also selects tree before execution: CallBuiltin has no coroutine
     handle. Dynamic Result values from builtin Await retain existing value semantics;
     this is not general runtime type validation or complete #82 normalization.
@@ -316,9 +328,9 @@ json_get's polymorphic output/sentinels remain unchanged; its old frontend Strin
 catalog entry is not made sound by this new helper. The new helper's catalog is
 accurate `(str,str)->str`; JSON registry metadata lives in `builtins/json.rs`.
 
-Native evaluate currently renders evaluated failures as `Err(json_kind...)`
-while `has_errors` can remain false. Tests pin categorical Err versus valid-kind
-Strings and unchanged Program snapshots, not a correctly flagged native status.
+Native evaluate now flags operational json_kind failures with has_errors=true, using
+structural execution failure rather than inspecting error text. Valid-kind Strings and
+ordinary false values remain successes; tests also pin unchanged Program snapshots.
 Primitive and port adoption are separate checkpoints. The NEW text-entry fixture
 now uses json_kind before conversion/auth/IO; the original #105 presence assertions
 pass without exemptions. This is not a change to original process_update or a
@@ -771,7 +783,8 @@ replaces that branch with one composer.
   explicit `[fail]` argument callees, including nested arguments, pending #97.
   #97 scalar Check now unwinds with a typed language failure instead of returning Err
   as data to a caller that could continue effects. Result/capture graphs select the
-  legacy tree path until combined B/C; full invocation/catching parity is still pending.
+  normalized interpreter path; lifting VM quarantine and frontend guard relaxation are
+  still separate acceptance gates.
   JIT Check/fallible graphs refuse before compilation rather than executing the historical
   native trap. #96 JIT relocation remains open too.
   Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
@@ -857,10 +870,12 @@ replaces that branch with one composer.
   Float Neq and unsupported aggregate equality remain #90/#86 residuals. The
   frontend json_get String signature remains an unresolved catalog mismatch.
   #82's original wrapper checkpoint pinned normal user-await dispatch failing
-  with zero requests (bare AND qualified). The pending admission fix now chooses
-  tree before execution, so normal dispatch reaches the same one-request success
-  or still-broken Err-consumer behavior as the preserved direct-tree diagnostic.
-  It does not change Result wrapping or the frontend Result-user-await guard.
+  with zero requests (bare AND qualified). Admission selects tree before execution.
+  C-core now preserves user-await Result values: the frozen misannotated String wrapper
+  returns builtin Result and BOTH its success/failure cases hit the String consumer error
+  after exactly one request. Its characterization was deliberately updated; frozen bytes
+  were not. This is not the corrected/live app-union port, whose behavior remains tested.
+  The frontend Result-user-await guard remains in place.
   Direct-tree success alone is not normal-dispatch evidence. IO contract fixtures use in-memory IoRequest
   replies, not the real Runtime IO loop or live services.
   Pure port expansion permits only ledgered local-call qualification, proved by
@@ -940,7 +955,7 @@ replaces that branch with one composer.
   list, str, Map or Set (str length is BYTES). Pure async calls
   need await; synchronous calls cannot be awaited. IO await also needs the inert
   io effect declaration. Awaiting Result-returning user functions is refused
-  until inherited runtime unwrapping is reconciled (#82); direct IO builtin
+  pending the separate frontend acceptance gate (#82); direct IO builtin
   Result awaits remain supported and their actual wrapper is covered by an
   in-memory IoRequest reply fixture. Trusted offline fixtures introduce no live
   IO or Python mock installation. Numeric literals exclude i64::MIN because canonical

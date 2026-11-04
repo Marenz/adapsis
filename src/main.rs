@@ -1488,7 +1488,7 @@ async fn main() -> Result<()> {
                 result = eval_task => {
                     match result? {
                         Ok(val) => println!("Result: {val}"),
-                        Err(e) => eprintln!("Error: {e}"),
+                        Err(error) => return Err(error),
                     }
                 }
                 _ = io_loop => {}
@@ -2728,7 +2728,7 @@ async fn main() -> Result<()> {
             if success {
                 println!("= {result}{tag}");
             } else {
-                println!("Error: {result}");
+                anyhow::bail!("{result}");
             }
         }
         Command::Query { query, api } => {

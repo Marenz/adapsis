@@ -243,8 +243,8 @@ fn constructor_spelling_in_a_user_union_is_not_a_result_wrapper() {
 
 #[test]
 fn legacy_success_helper_keeps_existing_nested_and_non_result_behavior() {
-    // This is the only helper used by production callers in A. The stricter nested
-    // invocation contract must not leak into the old tree/test/+call paths yet.
+    // The primitive wrapper itself remains idempotent; the declaration-aware caller
+    // separately checks required nested Result layers before choosing this operation.
     let value = wrap_success(Value::Ok(Box::new(Value::Int(3))));
     assert_ok_int(value, 3);
     let value = wrap_success(Value::Ok(Box::new(Value::Ok(Box::new(Value::Int(3))))));

@@ -3589,17 +3589,14 @@ fn match_on_option_some_none() {
 
 #[test]
 fn pure_function_rejects_io_call() {
-    // A pure function (no effects) calling an IO builtin produces an error
-    // result (the function returns an Err value, not a hard crash)
-    let result = eval_fn_result(
+    // Rejection remains a structural execution error, not a successful Err string.
+    let program = build_program(
         "\
 +fn bad ()->String
   +return http_get(\"http://example.com\")
 ",
-        "bad",
-        "",
     );
-    // The eval catches the IO-without-await error and returns it
+    let result = eval_call_with_input(&program, "bad", &parser::Expr::StructLiteral(vec![])).unwrap_err().to_string();
     assert!(
         result.contains("async IO operation") || result.contains("http_get"),
         "expected IO rejection message, got: {result}"
@@ -5991,7 +5988,7 @@ fn undeclared_shared_var_still_errors() {
         "Bot.auth_header",
         &parser::Expr::StructLiteral(vec![]),
     )
-    .unwrap();
+    .unwrap_err().to_string();
     assert!(
         result.contains("undefined variable `bot_token`"),
         "expected undefined variable error, got: {result}"

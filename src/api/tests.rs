@@ -3,6 +3,8 @@ use super::execute::collect_opencode_tasks;
 use axum::response::IntoResponse;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt as _; // for .oneshot()
+#[path = "result_contract_tests.rs"]
+mod result_contract_tests;
 
 #[path = "ask_completion_tests.rs"]
 mod ask_completion_tests;

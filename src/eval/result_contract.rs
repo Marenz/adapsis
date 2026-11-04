@@ -1,9 +1,6 @@
-//! Approved Adapsis Result contract (#82/#97/#86), slice A.
-//!
-//! Only `wrap_success` is wired into existing runtime paths in this slice: it replaces
-//! three identical success-wrapping blocks without changing their behavior. Invocation,
-//! Check, await, VM unwind and frontend migration are later slices. In particular, the
-//! legacy catch-all `+call Result` and test-error formatting are NOT changed here.
+//! Approved Adapsis Result contract (#82/#97/#86), active at interpreter invocation
+//! boundaries and explicit call modes. Result graphs remain quarantined from VM/JIT;
+//! frontend guard relaxation and a value-capable VM catch implementation are separate.
 //!
 //! At a genuine invocation boundary, declared Result<T> wraps successful plain T once;
 //! explicit Ok/Err is preserved. A typed language failure becomes Err at that boundary,
@@ -22,7 +19,6 @@ use std::fmt;
 
 /// Language control flow, deliberately distinct from untyped operational anyhow errors.
 /// Match this type, never its Display text, when deciding whether a failure is catchable.
-#[allow(dead_code)] // Constructed by Check/VM propagation in the later B/C migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LanguageFailure {
     Check { label: String },
@@ -40,9 +36,8 @@ impl fmt::Display for LanguageFailure {
 
 impl std::error::Error for LanguageFailure {}
 
-/// Existing behavior: wrap a success value unless it is already an explicit Result.
-/// This is NOT typed invocation normalization; it intentionally retains legacy behavior
-/// even for nested Result values until the invocation sites are migrated together.
+/// Primitive success wrapping used only after the declared-return contract is selected.
+/// It does not recursively flatten or inspect payload types.
 pub(super) fn wrap_success(value: Value) -> Value {
     match value {
         value @ (Value::Ok(_) | Value::Err(_)) => value,
@@ -54,7 +49,6 @@ pub(super) fn wrap_success(value: Value) -> Value {
 /// changed. Operational errors (including a wrapped operational cause) never turn into
 /// data merely because the function declares Result. Context-wrapped language failures
 /// are recognized by type and preserve their original label/message, not context prose.
-#[allow(dead_code)] // Contract API; do not wire independently into existing entry paths.
 pub(crate) fn complete_invocation(
     function: &str,
     return_type: &Type,
@@ -74,7 +68,6 @@ pub(crate) fn complete_invocation(
 
 /// `+call x:T = f()` (also no-binding +call): unwrap one Ok, turn explicit Err into
 /// nonlocal language failure, preserve plain scalar values and all existing failures.
-#[allow(dead_code)] // B/C must change tree and VM call sites together.
 pub(crate) fn propagate_call(outcome: Result<Value>) -> Result<Value> {
     match outcome? {
         Value::Ok(inner) => Ok(*inner),
@@ -85,7 +78,6 @@ pub(crate) fn propagate_call(outcome: Result<Value>) -> Result<Value> {
 
 /// Explicit `+call x:Result<T>` capture, preserving the established authored idiom.
 /// Uses the same declared-Result contract (including nested-wrapper requirements).
-#[allow(dead_code)] // Do not replace legacy catch-all before operational-error migration.
 pub(crate) fn capture_call(
     function: &str,
     payload_type: &Type,
