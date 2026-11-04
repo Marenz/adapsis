@@ -175,6 +175,14 @@ response has no Content-Disposition header.
 
 ## Architecture
 
+- `src/ingress/` is a finite host-owned Telegram polling/provenance fixture
+  checkpoint, not live intake. Only cfg(test) constructs sources/credentials and
+  private intake service capabilities. It uses existing Ladybug record CAS, retains
+  exact RawValue event bytes, fences source incarnations and admits one handler via
+  unique attempt IDs. Accepted events recover; started events become unknown, never
+  auto-retried. No user TrustedCaller issuance or Spawn/takeover origin propagation
+  exists yet. See `docs/poll-ingress.md`; focused gate: `cargo test --release --locked ingress_poll`.
+
 - Generic record grants now have an explicit operator-only `records-provision`
   CLI (required existing DB path; dry-run read-only). Stable grant IDs, monotonic
   generations/tombstones and whole-file semantic digests are durable; backend

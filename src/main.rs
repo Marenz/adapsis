@@ -12,6 +12,7 @@ mod coroutine;
 mod eval;
 mod events;
 pub mod intern;
+mod ingress;
 mod logging;
 mod permissions;
 mod capabilities;
