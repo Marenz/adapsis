@@ -20,7 +20,7 @@ pub(super) fn tree(prog: &ast::Program, target: &str, args: Vec<Value>) -> anyho
     for (param, arg) in function.params.iter().zip(args) {
         env.set(&param.name, arg);
     }
-    eval::eval_function_body_named(prog, target, &function.body, &mut env)
+    eval::eval_declared_function(prog, target, function, &mut env)
 }
 
 pub(super) fn vm_run(prog: &ast::Program, target: &str, args: Vec<Value>) -> anyhow::Result<Value> {
@@ -28,6 +28,20 @@ pub(super) fn vm_run(prog: &ast::Program, target: &str, args: Vec<Value>) -> any
     vm::execute_with_io(&compiled, args, prog, &|_, _| {
         anyhow::bail!("no IO expected")
     })
+}
+
+/// Literal Result construction/matching opcode evidence only, while production Result
+/// calls are quarantined. This must never be used to claim ordinary VM admission.
+pub(super) fn vm_result_opcode_fixture_run(
+    prog: &ast::Program,
+    target: &str,
+    args: Vec<Value>,
+) -> anyhow::Result<Value> {
+    let function = prog.get_function(target).unwrap();
+    assert!(vm::compile_function(function, prog).is_err());
+    assert!(matches!(vm::attempt(function, args.clone(), prog, false, &|_, _| anyhow::bail!("no IO")), vm::VmAttempt::NotAdmitted(_)));
+    let compiled = vm::compile_result_opcode_fixture(function, prog)?;
+    vm::execute_with_io(&compiled, args, prog, &|_, _| anyhow::bail!("no IO in Result opcode fixture"))
 }
 
 fn text(value: &Value) -> String {
@@ -296,7 +310,7 @@ fn ax_logical_call_operand_consumes_no_io_when_short_circuited() {
         env.set("flag", Value::Bool(flag));
         env.set("path", Value::string("fixture"));
         let result =
-            eval::eval_function_body_named(&prog, target, &function.body, &mut env).unwrap();
+            eval::eval_declared_function(&prog, target, function, &mut env).unwrap();
         drop(env);
         assert!(
             matches!(result, Value::Bool(b) if b == expected),
@@ -495,29 +509,14 @@ fn python_jit_not_string_parameter_survives_scratch_name_collision() {
 }
 
 #[test]
-#[cfg(unix)]
 fn python_jit_not_float_call_preserves_operand_failure() {
-    use std::os::unix::process::ExitStatusExt;
-    const CHILD: &str = "ADAPSIS_NOT_FLOAT_FAILURE_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        let prog = build("+fn fail_float ()->Float [fail]\n  +check required false ~failed\n  +return 0.0\n+end\n+fn probe ()->Int\n  +if NOT fail_float()\n    +return 1\n  +end\n  +return 0\n+end\n");
-        let mut jit = compiler::compile(&prog).unwrap();
-        println!("NOT_FLOAT_COMPILED");
-        jit.call_i64("probe", &[]).unwrap();
-        panic!("Float operand failure was skipped");
-    }
-    let output = std::process::Command::new("prlimit")
-        .args(["--core=0", "--"])
-        .arg(std::env::current_exe().unwrap())
-        .args(["--exact", "python_frontend::logical_tier_tests::python_jit_not_float_call_preserves_operand_failure", "--nocapture"])
-        .env(CHILD, "1").output().unwrap();
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("NOT_FLOAT_COMPILED"),
-        "{output:?}"
-    );
-    // Cranelift's existing Check failure traps. A normal exit or Rust panic is
-    // not evidence of executing it; require the child's signal termination.
-    assert!(output.status.signal().is_some(), "{output:?}");
+    let prog = build("+fn fail_float ()->Float [fail]\n  +check required false ~failed\n  +return 0.0\n+end\n+fn probe ()->Int\n  +if NOT fail_float()\n    +return 1\n  +end\n  +return 0\n+end\n");
+    let Err(error) = compiler::compile(&prog) else { panic!("fallible JIT graph admitted") };
+    assert!(error.to_string().contains("jit: reachable Check"), "{error}");
+    assert!(tree(&prog, "probe", vec![]).is_err());
+    // #97: a failing scalar operand unwinds; it cannot become falsy data for NOT.
+    let error = vm_run(&prog, "probe", vec![]).unwrap_err();
+    assert!(error.downcast_ref::<eval::result_contract::LanguageFailure>().is_some());
 }
 
 #[test]

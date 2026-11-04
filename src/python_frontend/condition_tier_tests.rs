@@ -43,7 +43,12 @@ fn matrix() {
             }
         }
         if truth {
-            compare(&format!("+fn probe ()->Int [fail]\n  +check truth {operand} ~failed\n  +return 1\n+end\n"), &[], 1);
+            let program = build(&format!("+fn probe ()->Int [fail]\n  +check truth {operand} ~failed\n  +return 1\n+end\n"));
+            // Check is now refused before JIT emission (#97). Preserve the operand
+            // truthiness cases on both value-capable tiers, not a native trap path.
+            assert!(compiler::compile(&program).is_err());
+            assert!(matches!(tree(&program, "probe", vec![]).unwrap(), Value::Int(1)));
+            assert!(matches!(vm_run(&program, "probe", vec![]).unwrap(), Value::Int(1)));
         }
     }
     for expression in [
@@ -145,9 +150,9 @@ fn refusals_and_fallback() {
             "callee()",
             "IO/async",
         ),
-        ("+fn callee (n:Int)->Int [fail]\n  +return n\n+end\n", "callee(1)", "fallible argument calls"),
-        ("+fn raises ()->Int [fail]\n  +return 1\n+end\n+fn callee (n:Int)->Int\n  +return n\n+end\n", "callee(raises())", "fallible argument calls"),
-        ("+fn raises ()->Bool [fail]\n  +return true\n+end\n+fn callee (n:Bool)->Int\n  +return 1\n+end\n", "callee(NOT raises())", "fallible argument calls"),
+        ("+fn callee (n:Int)->Int [fail]\n  +return n\n+end\n", "callee(1)", "jit: reachable Check"),
+        ("+fn raises ()->Int [fail]\n  +return 1\n+end\n+fn callee (n:Int)->Int\n  +return n\n+end\n", "callee(raises())", "jit: reachable Check"),
+        ("+fn raises ()->Bool [fail]\n  +return true\n+end\n+fn callee (n:Bool)->Int\n  +return 1\n+end\n", "callee(NOT raises())", "jit: reachable Check"),
         ("", "\"a\"==\"a\"", "homogeneous scalar comparison"),
     ] {
         // Even a short-circuited unsupported RHS must fail before execution.
@@ -271,10 +276,7 @@ fn python_jit_float_equality_finite_fallback_preserves_epsilon_rule() {
 }
 
 #[test]
-#[cfg(unix)]
 fn python_jit_condition_failure_and_short_circuit_paths() {
-    use std::os::unix::process::ExitStatusExt;
-    const CHILD: &str = "ADAPSIS_CONDITION_FAILURE_CHILD";
     let cases = [
         ("+check required 0 ~failed\n  +return 1", None),
         ("+check required \"\" ~failed\n  +return 1", None),
@@ -293,9 +295,7 @@ fn python_jit_condition_failure_and_short_circuit_paths() {
             Some(0),
         ),
     ];
-    if let Ok(index) = std::env::var(CHILD) {
-        let index = index.parse::<usize>().unwrap();
-        let (body, expected) = cases[index];
+    for (index, (body, expected)) in cases.into_iter().enumerate() {
         let program = build(&format!("+fn fail_float ()->Float [fail]\n  +check required false ~failed\n  +return 0.0\n+end\n+fn probe ()->Int [fail]\n  {body}\n+end\n"));
         if let Some(expected) = expected {
             assert!(
@@ -306,51 +306,15 @@ fn python_jit_condition_failure_and_short_circuit_paths() {
             );
         } else {
             assert!(tree(&program, "probe", vec![]).is_err());
-            let vm_result = vm_run(&program, "probe", vec![]).unwrap();
-            if index == 2 || index == 3 {
-                // Existing VM failure contract: Check returns Err as a value
-                // from the CALLEE; ordinary caller control flow consumes that
-                // falsy value and reaches its following return. Unlike tree/JIT,
-                // failure does not abort the caller. This gap remains OPEN.
-                assert!(matches!(vm_result, Value::Int(0)), "{vm_result}");
-            } else {
-                // Direct/outer failed Check terminates before return1.
-                assert!(
-                    matches!(vm_result, Value::Err(ref e) if e == "failed"),
-                    "{vm_result}"
-                );
-            }
+            let error = vm_run(&program, "probe", vec![]).unwrap_err();
+            assert_eq!(error.downcast_ref::<eval::result_contract::LanguageFailure>(),
+                Some(&eval::result_contract::LanguageFailure::Check { label: "failed".into() }),
+                "case {index}: failure must unwind scalar callers, not become falsy data");
         }
-        let mut jit = compiler::compile(&program).unwrap();
-        println!("CONDITION_FAILURE_COMPILED");
-        let value = jit.call_i64("probe", &[]).unwrap();
-        assert_eq!(
-            Some(value),
-            expected,
-            "taken failure must not return normally"
-        );
-        return;
-    }
-    for (index, (_, expected)) in cases.iter().enumerate() {
-        let output = std::process::Command::new("timeout")
-            .args(["--signal=KILL", "20s", "prlimit", "--core=0", "--"])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", "python_frontend::condition_tier_tests::python_jit_condition_failure_and_short_circuit_paths", "--nocapture"])
-            .env(CHILD, index.to_string()).output().unwrap();
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("CONDITION_FAILURE_COMPILED"),
-            "case{index}: {output:?}"
-        );
-        if expected.is_some() {
-            assert!(output.status.success(), "case{index}: {output:?}");
-        } else {
-            // Existing x86/Linux Cranelift Check trap = SIGILL, never a Rust
-            // assertion panic or the timeout's SIGKILL/status124.
-            assert!(
-                output.status.signal() == Some(4) || output.status.code() == Some(132),
-                "case{index}: {output:?}"
-            );
-        }
+        // Historical native Check traps are no longer reachable through compile().
+        // Refuse the complete graph, including short-circuited fallible branches.
+        let Err(error) = compiler::compile(&program) else { panic!("unsafe JIT graph admitted") };
+        assert!(error.to_string().contains("jit: reachable Check"), "{error}");
     }
 }
 
@@ -383,9 +347,7 @@ fn trusted_ax_condition_failure_after_io_is_not_replayed() {
     );
 }
 
-/// Existing failure-propagation discrepancy, NOT equivalence evidence. Production
-/// async dispatch selects the VM, whose ordinary caller continues after a failed
-/// Check returned as an Err value. Tree aborts before the subsequent IO effect.
+/// #97 regression: both tree and normal VM dispatch abort before the subsequent effect.
 #[test]
 fn trusted_ax_failed_check_caller_effect_characterization() {
     use crate::coroutine::{CoroutineHandle, IoRequest};
@@ -406,16 +368,14 @@ fn trusted_ax_failed_check_caller_effect_characterization() {
         let handle = CoroutineHandle::new(sender);
         if normal_dispatch {
             let input = parser::parse_single_expr("{}").unwrap();
-            assert!(matches!(
-                eval::eval_async_function(&program, "probe", &input, handle).unwrap(),
-                Value::Int(0)
-            ));
+            let error = eval::eval_async_function(&program, "probe", &input, handle).unwrap_err();
+            assert!(error.downcast_ref::<eval::result_contract::LanguageFailure>().is_some());
         } else {
             let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
             env.set("__coroutine_handle", Value::CoroutineHandle(handle));
-            let body = &program.get_function("probe").unwrap().body;
-            assert!(eval::eval_function_body_named(&program, "probe", body, &mut env).is_err());
+            let function = program.get_function("probe").unwrap();
+            assert!(eval::eval_declared_function(&program, "probe", function, &mut env).is_err());
         }
-        assert_eq!(responder.join().unwrap(), usize::from(normal_dispatch));
+        assert_eq!(responder.join().unwrap(), 0);
     }
 }

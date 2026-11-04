@@ -195,8 +195,46 @@ web/
 ## Execution Tiers
 Function evaluation goes through up to three tiers (fastest first):
 
+**Interpreter Result contract (#82/#97 C-core):** genuine declared calls use
+`eval/invocation.rs` with the actual FunctionDecl, including selected stubs and
+parser/named/async/test/task/source/route paths. `complete_invocation` wraps a successful
+plain T once for Result<T>, preserves explicit Ok/Err, and catches only typed language
+Check/propagation failures. Operational/internal errors stay Rust Err. Ordinary calls and
+user await preserve Result. `+call T` unwraps one Ok or propagates explicit Err; `+call
+Result<T>` captures only typed language failure, with argument evaluation outside its catch
+scope. Nested Result requires explicit outer wrappers, not recursive flattening. No general
+payload type inference is added; Python G7/user-Result-await admission remains a later gate.
+Raw lifecycle/blocks keep `eval_function_body_named` without signature lookup. CLI
+`run-async` retains its legacy unframed entry setup through
+`eval_declared_function_unframed`; unlike framed entry it cannot resolve root +shared
+reads, a separately characterized exception to the named-frame invariant above.
+`statement_execution.rs` runs the same statements for ordinary evaluation and tracing;
+`tracing.rs` observes root statements only, executes control flow instead of skipping it,
+and appends the normalized invocation outcome. No nested private-body events or extra IO
+authority are inherited. Test/trace observers may assert/report an operational error, but
+never resume evaluated code or create a recoverable in-language error value.
+**Compatibility:** named/sync VM operational errors now propagate structurally; API/native
+success flags reflect failure instead of successful `Err(...)` text. Application Value::Err
+and ordinary error-looking Strings remain data. CLI `eval` exits nonzero on API success=false;
+`run-async` exits nonzero on Rust Err, but application Err values still exit successfully.
+Generic callback ACK/app-outcome interpretation (#104) is unchanged. Other live module
+signatures/catch consumers must be audited separately before deployment.
+
 1. **Cranelift JIT** (`compiler.rs`) — numeric/string functions only
    (`is_compilable_function` gate; bails on each/await/spawn/yield/List/Map/Union).
+   - `compiler/failure_admission.rs` (#97/#119 safety checkpoint) refuses reachable
+     Check, `[fail]`, Result-bearing signatures/bindings/named types and Result
+     constructors before native code emission. Direct `compile(program)` checks every
+     emitted top-level function; cached dispatch additionally checks the current root's
+     reachable graph, using the shared iterative executable-AST walker and per-snapshot
+     function identity. The local `is_compilable_function` hint alone is not graph proof.
+   - `eval/jit_dispatch.rs` requires `cached_revision == revision` before invocation,
+     discards stale modules before rebuilding, and never calls old code after a failed
+     rebuild (#119). Warm same-revision safe numeric controls remain JIT-backed.
+     This JIT checkpoint does NOT itself repair Result invocation normalization. The
+     subsequent scalar VM safety rules are below. Native Check traps are unreachable through
+     supported compile paths; other JIT limitations (e.g. integer zero-divisor abort,
+     #92, and relocation #96) are not fixed by this admission rule.
 2. **Bytecode VM** (`vm.rs`) — near-full language coverage.
    - Sync path: `eval_compiled_or_interpreted_cached` → `try_vm_execute` (eval/mod.rs).
    - Async path: `eval_async_function` (eval/mod.rs) — IO suspensions serviced
@@ -207,6 +245,26 @@ Function evaluation goes through up to three tiers (fastest first):
      union variants — anything else is a compile error (fallback signal).
   - Async fallback rule: only safe BEFORE any IO has been performed.
     `eval_async_function` tracks this; never re-run a function after IO.
+  - **Scalar failure checkpoint (#97):** `vm/execution.rs::VmAttempt` distinguishes
+    `NotAdmitted(error)` (no instruction/effect ran) from `Executed(Result<Value>)`.
+    Only the former permits tree fallback; executed operational OR language failure
+    never retries, even before the first IO. Both synchronous and async dispatch now
+    propagate structural execution errors without calling the tree again.
+    Check emits `RaiseCheck`, yielding typed `LanguageFailure::Check` and discarding
+    the whole scalar VM state/frames, never returning an Err value to a scalar caller.
+  - `vm/scalar_admission.rs` temporarily quarantines reachable Result signatures,
+    binding/capture types and constructors until a separate value-capable VM migration.
+    These graphs use the interpreter's normalized, typed-only catching contract.
+    Non-Await builtin IO also selects tree before execution: CallBuiltin has no coroutine
+    handle. Dynamic Result values from builtin Await retain existing value semantics;
+    this is not general runtime type validation or complete #82 normalization.
+  - Preparation emits each unique reachable callee once, resolves the original spelling
+    through `get_function`, shares one growing interner and fills the call cache BEFORE
+    the first instruction. Aliases share bytecode by snapshot-local function identity;
+    recursive graphs terminate. No lazy compile/fallback during execution. Unsupported
+    nested callees (e.g. shared access) select tree before earlier IO, preserving those
+    programs when execution-error fallback is removed. Sync preparation rejects reachable
+    AwaitIo before execution. A missing prepared cache entry is an internal execution error.
   - `vm/await_admission.rs` preflights the supplied root and its statically
     reachable calls before bytecode emission. Any user-function Await forces
     pre-execution tree fallback, including a transitive await after earlier IO.
@@ -229,19 +287,27 @@ Function evaluation goes through up to three tiers (fastest first):
     `+spawn`/`+await` binding (VM keeps `Ok` where the tree unwraps, #82 viaok),
     match captures (they poison same-named bindings), shared vars, builtin calls.
     Parameters are only sound because (a) every in-graph call site must pass a proven
-    struct to a Struct-typed parameter and (b) `check_arguments` (in `execute_cached`)
-    shape-checks the ROOT call's entry arguments (`!eval f p=Ok({..})` reaches a Struct
+    struct to a Struct-typed parameter and (b) `check_arguments`
+    shape-checks the ROOT call's entry arguments in `vm/execution.rs` preparation
+    (`!eval f p=Ok({..})` reaches a Struct
     parameter otherwise). Conservative by design: it may send a struct-only function to
     the tree, never admits an unproven base. VM `GetField` and the JIT are unchanged.
-    Blast radius on `examples/*.ax` (99 functions): VM-compilable 95 -> 52 (44 more go
+    #114 blast radius on `examples/*.ax` (99 functions): VM-compilable 95 -> 52 (43 more go
     to the tree; `vm/blast_tests.rs` prints counts and asserts no function with only
-    ordinary field names is refused); parity library unchanged (161 functions, 107).
+    ordinary field names is refused by field admission); parity library unchanged
+    (161 functions, 107). Subsequent Result/direct-IO quarantine changes emission
+    eligibility to 49/99 examples and 99/161 parity-library functions; eager preparation
+    can additionally refuse nested unsupported callees before execution.
    - Dedicated `Value::Ok`/`Value::Err` matching is handled by
      `vm/result_match.rs` (#93): push the inner value/error String before the
      match Bool so the existing reverse-order binding stores consume it correctly.
      User Union payload ordering remains separate. Nested match statements are
      covered; this does not certify nested payload patterns, Option matching or
      non-exhaustive-match behavior across tiers.
+     Production Result graphs are now quarantined; literal Result opcode evidence uses
+     the cfg(test)-only `compile_result_opcode_fixture`, restricted to pure graphs without
+     Check or effects. Tests separately assert production refusal/normal tree fallback;
+     this fixture is never evidence of normal VM Result invocation support.
 3. **Tree-walker** (`eval/mod.rs`) — universal fallback; the only tier with
    `Env`-based shared vars, function stubs, spawned-task snapshot tracking.
 
@@ -267,9 +333,9 @@ json_get's polymorphic output/sentinels remain unchanged; its old frontend Strin
 catalog entry is not made sound by this new helper. The new helper's catalog is
 accurate `(str,str)->str`; JSON registry metadata lives in `builtins/json.rs`.
 
-Native evaluate currently renders evaluated failures as `Err(json_kind...)`
-while `has_errors` can remain false. Tests pin categorical Err versus valid-kind
-Strings and unchanged Program snapshots, not a correctly flagged native status.
+Native evaluate now flags operational json_kind failures with has_errors=true, using
+structural execution failure rather than inspecting error text. Valid-kind Strings and
+ordinary false values remain successes; tests also pin unchanged Program snapshots.
 Primitive and port adoption are separate checkpoints. The NEW text-entry fixture
 now uses json_kind before conversion/auth/IO; the original #105 presence assertions
 pass without exemptions. This is not a change to original process_update or a
@@ -747,7 +813,8 @@ replaces that branch with one composer.
   runnable CPython. `vm/field_admission.rs` (#114) sends these functions to the tree.
   #90 remains open: VM Boolean consumption uses `Value::is_truthy`; the reviewed
   JIT immutable normalization slice shares one emitter across AND/OR, NOT and
-  Check/Branch/While. Local/rebound condition dependencies conservatively refuse
+  Check/Branch/While (Check is now pre-execution-refused by failure admission).
+  Local/rebound condition dependencies conservatively refuse
   compilation, including mutable loops; normal eval then uses VM/tree fallback.
   This does not establish general tier parity. Narrow JIT NOT
   uses proven semantic representations: Float (including zero/NaN) is always
@@ -764,10 +831,12 @@ replaces that branch with one composer.
   exact Bool/Int/Float user-call arguments through identity-safe recursive
   emission (no generic scratch-name lookup). It refuses IO/async callees and
   explicit `[fail]` argument callees, including nested arguments, pending #97.
-  #97 is a bug: failed VM Check returns an Err value from the callee and ordinary
-  callers can continue to subsequent effects, unlike tree failure/JIT trap.
-  Zero-argument fallible-call tests characterize existing tier-specific behavior,
-  not equivalent failure propagation. #96 JIT relocation remains open too.
+  #97 scalar Check now unwinds with a typed language failure instead of returning Err
+  as data to a caller that could continue effects. Result/capture graphs select the
+  normalized interpreter path; lifting VM quarantine and frontend guard relaxation are
+  still separate acceptance gates.
+  JIT Check/fallible graphs refuse before compilation rather than executing the historical
+  native trap. #96 JIT relocation remains open too.
   Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
   finite equality uses epsilon rather than IEEE equality. Ordered Float
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
@@ -851,10 +920,12 @@ replaces that branch with one composer.
   Float Neq and unsupported aggregate equality remain #90/#86 residuals. The
   frontend json_get String signature remains an unresolved catalog mismatch.
   #82's original wrapper checkpoint pinned normal user-await dispatch failing
-  with zero requests (bare AND qualified). The pending admission fix now chooses
-  tree before execution, so normal dispatch reaches the same one-request success
-  or still-broken Err-consumer behavior as the preserved direct-tree diagnostic.
-  It does not change Result wrapping or the frontend Result-user-await guard.
+  with zero requests (bare AND qualified). Admission selects tree before execution.
+  C-core now preserves user-await Result values: the frozen misannotated String wrapper
+  returns builtin Result and BOTH its success/failure cases hit the String consumer error
+  after exactly one request. Its characterization was deliberately updated; frozen bytes
+  were not. This is not the corrected/live app-union port, whose behavior remains tested.
+  The frontend Result-user-await guard remains in place.
   Direct-tree success alone is not normal-dispatch evidence. IO contract fixtures use in-memory IoRequest
   replies, not the real Runtime IO loop or live services.
   Pure port expansion permits only ledgered local-call qualification, proved by
@@ -946,7 +1017,7 @@ replaces that branch with one composer.
   list, str, Map or Set (str length is BYTES). Pure async calls
   need await; synchronous calls cannot be awaited. IO await also needs the inert
   io effect declaration. Awaiting Result-returning user functions is refused
-  until inherited runtime unwrapping is reconciled (#82); direct IO builtin
+  pending the separate frontend acceptance gate (#82); direct IO builtin
   Result awaits remain supported and their actual wrapper is covered by an
   in-memory IoRequest reply fixture. Trusted offline fixtures introduce no live
   IO or Python mock installation. Numeric literals exclude i64::MIN because canonical

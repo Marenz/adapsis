@@ -8,7 +8,7 @@
 //! - Arithmetic, comparison, logic operators
 //! - if/elif/else (Branch nodes)
 //! - Function calls (direct)
-//! - Check statements (conditional trap)
+//! - Check/Result/fallible graphs are refused before code generation (#97/#119)
 //!
 //! Strings and structs are deferred to a later phase.
 
@@ -21,6 +21,9 @@ use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 
 use crate::ast;
 mod truthiness;
+pub(crate) mod failure_admission;
+#[cfg(test)]
+mod admission_measurement_tests;
 
 /// A compiled Adapsis program, ready to execute.
 pub struct CompiledProgram {
@@ -118,6 +121,11 @@ impl CompiledProgram {
 
 /// Check if a function can be compiled (only numeric types).
 pub fn is_compilable_function(func: &ast::FunctionDecl) -> bool {
+    // Local hint only. Direct compilation and cached execution additionally check the
+    // current reachable program graph through failure_admission.
+    if func.effects.contains(&ast::Effect::Fail) {
+        return false;
+    }
     // Check return type
     if !is_compilable_type(&func.return_type) {
         return false;
@@ -145,7 +153,7 @@ fn is_compilable_type(ty: &ast::Type) -> bool {
         // typed functions must use the VM/tree-walker until the JIT has a
         // Value-returning ABI (#53).
         ast::Type::Struct(_) => false,
-        ast::Type::Result(inner) => is_compilable_type(inner),
+        ast::Type::Result(_) => false,
         _ => false,
     }
 }
@@ -160,7 +168,7 @@ fn is_compilable_body(stmts: &[ast::Statement]) -> bool {
             call.args.iter().all(is_compilable_expr)
                 && binding.as_ref().is_none_or(|b| is_compilable_type(&b.ty))
         }
-        ast::StatementKind::Check { condition, .. } => is_compilable_expr(condition),
+        ast::StatementKind::Check { .. } => false,
         ast::StatementKind::Return { value } => is_compilable_expr(value),
         ast::StatementKind::Branch {
             condition,
@@ -264,6 +272,9 @@ extern "C" fn rt_int_rem(a: i64, b: i64) -> i64 {
 
 /// Compile an Adapsis program to native code via Cranelift JIT.
 pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
+    // This entry emits every top-level function, even ones unrelated to the requested
+    // root. Check all emitted functions before constructing any executable module.
+    failure_admission::check_program(program)?;
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
     flag_builder.set("is_pic", "false").unwrap();
@@ -1498,8 +1509,8 @@ mod tests {
     }
 
     #[test]
-    fn compilable_result_return() {
-        // Result<Int> is compilable (unwraps to inner type)
+    fn result_return_requires_value_capable_tier() {
+        // Erasing Result<Int> to an Int ABI is not an admissible invocation contract.
         let func = make_fn(
             "validate",
             vec![make_param("x", ast::Type::Int)],
@@ -1509,7 +1520,7 @@ mod tests {
                 value: ast::Expr::Identifier("x".to_string()),
             })],
         );
-        assert!(is_compilable_function(&func));
+        assert!(!is_compilable_function(&func));
     }
 
     #[test]
@@ -1562,7 +1573,7 @@ mod tests {
         assert!(is_compilable_type(&ast::Type::Bool));
         assert!(is_compilable_type(&ast::Type::Byte));
         assert!(is_compilable_type(&ast::Type::String));
-        assert!(is_compilable_type(&ast::Type::Result(Box::new(
+        assert!(!is_compilable_type(&ast::Type::Result(Box::new(
             ast::Type::Int
         ))));
     }

@@ -36,7 +36,7 @@ fn tree(program: &ast::Program, target: &str, args: Vec<Value>) -> Value {
     for (param, arg) in function.params.iter().zip(args) {
         env.set(&param.name, arg);
     }
-    eval::eval_function_body_named(program, target, &function.body, &mut env).unwrap()
+    eval::eval_declared_function(program, target, function, &mut env).unwrap()
 }
 
 fn bytecode(program: &ast::Program, target: &str, args: Vec<Value>) -> Value {

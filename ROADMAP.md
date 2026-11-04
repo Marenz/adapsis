@@ -1,5 +1,31 @@
 # AdapsisOS Roadmap
 
+## Current acceptance integration — `b0ffd8c` + `113f80f`
+
+- This isolated worktree combines accepted Result C-core `113f80f` with release
+  memory/privacy (#87/#88), Python grouped tests (#118), scalar admission (#83),
+  and structural IR guard (#121 Step A). Merge approval and commit belong to the
+  manager; typed execution/replay B+C starts only after that committed baseline.
+- The timer conflict retains C's actual-declaration invocation together with
+  release content-gated logging and categorical errors. Both scalar and C-result
+  test modules remain registered. No source-format or library activation is added.
+- Current deployment reported by manager: `6ddcfc1`, Astra, Python-authored
+  TelegramBot/TgFormat. Verified live scalar repair and completed-work restart
+  are not evidence of this merged Result runtime, which is not deployed here.
+- Owner has authorized Python-authoritative source work (#121) and Python-domain
+  task work (#120). Historical hold/scope notes below describe their checkpoints,
+  not current authorization. Native remains opt-in; #89/#76 acceptance stays open.
+- Focused merge gates: `native_` 174 passed; `ir_surface` 11 passed;
+  `--test result_contract_cli` 4 passed; `native_python_repair` 4 passed;
+  `logging` 8 passed. No full-suite rerun or deployment in this baseline step.
+  Logs: `/tmp/opencode/baseline-c-{native,ir,cli-result,repair,logging}.log`.
+- Both-parent review retained release logging/memory/opt-in behavior and C's
+  actual-declaration entry points. Historical release and Result evidence follows
+  unchanged except for explicitly historical headings. The foundation archive
+  below is byte-identical to the corresponding `b0ffd8c` tail.
+
+## Historical release integration records
+
 ## Release integration 2026-11-02 — `108e4dc`, pending manager review
 
 - Release writer: session `ses_e67e01ef9ffettWZDQAXWveOxc`, scoped exclusively to
@@ -81,9 +107,250 @@ Release 2026-11-01 combines work/native-tools a4ab092 and work/issue-87-88 e28fe
 side: the first block is the #86 Python-parity line, the second the #87/#88/TUI line
 (native tools remain OPT-IN via --native-tools).
 
-## Recovery — Python parity #86 (current: 2026-10-28, red)
+## Historical recovery — C-core activation checkpoint (committed as `113f80f`)
 
-### Current pending slice — G1 (Python pseudo-field properties), baseline `5fb1ca8`
+- Owner authorizes the broader work and deployment toward a useful programming/task/agent
+  bot that can eventually replace OpenCode. Current worker scope is the approved bounded
+  interpreter-only C-core activation, after accepted Result A, JIT/cache, scalar VM safety
+  and invocation plumbing. Result normalization, typed call modes, preserved user-await
+  Results, shared trace execution and structural adapter errors are approved together.
+  No commit, push, service changes, live-module access or live IO in this writer's scope.
+- Model rule: owner now permits OpenAI and DeepSeek; manager/default remains
+  `openai/gpt-6-astra`, default variant (no explicit high effort), no Anthropic.
+  This supersedes the earlier OpenAI-only and historical model-routing notes below.
+- Main checkout baseline `8d8cfaa`. Manager reports current live release `6ddcfc1`, healthy
+  service, model `chatgpt/gpt-6-astra` with default effort; no live re-verification by this
+  writer. Earlier `88b4275`/deployment record `2019299` and its SHA belong to historical
+  release evidence, not this current activation. Historical DeepInfra 402 caused an alias rollback to direct
+   DeepSeek; the current reported runtime selection is Astra.
+- Subsequent manager/release evidence: Python-authored live TelegramBot/TgFormat installed
+  via tooling `9ffd3fa`, exact AST + 221 cases verified; real Telegram marker message
+  542631/reply 542632 exactly `PYTHONLIVE7429`, release record `5b788be`, binary `88b4275`
+  unchanged. This is a real text-reply proof, not proof of the new C runtime. Broader
+  programming smoke exposed #83 restart-helper collision (native Python test/eval denied;
+  .ax repaired the module and stored two cases), not a Result regression. Manager now
+  reports live Python repair, restart and photo paths proven; none certifies pending C-core.
+- Ownership: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; sole main-checkout writer
+  `ses_e8b17a23affedgH4V52JdwxNDL`; release writer `ses_e67e01ef9ffettWZDQAXWveOxc`.
+  Main writer must not touch the release checkout. Review session
+  `ses_e82647931ffewdBFqa9bGCmPIz` remains separate from write ownership. #118 is fixed
+  by `463d839`, deployed and closed; two cases survive save/load. The release worker's
+  live Python TelegramBot investigation is separate: this writer must not touch live modules.
+- Accepted main work: G1 `fce692c`; #114 `5fb1ca8`; #112 `ce9096a` + structural hardening
+  `56ce420`; #116 `ab2000a`; Result slice A `75da3aa`; JIT safety `2e9b3fc`; scalar VM
+  safety `bbfe932`; invocation plumbing `8d8cfaa`. #97/#119/#86 source-fix status is
+  distinct from deployment; this uncommitted C-core must not activate automatically.
+  Strict parity remains RED: 324 verified / 58 invalid / 191 unsupported (573 entries).
+- Superseding owner direction (#121): Python is the authoritative maintained source;
+  .ax becomes a temporary importer. Separate Astra/DeepSeek worktrees handle serializer
+  and persistence; no overlap with this C writer. Historical strict parity remains useful
+  evidence, but preserving .ax spelling is no longer the ultimate acceptance goal. C does
+  not change frontend guards, source formats or parity success criteria.
+- Approved next sequence: Result contract A, then B (VM Check/unwind and fail-closed JIT
+  admission), C (invocation/await normalization), then G7 frontend admission. Parked:
+  G3 anonymous literals, G4 json_get typing,
+  G5 shared Some, G6 vars, QualifiedEquivalent classification and the strict success
+  definition. Preserve frozen fixtures and existing acceptance criteria pending decisions.
+- Task/workspace implementation in the Python domain (#120) and model/turn permission
+  changes are separately authorized/owned, not this writer's scope. No crossover into
+  task/project/plan features here. Idle watchdog is explicitly disabled; do not arm it.
+- Adoption is behavioral: #76 manager-workflow gates and #89's latest owner correction
+  require native conversation capability parity before a default flip; retain legacy and
+  the guarded OpenCode integration. Language parity alone is not cutover evidence.
+
+### Approved Result contract — #82/#97/#86; slice A only
+
+- This is Adapsis semantics, not Python inference. At every genuine invocation boundary,
+  declared Result<T> wraps successful plain T once; explicit Ok/Err is preserved. Ordinary
+  calls and user awaits preserve Result. No block/branch/loop-body normalization.
+- A typed language Check/propagation failure unwinds scalar callers and becomes Err once
+  at a declared-Result invocation. Operational/internal anyhow failures remain execution
+  errors. Failure classification uses a Rust type, never rendered text. Context-wrapped
+  language failures retain their original label; source chains of operational errors survive.
+- `+call x:T` unwraps one Ok and propagates explicit Err. `+call x:Result<T>` remains an
+  explicit compatible catching form. An intentional handler may continue; the failing
+  callee and unwound scalar callers must not execute later effects. Nested Results require
+  explicit outer Ok/Err at each Result layer; no recursive flattening or implicit nesting.
+- Slice A adds `eval/result_contract.rs`: `LanguageFailure::{Check,Propagation}`,
+  `complete_invocation`, `propagate_call`, `capture_call` and legacy `wrap_success`.
+  Only `wrap_success` is connected: it replaces three identical existing success-wrapping
+  blocks (tree eval entry, test comparator, Result-typed +call), preserving their behavior.
+  The new typed contract is tested but NOT activated at current Check/call/await boundaries.
+  Legacy catch-all error conversion and nested success wrapping are unchanged in A.
+- Scope/compatibility: no VM, JIT, frontend, fixture, persistence or activation change.
+  Before behavior-changing B/C activates, audit ordinary consumers expecting plain T from
+  Result functions, user await into plain T, +call Result catching operational errors, scalar
+  +call accepting explicit Err, and tests that mask wrappers. Preserve #114/await admission
+  and the no-IO-replay guard. Release integration at 108e4dc excludes this work.
+
+| Current discrepancy (not repaired by A) | Planned discriminating B/C gate |
+|---|---|
+| VM Check is PushErr+Return; scalar caller may continue | B: `check_unwinds_scalar_callers_before_effects`; direct VM/tree/normal async, zero requests before failure or exactly one preceding request, never the later request |
+| JIT Check traps and Result ABI erases wrapper | B: `fallible_graph_refused_before_jit_execution`; safe numeric control stays eligible, hazardous direct compile and cached paths refuse before execution |
+| Tree named entry/test comparator wrap; ordinary/parser/VM calls do not | C: `result_boundary_matrix`; structural plain/Ok/Err values through named, inline, session/API, CLI, stubs and spawned/route invocations |
+| Tree +call unwraps Ok but keeps explicit Err; VM lacks that unwrap | C: `propagate_or_capture_call_matrix`; explicit Err unwinds, Result binding catches language failure only, one-layer unwrap preserves nested Result data |
+| User await strips Ok; builtin await preserves it | C: `user_builtin_await_result_parity`; same-source/existing declarations, post-await failure, ordered synthetic IO and zero replay |
+| Broad anyhow catches conflate language and operational failure | B/C: `failure_category_matrix`; identical text with different types, preserved source chain, operational error cannot be caught as Result |
+| Native flags/callbacks can confuse application result with task success | C plus #104/#76: assert structural Result and execution status separately; no parsing formatted Err or claiming delivery/merge success from evaluator Ok |
+
+Slice A's helper tests prove wrapping, explicit typed capture/propagation, nested-wrapper
+requirements, payload identity and operational-error preservation only. The IO/entry/JIT
+rows above are future integration gates, not claimed evidence from these pure tests.
+Useful completion trials after C: validation→transform→write (invalid input means zero
+writes); fetch→decode→reply (one request per step, deliberate recovery only); worker
+validation→tool execution (failed Check means no later shell/tool action and truthful report).
+
+Accepted slice A (`75da3aa`): 15 contract tests pass; `eval::` 324 passed /
+1 ignored, `native_` 149 passed, `python_` 350 passed plus the existing strict-parity failure.
+One full release gate: 1962 passed / strict parity 1 failed / 2 ignored; CLI 5/5. Strict
+counts unchanged at 324/58/191. Log: `/tmp/opencode/full_gate_result_a.log`. No production
+invocation migration or release activation follows from this helper-only checkpoint.
+
+### Accepted JIT-only safety checkpoint — #97/#119 (`2e9b3fc`)
+
+- #119 reproduced before repair: revision 1 `probe` returned 11 on JIT; revision 2
+  changed it to 22 and introduced an unsupported List-returning sibling. Rebuild failed,
+  yet normal cached dispatch returned `(11, used_jit=true)` instead of `(22, false)`.
+  Evidence: `/tmp/opencode/jit_119_before.log`; no trap execution was needed.
+- New program-aware JIT failure admission refuses reachable Check, `[fail]`, Result
+  contracts/bindings/named fields and Result constructors. Direct compilation checks
+  every emitted top-level function; cached entry checks the current root graph as well.
+  Shared await-admission AST visitor is exposed crate-wide (visibility only); VM
+  admission/execution behavior is unchanged. The decision is never cached across revisions.
+- JIT dispatch extracted to `eval/jit_dispatch.rs`: cached revision must match exactly;
+  clear stale cache before rebuild; failed compilation cannot invoke the old module.
+  Matched warm same-revision and later successful revision controls remain on JIT.
+- Former Check-trap tests now assert direct compile refusal, retaining their tree/VM
+  operand/short-circuit and known VM-error-as-data cases. JSON-builtin refusal still has
+  an independent undefined-callee control; admission is not proof of JSON JIT support.
+  Result helper tests add triple nesting with a missing deepest wrapper, a middle Err,
+  and an extra terminal wrapper pin (no general payload-type validation).
+- Static compilation blast sample: examples 99 functions, local JIT-eligibility hint
+  41 -> 39, new current-root graph eligibility 39; strict library 161 functions, local
+  83 -> 81, graph 81. These are admission/hint counts, NOT emitted-code success counts:
+  compiler backend limitations remain, and library functions are inside modules while
+  the compiler emits top-level functions only. Whole-program safety admission allows
+  19/26 valid example programs; two invalid files are excluded, not counted as covered.
+- Safe numeric timing sample, 10,000 invocations per mode, before -> after:
+  arithmetic direct 216 -> 222 microseconds, warm cached 2.10 -> 4.17 ms;
+  numeric branch direct 216 -> 212 microseconds, warm cached 2.30 -> 4.08 ms.
+  Both controls assert `used_jit=true`; timing is informational, noisy single samples,
+  not a performance threshold. Logs: `/tmp/opencode/jit_safety_{before,after}.log`.
+- Still open: VM NotAdmitted/Executed distinction, scalar Check unwind, temporary VM
+  quarantine for Result/catching graphs, combined B/C normalization and explicit catch
+  activation. No caller behavior migration, frontend relaxation, or callback ACK change
+  ships in this checkpoint. Run source compatibility audit before behavior-changing
+  VM/B/C activation; no production self-modification or replay-after-IO relaxation.
+- Review freeze: focused admission/cache/Result/await tests 44 passed; native 149 and
+  Telegram port 73 passed. One full release gate: 1979 passed / strict parity 1 failed /
+  2 ignored, CLI 5/5; strict counts unchanged at 324/58/191. Log:
+  `/tmp/opencode/full_gate_jit_safety.log`. No exhaustive mutation campaign was run.
+
+### Accepted VM scalar-safety checkpoint — #97 (`bbfe932`)
+
+- Baseline reproduced on a genuinely VM-admitted graph: ordinary scalar failing helper
+  between two builtin awaits emitted `[before, after]`; required result is `[before]` and
+  a typed failure. Log `/tmp/opencode/vm_scalar_before.log`. No user-await/field/Result
+  admission hides the reproduced failure. Check now emits RaiseCheck and aborts the scalar
+  VM stack; tree Check produces the same LanguageFailure::Check label.
+- `VmAttempt::NotAdmitted` is pre-execution only; `Executed(Err)` never retries tree, with
+  or without earlier IO. Sync preserves legacy Err(...) formatting; async returns the
+  execution error. Operational errors stay operational. The no-IO-replay guard remains.
+- Eager preparation compiles/reuses each unique reachable callee before any instruction,
+  shares one growing interner, resolves original call spellings and terminates cycles.
+  Nested unsupported code (e.g. shared reads) and non-Await builtin IO select tree before
+  the first effect; missing prepared bytecode is an internal execution failure.
+- Result contracts/captures/constructors temporarily select tree, preserving legacy
+  catching (including operational capture) until combined B/C. No full catch activation,
+  Result normalization, frontend relaxation or callback ACK reinterpretation. Tests retain
+  literal Result opcode evidence through a cfg(test)-only pure `compile_result_opcode_fixture`
+  plus production refusal/fallback assertions; those fixtures cannot execute Check or IO.
+- Focused regressions count actual synthetic IoRequests: Check failure before IO emits
+  zero; after earlier IO emits only before; success continues once; operational execution
+  failure also suppresses later requests. Tail/recursive/nested-argument failure, a tree
+  stub replay discriminator, alias identity, nested shared-code fallback and explicit
+  Result capture recovery are covered. Frozen fixture bytes are unchanged.
+- VM emission eligibility: examples 52 -> 49 of 99; strict library 107 -> 99 of 161.
+  Preparation can additionally refuse nested unsupported callees. Informational scalar
+  sample (1,000 iterations, one helper called twice): preparation 4.59 ms, full admitted
+  compile/execute 8.40 ms; noisy current measurements, not a before/after speed claim.
+  Logs `/tmp/opencode/vm_scalar_blast.log` and `/tmp/opencode/vm_scalar_cost.log`.
+- Review freeze: 16 new tests; focused VM suite 91 passed, eval 331 passed/1 ignored,
+  native 149, Telegram port 73, await/field admission 14 each. One full release gate:
+  1995 passed / strict parity 1 failed / 2 ignored; CLI 5/5, strict still 324/58/191.
+  Full log `/tmp/opencode/full_gate_vm_scalar.log`. No broad mutation campaign.
+
+### Accepted C invocation/observer plumbing — behavior-preserving (`8d8cfaa`)
+
+- `eval/invocation.rs` receives the actual FunctionDecl and a declared or selected-stub
+  body, returns the existing raw outcome, and optionally calls a trusted Rust observer.
+  No production caller installs that observer; nested callees do not inherit it, and it
+  receives no coroutine handle or nested private body. Stub selection/authority, program-only
+  expression context, named frame setup and depth guards remain unchanged.
+- Moved real named/parser/nested/async/test/spawned/source/route invocation sites to the
+  wrapper; raw startup/lifecycle and synthetic statement blocks remain outside it. CLI
+  run-async historically used an unframed body entry; its explicit legacy-unframed wrapper
+  retains that behavior (including the root shared-scope limitation) in this checkpoint.
+- No normalization/capture/propagation/await activation: current raw-vs-named-result
+  discrepancy, external error rendering and legacy catch-all behavior are retained.
+  Legacy trace is untouched and explicitly characterized: a branch returning 7 is skipped
+  and trace reports a later 9; a Check inside a branch is likewise skipped. Correcting this
+  requires the later shared-executor/trace C checkpoint, not an implicit plumbing change.
+- Metadata-only release audit (no live reads by main writer): migrated TelegramBot48 /
+  TgFormat18, no Result-returning functions, no +call captures or user-Result awaits;
+  two Result-parameter helpers and seven Result-typed builtin awaits. Preserve app unions
+  and builtin Err behavior. The frozen old Result callback signature is not a live claim.
+- C activation must explicitly migrate operational catch consumers: self-hosted REPL
+  division currently reaches a broad +call Result catch; use an authored domain Check/Err
+  where recovery is intended, never string classification or frozen-fixture edits. Test
+  observers may assert execution failure but may not create recoverable language values.
+  Other live-module metadata audit, generic ACK #104, and frontend guard relaxation remain
+  separate gates. No task/workspace/plan features are authorized for this writer.
+- Review freeze: 10 boundary/observer characterizations pass; eval 341 passed/1 ignored,
+  VM 91, native 149 and Telegram port 73 passed. One full release gate: 2005 passed /
+  strict parity 1 failed / 2 ignored, CLI 5/5; strict unchanged324/58/191. Log:
+  `/tmp/opencode/full_gate_c_plumbing.log`. No expanded mutation campaign.
+
+### Historical C-core activation freeze — interpreter-only (now committed as `113f80f`)
+
+- The actual-FunctionDecl wrapper now calls complete_invocation once for declared bodies
+  and selected stubs. Ordinary calls/user await preserve Result; +call T propagates explicit
+  Err and unwraps one Ok; +call Result captures typed language failure only. Arguments are
+  evaluated before the target's catch scope. Lifecycle/raw blocks have no inferred contract;
+  CLI's legacy unframed setup remains, but its declared return contract is normalized.
+- Shared statement_execution/tracing modules replace the partial trace interpreter.
+  Branch/loop/match bodies really execute; root-only observation does not inherit into
+  private callees and never re-evaluates expressions for logging. Trace appends normalized
+  invocation output and gains no IO handle. Test/trace observers can assert/report an
+  operational error without exposing it as a recoverable language value.
+- Deliberate compatibility changes: broad operational +call Result capture is removed.
+  Division-error recovery now aborts with zero recovery requests; an explicit domain Check
+  counterpart recovers once. Named and VM sync adapters preserve Rust Err structurally,
+  so API/native flags now report execution failure; application Value::Err and error-looking
+  Strings remain success data. CLI eval success=false and run-async Rust Err exit nonzero;
+  app Err values still exit successfully. No generic task ACK #104 reinterpretation.
+- Frozen legacy Telegram wrapper is misannotated String but returns builtin Result. User
+  await now preserves it, so BOTH success/failure reach the String consumer error after
+  one request. Only its characterization changed, not frozen bytes. Corrected app-union
+  port and migrated 48/18 metadata are distinct and retain their existing IO contracts.
+- Structural/IO matrix covers declaration, parser/named, nested/stub, async/tracked-task,
+  trace, test, API/session/native, route and CLI entries. Validation→write emits zero writes
+  on domain failure, one on success. Before/fail/after and argument-failure cases suppress
+  later effects; intended typed recovery emits once. Operational failure after earlier IO
+  reports success=false with one request and unchanged Program snapshot.
+- Result graphs stay quarantined off production VM/JIT. No Python G7/user-Result-await
+  guard relaxation, fixture exemptions, task feature changes or deployment. Other live
+  signatures, routes and operational-catch consumers require a separately authorized
+  metadata/source audit before activation. Existing successful live smoke is not C proof.
+- Review freeze: 14 new unit/boundary tests and four new CLI tests. Focused eval350 /
+  1 ignored, API241, VM91, native/port gates included in the full run. One full release
+  --no-fail-fast: 2019 passed / strict parity 1 failed / 2 ignored; existing Python CLI5/5
+  and Result-contract CLI4/4. Strict unchanged324/58/191 (zero AST mismatches/non-idempotence).
+  Log `/tmp/opencode/full_gate_c_core.log`. No expanded mutation campaign or deployment.
+
+## Historical recovery — Python parity #86 (2026-10-28 onward, red)
+
+### Accepted slice — G1 (Python pseudo-field properties), commit `fce692c`, baseline `5fb1ca8`
 
 - PRODUCTION frontend change (native mutate/test/evaluate/inspect), owner-approved choices:
   names `len`, `is_empty`, `is_ok`, `is_err`, `unwrap` only; PROPERTY form lowering to the
@@ -1211,7 +1478,7 @@ this ledger refer to that earlier checkpoint; the header above is authoritative.
 - No commit, push, integration deployment or service restart authorized.
 
 
-## Current release candidate — #87/#88 + TUI, native still opt-in (#89 parity gate)
+## Historical release candidate — #87/#88 + TUI, native still opt-in (#89 parity gate)
 
 2026-10-26 superseding owner decision: **conversation capability parity and
 independent review are required before native becomes the default.** Retain
@@ -1643,261 +1910,7 @@ A standalone syntax demo or CPython `eval`/`exec` is not the stop gate.
   together, with no zero-test success. Legacy `.ax` defaults remain unchanged.
   No CPython, provider, live library state or new mock-authoring API is involved.
 
-## Completed foundation — native tools first (#78)
+## Archived foundation and pre-native history
 
-**Approved direction (2026-10-25).** Implement native JSON-schema tool calls over
-the existing permission-checked runtime before any Python frontend. The first
-slice must complete one inspect → mutate → test → evaluate → finish task without
-bypassing runtime authorization, test obligations, CoW write-back, session
-persistence or completion validation. Related: #78 (this work) and #76 (manager
-cutover, **not** satisfied by this slice). Preserve the legacy `<code>`
-mutation/`!done` protocol throughout migration.
-
-### Scope and explicit non-goals
-- In: fixed named tool schemas; strict server-side argument validation; exposure
-  filtered by permissions (exposure is not the execution boundary); streaming and
-  non-streaming tool calls with correlated results; backward-compatible persisted
-  history; shared execution/completion semantics for HTTP (`ask`, `ask_stream`);
-  offline mock-transport and negative authorization/protocol tests. Takeover stays
-  on the legacy protocol in this first slice.
-- Out (first slice): deployment, generic MCP client, Python frontend, model-quality
-  claims, changing `!opencode`/agent authority, replacing the AST/runtime.
-- Later, separately measured: Python-subset frontend lowering to the existing AST.
-
-### Execution phases
-1. Research and agree the shared API (tool schema shape, assistant `tool_calls`
-   envelope, tool-result correlation, persisted-history representation).
-2. Isolated implementation in worktrees (schemas/dispatcher, transport, fixtures).
-3. Single-writer integration in `src/llm.rs`, `src/api/{llm_handlers,execute}.rs`,
-   `src/context_prompt.rs`, `src/permissions.rs`, `src/session.rs`, `src/builtins.rs`.
-4. Full release tests, offline evaluation gate, independent diff review.
-
-### Evaluation gate
-- A fixed offline fixture suite certifies protocol shape and execution semantics
-  with a mock provider. It does **not** certify model tool-selection quality.
-- Real-model effectiveness is a separate opt-in measurement using the same tasks
-  and result schema (model id/revision, repeats, success, attempts, tokens,
-  latency); it is not a CI gate and no improvement claim is made without it.
-- Mock results record token/latency provenance explicitly so harness overhead is
-  never presented as model cost or speed.
-- Report contract for future measured runs (documentation only; no generic
-  benchmark CLI yet): `schema_version`, `fixture_id`, `transport` (`http`/`sse`),
-  `mode` (`offline-scripted`/`live-provider`), `model_id`, `model_revision`,
-  `repeat_index`, `attempts`, `completed`, `encountered_errors`, `assertions_passed`,
-  `prompt_tokens`, `completion_tokens`, `token_source`, `latency_ms`, and
-  `latency_source`. Offline provider fixtures use model `native-fixture`, fixed
-  synthetic usage (10 input/5 output per scripted response),
-  `token_source=fixture`, and `latency_source=local-harness`; never infer model
-  performance from those values. Live runs require exact model/revision and
-  provider-reported usage, retaining missing counters as null rather than zero.
-- Fixture cases live in `src/api/native_turn_tests.rs`,
-  `src/api/native_tools/tests.rs`, `src/llm/native.rs`, and
-  `src/session/native_history.rs`: full lifecycle with early finish rejection,
-  no-finish exhaustion, closed schemas, permission narrowing, guest exclusion,
-  duplicate ids, same arguments/new ids, truncated/error streams, no legacy
-  double-execution, immutable baseline, dependent batches and restored/bounded
-  protocol pairs. A successful `finish` is task completion; encountered and
-  subsequently corrected errors remain separately observable.
-
-### Recovery / baseline
-- Branch `work/native-tools`, baseline `90883a2`; upstream `origin/master`
-  `6667139`. Do not merge pre-sanitization history or archived feature branches.
-- Local-only recovery refs: `refs/archive/2026-10-25/*` (see AGENTS.md). Inspect,
-  do not publish. No deployment or commit is authorized by the roadmap.
-- Main integration writer: `ses_e8d51b0b2ffe2YU2n1nfJe0WbS` (main checkout).
-  Transport: `ses_e8d53de21ffeTkWfOEP3G1FCYy` (`adapsis-native-transport`).
-  Dispatcher: `ses_e8d5328a9ffepJ6zzxG43iUzuC` (`adapsis-native-dispatch`).
-  Manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi` imports reviewed final diffs and
-  retains architecture/release authority. Workers never commit or deploy.
-- Approved surface: `inspect` (symbols/source/deps/tasks/library), `mutate`
-  (explicit module/function/type/doc/shared declarations), `test` (qualified
-  function test blocks), `evaluate` (qualified named functions), `finish`.
-  Opt-in `--native-tools`, write-capable non-guest HTTP turns only. Plans,
-  roadmap, agents, guest native tools and Python are deferred.
-- Current phase: finalized transport/dispatcher imported; integrated offline gates
-  pass and critical integration review accepted. Native
-  completion uses one immutable turn baseline and explicit successful finish;
-  provider stop/prose never certifies completion, and no legacy fallback runs.
-- Model policy: preserve Claude quota above 90%; integration uses no Claude.
-  Offline mock results only; real-model effectiveness remains unmeasured.
-- Disk guard: serialize builds and recheck `df` before heavy phases. Reuse the
-  existing main target; no new `/home` target trees. Cache inventory worker
-  `ses_e8d384e9affeGaFjnegdZpoKtz` is read-only until the manager approves an
-  exact cleanup list. Main target and both native worker trees/targets are
-  protected; do not delete unrelated caches or files.
-- Approved cleanup completed: six inactive cache/target paths reclaimed 25.0 GiB;
-  `/home` free space rose from 7 to 32 GiB. Active main/native targets were
-  untouched. Continue serial builds with a fresh space check before verification.
-- Independent reviewers: Astra critical integration
-  `ses_e8d27edc9ffeFZJshutWc7PbXM`; DeepSeek Pro transport/history
-  `ses_e8d279e0bffe6hI60QWbBO7jmg`. Both accepted reviewed corrections,
-  including DeepSeek's fresh acceptance of the final whitespace id/name
-  validation tightening. All source reviews are clear with final offline gates
-  green. Read-only reviewers; integration remains sole writer.
-- Integrated verification after review fixes (2026-10-25):
-  `cargo test --release native_` 57 passed; `cargo test --release llm::` 41 passed;
-  completion suite 9 passed; conversation-view suite 7 passed;
-  full `cargo test --release` 1529 passed,
-  2 ignored; release build passed; `memory-eval` passed (6 cases, recall 1.0,
-  zero ACL/citation/stale/duplicate violations); all 28 example files passed.
-  No live provider calls, deployment, service changes, commits or pushes.
-- UI gates: `node tools/test_native_events.mjs` passed; independent browser
-  validation by `ses_e8d5eb051ffe2vVYWvhJwWh71j` passed at 1280×800 and 390×844
-  against isolated mock SSE using the actual `web/adapsis.html`. Incomplete
-  turns, corrected completion-with-errors, legacy done events and thinking
-  toggles were verified, with no overflow or JavaScript errors. Screenshots:
-  `/tmp/opencode/native-ui-verify/{desktop,mobile}-*.png`. The pre-existing
-  mobile program-panel width issue is deferred as #80; the mock server stopped.
-- Final build state: package version remains 0.1.0; `os --help` documents the
-  HTTP-only flag. One release dead-code warning remains for the structural-only
-  `validate_native_tool` API exercised by tests; production uses its authorized
-  counterpart. At gate time new files were intent-to-add only; the manager later
-  committed the #78 slice as `8e10876`. Disk was 32 GiB free on `/home`, 9.5 GiB
-  on `/tmp` after those sequential gates.
-- Post-gate cleanup removed only the two disposable `/tmp` native worktree
-  target caches after builds stopped, reclaiming 5.36 GiB of tmpfs. Current free
-  space is 15 GiB on `/tmp` and 32 GiB on `/home`; the main target, screenshots
-  and logs remain available. No functional changes followed the accepted gates.
-- Live gateway usability remains blocked/unverified by llm-gateway #2; legacy
-  permission follow-up is tracked in #79. Neither is certified by offline gates.
-- Review tightened the initial surface: source/deps require qualified members;
-  evaluate/test inputs, exact expectations and shared defaults are literal-only;
-  contains/starts_with matchers remain, Result matchers and global +after are
-  deferred. New user-function calls must be qualified, including local calls.
-  Direct authored module references are checked; task rows are Read-filtered
-  and contain only categorical states. Unknown qualified eval/test targets get
-  neutral diagnostics rather than legacy cross-module suggestions. Browser/TUI
-  event handling distinguishes successful finish from incomplete stream end.
-
-### Status
-- [x] Baseline cleanup and direction recorded (2026-10-25)
-- [x] Shared tool-call API and persisted-history compatibility
-- [x] Tool dispatcher over existing guarded operations
-- [x] Offline fixture suite + documented results contract
-- [x] Offline streaming/non-streaming transport certification
-- [x] Negative protocol + authorization suite
-- [x] Independent review acceptance
-- [ ] Live gateway/provider certification (llm-gateway #2)
-- [x] Working Python-subset frontend (completed in #81 above; model-effectiveness trials remain separate)
-
----
-
-## Historical sections (pre-#78)
-
-Everything below this line predates the 2026-10-25 native-tools decision and is
-retained for context. It is not the current execution plan; in particular
-"Current Priority: Telegram Bot" and the "Next Targets" list are historical.
-
-## The Three Modes
-
-AdapsisOS operates in three distinct modes, each building on the previous:
-
-### Agentic Mode (current focus)
-
-AdapsisOS as a **live, autonomous AI programming environment**. The AI has a session, a
-program state, a plan, and works toward goals — both user-directed and self-initiated.
-
-- The AI receives user requests and builds Adapsis programs incrementally
-- It can spawn sub-agents with scoped access for parallel work
-- It proactively identifies missing capabilities and extends itself:
-  - **Adapsis-level**: write new functions, types, modules in Adapsis
-  - **Rust-level**: use `!opencode` to add builtins, fix runtime bugs, add IO operations
-- It maintains a plan and works through it step by step
-- Agents communicate via `!msg` / `?inbox`
-- All mutations are logged, rewindable, inspectable
-- `--autonomous` flag: inject a goal and let the AI work without user input
-
-This is the default `adapsis os` mode.
-
-### Adaptive Mode (planned)
-
-AdapsisOS loads a **pre-built Adapsis program** and the AI can modify/extend it at runtime
-via the mutation protocol. Like a live-patching server.
-
-- Start with: `adapsis os --load program.ax --adaptive`
-- The program runs (e.g. an HTTP server, a data pipeline, a game)
-- The AI monitors it via `!watch` and `?tasks`
-- When the user or an event triggers a change, the AI hot-patches the running program
-- New functions can be added, existing ones replaced, types extended
-- The program never stops — mutations apply live
-
-Use cases: self-adapting servers, AI-driven game NPCs, live data pipeline reconfiguration.
-
-### Compiled Mode (planned)
-
-Freeze the current program state into a **standalone native binary** via AOT compilation.
-No runtime, no mutation protocol, no LLM — just a compiled executable.
-
-- Build with: `adapsis compile --output binary session.json`
-- Takes the current `Program` AST and compiles everything through Cranelift
-- Produces a statically-linked binary with no Adapsis runtime overhead
-- Useful for deploying what the AI built as a production artifact
-
-The flow: Agentic mode → build and iterate → Compiled mode → deploy.
-
-## Current Priority: Telegram Bot
-
-The first autonomous goal. The AI should build a Telegram bot entirely in Adapsis:
-
-- Use the async IO system (TCP, HTTP requests via shell/builtins)
-- Connect to the Telegram Bot API (HTTP long polling or webhooks)
-- Handle messages, respond with AI-generated content
-- Persist state across restarts via session
-- If missing builtins are needed (HTTP client, JSON parsing), use `!opencode` to add them
-
-This exercises the full stack: async IO, LLM calls, self-extension, error handling,
-and proves AdapsisOS can build real-world applications autonomously.
-
-## Self-Enhancement Roadmap
-
-The AI inside AdapsisOS should be working toward making itself better. The loop:
-
-1. **Identify a limitation** — missing builtin, awkward syntax, slow eval, missing IO op
-2. **Try to solve it in Adapsis first** — write a function, use existing builtins
-3. **If Adapsis can't do it, use `!opencode`** — request a Rust-level change
-4. **After rebuild, verify the new capability works** — write a test, eval it
-5. **Document what changed** — update the prompt, add to the registry
-
-### Done
-- [x] Full language: types, functions, pattern matching, effects, modules
-- [x] Async IO: TCP, files, shell, stdin, LLM calls
-- [x] Coroutine runtime with task registry and wait-reason tracking
-- [x] Multi-agent with scoped branches
-- [x] Agent-to-agent messaging (`!msg` / `?inbox`)
-- [x] Self-extension via `!opencode` → OpenCode → cargo build → exec restart
-- [x] Cranelift JIT for Int/Float/Bool/String/Struct
-- [x] HTTP API + SSE streaming + web UI
-- [x] Plan management with auto-numbering, plan pinned to chat
-- [x] AI feedback loop: full eval/test/mutation results fed back to LLM
-- [x] `+spawn` returns task handle, tasks trackable via `?tasks`
-- [x] AdapsisOS identity prompt: AI knows it's a self-improving system
-- [x] Three modes documented
-- [x] 118 unit tests, 12 e2e tests
-
-### In Progress
-- [ ] **Autonomous mode** — `--autonomous` flag, goal injection, structured logging
-- [ ] **Telegram bot** — first real-world autonomous build target
-
-### Next Targets (priority order)
-1. **HTTP client builtin** — needed for Telegram API, currently only TCP raw sockets
-2. **JSON parsing builtin** — needed for any API interaction
-3. **`!config` command** — per-task model selection, temperature
-4. **AOT compilation** — freeze program to standalone binary (Compiled mode)
-5. **Adaptive mode** — `--load` flag, hot-patching running programs
-6. **Provenance tracking** — who wrote what, when, why (design doc Phase 7)
-7. **Grammar constraints** — GBNF for guaranteed syntactically valid output
-8. **LoRA fine-tuning** — train a model specifically on Adapsis
-9. **Self-hosting** — Adapsis parser/evaluator written in Adapsis (design doc Phase 8)
-
-## Post-Self-Hosting Goal: AI-in-the-Loop
-
-Once Adapsis can parse and evaluate itself, the next milestone is the AI running inside AdapsisOS:
-
-1. The AI operates through the AdapsisOS HTTP API — emitting mutations, running evals, querying state
-2. The AI modifies the Adapsis runtime FROM INSIDE Adapsis — writing parser improvements that the parser then uses
-3. A self-modifying AI in its own environment
-
-The loop: AI writes Adapsis code → AdapsisOS validates and runs it → results feed back → AI
-improves the code → the improved code improves AdapsisOS itself.
-
-This is the design doc's Phase 8 vision made concrete.
+The completed #78 foundation and earlier roadmap sections are preserved verbatim
+in [the historical archive](docs/roadmap-native-foundation-history.md).

@@ -23,7 +23,7 @@ fn tiers(source: &str, target: &str, args: &[i64]) -> (i64, i64, i64) {
         env.set(&param.name, value.clone());
     }
     let tree =
-        match eval::eval_function_body_named(&program, target, &function.body, &mut env).unwrap() {
+        match eval::eval_declared_function(&program, target, function, &mut env).unwrap() {
             Value::Int(n) => n,
             other => panic!("tree returned {other}"),
         };
@@ -83,7 +83,7 @@ fn python_int_min_overflow_is_reachable_from_python_frontend_operands() {
         env.set("a", Value::Int(i64::MIN));
         env.set("b", Value::Int(-1));
         let value =
-            eval::eval_function_body_named(&program, target, &function.body, &mut env).unwrap();
+            eval::eval_declared_function(&program, target, function, &mut env).unwrap();
         assert!(
             matches!(value, Value::Int(n) if n == expected),
             "{target}: {value}"
@@ -104,7 +104,7 @@ fn python_int_zero_divisor_still_errors_in_tree_and_vm() {
         env.set("a", Value::Int(1));
         env.set("b", Value::Int(0));
         let error =
-            eval::eval_function_body_named(&program, target, &function.body, &mut env).unwrap_err();
+            eval::eval_declared_function(&program, target, function, &mut env).unwrap_err();
         assert!(error.to_string().contains(message), "{target}: {error}");
         // VM
         let compiled = vm::compile_function(function, &program).unwrap();

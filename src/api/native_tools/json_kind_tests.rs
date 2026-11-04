@@ -98,15 +98,17 @@ async fn native_python_json_kind_mutate_test_inspect_evaluate_with_hidden_state(
 }
 
 fn native_failure(result: &super::super::NativeToolResult) {
-    // Existing native evaluate protocol reports an evaluated Err as text while
-    // has_errors remains false. Pin it honestly, not as a correctly flagged status.
-    assert!(!result.execution.has_errors);
+    // Operational invocation failures now stay structural errors through the executor.
+    // Application Value::Err is a separate successful value, never classified by text.
+    assert!(result.execution.has_errors);
     // The legacy mutation_results vector also carries eval reports; actual
     // Program immutability is asserted from snapshots at the call site.
     let content: serde_json::Value = serde_json::from_str(&result.content).unwrap();
-    let value = content["eval_results"].as_str().unwrap();
-    assert!(value.contains(" = Err(json_kind"), "{value}");
-    assert!(value.ends_with(')'), "{value}");
+    assert_eq!(content["success"], false);
+    assert!(content["mutation_results"].as_array().unwrap().iter().any(|row|
+        row["success"] == false && row["message"].as_str().is_some_and(|message| message.contains("json_kind"))
+    ), "{content}");
+    let value = content["eval_results"].as_str().unwrap_or("");
     for kind in [
         "missing", "null", "bool", "int", "float", "string", "array", "object",
     ] {

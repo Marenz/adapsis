@@ -23,7 +23,7 @@ struct Analysis {
     nodes: usize,
 }
 
-pub(super) enum Work<'a> {
+pub(crate) enum Work<'a> {
     Function(&'a ast::FunctionDecl),
     Statement(&'a ast::Statement),
     Expression(&'a ast::Expr),
@@ -76,7 +76,7 @@ fn analyze<'a>(root: &'a ast::FunctionDecl, program: &'a ast::Program) -> Analys
     result
 }
 
-pub(super) fn statement_work<'a>(statement: &'a ast::StatementKind, work: &mut Vec<Work<'a>>) {
+pub(crate) fn statement_work<'a>(statement: &'a ast::StatementKind, work: &mut Vec<Work<'a>>) {
     use ast::StatementKind as S;
     match statement {
         S::Let { value, .. } | S::Set { value, .. } | S::Return { value } | S::Yield { value } => {
@@ -120,7 +120,7 @@ pub(super) fn statement_work<'a>(statement: &'a ast::StatementKind, work: &mut V
     }
 }
 
-pub(super) fn expression_work<'a>(expression: &'a ast::Expr, work: &mut Vec<Work<'a>>) {
+pub(crate) fn expression_work<'a>(expression: &'a ast::Expr, work: &mut Vec<Work<'a>>) {
     use ast::Expr as E;
     match expression {
         E::Call(call) => work.push(Work::Call(call, false)),
