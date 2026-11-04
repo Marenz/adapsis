@@ -175,6 +175,35 @@ response has no Content-Disposition header.
 
 ## Architecture
 
+- Issue #121 opt-in source library: `library-sources.json` explicitly maps module
+  names to `python`/transitional `legacy_ax` plus a closed acyclic dependency set.
+  Active manifests whitelist source files: unlisted files are diagnosed without
+  reading/applying them, unlisted saves refuse, and unlisted cached modules or
+  top-level members refuse startup with recovery preserved. No-manifest legacy
+  behavior is unchanged; unreadable policy is never treated as absent.
+  Retained manifest presence includes empty sets: deletion/dangling links never
+  restore legacy reload/writes in-process. Source-root create/inspection/enumeration
+  failures block startup before cached code or initialization can execute.
+  `library/source.rs` owns manifest/conflict/atomic-file policy;
+  `library/source_io.rs` adapts the checked whole-module Python serializer.
+  Never infer authority from mutation language, choose between colliding `.py`
+  and `.ax`, or consult stale session modules while lowering managed source.
+  Failed managed startup aborts before initialization; ALL managed hot reload
+  requires restart, preserving live memory, baselines and queued edits.
+  Cases loaded from source are untested, not implicitly passed.
+  `flush_live_sources` is the sole managed writer: a blocking worker holds live
+  Program read -> source transaction -> metadata locks through checked printing
+  and rename, with bounded inputs and no model/eval/IO awaits. Queued requests
+  carry names, never detached ASTs. Snapshot persistence APIs refuse managed
+  modules; mutation acknowledgements mean pending source save, not durability.
+  Failures retain pending names and live edits for recovery. Manifest is durable policy,
+  LibraryState owns runtime source-byte hashes, session AST is recovery cache.
+  Source/session writes are not cross-file atomic; final hash-check/rename has a
+  documented external-process race. See `docs/python-source-library.md`.
+  Focused isolated gates: `cargo test --release managed_` and
+  `cargo test --release --test python_source_startup`. Default library format and
+  deployment remain unchanged; migration requires separate backup/review gates.
+
 - #120 task-domain logic lives in Python-frontend Adapsis modules, initially
   `examples/tasks/domain.py`; the premature Rust foundation is removed from active
   source, history retained. Pure scoped-record validation, transition proposals

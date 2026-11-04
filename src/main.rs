@@ -1627,6 +1627,12 @@ async fn main() -> Result<()> {
 
             // Auto-load persistent module library (~/.config/adapsis/modules/)
             let lib_state = library::load_module_library(&mut sess.program);
+            lib_state.require_authoritative_sources()?;
+            let managed_names = lib_state.managed_module_names();
+            // The authoritative set has fully validated. Only now retire cached
+            // managed routes before draining its new registration batch once.
+            sess.runtime.http_routes.retain(|route| !route.handler_fn.split_once('.')
+                .is_some_and(|(owner, _)| managed_names.contains(owner)));
             if !lib_state.loaded_modules.is_empty() {
                 sess.program.rebuild_function_index();
             }
@@ -2526,30 +2532,34 @@ async fn main() -> Result<()> {
                         }
                     }
                     // Snapshot tiers and save
-                    let sess = snapshot_from_tiers(&autosave_program, &autosave_meta, &autosave_runtime).await;
+                    let mut sess = snapshot_from_tiers(&autosave_program, &autosave_meta, &autosave_runtime).await;
                     let conv_count = sess.meta.conversations.contexts.len();
                     eprintln!("[save] triggered: {} conversation(s), revision {}", conv_count, sess.meta.revision);
-                    // Persist all library modules (picks up test changes, shared var updates, etc.)
-                    let mut lib_errors = 0usize;
-                    for module in &sess.program.modules {
-                        if let Err(e) = crate::library::persist_module(
-                            module,
-                            sess.meta.library_state.as_ref(),
-                        ) {
-                            let message =
-                                format!("failed to persist module `{}`: {e}", module.name);
-                            eprintln!("[save] {message}");
-                            if let Some(state) = sess.meta.library_state.as_ref() {
-                                state.record_error(message);
-                            }
-                            lib_errors += 1;
+                    // A request carries no AST to the writer. The blocking worker
+                    // reads the CURRENT live Program and keeps that read guard
+                    // through serialization/rename; stale session clones never write.
+                    match crate::library::flush_live_sources(
+                        autosave_program.clone(), sess.meta.library_state.clone(),
+                    ).await {
+                        Ok(receipt) => {
+                            sess.program = receipt.program_snapshot;
+                            eprintln!("[save] {} module(s) persisted; {} source failure(s)", receipt.saved_names.len(), receipt.failures.len());
+                            for message in receipt.failures { eprintln!("[save] {message}"); }
                         }
-                    }
-                    if lib_errors > 0 {
-                        eprintln!("[save] {lib_errors} module(s) failed to persist");
+                        Err(error) => {
+                            let message = format!("source coordinator failed; edits remain pending: {error}");
+                            eprintln!("[save] {message}");
+                            if let Some(state) = sess.meta.library_state.as_ref() { state.record_error(message); }
+                        }
                     }
                     if let Err(e) = sess.save(std::path::Path::new(&save_path)) {
                         eprintln!("[save] failed: {e}");
+                        if sess.meta.library_state.as_ref().is_some_and(|state| !state.managed_module_names().is_empty()) {
+                            eprintln!("[save] source writes already committed remain authoritative; session recovery checkpoint failed. No cross-file rollback was performed");
+                            if let Some(state) = sess.meta.library_state.as_ref() {
+                                state.record_error("session recovery checkpoint failed after source persistence attempts; successful source writes remain authoritative and were not rolled back".to_string());
+                            }
+                        }
                     } else {
                         eprintln!("[save] session saved to {save_path}");
                     }

@@ -1574,12 +1574,12 @@ impl Session {
 
         if any_definition && results.iter().all(|(_, ok)| *ok) {
             let affected = crate::library::affected_module_names(&operations);
-            let persist_errors = crate::library::persist_affected_modules(
+            let persistence_results = crate::library::persist_affected_modules(
                 &self.program,
                 &affected,
                 self.meta.library_state.as_ref(),
             );
-            results.extend(persist_errors.into_iter().map(|error| (error, false)));
+            results.extend(persistence_results);
         }
 
         let success = results.iter().all(|(_, ok)| *ok);

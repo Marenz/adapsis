@@ -2,9 +2,10 @@
 //! and persists module changes back to disk.
 //!
 //! This provides a permanent library layer that works across git worktrees and sessions.
-//! Modules are stored as reconstructed `.ax` source files, one per module.
+//! Legacy modules use reconstructed `.ax`; an explicit source manifest opts
+//! modules into maintained Python source plus stored tests.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +16,13 @@ use crate::ast;
 use crate::parser;
 use crate::typeck;
 use crate::validator;
+
+mod source;
+mod source_io;
+mod source_flush;
+pub use source_flush::{flush_live_sources, SaveReceipt};
+#[cfg(test)]
+mod source_tests;
 
 /// A module load error — pairs the module/file name with the error message.
 #[derive(Debug, Clone)]
@@ -36,6 +44,13 @@ pub struct LibraryState {
     pub load_errors: Arc<Mutex<Vec<LoadError>>>,
     /// Hash of the last successfully loaded or persisted source per module.
     file_hashes: Arc<Mutex<HashMap<String, String>>>,
+    /// Explicit authority policy; hashes remain in `file_hashes`, never duplicated.
+    managed_sources: Arc<Mutex<Option<source::ManagedSources>>>,
+    /// A failed managed-set load blocks persistence and initial OS startup.
+    managed_error: Arc<Mutex<Option<String>>>,
+    /// Lock order is live Program read guard -> this mutex -> source metadata.
+    source_transaction: Arc<Mutex<()>>,
+    pending_sources: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 impl LibraryState {
@@ -45,6 +60,10 @@ impl LibraryState {
             errors: Arc::new(Mutex::new(Vec::new())),
             load_errors: Arc::new(Mutex::new(Vec::new())),
             file_hashes: Arc::new(Mutex::new(HashMap::new())),
+            managed_sources: Arc::new(Mutex::new(None)),
+            managed_error: Arc::new(Mutex::new(None)),
+            source_transaction: Arc::new(Mutex::new(())),
+            pending_sources: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -105,8 +124,51 @@ impl LibraryState {
         for le in errs.iter() {
             out.push_str(&format!("  {}: {}\n", le.module_name, le.error));
         }
-        out.push_str("Fix the named persisted .ax file, then call library_reload(\"ModuleName\") to retry it.\n");
+        out.push_str("Fix the named persisted source. Manifest-managed libraries require reconciliation and server restart; unmanifested legacy modules may use library_reload(\"ModuleName\").\n");
         Some(out)
+    }
+
+    /// Call before route registration, shared initialization or lifecycle IO.
+    /// Managed hot reload is refused; a new server must
+    /// never advertise a session recovery cache as successfully loaded source.
+    pub fn require_authoritative_sources(&self) -> Result<()> {
+        self.check_source_available().context("startup refused before initialization; repair authoritative sources and restart. Session recovery cache unchanged")
+    }
+
+    fn check_source_available(&self) -> Result<()> {
+        let error = self.managed_error.lock().map_err(|_| anyhow::anyhow!("source state lock unavailable"))?;
+        if let Some(error) = error.as_ref() {
+            bail!("authoritative library unavailable: {error}; repair source files/manifest and restart the server");
+        }
+        Ok(())
+    }
+
+    pub fn managed_module_names(&self) -> BTreeSet<String> {
+        self.managed_sources.lock().ok().and_then(|managed| managed.as_ref()
+            .map(|managed| managed.manifest.modules.keys().cloned().collect()))
+            .unwrap_or_default()
+    }
+
+    fn has_source_manifest(&self) -> Result<bool> {
+        self.managed_sources.lock().map(|sources| sources.is_some())
+            .map_err(|_| anyhow::anyhow!("source policy state lock unavailable"))
+    }
+
+    fn block_source_startup(&self, message: String) {
+        if let Ok(mut error) = self.managed_error.lock() { *error = Some(message.clone()); }
+        self.record_load_error("source-library".to_string(), message.clone());
+        self.record_error(message);
+    }
+
+    pub fn pending_source_names(&self) -> BTreeSet<String> {
+        self.pending_sources.lock().map(|names| names.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    fn queue_source(&self, name: &str) -> Result<u64> {
+        let mut pending = self.pending_sources.lock().map_err(|_| anyhow::anyhow!("source pending-state lock unavailable"))?;
+        let request = pending.get(name).copied().unwrap_or(0).checked_add(1).context("source pending counter exhausted")?;
+        pending.insert(name.to_string(), request);
+        Ok(request)
     }
 }
 
@@ -116,6 +178,14 @@ const MAX_RECORDED_ERRORS: usize = 50;
 
 fn source_hash(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+
+fn source_policy_active(dir: &Path, state: Option<&LibraryState>) -> Result<bool> {
+    if let Some(state) = state {
+        state.check_source_available()?;
+        if state.has_source_manifest()? { return Ok(true); }
+    }
+    source::manifest_present(dir)
 }
 
 /// Default library directory path.
@@ -151,9 +221,13 @@ pub fn library_dir() -> PathBuf {
 /// Ensure the library directory exists, creating it if necessary.
 pub fn ensure_library_dir() -> Result<PathBuf> {
     let dir = library_dir();
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create module library dir: {}", dir.display()))?;
+    match std::fs::metadata(&dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => bail!("module library path is not a directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&dir).context("failed to create module library directory")?;
+        }
+        Err(error) => return Err(error).context("could not inspect module library directory"),
     }
     Ok(dir)
 }
@@ -422,7 +496,7 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
         Err(e) => {
             let msg = format!("could not create library dir: {e}");
             crate::logging::diagnostic("library-init-error", &msg);
-            state.record_error(msg);
+            state.block_source_startup(msg);
             return state;
         }
     };
@@ -441,19 +515,34 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
 }
 
 fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut LibraryState) {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "ax"))
-            .collect(),
-        Err(e) => {
-            let msg = format!("could not read library dir {}: {e}", dir.display());
-            crate::logging::diagnostic("library-read-error", &msg);
-            state.record_error(msg);
+    // Inventory before publishing any candidate: inability to inspect the source
+    // root is an operational failure, never evidence of absent authority policy.
+    let entries = std::fs::read_dir(dir).and_then(|entries| {
+        entries.map(|entry| entry.map(|entry| entry.path())).collect::<std::io::Result<Vec<_>>>()
+    });
+    let paths = match entries {
+        Ok(paths) => paths,
+        Err(_) => {
+            state.block_source_startup("could not inspect source library directory; startup refused before cached code initialization".to_string());
             return;
         }
     };
+    let managed = match source_io::load(program, dir, state) {
+        Ok(names) => names,
+        Err(error) => {
+            state.record_error(error.to_string());
+            return;
+        }
+    };
+    state.loaded_modules.extend(managed.iter().cloned());
+    let manifest_active = match state.has_source_manifest() {
+        Ok(active) => active,
+        Err(error) => { state.block_source_startup(error.to_string()); return; }
+    };
+    let mut files: Vec<PathBuf> = paths.into_iter()
+            .filter(|p| p.extension().is_some_and(|ext| ext == "ax" || (manifest_active && ext == "py")))
+            .filter(|p| !p.file_stem().and_then(|name| name.to_str()).is_some_and(|name| managed.contains(name)))
+            .collect();
 
     // Sort by filename for deterministic load order
     files.sort();
@@ -466,6 +555,12 @@ fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut Library
             .unwrap_or("Unknown")
             .to_string();
 
+        if manifest_active {
+            let message = "source file is not listed in library-sources.json and was NOT loaded; add an explicit python/legacy_ax entry and dependencies, then restart".to_string();
+            state.record_load_error(source::diagnostic_name(&file_module_name), message.clone());
+            state.record_error(message);
+            continue;
+        }
         match std::fs::read_to_string(path) {
             Ok(source) => {
                 match replace_module_from_source(program, &file_module_name, &source) {
@@ -632,7 +727,26 @@ fn telegram_migration_library_targets_must_be_bare() {
 /// Uses atomic write and refuses to overwrite a file changed since this process saw it.
 pub fn persist_module(module: &ast::Module, lib_state: Option<&LibraryState>) -> Result<()> {
     let dir = ensure_library_dir()?;
+    if source_policy_active(&dir, lib_state)? {
+        bail!("active source manifest refuses snapshot writes and implicit legacy files; use an explicit manifest entry and the live-program coordinator");
+    }
     persist_module_to_dir(module, lib_state, &dir)
+}
+
+/// Legacy snapshot persistence. Managed sources require `flush_live_sources`,
+/// which obtains the authoritative live Program itself rather than a clone.
+pub fn persist_program_module(program: &ast::Program, name: &str, state: Option<&LibraryState>) -> Result<()> {
+    let dir = ensure_library_dir()?;
+    persist_program_module_to_dir(program, name, state, &dir)
+}
+
+fn persist_program_module_to_dir(program: &ast::Program, name: &str, state: Option<&LibraryState>, dir: &Path) -> Result<()> {
+    if source_policy_active(dir, state)? {
+        bail!("active source policy refuses detached snapshot writes and implicit legacy files; retain the recovery cache and use the live-program coordinator");
+    }
+    let module = program.modules.iter().find(|module| module.name == name)
+        .context("module to persist is absent from current program")?;
+    persist_module_to_dir(module, state, dir)
 }
 
 fn persist_module_to_dir(
@@ -759,10 +873,19 @@ pub fn reload_module(
     lib_state: Option<&LibraryState>,
 ) -> Result<String> {
     let dir = ensure_library_dir()?;
+    reload_module_from_dir(program, module_name, lib_state, &dir)
+}
+
+fn reload_module_from_dir(program: &mut ast::Program, module_name: &str, lib_state: Option<&LibraryState>, dir: &Path) -> Result<String> {
+    if source_policy_active(dir, lib_state)? {
+        // A live source reload would invalidate in-flight execution snapshots.
+        // The first slice deliberately has no epoch/merge-conflict framework.
+        bail!("manifest-managed library hot reload requires restart; live program, source baselines and pending edits are unchanged. Preserve the session recovery checkpoint and reconcile source before restarting");
+    }
     if module_name.is_empty() {
-        reload_all_modules(program, &dir, lib_state)
+        reload_all_modules(program, dir, lib_state)
     } else {
-        reload_specific_module(program, &dir, module_name, lib_state)
+        reload_specific_module(program, dir, module_name, lib_state)
     }
 }
 
@@ -888,18 +1011,25 @@ pub fn affected_module_names(operations: &[parser::Operation]) -> BTreeSet<Strin
     names
 }
 
-/// Persist all modules whose names are in the given set.
-/// Returns actionable errors so the mutation caller can report them immediately.
-/// Also records errors into the LibraryState if provided.
+/// Queue managed names for live-program persistence and immediately persist
+/// unmanifested legacy modules. Results explicitly distinguish a successful
+/// pending-source acknowledgement from a failed disk save.
 pub fn persist_affected_modules(
     program: &ast::Program,
     module_names: &BTreeSet<String>,
     lib_state: Option<&LibraryState>,
-) -> Vec<String> {
-    let mut errors = Vec::new();
+) -> Vec<(String, bool)> {
+    let mut results = Vec::new();
     for name in module_names {
+        if let Some(state) = lib_state.filter(|state| state.managed_module_names().contains(name)) {
+            match state.queue_source(name) {
+                Ok(_) => results.push((format!("module `{name}` accepted in memory; authoritative source save is pending live-program writeback/autosave (not yet durable)"), true)),
+                Err(error) => results.push((error.to_string(), false)),
+            }
+            continue;
+        }
         if let Some(module) = program.modules.iter().find(|m| &m.name == name) {
-            match persist_module(module, lib_state) {
+            match persist_program_module(program, &module.name, lib_state) {
                 Ok(()) => {}
                 Err(e) => {
                     let msg = format!(
@@ -911,12 +1041,12 @@ pub fn persist_affected_modules(
                     if let Some(state) = lib_state {
                         state.record_error(msg.clone());
                     }
-                    errors.push(msg);
+                    results.push((msg, false));
                 }
             }
         }
     }
-    errors
+    results
 }
 
 /// Format a summary of the library state for the ?library query.
@@ -933,6 +1063,17 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
     ));
 
     if let Some(state) = lib_state {
+        let managed = state.managed_module_names();
+        if !managed.is_empty() {
+            out.push_str(&format!("Managed authoritative sources: {} module(s); library-sources.json selects format.\n", managed.len()));
+            let pending = state.pending_source_names();
+            if !pending.is_empty() {
+                out.push_str(&format!("Source save pending (not durable): {}\n", pending.into_iter().collect::<Vec<_>>().join(", ")));
+            }
+        }
+        if let Err(error) = state.check_source_available() {
+            out.push_str(&format!("Source unavailable; live modules are last-good recovery state and saves are blocked: {error}\n"));
+        }
         if state.loaded_modules.is_empty() {
             out.push_str("No library modules loaded at startup.\n");
         } else {
@@ -955,15 +1096,15 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
         }
     }
 
-    // List .ax files on disk
+    // List source files without choosing authority by filename.
     if dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             let mut files: Vec<String> = entries
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "ax"))
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "ax" || ext == "py"))
                 .map(|e| {
                     e.path()
-                        .file_stem()
+                        .file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or("?")
                         .to_string()
@@ -975,7 +1116,7 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
                 out.push_str("  (none)\n");
             } else {
                 for f in &files {
-                    out.push_str(&format!("  {f}.ax\n"));
+                    out.push_str(&format!("  {f}\n"));
                 }
             }
         }

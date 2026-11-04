@@ -7,6 +7,7 @@ mod expressions;
 mod lower;
 #[cfg(test)]
 mod parity;
+mod module_source;
 mod printer;
 mod runtime_arguments;
 mod call_sites;
@@ -26,10 +27,11 @@ mod top_level_function_tests;
 mod input_binding_tests;
 #[cfg(test)]
 mod pseudo_field_tests;
-#[cfg(test)]
 mod tests_print;
 #[cfg(test)]
 mod tests_print_tests;
+#[cfg(test)]
+mod module_source_tests;
 mod types;
 mod type_bindings;
 
@@ -76,6 +78,7 @@ pub use printer::print_function;
 #[cfg(test)]
 pub use printer::print_module;
 pub use printer::print_type;
+pub use module_source::{lower_python_module, print_python_module, LoweredPythonModule};
 pub use runtime_arguments::validate_runtime_arguments;
 pub use references::{NativeReferences, resolve_native_references, retain_native_dependencies, check_constructor_environment};
 pub use lower::Preflight as NativePreflight;
