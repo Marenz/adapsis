@@ -681,7 +681,7 @@ fn is_lifecycle(name: &str) -> bool {
     matches!(name, "startup" | "shutdown")
 }
 
-fn is_effect_name(name: &str) -> bool {
+pub(super) fn is_effect_name(name: &str) -> bool {
     matches!(
         name,
         "io" | "fail" | "mut" | "rand" | "yield" | "parallel" | "unsafe"

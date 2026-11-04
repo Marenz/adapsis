@@ -41,6 +41,14 @@ rechecked after edits. Calls, fields/pseudo-fields, constructors, effects, contr
 flow, list data and unproved defaults still use the conservative collision gate;
 this is a bounded exception, not complete support for legacy helper collisions.
 
+The lowerer also validates the structural operation IR before canonical emission:
+unsupported casts, misplaced operations, malformed call/pattern/type shapes and
+source/event fragment injection are refused independently of the `.ax` roundtrip.
+This is an additional guard, not a replacement for type/effect checking or native
+authorization. Structural-IR errors currently report a submission-level location
+and operation path. Emission/reparse, normal execution and persistence still use
+the existing paths; maintained `.py` authority is separate #121 work.
+
 Omitting `language` or source `format` preserves Adapsis syntax. Python `module`
 metadata selects a namespace, never permission. Live gateway compatibility is
 a separate deployment/certification gate; these local examples need no gateway.

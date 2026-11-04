@@ -2379,7 +2379,7 @@ pub fn parse_single_expr(input: &str) -> Result<Expr> {
     parse_expr(0, input)
 }
 
-fn parse_type(line: usize, input: &str) -> Result<TypeExpr> {
+pub(crate) fn parse_type(line: usize, input: &str) -> Result<TypeExpr> {
     let input = input.trim();
     if input.is_empty() {
         bail!("line {}: expected type", line);

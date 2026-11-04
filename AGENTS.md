@@ -690,7 +690,17 @@ replaces that branch with one composer.
   `rustpython-parser = "=0.4.0"` parses
   syntax without a Python interpreter. `src/python_frontend/` lowers a bounded
   typed subset into `parser::Operation`, emits canonical `.ax`, and requires a
-  complete structural reparse match. #86 adds forms toward `.ax` parity:
+  complete structural reparse match. #121 Step A additionally runs the independent
+  `python_frontend/ir_surface.rs` structural guard BEFORE emission: supported IR
+  placement, names/types/effects, direct call shapes, pattern/binding coherence,
+  test-data/matcher shapes and inert source/event fragments. It rejects casts
+  (runtime conversion otherwise erases them). The guard uses existing identifier,
+  effect, type-fragment parsing and conversion helpers; it is NOT type checking,
+  authority, or runtime admission. Current errors identify an IR operation path
+  at submission line 1; existing SourceSpans are unchanged and are not a nested
+  node-location map. The legacy emit/reparse oracle and all native guards remain.
+  Normal execution/replay/library storage still depend on `.ax`; this checkpoint
+  does not activate maintained Python source or change persistence. #86 adds forms toward `.ax` parity:
   `@dataclass`/`@union` types, `match`/`case`, `+shared`, `+call`/`+check`/`+spawn`
   via `propagate`/`check`/`spawn`, `div`/`rem` helpers, all eight effects, and
   source/event/route/lifecycle declarations. `src/python_frontend/parity.rs`

@@ -2,6 +2,7 @@
 //! No Python interpreter, imports, source sidecars, or authority decisions live here.
 
 mod emit;
+mod ir_surface;
 mod ast_equality;
 mod expressions;
 mod lower;
@@ -205,6 +206,10 @@ impl<'a> Context<'a> {
         operations: Vec<crate::parser::Operation>,
         source_map: Vec<SourceSpan>,
     ) -> Result<LoweredSource, Diagnostic> {
+        // Submission-level location only: current spans do not identify nested IR
+        // nodes. The guard supplies an operation path, never fabricated .ax lines.
+        ir_surface::validate(&operations)
+            .map_err(|error| self.error(0, format!("Python operation IR: {error}")))?;
         let canonical_adapsis = emit::operations(&operations).map_err(|e| self.error(0, e))?;
         let reparsed = crate::parser::parse(&canonical_adapsis).map_err(|e| {
             self.error(
