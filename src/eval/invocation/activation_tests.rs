@@ -262,3 +262,37 @@ fn public_trace_does_not_gain_io_authority() {
         terminal.result
     );
 }
+
+#[test]
+fn synthetic_legacy_string_wrapper_breaks_plain_user_await_after_c() {
+    // Public synthetic legacy-import fixture only: no installed module body, URL or data.
+    // A String declaration does not prove its runtime body really returns String.
+    let p = program("+fn legacy_string ()->String\n  +return Ok(\"sample\")\n+end\n+fn consumer ()->Int [async]\n  +await text:String = legacy_string()\n  +return len(text)\n+end\n");
+    let mut env = Env::new_with_shared_interner(&p.shared_interner);
+    let wrapped = eval::eval_declared_function(
+        &p,
+        "legacy_string",
+        p.get_function("legacy_string").unwrap(),
+        &mut env,
+    )
+    .unwrap();
+    let Value::Ok(old_unwrapped) = wrapped else {
+        panic!("legacy wrapper premise changed")
+    };
+    // Diagnostic model of the OLD user-await transformation (not an old-binary claim):
+    // it stripped one Ok and therefore let the String consumer succeed.
+    let old = eval::eval_call_inner_with_args(&p, "len", vec![*old_unwrapped], &mut env).unwrap();
+    assert!(matches!(old, Value::Int(6)));
+    // C preserves the actual Result. The malformed wrapper now exposes its type mismatch.
+    let error = eval::eval_async_function(
+        &p,
+        "consumer",
+        &parser::parse_single_expr("{}").unwrap(),
+        CoroutineHandle::new_mock(vec![]),
+    )
+    .unwrap_err();
+    assert!(error
+        .downcast_ref::<eval::result_contract::LanguageFailure>()
+        .is_none());
+    assert!(error.to_string().contains("len"));
+}

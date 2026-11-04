@@ -1,5 +1,4 @@
 use super::*;
-use tower::ServiceExt as _;
 
 const ERROR_SOURCE: &str = "+module CCoreApi\n+fn application ()->Result<String>\n  +return Err(\"division by zero\")\n+end\n+fn text ()->String\n  +return \"division by zero\"\n+end\n+fn broken_result ()->Result<Int>\n  +return 1 / 0\n+end\n+fn broken_scalar ()->Int [fail]\n  +return 1 / 0\n+end\n+fn effect ()->Int [io,async]\n  +await before:Bool = file_exists(\"once\")\n  +return 1 / 0\n+end\n";
 
