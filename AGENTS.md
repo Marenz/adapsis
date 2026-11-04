@@ -175,10 +175,19 @@ response has no Content-Disposition header.
 
 ## Architecture
 
+- Generic record grants now have an explicit operator-only `records-provision`
+  CLI (required existing DB path; dry-run read-only). Stable grant IDs, monotonic
+  generations/tombstones and whole-file semantic digests are durable; backend
+  authorization refresh shares the record DB lock. Usable binding additionally
+  requires sealed `TrustedCaller` attestation, whose issuer is **cfg(test) only**.
+  Adapsis-supplied source_metadata/TurnIdentity is not authentication. No service
+  activation/transport attachment is provided. See `docs/record-grants.md`; focused
+  gate `cargo test --release record_grants` includes real CLI no-write dry runs.
+
 - `memory_graph/records/` is a dormant general bounded record/CAS/idempotency
-  backend using the existing Ladybug owner and write lock. Only cfg(test) can
-  initialize tables or mint namespace/principal/context-bound grants; there is no
-  production activation/provisioning. Generic records_read/commit/receipt IO now
+  backend using the existing Ladybug owner and write lock. Operator provisioning
+  prepares generic tables/grants, but usable caller binding still needs an
+  independently issued attestation. Generic records_read/commit/receipt IO now
   exists but all ordinary handles default to no binding and fail closed; only
   cfg(test) can attach access. Task policy stays in Python modules.
   Receipt access requires the same write authority as commits. COMMIT/CHECKPOINT

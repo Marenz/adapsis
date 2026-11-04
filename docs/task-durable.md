@@ -1,11 +1,14 @@
 # Record IO / Python durable task bridge — #120 checkpoint 2
 
 This checkpoint connects real Python-frontend execution to the existing generic
-Ladybug record backend. **Production provisioning remains disabled.** Store/table
-initialization and grant creation are test-only; ordinary conversation, CLI,
+Ladybug record backend. **Production transport binding remains disabled.** Its
+executable fixtures attach test-only caller grants; ordinary conversation, CLI,
 startup and route handles have no record binding and fail closed. No live module
 installation, native task tool, workspace membership rule or automatic task tracking
-is introduced. Task policy is Python, not a Rust task manager.
+is introduced. Task policy is Python, not a Rust task manager. The later
+[operator provisioning checkpoint](record-grants.md) can prepare generic schema
+and registry entries, but production caller attestation is still absent; it does
+not activate this module or grant live turns access.
 
 ## Generic IO ABI
 

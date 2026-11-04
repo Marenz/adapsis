@@ -4,8 +4,10 @@ The implementation in `src/memory_graph/records/` reuses the existing
 `MemoryGraph` Ladybug database owner and write lock. It contains **no task states,
 workspace policy, resource policy, Python workflows or queue**. Those belong in
 Python-frontend Adapsis modules. No new database/dependency, native task tool or live
-startup/schema activation is added. Only `cfg(test)` code can initialize the two
-tables or mint a binding/store. Checkpoint 2 adds a fail-closed generic coroutine
+startup/schema activation is added. Checkpoints 1–2 initialized tables/grants only
+in tests. The explicit operator provisioning
+checkpoint is described in [record-grants.md](record-grants.md); it adds no production
+caller attestation issuer, so ordinary turns still cannot bind access. Checkpoint 2 adds a fail-closed generic coroutine
 bridge; see [task-durable.md](task-durable.md). Production provisioning stays absent.
 
 ## Record/envelope contract (provisional, not an exposed API)

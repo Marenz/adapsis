@@ -2,7 +2,6 @@ use super::{Field, Receipt, Record, RecordBinding, StoreError, envelope, identit
 use crate::memory_graph::{execute, int64_value, string_value};
 use lbug::{Connection, Value};
 
-#[cfg(test)]
 pub(super) fn initialize(connection: &Connection<'_>) -> Result<(), StoreError> {
     connection.query(
         "CREATE NODE TABLE IF NOT EXISTS ScopedRecord(id STRING, namespace STRING, record_key STRING, revision INT64, fields STRING, PRIMARY KEY(id));

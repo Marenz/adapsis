@@ -340,7 +340,8 @@ Effect validation is enforced when functions are added or replaced:
 - Any function that awaits an IO builtin such as `http_get`, `file_read`, or `llm_call` must also declare `[io]`.
 - Generic `records_read(request:String)`, `records_commit(request_id:String,batch:String)`,
   and `records_receipt(request_id:String)` return `Result<String>` and require an
-  explicit server-bound record grant. Production provisioning is NOT enabled;
+  explicit server-bound record grant and independently attested caller. The
+  production attested-caller path is NOT enabled; operator provisioning alone is insufficient;
   without a binding these operations are unavailable, not a live task-storage capability.
   Direct Python builtin await keeps Result: `r: Result[str] = await records_read(request)`;
   match Ok/Err before use. Inputs are bounded version-1 envelopes, outputs carry the

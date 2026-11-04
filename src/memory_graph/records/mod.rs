@@ -1,8 +1,10 @@
-//! Dormant generic record/CAS backend. Only tests can initialize or grant access.
-//! No task policy, caller-selected namespace, IO builtin or startup activation.
+//! Generic record/CAS backend with explicit operator provisioning.
+//! Production caller attestation issuance is absent; no automatic activation.
 #![allow(dead_code)]
 
+pub(crate) mod authority;
 mod envelope;
+pub(crate) mod grants;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -70,7 +72,7 @@ pub(crate) struct Receipt {
     pub revisions: Vec<Revision>,
 }
 
-/// Private fields and no production constructor: not a serializable bearer token.
+/// Private factory-bound fields; never a serializable caller-supplied bearer token.
 #[derive(Clone)]
 pub(crate) struct RecordBinding {
     store: Arc<()>,
@@ -79,12 +81,18 @@ pub(crate) struct RecordBinding {
     context: String,
     grant_id: String,
     write: bool,
+    generation: Option<i64>,
+    attestation: Option<authority::TrustedCaller>,
+    ceiling: Option<authority::RecordCeiling>,
 }
 
 #[derive(Clone)]
 pub(crate) struct RecordStore {
     graph: MemoryGraph,
     identity: Arc<()>,
+    grant_file: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    authorization_barrier: Option<Arc<std::sync::Barrier>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +105,98 @@ enum Fault {
 }
 
 impl RecordStore {
+    pub(crate) fn configured(
+        graph: MemoryGraph,
+        file: std::path::PathBuf,
+    ) -> Result<Self, StoreError> {
+        let store = Self {
+            graph,
+            identity: Arc::new(()),
+            grant_file: Some(file),
+            #[cfg(test)]
+            authorization_barrier: None,
+        };
+        {
+            let _guard = store.lock()?;
+            let connection = store.connection()?;
+            grants::load(&connection)?;
+        }
+        Ok(store)
+    }
+
+    pub(crate) fn bind(
+        &self,
+        turn: &TurnIdentity,
+        attestation: Option<&authority::TrustedCaller>,
+        ceiling: Option<&authority::RecordCeiling>,
+    ) -> Result<RecordBinding, StoreError> {
+        use crate::permissions::PermissionLevel;
+        if turn.guest_tools.is_some() {
+            return Err(StoreError::Denied);
+        }
+        let attestation = attestation.ok_or(StoreError::Denied)?;
+        let ceiling = ceiling.ok_or(StoreError::Denied)?;
+        let file = self.grant_file.as_ref().ok_or(StoreError::Denied)?;
+        let _guard = self.lock()?;
+        let connection = self.connection()?;
+        let registry = grants::refresh(&connection, file)?;
+        let grant = registry
+            .matching(&turn.principal, &turn.context)
+            .ok_or(StoreError::Denied)?;
+        let level = attestation.level(turn, ceiling, &grant.permission_group);
+        if level < PermissionLevel::Read {
+            return Err(StoreError::Denied);
+        }
+        Ok(RecordBinding {
+            store: self.identity.clone(),
+            namespace: grant.namespace.clone(),
+            principal: grant.principal.clone(),
+            context: grant.context.clone(),
+            grant_id: grant.id.clone(),
+            generation: Some(grant.generation),
+            write: grant.writable() && level >= PermissionLevel::Write && turn.may_write,
+            attestation: Some(attestation.clone()),
+            ceiling: Some(ceiling.clone()),
+        })
+    }
+
+    fn authorize_registry(
+        &self,
+        connection: &Connection<'_>,
+        binding: &RecordBinding,
+        turn: &TurnIdentity,
+        write: bool,
+    ) -> Result<(), StoreError> {
+        if let Some(file) = &self.grant_file {
+            let registry = grants::refresh(connection, file)?;
+            if !registry.contains(binding, write) {
+                return Err(StoreError::Denied);
+            }
+            let grant = registry
+                .matching(&turn.principal, &turn.context)
+                .ok_or(StoreError::Denied)?;
+            let level = binding
+                .attestation
+                .as_ref()
+                .ok_or(StoreError::Denied)?
+                .level(
+                    turn,
+                    binding.ceiling.as_ref().ok_or(StoreError::Denied)?,
+                    &grant.permission_group,
+                );
+            let required = if write {
+                crate::permissions::PermissionLevel::Write
+            } else {
+                crate::permissions::PermissionLevel::Read
+            };
+            if level < required {
+                return Err(StoreError::Denied);
+            }
+        } else if binding.generation.is_some() {
+            return Err(StoreError::Denied);
+        }
+        Ok(())
+    }
     pub(crate) fn check_access(
         &self,
         binding: &RecordBinding,
@@ -155,6 +255,7 @@ impl RecordStore {
         let keys = envelope::read_keys(request)?;
         let _guard = self.lock()?;
         let connection = self.connection()?;
+        self.authorize_registry(&connection, binding, turn.ok_or(StoreError::Denied)?, false)?;
         let start = Instant::now();
         connection
             .query("BEGIN TRANSACTION READ ONLY")
@@ -181,6 +282,7 @@ impl RecordStore {
         }
         let _guard = self.lock()?;
         let connection = self.connection()?;
+        self.authorize_registry(&connection, binding, turn.ok_or(StoreError::Denied)?, true)?;
         storage::read_receipt(&connection, binding, request_id)
             .map(|receipt| receipt.map(|(_, receipt)| receipt))
     }
@@ -211,7 +313,13 @@ impl RecordStore {
         let hash = batch.hash()?; // Validation/canonicalization before taking DB lock.
         let _guard = self.lock()?;
         let connection = self.connection()?;
+        self.authorize_registry(&connection, binding, turn.ok_or(StoreError::Denied)?, true)?;
         let start = Instant::now();
+        #[cfg(test)]
+        if let Some(barrier) = &self.authorization_barrier {
+            barrier.wait();
+            barrier.wait();
+        }
         connection
             .query("BEGIN TRANSACTION")
             .map_err(|_| StoreError::Unavailable)?;
@@ -347,6 +455,8 @@ impl RecordStore {
         let store = Self {
             graph,
             identity: Arc::new(()),
+            grant_file: None,
+            authorization_barrier: None,
         };
         {
             let _guard = store.lock()?;
@@ -375,6 +485,9 @@ impl RecordStore {
             context: turn.context.clone(),
             grant_id: grant_id.into(),
             write,
+            generation: None,
+            attestation: None,
+            ceiling: None,
         }
     }
 }

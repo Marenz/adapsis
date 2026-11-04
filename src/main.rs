@@ -24,6 +24,7 @@ mod prompt;
 mod python_frontend;
 mod python_cli;
 mod repl;
+mod record_provision;
 mod server;
 mod session;
 mod shared_state;
@@ -539,6 +540,8 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Explicitly provision general record schema/grants in an existing stopped database
+    RecordsProvision(record_provision::Args),
     /// Run the interactive feedback loop with the LLM (CLI mode)
     Run {
         /// Natural language task description for the model
@@ -932,6 +935,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::RecordsProvision(args) => record_provision::run(args)?,
         Command::MemoryEval {
             fixture,
             extraction_snapshot,
