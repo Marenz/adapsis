@@ -1,7 +1,6 @@
 //! Only actual typed NodeId fields are erased. Names, `id` struct fields,
 //! callee spelling, docs, test metadata and effect/declaration order stay exact.
 use crate::ast;
-#[cfg(test)]
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -74,7 +73,6 @@ fn difference(a: &serde_json::Value, b: &serde_json::Value, path: &str) -> Optio
     }
 }
 
-#[cfg(test)]
 pub(super) fn module(a: &ast::Module, b: &ast::Module) -> bool {
     let (mut a, mut b) = (a.clone(), b.clone());
     clear_module(&mut a);
@@ -99,7 +97,6 @@ fn exact<T: serde::Serialize>(a: &T, b: &T) -> bool {
         .is_some_and(|(a, b)| a == b)
 }
 
-#[cfg(test)]
 fn clear_module(module: &mut ast::Module) {
     module.id.clear();
     for function in &mut module.functions {

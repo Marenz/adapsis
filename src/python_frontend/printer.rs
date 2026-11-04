@@ -119,10 +119,10 @@ pub fn print_module(program: &a::Program, module_name: &str) -> Result<String, D
         .clone();
     let mut printer = Printer::new(program);
     printer.set_module(module_name);
-    let text = printer.module(&module).map_err(&error)?;
+    let types = printer.catalog();
+    let text = module_body(program, &module).map_err(&error)?;
     let mut signatures = HashMap::new();
     collect_signatures(&program.modules, "", &mut signatures);
-    let types = printer.catalog();
     let shared = super::types::module_shared_vars(program, module_name);
     let lowered = super::lower::module_with_signatures(&text, module_name, signatures, &types, &shared, true)
         .map_err(|e| error(e.message))?;
@@ -141,6 +141,14 @@ pub fn print_module(program: &a::Program, module_name: &str) -> Result<String, D
         ));
     }
     Ok(text)
+}
+
+/// Render module declarations only. The checked persistence serializer adds the
+/// stored-test definitions and performs all completeness/roundtrip validation.
+pub(super) fn module_body(program: &a::Program, module: &a::Module) -> Result<String, String> {
+    let mut printer = Printer::new(program);
+    printer.set_module(&module.name);
+    printer.module(module)
 }
 
 /// Resolve a type target (`TypeName` or `Module.TypeName`) to its owning module
@@ -457,7 +465,6 @@ impl<'a> Printer<'a> {
         Ok(out)
     }
 
-    #[cfg(test)]
     fn module(&mut self, m: &a::Module) -> Result<String, String> {
         self.env.clear();
         self.return_type = None;
@@ -510,7 +517,6 @@ impl<'a> Printer<'a> {
         Ok(out)
     }
 
-    #[cfg(test)]
     fn lifecycle_block(&self, name: &str, block: &a::LifecycleBlock) -> Result<String, String> {
         let mut out = String::new();
         let effects = effect_names(&block.effects)?;
@@ -528,7 +534,6 @@ impl<'a> Printer<'a> {
         Ok(out)
     }
 
-    #[cfg(test)]
     fn source_decorator(&self, source: &a::SourceDecl) -> Result<String, String> {
         let mut config = String::new();
         if !source.source_type.is_empty() {
