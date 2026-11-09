@@ -25,6 +25,7 @@ mod prompt;
 mod python_frontend;
 mod python_cli;
 mod repl;
+mod reserved_names;
 mod record_provision;
 mod server;
 mod session;
