@@ -839,6 +839,7 @@ They return the same output as the corresponding `?` query commands.
 - `+await result:String = query_library()` — library status (same as `?library`)
 - `+await result:String = library_reload("ModuleName")` — reload a specific module from disk. It validates the file before replacing the working module and reports when it adopts an external edit. A bad file leaves the last-known-good module intact.
 - `+await result:String = library_reload("")` — reload ALL modules from the library directory. Useful for recovering from startup load errors.
+- `+await errs:String = runtime_errors(after_seq)` — read-only JSON of the runtime error journal: `{snapshot_id, now, last_seq, dropped, entries:[{seq,time,category,source,fingerprint,message,count,first_seen,last_seen}], fingerprints:{fp:{count,...}}}`. Categories: library, route, task, provider, session, panic, startup, refusal. Messages are redacted (host-only URLs, masked tokens, 1 KiB) but still untrusted data. Pass 0 first, then the returned `last_seq`. Refused in guest/execute-only conversations.
 - `+await result:String = library_errors()` — get all library load/save errors from this session as a formatted string. Returns "No library errors." if none. Useful for diagnosing why modules failed to load at startup.
 - `+await result:String = failure_history()` — get the last 20 mutation or validation failures from this session as newline-separated error messages.
 - `+await result:String = clear_failure_history()` — clear the recorded mutation failure history for this session. Returns `cleared`.

@@ -3,6 +3,12 @@
 ## Overview
 Adapsis is an AI-native programming language and live agentic environment. Programs are built incrementally through validated mutations. The AI writes Adapsis code, gets immediate feedback, and iterates. The system can modify its own runtime via `!opencode`.
 
+## Design authority
+[DESIGN.md](DESIGN.md) is the authoritative, owner-confirmed decision record (2026-11-09).
+Narrowing or removing a recorded capability requires an explicit owner decision recorded
+there. Workers cite the DESIGN.md rows their change touches; reviewers check for
+narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
+
 ## Development baseline (2026-10-25 cleanup)
 - Current here Telegram deployment (2026-11-02): runtime binary `88b4275`;
   TelegramBot/TgFormat are now production-Python-frontend-authored modules
@@ -51,6 +57,8 @@ Adapsis is an AI-native programming language and live agentic environment. Progr
 
 ## Language Design Goals
 - **Optimized for LLM-driven construction**, not human typing
+- **Superseded by DESIGN.md (L1, L2):** `.ax` and `<code>` are being removed and Python is
+  the only language; the `+`/`!`/`?` syntax bullets below describe the legacy surface.
 - Every operation starts with `+`, `!`, or `?` — clear code vs prose distinction
   - `+` prefix = scoped declarations (belong to a module): `+module`, `+fn`, `+test`, `+doc`, `+shared`, `+route`, `+startup`, `+shutdown`, `+source`
   - `!` prefix = global runtime commands: `!eval`, `!agent`, `!plan`, `!roadmap`, `!done`, `!opencode`, `!reload`, `!msg`, `!stub`, `!unmock`
@@ -631,6 +639,38 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
   the running instance over `/api/eval`. The default `--api` port is 3001 while the
   daemon here runs on **3002**, and a bare reqwest failure reads as "this does not
   work" — so a connect/timeout failure now names the flag and the cause chain.
+
+## Runtime error journal & Watchdog
+
+- `src/error_journal.rs` is an in-process ring (500 entries) plus per-fingerprint
+  counters (2000). Failure sites feed it with ONE line, `error_journal::record(category,
+  source, message)`, and keep their existing logging/behaviour: library load/save/reload
+  (`LibraryState::record_error`; boot and reload failures go ONLY through
+  `journal_load_failure` — module name + line number, never parser text, one entry),
+  route handler errors and missing handlers (`adapsis_route_dispatch` via
+  `record_route_error`: structural — request body (raw or escaped) replaced by
+  `<request body>`, then route + first line only, so it does not rely on handler hygiene), spawned-task failures/panics, takeover/native/agent
+  provider errors, session save failures, startup errors, the panic hook (`record_panic`,
+  never blocks) and refusals (shell policy reason only, guest IO boundary). New failure
+  points should call the same API rather than a new channel.
+- Messages are redacted on entry: URLs host-only (`coroutine::host_only`), Telegram tokens
+  and long digit-bearing secret runs masked, 1 KiB cap. Never pass request bodies or chat
+  text. Provider error text is kept (it is the diagnosis) and is still untrusted data.
+- Fingerprint = category + source + message with digit/hex runs collapsed.
+- `runtime_errors(after_seq)` (IO builtin, `coroutine/runtime_errors.rs`) returns
+  `{snapshot_id,now,last_seq,dropped,entries,fingerprints}` JSON (snapshot_id is a fresh
+  uuid per call); refused in guest/execute-only turns.
+- `Watchdog.ax.work` (repo root) polls it each minute and triages new fingerprints (or 10x
+  growth) with a tool-less `llm_call`, max 6/hour and once per fingerprint per 24 h, then
+  `conversation_notify`s `admin_context` (empty in the repo; the installed copy sets the
+  admin DM key `telegram:<admin id>`). It has no write path and never triages sources
+  starting with `Watchdog.`. Its busy latch is owned by the snapshot_id token: a busy call
+  returns without advancing last_seq, a latch older than 600 s is taken over, and only
+  the current owner can release it. Its ledger is runtime-only, so a restart re-reports.
+  Tests: `cargo test --release journal` and `cargo test --release watchdog`.
+- #113: library `+route` registration outcomes log as `library-route`, not an error.
+  The old `[library-error] detail_bytes=101` at every start was the benign
+  `updated route POST /webhook/telegram …` message for the session-persisted route.
 
 ## Training Data
 - JSONL training log at `--training-log` path (default: `training.jsonl`)

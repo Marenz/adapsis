@@ -838,7 +838,7 @@ pub(super) async fn execute_operations_with_baseline(
 
                                 let output = match agent_llm.generate(agent_messages.clone()).await {
                                     Ok(o) => o,
-                                    Err(e) => { crate::logging::diagnostic("agent-provider-error", &e); break; }
+                                    Err(e) => { crate::logging::diagnostic("agent-provider-error", &e); crate::error_journal::record(crate::error_journal::Category::Provider, "agent", crate::llm::render_error(&e)); break; }
                                 };
 
                                 agent_messages.push(crate::llm::ChatMessage::assistant(&output.text));

@@ -98,6 +98,7 @@ pub(super) async fn run(turn: TakeoverRun<'_>) -> anyhow::Result<String> {
     );
     if let LoopEnd::ProviderError(error) = &native.end {
         crate::logging::diagnostic("native-provider-error", error);
+        crate::error_journal::record(crate::error_journal::Category::Provider, "llm_takeover_native", error);
     }
     if crate::logging::content() {
         write_log_file(

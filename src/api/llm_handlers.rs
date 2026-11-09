@@ -1581,6 +1581,7 @@ pub async fn handle_llm_takeover(
             Err(e) => {
                 eprintln!("[llm_takeover:{context}] LLM error: {}", crate::llm::render_error(&e));
                 write_log_file(&log_file, "llm-error", &format!("[{context}] {}", crate::llm::render_error(&e))).await;
+                crate::error_journal::record(crate::error_journal::Category::Provider, "llm_takeover", crate::llm::render_error(&e));
                 // Never leave the user hanging: if we have no reply yet,
                 // return a short apology instead of silently dropping the
                 // message (the callback path sends whatever we return).
@@ -1827,6 +1828,7 @@ pub async fn handle_llm_takeover(
                     }
                     Err(error) => {
                         eprintln!("[llm_takeover:{context}] final summary LLM error: {}", crate::llm::render_error(&error));
+                        crate::error_journal::record(crate::error_journal::Category::Provider, "llm_takeover", crate::llm::render_error(&error));
                         write_log_file(&log_file, "llm-error", &format!("[{context}] final summary: {}", crate::llm::render_error(&error)))
                             .await;
                         break;

@@ -10,6 +10,9 @@ mod compiler;
 mod client_sse;
 mod coroutine;
 mod eval;
+mod error_journal;
+#[cfg(test)]
+mod watchdog_tests;
 mod events;
 pub mod intern;
 mod logging;
@@ -154,6 +157,16 @@ fn append_conversation_notification(
     (conversation.reply_fn.clone(), conversation.reply_arg.clone())
 }
 
+/// Register routes declared by library `+route` lines. The add/update message is an
+/// outcome, not an error (#113): it is logged under `library-route` and never journaled.
+fn register_library_routes(sess: &mut session::Session) {
+    let pending_routes: Vec<_> = sess.program.pending_routes.drain(..).collect();
+    for route in pending_routes {
+        let msg = sess.add_route(route);
+        crate::logging::diagnostic("library-route", &msg);
+    }
+}
+
 async fn monitor_spawned_task(
     task: tokio::task::JoinHandle<()>,
     registry: coroutine::TaskRegistry,
@@ -163,6 +176,7 @@ async fn monitor_spawned_task(
     if let Err(error) = task.await {
         let detail = if error.is_panic() { "panicked" } else { "was cancelled" };
         crate::logging::diagnostic("spawn-error", format_args!("{function_name} {detail}: {error}"));
+        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, format_args!("{detail}: {error}"));
         if let Ok(mut tasks) = registry.lock()
             && let Some(info) = tasks.get_mut(&task_id)
         {
@@ -923,6 +937,7 @@ async fn main() -> Result<()> {
     // Ensure panics in any thread are logged to stderr
     std::panic::set_hook(Box::new(|info| {
         crate::logging::diagnostic("panic", info);
+        crate::error_journal::record_panic(info);
         let bt = std::backtrace::Backtrace::force_capture();
         eprintln!("{bt}");
     }));
@@ -1232,6 +1247,7 @@ async fn main() -> Result<()> {
                                     Some(f) => f,
                                     None => {
                                         eprintln!("spawn: function `{function_name}` not found");
+                                        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, "function not found");
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
                                                 info.status = coroutine::WaitReason::Failed(format!("function `{function_name}` not found"));
@@ -1259,6 +1275,7 @@ async fn main() -> Result<()> {
                                     }
                                     Err(e) => {
                                         crate::logging::diagnostic("spawn-error", &e);
+                                        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, &e);
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
                                                 info.status = coroutine::WaitReason::Failed(format!("{e}"));
@@ -1510,11 +1527,7 @@ async fn main() -> Result<()> {
                 sess.program.rebuild_function_index();
             }
             // Drain any routes declared inside library modules via +route
-            let pending_routes: Vec<_> = sess.program.pending_routes.drain(..).collect();
-            for route in pending_routes {
-                let msg = sess.add_route(route);
-                crate::logging::diagnostic("library-error", &msg);
-            }
+            register_library_routes(&mut sess);
             eprintln!("[library] http_routes after drain: {:?}", sess.runtime.http_routes.iter().map(|r| format!("{} {} -> {}", r.method, r.path, r.handler_fn)).collect::<Vec<_>>());
             sess.meta.library_state = Some(lib_state);
             sess.init_shared_vars();
@@ -1645,6 +1658,7 @@ async fn main() -> Result<()> {
                                     Some(f) => f.clone(),
                                     None => {
                                         eprintln!("spawn: function `{function_name}` not found");
+                                        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, "function not found");
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
                                                 info.status = coroutine::WaitReason::Failed(format!("function not found"));
@@ -1685,6 +1699,7 @@ async fn main() -> Result<()> {
                                     }
                                     Err(e) => {
                                         crate::logging::diagnostic("spawn-error", &e);
+                                        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, &e);
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
                                                 info.status = coroutine::WaitReason::Failed(format!("{e}"));
@@ -2071,7 +2086,7 @@ async fn main() -> Result<()> {
                                     eprintln!("[startup] {}.startup completed", mod_name);
                                 }
                             }
-                            Err(e) => crate::logging::diagnostic("startup-error", &e),
+                            Err(e) => { crate::logging::diagnostic("startup-error", &e); crate::error_journal::record(crate::error_journal::Category::Startup, &mod_name, &e); }
                         }
                     });
                 }
@@ -2433,6 +2448,7 @@ async fn main() -> Result<()> {
                     }
                     if let Err(e) = sess.save(std::path::Path::new(&save_path)) {
                         eprintln!("[save] failed: {e}");
+                        crate::error_journal::record(crate::error_journal::Category::Session, "session_save", &e);
                         if sess.meta.library_state.as_ref().is_some_and(|state| !state.managed_module_names().is_empty()) {
                             eprintln!("[save] source writes already committed remain authoritative; session recovery checkpoint failed. No cross-file rollback was performed");
                             if let Some(state) = sess.meta.library_state.as_ref() {

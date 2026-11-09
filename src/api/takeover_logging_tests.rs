@@ -81,3 +81,21 @@ async fn native_compaction_shape_error_is_redacted_in_both_sinks() {
     assert_eq!(log.contains("CANARY_EXTRACTED_TEXT"), crate::logging::content());
     assert!(harness.graph.episode_summaries(context, 6).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn native_provider_error_feeds_the_runtime_error_journal() {
+    let last = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+    let before = last(&crate::error_journal::query(u64::MAX - 1))["last_seq"].as_u64().unwrap();
+    let harness = Harness::new(true);
+    let provider = provider(vec![json!({"error":{"message":"JOURNAL_PROVIDER_BODY"}})]).await;
+    harness.turn(&provider, "telegram:group:-88009", ADMIN, "private journal chat text").await;
+    let journal = last(&crate::error_journal::query(before));
+    let entries = journal["entries"].as_array().unwrap();
+    let entry = entries.iter()
+        .find(|e| e["category"] == "provider" && e["source"] == "llm_takeover_native")
+        .unwrap_or_else(|| panic!("no provider entry: {entries:#?}"));
+    assert!(entry["fingerprint"].as_str().unwrap().starts_with("provider:"));
+    assert!(entries.iter().all(|e| !e.to_string().contains("private journal chat text")));
+    // The provider's own error text is kept (redacted, 1 KiB): it is the diagnosis.
+    assert!(entry["message"].as_str().unwrap().starts_with("provider error"));
+}
