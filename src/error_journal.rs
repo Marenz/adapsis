@@ -263,7 +263,7 @@ fn cap(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 #[path = "error_journal_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 #[path = "error_journal_hook_tests.rs"]
 mod hook_tests;

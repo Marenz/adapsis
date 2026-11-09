@@ -32,8 +32,15 @@ async fn route_handler_error_and_missing_handler_are_journaled() {
         let mut program = config.program.write().await;
         // The handler interpolates the request body (and a token URL) into its error,
         // so the guarantee must come from dispatch, not from handler hygiene.
-        let source = "+module JournalRoute\n+fn boom (body:String)->String\n  +return to_string(to_int(concat(body, \" https://api.example.org/bot1234567:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/x\")))\n+end\n";
-        for op in crate::parser::parse(source).unwrap() {
+        let url = format!(
+            "https://api.example.org/{}{}/x",
+            "bot",
+            crate::error_journal::tests::synthetic_bot_token(&"7".repeat(7), 'K')
+        );
+        let source = format!(
+            "+module JournalRoute\n+fn boom (body:String)->String\n  +return to_string(to_int(concat(body, \" {url}\")))\n+end\n"
+        );
+        for op in crate::parser::parse(&source).unwrap() {
             crate::validator::apply_and_validate(&mut program, &op).unwrap();
         }
         program.rebuild_function_index();
@@ -62,7 +69,7 @@ async fn route_handler_error_and_missing_handler_are_journaled() {
     assert!(message.starts_with("POST /journal/boom: "), "{message}");
     assert!(message.contains("<request body>"), "body was not interpolated or not replaced: {message}");
     assert!(!message.contains("ROUTE_BODY_CANARY_77"), "{message}");
-    assert!(!message.contains("AAAAAAAAAAAAAAAA") && !message.contains("1234567"), "{message}");
+    assert!(!message.contains(&"K".repeat(35)) && !message.contains("7777777"), "{message}");
     assert!(!message.contains('\n'), "first line only: {message}");
     assert!(entries.iter().any(|e| e["category"] == "route" && e["source"] == "JournalRoute.gone"));
     assert!(entries.iter().all(|e| !e.to_string().contains("ROUTE_BODY_CANARY_77")), "request body journaled");
