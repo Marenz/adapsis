@@ -193,6 +193,11 @@ pub(super) fn payload_type(value: &str) -> Checked {
 }
 
 pub(super) fn test(test: &p::TestMutation) -> Checked {
+    test_with(test, false)
+}
+
+pub(super) fn test_with(test: &p::TestMutation, trusted: bool) -> Checked {
+    let data = |value: &p::Expr| if trusted { trusted_data(value) } else { data(value) };
     name(&test.function_name)?;
     if test.cases.is_empty() {
         return Err("empty test set".into());
@@ -219,7 +224,7 @@ pub(super) fn test(test: &p::TestMutation) -> Checked {
         } else {
             data(&case.input)?;
         }
-        expectation(case)?;
+        expectation(case, trusted)?;
         for after in &case.after_checks {
             bare(&after.target)?;
             bare(&after.matcher)?;
@@ -243,7 +248,24 @@ fn data(value: &p::Expr) -> Checked {
     }
 }
 
-fn expectation(case: &p::TestCase) -> Checked {
+/// Trusted stored-test data: literal data, `None`, and explicit calls whose
+/// target is a bare or `Module.function` name (`call` checks the target), with
+/// trusted arguments. Purity is checked separately against the Program.
+fn trusted_data(value: &p::Expr) -> Checked {
+    match value {
+        p::Expr::Ident(n) if n == "None" => Ok(()),
+        p::Expr::Call { callee, args } if matches!(callee.as_ref(), p::Expr::Ident(n) if n == "list") => {
+            args.iter().try_for_each(trusted_data)
+        }
+        p::Expr::Call { args, .. } => {
+            call(value)?;
+            args.iter().try_for_each(trusted_data)
+        }
+        other => data(other),
+    }
+}
+
+fn expectation(case: &p::TestCase, trusted: bool) -> Checked {
     use p::{Expr, TestMatcher};
     let matches = match &case.matcher {
         Some(TestMatcher::Contains(s) | TestMatcher::StartsWith(s)) => {
@@ -264,7 +286,7 @@ fn expectation(case: &p::TestCase) -> Checked {
                     return bare(label); // Existing exact Err(label) representation.
                 }
             }
-            return data(&case.expected);
+            return if trusted { trusted_data(&case.expected) } else { data(&case.expected) };
         }
     };
     if matches {

@@ -40,6 +40,8 @@ mod tests_print_tests;
 mod module_source_tests;
 #[cfg(test)]
 mod qualification_tests;
+#[cfg(test)]
+mod stored_test_data_tests;
 mod types;
 mod type_bindings;
 

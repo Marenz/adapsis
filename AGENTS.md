@@ -208,6 +208,10 @@ response has no Content-Disposition header.
   LibraryState owns runtime source-byte hashes, session AST is recovery cache.
   Source/session writes are not cross-file atomic; final hash-check/rename has a
   documented external-process race. See `docs/python-source-library.md`.
+  Persisted `@stored_test` data uses `tests_lower::Data::Trusted` (pure calls with exact
+  callee spelling, Ok/Err/Some/None) checked by `module_source::check_stored_test_purity`
+  at save AND load; `ir_surface::validate_stored_tests` is its structural guard. Native
+  test/evaluate and CLI stay on the unchanged `Data::Literal` policy.
   Persistence printing qualifies a bare local call ONLY when `get_function` provably
   resolves it to the caller module's own declaration (catalog AND whole live Program);
   `python_frontend/qualification.rs` applies the same ledgered rewrite to the original

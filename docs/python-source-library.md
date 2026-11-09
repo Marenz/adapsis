@@ -31,7 +31,16 @@ def test_case_0() -> None:
     assert increment(1) == 2
 ```
 
-`@stored_test` does not expand native mutation/test input policy. Function names
+**Trusted stored-test data.** Persisted `@stored_test` cases restore the `.ax`
+test semantics: inputs and expectations may call pure functions (`concat(..)`,
+effect-free user helpers) and use the `Ok`/`Err`/`Some`/`None` constructors.
+Calls take positional arguments and keep their exact callee spelling: a bare
+helper stays bare, so it resolves at run time exactly as the original case did.
+Pure means a non-IO builtin or constructor, or a user function (resolved as the
+runtime resolves the spelling) declaring no effect other than `fail`. Anything
+else is refused, both when saving and when loading, with a diagnostic naming
+the case and callee. `@stored_test` does not expand native mutation/test input policy. The native test/evaluate tools and the CLI
+keep the literal-only policy. Function names
 starting with `test_` alone do not identify persisted tests. Every supported
 member and every stored case must be represented; an unsupported member/test
 refuses the entire save. Cases retain order within their target function.

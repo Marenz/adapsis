@@ -23,7 +23,7 @@ pub fn lower_input_expr(source: &str) -> Result<p::Expr, Diagnostic> {
         if !matches!(c.func.as_ref(), py::Expr::Name(n) if n.id.as_str() == "__input") {
             return Err(cx.at(c, "expected literal argument list"));
         }
-        let value = arguments(&cx, c)?;
+        let value = arguments(&cx, c, Data::Literal)?;
         super::ir_surface::validate(&[p::Operation::Test(p::TestMutation {
             function_name: "Input.value".into(), cases: vec![p::TestCase {
                 input: value.clone(), expected: p::Expr::Int(0), matcher: None, after_checks: vec![],
@@ -53,7 +53,29 @@ pub fn lower_tests(source: &str, module: &str) -> Result<LoweredSource, Diagnost
     if !super::identifier(module) {
         return Err(cx.error(0, "test module must be a simple identifier"));
     }
-    lower_tests_in(&cx)
+    lower_tests_in(&cx, Data::Literal)
+}
+
+/// Test-data policy. `Literal` is the native/CLI policy and is unchanged.
+/// `Trusted` is ONLY for `@stored_test` cases in maintained `.py` source: it
+/// restores the `.ax` semantics where test inputs/expectations may call pure
+/// functions (`concat(..)`, effect-free user helpers) and the Ok/Err/Some/None
+/// constructors. Purity is checked against the Program by the caller
+/// (`module_source::check_stored_test_purity`), at save and at load.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Data {
+    Literal,
+    Trusted,
+}
+
+/// Persistence-only: lower one `@stored_test` definition under the trusted
+/// stored-test data policy. Never reachable from native tools or the CLI.
+pub(super) fn lower_stored_tests(source: &str, module: &str) -> Result<LoweredSource, Diagnostic> {
+    let cx = Context { source, module };
+    if !super::identifier(module) {
+        return Err(cx.error(0, "test module must be a simple identifier"));
+    }
+    lower_tests_in(&cx, Data::Trusted)
 }
 
 /// Test-only: MODULE-LESS stored tests (owner ""). A bare target stays bare, exactly the
@@ -61,10 +83,10 @@ pub fn lower_tests(source: &str, module: &str) -> Result<LoweredSource, Diagnost
 /// Same no-authority-model caveat as `top_level.rs`.
 #[cfg(test)]
 pub(crate) fn lower_tests_toplevel(source: &str) -> Result<LoweredSource, Diagnostic> {
-    lower_tests_in(&Context { source, module: "" })
+    lower_tests_in(&Context { source, module: "" }, Data::Literal)
 }
 
-fn lower_tests_in(cx: &Context<'_>) -> Result<LoweredSource, Diagnostic> {
+fn lower_tests_in(cx: &Context<'_>, data: Data) -> Result<LoweredSource, Diagnostic> {
     let suite = cx.parse()?;
     let mut operations = Vec::new();
     let mut source_map = Vec::new();
@@ -112,7 +134,7 @@ fn lower_tests_in(cx: &Context<'_>) -> Result<LoweredSource, Diagnostic> {
         let first = iter
             .next()
             .ok_or_else(|| cx.at(stmt, "test body must contain an assertion"))?;
-        let p::Operation::Test(test) = test_assertion(&cx, stmt, first, iter)? else {
+        let p::Operation::Test(test) = test_assertion(&cx, stmt, first, iter, data)? else {
             return Err(cx.at(stmt, "expected a test assertion"));
         };
         // One replacement set per exact target per submission. Interleaved targets
@@ -130,7 +152,14 @@ fn lower_tests_in(cx: &Context<'_>) -> Result<LoweredSource, Diagnostic> {
     if operations.is_empty() {
         return Err(cx.error(0, "provide at least one test function"));
     }
-    cx.finish(operations, source_map)
+    match data {
+        Data::Literal => cx.finish(operations, source_map),
+        Data::Trusted => {
+            super::ir_surface::validate_stored_tests(&operations)
+                .map_err(|error| cx.error(0, format!("Python operation IR: {error}")))?;
+            Ok(LoweredSource { operations, source_map })
+        }
+    }
 }
 
 /// Lower a test body: one leading assertion plus zero or more `assert_after(...)`
@@ -140,6 +169,7 @@ fn test_assertion<'a>(
     fn_stmt: &py::Stmt,
     assert_stmt: &py::Stmt,
     after: impl Iterator<Item = &'a py::Stmt>,
+    data: Data,
 ) -> Result<p::Operation, Diagnostic> {
     let py::Stmt::Assert(a) = assert_stmt else {
         return Err(cx.at(
@@ -147,7 +177,7 @@ fn test_assertion<'a>(
             "test body must begin with assert target(...) == expected or a matcher helper",
         ));
     };
-    let (function_name, input, expected, matcher) = assertion(cx, fn_stmt, a)?;
+    let (function_name, input, expected, matcher) = assertion(cx, fn_stmt, a, data)?;
     let mut after_checks = Vec::new();
     for stmt in after {
         after_checks.push(assert_after(cx, stmt)?);
@@ -167,12 +197,13 @@ fn assertion(
     cx: &Context<'_>,
     fn_stmt: &py::Stmt,
     a: &py::StmtAssert,
+    data: Data,
 ) -> Result<(String, p::Expr, p::Expr, Option<p::TestMatcher>), Diagnostic> {
     if a.msg.is_some() {
         return Err(cx.at(a, "assert messages are unsupported in test declarations"));
     }
     if let py::Expr::Call(call) = a.test.as_ref() {
-        return matcher_assertion(cx, call);
+        return matcher_assertion(cx, call, data);
     }
     let py::Expr::Compare(c) = a.test.as_ref() else {
         return Err(cx.at(a, "test requires assert target(literals) == literal or a matcher helper"));
@@ -187,8 +218,8 @@ fn assertion(
         ));
     };
     let function_name = qualify(cx, call)?;
-    let input = arguments(cx, call)?;
-    let (expected, matcher) = parse_expected(cx, &c.comparators[0])?;
+    let input = arguments(cx, call, data)?;
+    let (expected, matcher) = parse_expected(cx, &c.comparators[0], data)?;
     let _ = fn_stmt;
     Ok((function_name, input, expected, matcher))
 }
@@ -198,6 +229,7 @@ fn assertion(
 fn matcher_assertion(
     cx: &Context<'_>,
     call: &py::ExprCall,
+    data: Data,
 ) -> Result<(String, p::Expr, p::Expr, Option<p::TestMatcher>), Diagnostic> {
     let name = direct_name(cx, &call.func, &HashMap::new())?;
     if name.contains('.') {
@@ -212,7 +244,7 @@ fn matcher_assertion(
                 return Err(cx.at(&call.args[0], "matcher first argument must be a function call"));
             };
             let function_name = qualify(cx, inner)?;
-            let input = arguments(cx, inner)?;
+            let input = arguments(cx, inner, data)?;
             let s = string_literal(cx, &call.args[1])?
                 .ok_or_else(|| cx.at(&call.args[1], "matcher substring must be a string literal"))?;
             let matcher = if name == "contains" {
@@ -230,7 +262,7 @@ fn matcher_assertion(
                 return Err(cx.at(&call.args[0], "matcher first argument must be a function call"));
             };
             let function_name = qualify(cx, inner)?;
-            let input = arguments(cx, inner)?;
+            let input = arguments(cx, inner, data)?;
             let (variant, matcher) = if name == "is_ok" {
                 ("Ok", p::TestMatcher::AnyOk)
             } else {
@@ -254,11 +286,63 @@ fn qualify(cx: &Context<'_>, call: &py::ExprCall) -> Result<String, Diagnostic> 
 
 /// `assert f(x) == Err("msg")` → `ErrContaining`; `assert f(x) == Err(label)` →
 /// an exact `Err(label)` match; otherwise a literal equality.
-fn parse_expected(cx: &Context<'_>, e: &py::Expr) -> Result<(p::Expr, Option<p::TestMatcher>), Diagnostic> {
+fn parse_expected(
+    cx: &Context<'_>,
+    e: &py::Expr,
+    data: Data,
+) -> Result<(p::Expr, Option<p::TestMatcher>), Diagnostic> {
     if let Some(found) = parse_err_expected(cx, e)? {
         return Ok(found);
     }
-    Ok((literal(cx, e)?.0, None))
+    Ok((value(cx, e, data)?, None))
+}
+
+fn value(cx: &Context<'_>, e: &py::Expr, data: Data) -> Result<p::Expr, Diagnostic> {
+    match data {
+        Data::Literal => Ok(literal(cx, e)?.0),
+        Data::Trusted => trusted(cx, e),
+    }
+}
+
+/// Trusted stored-test data: literals, lists of trusted values, `None`, and
+/// positional calls to a bare or `Module.function` name. The callee spelling is
+/// kept exactly (bare stays bare), so test data resolves at run time exactly
+/// as the `.ax` original did. Purity is checked separately against the Program.
+fn trusted(cx: &Context<'_>, e: &py::Expr) -> Result<p::Expr, Diagnostic> {
+    match e {
+        py::Expr::Constant(c) if matches!(c.value, py::Constant::None) => {
+            Ok(p::Expr::Ident("None".into()))
+        }
+        py::Expr::List(l) => Ok(super::expressions::call(
+            "list",
+            l.elts.iter().map(|item| trusted(cx, item)).collect::<Result<_, _>>()?,
+        )),
+        py::Expr::Call(c) => {
+            if !c.keywords.is_empty() {
+                return Err(cx.at(c, "calls in stored test data take positional arguments only"));
+            }
+            let callee = match c.func.as_ref() {
+                py::Expr::Name(n) if super::identifier(n.id.as_str()) || n.id.as_str() == "None" => {
+                    p::Expr::Ident(n.id.to_string())
+                }
+                py::Expr::Attribute(a) => match a.value.as_ref() {
+                    py::Expr::Name(owner)
+                        if super::identifier(owner.id.as_str()) && super::identifier(a.attr.as_str()) =>
+                    {
+                        p::Expr::FieldAccess {
+                            base: Box::new(p::Expr::Ident(owner.id.to_string())),
+                            field: a.attr.to_string(),
+                        }
+                    }
+                    _ => return Err(cx.at(c, "stored test data calls need a bare or Module.function name")),
+                },
+                _ => return Err(cx.at(c, "stored test data calls need a bare or Module.function name")),
+            };
+            let args = c.args.iter().map(|arg| trusted(cx, arg)).collect::<Result<_, _>>()?;
+            Ok(p::Expr::Call { callee: Box::new(callee), args })
+        }
+        _ => Ok(literal(cx, e)?.0),
+    }
 }
 
 fn parse_err_expected(
@@ -320,7 +404,7 @@ fn string_literal(cx: &Context<'_>, e: &py::Expr) -> Result<Option<String>, Diag
     }
 }
 
-fn arguments(cx: &Context<'_>, c: &py::ExprCall) -> Result<p::Expr, Diagnostic> {
+fn arguments(cx: &Context<'_>, c: &py::ExprCall, data: Data) -> Result<p::Expr, Diagnostic> {
     if !c.args.is_empty() && !c.keywords.is_empty() {
         return Err(cx.at(c, "mixed positional/keyword arguments are unsupported; use only positional or only named literals"));
     }
@@ -342,7 +426,7 @@ fn arguments(cx: &Context<'_>, c: &py::ExprCall) -> Result<p::Expr, Diagnostic> 
             }
             fields.push(p::FieldValue {
                 name: name.to_string(),
-                value: literal(cx, &keyword.value)?.0,
+                value: value(cx, &keyword.value, data)?,
             });
         }
         return Ok(p::Expr::StructLiteral(fields));
@@ -350,7 +434,7 @@ fn arguments(cx: &Context<'_>, c: &py::ExprCall) -> Result<p::Expr, Diagnostic> 
     let values = c
         .args
         .iter()
-        .map(|e| literal(cx, e).map(|(e, _)| e))
+        .map(|e| value(cx, e, data))
         .collect::<Result<Vec<_>, _>>()?;
     if values.len() == 1 {
         return Ok(values.into_iter().next().unwrap());

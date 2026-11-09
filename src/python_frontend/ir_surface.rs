@@ -41,6 +41,22 @@ pub(crate) fn validate(operations: &[p::Operation]) -> Checked {
     block(operations, Place::Root)
 }
 
+/// Persistence-only `@stored_test` data: the same test structure checks as
+/// [`validate`], but test data may also contain calls with a bare or
+/// `Module.function` target and `None` (see `tests_lower::Data::Trusted`).
+pub(crate) fn validate_stored_tests(operations: &[p::Operation]) -> Checked {
+    if operations.is_empty() {
+        return Err("empty submission".into());
+    }
+    for (index, operation) in operations.iter().enumerate() {
+        let p::Operation::Test(test) = operation else {
+            return Err(format!("operation {index}: stored tests contain only test cases"));
+        };
+        values::test_with(test, true).map_err(|error| format!("operation {index}: {error}"))?;
+    }
+    Ok(())
+}
+
 fn block(operations: &[p::Operation], place: Place) -> Checked {
     for (index, operation) in operations.iter().enumerate() {
         check(operation, place).map_err(|error| format!("operation {index}: {error}"))?;

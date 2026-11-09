@@ -136,3 +136,32 @@ fn boot_time_library_load_failure_is_journaled_once_without_source_text() {
     assert!(message.starts_with("failed to load BootBroken.ax at startup"), "{message}");
     assert!(entries.iter().all(|e| !e.to_string().contains(secret) && !e.to_string().contains("+fn")));
 }
+
+#[test]
+fn managed_python_load_failure_is_journaled_with_name_and_line_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "MANAGED_SOURCE_CANARY_77";
+    std::fs::write(
+        dir.path().join("library-sources.json"),
+        r#"{"version":1,"modules":{"JournalPy":{"format":"python","dependencies":[]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("JournalPy.py"),
+        format!("def ok() -> int:\n    return 1\n\ndef bad(x: int -> str:\n    return \"{secret}\"\n"),
+    )
+    .unwrap();
+    let before = last_seq();
+    let mut program = crate::ast::Program::default();
+    let mut state = crate::library::LibraryState::new();
+    crate::library::load_module_files(&mut program, dir.path(), &mut state);
+    assert!(state.require_authoritative_sources().is_err());
+    let entries = entries_since(before);
+    let library: Vec<_> = entries.iter().filter(|e| e.to_string().contains("JournalPy")).collect();
+    assert_eq!(library.len(), 1, "exactly one entry for the managed failure: {library:#?}");
+    assert_eq!(library[0]["category"], "library");
+    assert_eq!(library[0]["source"], "library-sources");
+    let message = library[0]["message"].as_str().unwrap();
+    assert!(message.contains("JournalPy.py") && message.contains("at line"), "{message}");
+    assert!(entries.iter().all(|e| !e.to_string().contains(secret) && !e.to_string().contains("def bad")));
+}

@@ -104,6 +104,9 @@ pub fn print_python_module_with_ledger(
     }
 
     let expected = stored_groups(module)?;
+    for group in &expected {
+        check_stored_test_purity(program, module_name, &group.target, &group.cases)?;
+    }
     compare_test_groups(&expected, &lowered.tests)?;
 
     for function in &module.functions {
@@ -204,6 +207,9 @@ pub fn lower_python_module(
     let refs = collect_module_refs(candidate);
     validate_callees(&candidate_program, &refs)?;
     type_owner_map(&candidate_program, module_name, &refs.types)?;
+    for (target, cases) in &grouped {
+        check_stored_test_purity(&candidate_program, module_name, target, cases)?;
+    }
 
     let tests = grouped
         .into_iter()
@@ -259,7 +265,12 @@ fn render_test_groups(
                 }
             }
             let name = format!("test_case_{counter}");
-            let body = tests_print::print_case(&group.function, case).map_err(|message| {
+            let body = tests_print::print_case_with(
+                &group.function,
+                case,
+                super::tests_lower::Data::Trusted,
+            )
+            .map_err(|message| {
                 diag(
                     module_name,
                     format!("stored test {} case {}: {message}", group.target, index + 1),
@@ -366,6 +377,74 @@ fn parse_matcher(value: &str) -> Option<p::TestMatcher> {
         return Some(p::TestMatcher::ErrContaining(text.to_string()));
     }
     None
+}
+
+/// Trusted stored-test data may only call pure functions: a non-IO builtin or
+/// constructor, or a user function (resolved exactly as the runtime resolves
+/// the spelling) declaring no effect other than `fail`. Checked at save AND at
+/// load, so effectful calls can never become persisted test data.
+fn check_stored_test_purity(
+    program: &a::Program,
+    module_name: &str,
+    target: &str,
+    cases: &[p::TestCase],
+) -> Result<(), Diagnostic> {
+    fn calls<'e>(expr: &'e p::Expr, out: &mut Vec<(String, &'e p::Expr)>) {
+        match expr {
+            p::Expr::Call { callee, args } => {
+                let name = match callee.as_ref() {
+                    p::Expr::Ident(name) => Some(name.clone()),
+                    p::Expr::FieldAccess { base, field } => match base.as_ref() {
+                        p::Expr::Ident(owner) => Some(format!("{owner}.{field}")),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                out.push((name.unwrap_or_default(), expr));
+                args.iter().for_each(|arg| calls(arg, out));
+            }
+            p::Expr::StructLiteral(fields) => fields.iter().for_each(|f| calls(&f.value, out)),
+            p::Expr::Unary { expr, .. } | p::Expr::Cast { expr, .. } => calls(expr, out),
+            p::Expr::Binary { left, right, .. } => {
+                calls(left, out);
+                calls(right, out);
+            }
+            p::Expr::FieldAccess { base, .. } => calls(base, out),
+            _ => {}
+        }
+    }
+    for (index, case) in cases.iter().enumerate() {
+        let mut found = Vec::new();
+        calls(&case.input, &mut found);
+        calls(&case.expected, &mut found);
+        for (name, _) in found {
+            let refuse = |why: String| {
+                Err(diag(
+                    module_name,
+                    format!(
+                        "stored test {target} case {}: call to {name} {why}; stored test data may only call pure builtins or user functions without io/async/mut effects",
+                        index + 1
+                    ),
+                ))
+            };
+            if name.is_empty() {
+                return refuse("has a dynamic target".into());
+            }
+            if let Some(function) = program.get_function(&name) {
+                if let Some(effect) = function.effects.iter().find(|e| **e != a::Effect::Fail) {
+                    return refuse(format!("declares the {} effect", format!("{effect:?}").to_lowercase()));
+                }
+                continue;
+            }
+            if crate::builtins::is_io_builtin(&name) {
+                return refuse("is an IO builtin".into());
+            }
+            if !crate::builtins::is_builtin(&name) && !matches!(name.as_str(), "Ok" | "Err" | "Some" | "list") {
+                return refuse("is not a known function".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compare_test_groups(
@@ -564,7 +643,7 @@ fn lower_test_definition(
     local: &HashSet<String>,
     grouped: &mut Vec<(String, Vec<p::TestCase>)>,
 ) -> Result<(), Diagnostic> {
-    let lowered = super::lower_tests(&definition.source, module_name).map_err(|error| {
+    let lowered = super::tests_lower::lower_stored_tests(&definition.source, module_name).map_err(|error| {
         diag(
             module_name,
             format!(

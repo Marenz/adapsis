@@ -2,10 +2,13 @@
 //! restricted Python test syntax. It accepts exactly what the lowerer accepts (bool,
 //! str, int, finite float, signed numerics and lists as data; keyword or positional
 //! arguments; equality, `contains`/`starts_with`/`is_ok`/`is_err`/`Err(..)` and
-//! `assert_after`) and refuses everything else with a precise reason. The Python
-//! test-data literal policy is NOT broadened: records, variant constructors, calls,
-//! `Ok(..)`/`Err(..)` inputs and non-finite floats are unsupported here.
+//! `assert_after`) and refuses everything else with a precise reason. Under the
+//! default `Data::Literal` policy the Python test-data literal policy is NOT
+//! broadened: records, variant constructors, calls, `Ok(..)`/`Err(..)` inputs and
+//! non-finite floats are unsupported. `Data::Trusted` (persisted `@stored_test`
+//! only) additionally prints calls with an exact bare/`Module.f` target and `None`.
 use super::emit;
+use super::tests_lower::Data;
 use crate::parser as p;
 
 /// One `def test_case_<n>() -> None:` per case, joined by blank lines. The def names
@@ -26,8 +29,18 @@ pub(crate) fn print_block(test: &p::TestMutation) -> Result<String, String> {
 
 /// The indented assertion line plus any `assert_after` lines for one case.
 pub(crate) fn print_case(function: &str, case: &p::TestCase) -> Result<String, String> {
-    let call = format!("{}({})", emit::name(function)?, arguments(&case.input)?);
-    let mut lines = vec![format!("    assert {}", assertion(&call, case)?)];
+    print_case_with(function, case, Data::Literal)
+}
+
+/// `Trusted` is the persistence-only `@stored_test` policy (see
+/// `tests_lower::Data`): pure calls, `None` and constructor calls print too.
+pub(crate) fn print_case_with(
+    function: &str,
+    case: &p::TestCase,
+    data: Data,
+) -> Result<String, String> {
+    let call = format!("{}({})", emit::name(function)?, arguments(&case.input, data)?);
+    let mut lines = vec![format!("    assert {}", assertion(&call, case, data)?)];
     for check in &case.after_checks {
         lines.push(format!(
             "    assert_after({}, {}, {})",
@@ -39,7 +52,7 @@ pub(crate) fn print_case(function: &str, case: &p::TestCase) -> Result<String, S
     Ok(lines.join("\n") + "\n")
 }
 
-fn assertion(call: &str, case: &p::TestCase) -> Result<String, String> {
+fn assertion(call: &str, case: &p::TestCase, data: Data) -> Result<String, String> {
     match &case.matcher {
         None => match &case.expected {
             // `Err(label)` with an identifier label is the exact-label form.
@@ -52,7 +65,7 @@ fn assertion(call: &str, case: &p::TestCase) -> Result<String, String> {
                         .into(),
                 ),
             },
-            expected => Ok(format!("{call} == {}", literal(expected)?)),
+            expected => Ok(format!("{call} == {}", value(expected, data)?)),
         },
         Some(p::TestMatcher::Contains(text)) => {
             require_string(&case.expected, text)?;
@@ -103,9 +116,9 @@ fn require_ident(expected: &p::Expr, name: &str) -> Result<(), String> {
 
 /// Keyword arguments for named fields, positional for `_0.._n` (n >= 1), one
 /// positional literal otherwise. Exactly the shapes `tests_lower::arguments` builds.
-fn arguments(input: &p::Expr) -> Result<String, String> {
+fn arguments(input: &p::Expr, data: Data) -> Result<String, String> {
     let p::Expr::StructLiteral(fields) = input else {
-        return literal(input);
+        return value(input, data);
     };
     if fields.is_empty() {
         return Ok(String::new());
@@ -118,7 +131,7 @@ fn arguments(input: &p::Expr) -> Result<String, String> {
     if positional {
         let values = fields
             .iter()
-            .map(|field| literal(&field.value))
+            .map(|field| value(&field.value, data))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(values.join(", "));
     }
@@ -137,7 +150,7 @@ fn arguments(input: &p::Expr) -> Result<String, String> {
                 field.name
             ));
         }
-        parts.push(format!("{}={}", field.name, literal(&field.value)?));
+        parts.push(format!("{}={}", field.name, value(&field.value, data)?));
     }
     Ok(parts.join(", "))
 }
@@ -148,6 +161,39 @@ fn arguments(input: &p::Expr) -> Result<String, String> {
 /// Python lowerer builds. A negative constant node therefore has no Python spelling that
 /// lowers back to it, and printing `-1` would silently change the AST.
 const NEGATIVE_CONSTANT: &str = "a negative numeric constant (keyword shorthand `name=-1`) has no exact Python form: Python lowers `-1` to a unary minus, a different AST (#111)";
+
+fn value(expr: &p::Expr, data: Data) -> Result<String, String> {
+    match data {
+        Data::Literal => literal(expr),
+        Data::Trusted => trusted(expr),
+    }
+}
+
+/// Inverse of `tests_lower::trusted`: the callee spelling is printed exactly.
+fn trusted(expr: &p::Expr) -> Result<String, String> {
+    match expr {
+        p::Expr::Ident(name) if name == "None" => Ok("None".into()),
+        p::Expr::Call { callee, args } if is_ident(callee, "list") => {
+            let items = args.iter().map(trusted).collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("[{}]", items.join(", ")))
+        }
+        p::Expr::Call { callee, args } => {
+            let name = match callee.as_ref() {
+                p::Expr::Ident(name) if super::identifier(name) => name.clone(),
+                p::Expr::FieldAccess { base, field } => match base.as_ref() {
+                    p::Expr::Ident(owner) if super::identifier(owner) && super::identifier(field) => {
+                        format!("{owner}.{field}")
+                    }
+                    _ => return Err("stored test call target must be a bare or Module.function name".into()),
+                },
+                _ => return Err("stored test call target must be a bare or Module.function name".into()),
+            };
+            let args = args.iter().map(trusted).collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("{name}({})", args.join(", ")))
+        }
+        other => literal(other),
+    }
+}
 
 /// What `expressions::literal` accepts, printed back.
 fn literal(expr: &p::Expr) -> Result<String, String> {

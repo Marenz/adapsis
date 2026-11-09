@@ -216,9 +216,11 @@ fn malformed_stored_test_cases_refuse_the_whole_save() {
         .iter_mut()
         .find(|f| f.name == "inc")
         .unwrap();
-    Arc::make_mut(function).tests[0].input = "Ok(\"x\")".into();
+    // #128: pure calls/constructors are now trusted stored-test data, so an
+    // effectful (IO builtin) call is the malformed case that must refuse.
+    Arc::make_mut(function).tests[0].input = "file_read(\"x\")".into();
     let error = print_python_module(&program, "Example").unwrap_err();
-    assert!(error.to_string().contains("call to Ok"), "{error}");
+    assert!(error.to_string().contains("call to file_read is an IO builtin"), "{error}");
 
     let mut program = full_program();
     let function = program
