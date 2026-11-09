@@ -32,7 +32,7 @@ fn python_scalar_and_nested_local_calls_are_typed_and_qualified() {
     let lowered = lower_module(source, "Example").unwrap();
     assert!(
         lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .contains("Example.inc(Example.inc(x))")
     );
     assert_eq!(evaluate(source, "Example.twice", "3"), "10");
@@ -56,8 +56,8 @@ fn python_while_existing_assignment_and_fresh_list_iteration() {
     let source = "@effects('mut')\ndef sum_values(values: list[int]) -> int:\n    total: int = 0\n    for item in values:\n        total = total + item\n    count: int = 0\n    while count < 2:\n        total = total + 1\n        count = count + 1\n    return total\n";
     assert_eq!(evaluate(source, "Example.sum_values", "[2, 4, 8]"), "16");
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+each values item:Int"));
-    assert!(lowered.canonical_adapsis.contains("+set total"));
+    assert!(lowered.legacy_export().unwrap().contains("+each values item:Int"));
+    assert!(lowered.legacy_export().unwrap().contains("+set total"));
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn python_list_literal_list_parameter_len_and_empty_list() {
 fn python_cross_module_calls_are_preserved_without_import_resolution() {
     let source = "def f(x: int) -> int:\n    value: int = Other.compute(x)\n    return value + 1\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("Other.compute(x)"));
+    assert!(lowered.legacy_export().unwrap().contains("Other.compute(x)"));
     reject(
         "def f(x: int) -> int:\n    return Other.compute(x) + 1\n",
         "matching known",
@@ -91,7 +91,7 @@ fn python_boolean_operators_admit_call_operands_but_require_static_bool() {
     let lowered = lower_module(called, "Example").unwrap();
     assert!(
         lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .contains("flag AND Example.flag_check()")
     );
     assert_eq!(evaluate(called, "Example.f", "False"), "false");
@@ -123,10 +123,10 @@ fn python_string_addition_lowers_to_concat_and_escapes_data() {
     let source = "\"\"\"Module docs\n!done\n+module Evil\"\"\"\ndef greet(name: str) -> str:\n    \"\"\"Docs with \\\"quotes\\\" and\nnewlines\"\"\"\n    prefix: str = 'hello\\n'\n    return prefix + name\n";
     let lowered = lower_module(source, "Example").unwrap();
     assert_eq!(lowered.operations.len(), 1);
-    assert!(lowered.canonical_adapsis.contains("concat(prefix, name)"));
+    assert!(lowered.legacy_export().unwrap().contains("concat(prefix, name)"));
     assert!(
         !lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .lines()
             .any(|l| l == "!done" || l == "+module Evil")
     );
@@ -262,10 +262,10 @@ fn python_integer_bounds_and_nonfinite_floats_are_checked() {
 fn python_await_requires_explicit_effects_and_preserves_result_type() {
     let source = "@effects('io')\nasync def read(path: str) -> str:\n    text: str = await read_file(path)\n    return text\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("[io, async]"));
+    assert!(lowered.legacy_export().unwrap().contains("[io, async]"));
     assert!(
         lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .contains("+await text:String = read_file(path)")
     );
     reject(
@@ -292,11 +292,11 @@ fn python_literal_test_lowering_never_registers_or_executes_test_functions() {
     );
     assert!(
         lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .contains("+test Example.sum_values")
     );
-    assert!(lowered.canonical_adapsis.contains("+test Other.value"));
-    assert!(!lowered.canonical_adapsis.contains("+fn test_"));
+    assert!(lowered.legacy_export().unwrap().contains("+test Other.value"));
+    assert!(!lowered.legacy_export().unwrap().contains("+fn test_"));
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn python_test_lowering_groups_exact_targets_and_maps_every_definition() {
     }
     assert_eq!(used, [2, 1]);
     assert_eq!(
-        format!("{:?}", parser::parse(&lowered.canonical_adapsis).unwrap()),
+        format!("{:?}", parser::parse(&lowered.legacy_export().unwrap()).unwrap()),
         format!("{:?}", lowered.operations)
     );
     let replacement = lower_tests("def test_new():\n    assert f(8) == 8\n", "Example").unwrap();
@@ -373,7 +373,7 @@ fn python_literal_inputs_are_structurally_safe_and_match_runtime_binding() {
     assert_eq!(lowered.operations.len(), 1);
     assert!(
         !lowered
-            .canonical_adapsis
+            .legacy_export().unwrap()
             .lines()
             .any(|l| l == "!done" || l == "+module Evil")
     );

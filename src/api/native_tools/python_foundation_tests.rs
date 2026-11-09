@@ -146,6 +146,7 @@ async fn python_p0_inspect_replace_preserves_attached_tests_and_other_functions(
         .unwrap()
         .tests
         .push(crate::ast::TestCase {
+            typed: None,
             input: "1".into(),
             expected: "2".into(),
             passed: true,

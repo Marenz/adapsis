@@ -19,10 +19,10 @@ fn program(ax: &str) -> ast::Program {
 /// native one (which runs the surface preflight first).
 fn both(source: &str, ax: &str) -> [Result<String, String>; 2] {
     let free = lower_module(source, "InputProbe")
-        .map(|l| l.canonical_adapsis)
+        .map(|l| l.legacy_export().unwrap())
         .map_err(|e| e.to_string());
     let native = lower_module_with_program(source, "InputProbe", &program(ax))
-        .map(|l| l.canonical_adapsis)
+        .map(|l| l.legacy_export().unwrap())
         .map_err(|e| e.to_string());
     [free, native]
 }
@@ -151,9 +151,9 @@ fn other_forbidden_names_remain_forbidden_as_bindings() {
 fn input_keyword_in_tests_was_and_stays_accepted() {
     let lowered = lower_tests("def test_case_1():\n    assert f(input='x') == 1\n", "M").unwrap();
     assert!(
-        lowered.canonical_adapsis.contains("{input: \"x\"}"),
+        lowered.legacy_export().unwrap().contains("{input: \"x\"}"),
         "{}",
-        lowered.canonical_adapsis
+        lowered.legacy_export().unwrap()
     );
 }
 

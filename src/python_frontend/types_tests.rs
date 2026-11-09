@@ -63,7 +63,7 @@ fn recursive_union_declaration_prints_and_relowers() {
     let rebuilt = program(&printed);
     assert_eq!(printer::print_type(&rebuilt, "Example.Expr").unwrap(), printed);
     let canonical = lower_module(source, "Example").unwrap();
-    assert!(canonical.canonical_adapsis.contains("+type Expr = Literal(Int) | Var(String) | Add(Expr, Expr) | Nil"));
+    assert!(canonical.legacy_export().unwrap().contains("+type Expr = Literal(Int) | Var(String) | Add(Expr, Expr) | Nil"));
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn union_typed_parameter_and_return_roundtrip() {
 fn map_set_option_byte_annotations_lower_to_adapsis() {
     let source = "@effects('mut')\ndef f(m: Map[str, int], s: Set[int], o: Option[int], b: Byte) -> Byte:\n    return b\n";
     let lowered = lower_module(source, "Example").unwrap();
-    let canonical = lowered.canonical_adapsis;
+    let canonical = lowered.legacy_export().unwrap();
     assert!(canonical.contains("m:Map<String, Int>"));
     assert!(canonical.contains("s:Set<Int>"));
     assert!(canonical.contains("o:Option<Int>"));

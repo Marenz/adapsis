@@ -16,11 +16,22 @@ use crate::eval::Value;
 use crate::intern::{InternedId, StringInterner};
 use std::sync::Arc;
 mod result_match;
+#[cfg(test)]
+pub(crate) use result_match::compile_result_opcode_fixture;
 mod equality;
-mod await_admission;
+pub(crate) mod await_admission;
 mod field_admission;
+mod scalar_admission;
+mod execution;
+pub use execution::{VmAttempt, attempt};
+#[allow(unused_imports)] // Retained direct API; normal dispatch now uses typed `attempt`.
+pub use execution::execute_with_io;
+#[cfg(test)]
+pub use execution::execute;
 #[cfg(test)]
 mod blast_tests;
+#[cfg(test)]
+mod scalar_failure_tests;
 
 /// A single bytecode instruction.
 #[derive(Debug, Clone)]
@@ -137,6 +148,8 @@ pub enum Op {
     PushOk,
     /// Pop one value (string), wrap in Err.
     PushErr,
+    /// Nonlocal language failure, never an Err value returned to a scalar caller.
+    RaiseCheck(String),
     /// Pop one value, wrap in Some (= Ok internally).
     PushSome,
     /// Push None.
@@ -221,7 +234,18 @@ pub fn compile_function(
 ) -> Result<CompiledFunction> {
     await_admission::check(func, program)?;
     field_admission::check(func, program)?;
+    scalar_admission::check(func, program)?;
+    emit_function(func, program, &program.interner)
+}
+
+/// Used only after graph admission, and by the narrowly scoped opcode-matching fixture.
+fn emit_function(
+    func: &ast::FunctionDecl,
+    program: &ast::Program,
+    interner: &StringInterner,
+) -> Result<CompiledFunction> {
     let mut compiler = Compiler::new(program);
+    compiler.interner = interner.clone();
 
     // Allocate parameter slots first (slot 0..N-1)
     for param in &func.params {
@@ -368,9 +392,7 @@ impl<'a> Compiler<'a> {
                 // Fail path
                 let fail_target = self.here();
                 self.patch(fail_jump, fail_target);
-                self.emit(Op::PushString(on_fail.clone()));
-                self.emit(Op::PushErr);
-                self.emit(Op::Return);
+                self.emit(Op::RaiseCheck(on_fail.clone()));
 
                 // Continue path
                 let continue_target = self.here();
@@ -761,94 +783,6 @@ pub enum VmResult {
 /// to avoid string hashing on every call dispatch (issue #29).
 pub type CompileCache = std::collections::HashMap<InternedId, CompiledFunction>;
 
-/// Execute a compiled function without IO support — returns `VmResult::Await`
-/// on the first IO suspension instead of servicing it. Test-only: production
-/// callers use `execute_with_io`, which keeps the compile cache alive across
-/// resumptions.
-#[cfg(test)]
-pub fn execute(
-    compiled: &CompiledFunction,
-    args: Vec<Value>,
-    program: &ast::Program,
-) -> Result<VmResult> {
-    let mut cache = CompileCache::new();
-    let name_id = compiled.interner.get(&compiled.name).unwrap_or(0);
-    cache.insert(name_id, compiled.clone());
-    execute_cached(compiled, args, program, &mut cache)
-}
-
-fn execute_cached(
-    compiled: &CompiledFunction,
-    args: Vec<Value>,
-    program: &ast::Program,
-    cache: &mut CompileCache,
-) -> Result<VmResult> {
-    // Before any instruction (and so before any IO): see `field_admission`.
-    field_admission::check_arguments(compiled, &args)?;
-    let mut state = VmState {
-        function_name: compiled.name.clone(),
-        ip: 0,
-        bytecode: Arc::clone(&compiled.bytecode),
-        locals: vec![Value::None; compiled.local_count.max(args.len())],
-        stack: Vec::with_capacity(32),
-        call_stack: Vec::new(),
-    };
-
-    // Load arguments into local slots
-    for (i, arg) in args.into_iter().enumerate() {
-        if i < state.locals.len() {
-            state.locals[i] = arg;
-        }
-    }
-
-    let mut interner = compiled.interner.clone();
-    run_loop(state, program, cache, &mut interner)
-}
-
-/// Resume a suspended VM after an async IO operation completes.
-/// Pushes the IO result onto the stack and continues execution.
-/// The `cache` and `interner` must be the same ones used for the initial
-/// execution so lazily-compiled callees stay available.
-fn resume(
-    mut vm_state: VmState,
-    io_result: Value,
-    program: &ast::Program,
-    cache: &mut CompileCache,
-    interner: &mut StringInterner,
-) -> Result<VmResult> {
-    vm_state.stack.push(io_result);
-    run_loop(vm_state, program, cache, interner)
-}
-
-/// Execute a compiled function with async IO support.
-/// When the VM suspends for IO, calls `io_handler` to perform the operation,
-/// then resumes. Loops until execution completes.
-pub fn execute_with_io(
-    compiled: &CompiledFunction,
-    args: Vec<Value>,
-    program: &ast::Program,
-    io_handler: &dyn Fn(&str, &[Value]) -> Result<Value>,
-) -> Result<Value> {
-    let mut cache = CompileCache::new();
-    let name_id = compiled.interner.get(&compiled.name).unwrap_or(0);
-    cache.insert(name_id, compiled.clone());
-    let mut interner = compiled.interner.clone();
-    let mut result = execute_cached(compiled, args, program, &mut cache)?;
-    loop {
-        match result {
-            VmResult::Done(val) => return Ok(val),
-            VmResult::Await {
-                op_name,
-                args,
-                vm_state,
-            } => {
-                let io_result = io_handler(&op_name, &args)?;
-                result = resume(vm_state, io_result, program, &mut cache, &mut interner)?;
-            }
-        }
-    }
-}
-
 /// The main execution loop. Processes instructions until Return or AwaitIo.
 fn run_loop(
     mut state: VmState,
@@ -985,20 +919,11 @@ fn run_loop(
                 }
                 call_args.reverse(); // arguments were pushed left-to-right
 
-                // Compile callee (cached — only compiles once per function).
-                // Cache is keyed by InternedId (u32) — no string hashing.
-                if !cache.contains_key(&name_id) {
-                    let name_str = interner
-                        .resolve(name_id)
-                        .ok_or_else(|| anyhow::anyhow!("vm: unknown interned id {name_id}"))?
-                        .to_string();
-                    let func = program
-                        .get_function(&name_str)
-                        .ok_or_else(|| anyhow::anyhow!("vm: function `{name_str}` not found"))?;
-                    let compiled = compile_function(func, program)?;
-                    cache.insert(name_id, compiled);
-                }
-                let callee = cache.get(&name_id).unwrap();
+                // All callees were prepared before the first instruction. A missing
+                // entry is an internal execution failure, never a fallback request.
+                let callee = cache.get(&name_id).ok_or_else(|| {
+                    anyhow::anyhow!("vm: prepared callee bytecode missing for id {name_id}")
+                })?;
 
                 // Save current frame
                 let locals_base = state.locals.len();
@@ -1075,6 +1000,14 @@ fn run_loop(
                 state.bytecode = frame.return_bytecode;
                 state.locals.truncate(frame.locals_base);
                 state.stack.push(val);
+            }
+            Op::RaiseCheck(label) => {
+                // Result/capture graphs never enter this VM slice. There is no catcher
+                // to resume: dropping state discards every frame, local and partial
+                // operand, and no caller may continue with an Err value as a scalar.
+                return Err(crate::eval::result_contract::LanguageFailure::Check {
+                    label: label.clone(),
+                }.into());
             }
             Op::ToBool => {
                 let value = pop_stack(&mut state.stack)?;
@@ -1355,7 +1288,7 @@ mod tests {
     fn compile_check_statement() {
         let compiled = compile_from_source(
             "\
-+fn validate (x:Int)->Result<Int> [fail]
++fn validate (x:Int)->Int [fail]
   +check positive x > 0 ~err_negative
   +return x
 ",
@@ -1363,15 +1296,14 @@ mod tests {
         );
 
         assert_eq!(compiled.name, "validate");
-        // Check compiles to: condition, BranchIfNot(fail), Jump(past_fail), PushString, PushErr, Return
+        // Scalar Check has a nonlocal failure instruction, not PushErr + Return.
         let has_gt = compiled.bytecode.iter().any(|op| matches!(op, Op::Gt));
-        let has_push_err = compiled.bytecode.iter().any(|op| matches!(op, Op::PushErr));
         let has_err_label = compiled
             .bytecode
             .iter()
-            .any(|op| matches!(op, Op::PushString(s) if s == "err_negative"));
+            .any(|op| matches!(op, Op::RaiseCheck(s) if s == "err_negative"));
         assert!(has_gt, "should have Gt for x > 0");
-        assert!(has_push_err, "should have PushErr for fail path");
+        assert!(!compiled.bytecode.iter().any(|op| matches!(op, Op::PushErr)));
         assert!(has_err_label, "should have err_negative label");
     }
 
@@ -1662,18 +1594,13 @@ mod tests {
 
     #[test]
     fn compile_ok_err_constructors() {
-        let compiled = compile_from_source(
-            "\
-+fn wrap (x:Int)->Result<Int> [fail]
-  +check pos x > 0 ~err_neg
-  +return x
-",
-            "wrap",
-        );
-
-        // The check's fail path should have PushErr
-        let has_push_err = compiled.bytecode.iter().any(|op| matches!(op, Op::PushErr));
-        assert!(has_push_err);
+        let program = build_program("+fn wrap (x:Int)->Result<Int>\n  +if x > 0\n    +return Ok(x)\n  +else\n    +return Err(\"negative\")\n  +end\n+end\n");
+        let function = program.get_function("wrap").unwrap();
+        assert!(compile_function(function, &program).is_err());
+        let compiled = compile_result_opcode_fixture(function, &program).unwrap();
+        // Opcode construction remains tested, not claimed as normal Result admission.
+        assert!(compiled.bytecode.iter().any(|op| matches!(op, Op::PushOk)));
+        assert!(compiled.bytecode.iter().any(|op| matches!(op, Op::PushErr)));
     }
 
     #[test]
@@ -1828,32 +1755,24 @@ mod tests {
     fn exec_check_pass() {
         let val = exec_fn(
             "\
-+fn validate (x:Int)->Result<Int> [fail]
++fn validate (x:Int)->Int [fail]
   +check positive x > 0 ~err_negative
   +return x
 ",
             "validate",
             vec![Value::Int(42)],
         );
-        // Check passed — returns the raw value (not wrapped in Ok by VM)
+        // Scalar success remains an ordinary value.
         assert!(matches!(val, Value::Int(42)), "expected 42, got {val}");
     }
 
     #[test]
     fn exec_check_fail() {
-        let val = exec_fn(
-            "\
-+fn validate (x:Int)->Result<Int> [fail]
-  +check positive x > 0 ~err_negative
-  +return x
-",
-            "validate",
-            vec![Value::Int(-1)],
-        );
-        assert!(
-            matches!(val, Value::Err(ref msg) if &**msg == "err_negative"),
-            "expected Err(err_negative), got {val}"
-        );
+        let program = build_program("+fn validate (x:Int)->Int [fail]\n  +check positive x > 0 ~err_negative\n  +return x\n+end\n");
+        let compiled = compile_function(program.get_function("validate").unwrap(), &program).unwrap();
+        let error = execute(&compiled, vec![Value::Int(-1)], &program).unwrap_err();
+        assert_eq!(error.downcast_ref::<crate::eval::result_contract::LanguageFailure>(),
+            Some(&crate::eval::result_contract::LanguageFailure::Check { label: "err_negative".into() }));
     }
 
     #[test]

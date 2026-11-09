@@ -38,7 +38,7 @@ fn python_json_kind_signature_roundtrip_and_no_io_tiers() {
             env.set("payload", args[0].clone());
             env.set("path", args[1].clone());
             let tree =
-                eval::eval_function_body_named(program, "Kind.probe", &function.body, &mut env)
+                eval::eval_declared_function(program, "Kind.probe", function, &mut env)
                     .unwrap();
             let code = vm::compile_function(function, program).unwrap();
             let machine = vm::execute_with_io(&code, args, program, &|_, _| {

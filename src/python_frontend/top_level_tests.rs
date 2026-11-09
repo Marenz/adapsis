@@ -38,8 +38,8 @@ fn top_level_lowering_emits_unwrapped_type_operations() {
         .operations
         .iter()
         .all(|op| matches!(op, parser::Operation::Type(_))));
-    assert!(lowered.canonical_adapsis.contains("+type Point"));
-    assert!(!lowered.canonical_adapsis.contains("+module"));
+    assert!(lowered.legacy_export().unwrap().contains("+type Point"));
+    assert!(!lowered.legacy_export().unwrap().contains("+module"));
     let mut fresh = ast::Program::default();
     apply(&mut fresh, &source);
     assert_eq!(fresh.types.len(), 2);

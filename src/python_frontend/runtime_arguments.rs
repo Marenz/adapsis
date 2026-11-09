@@ -8,6 +8,46 @@ use crate::{
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+/// Native Python entry preflight, not transitive authorization or payload validation.
+/// Inspect only the reachable graph in this snapshot, with tree resolution and no cache.
+pub fn validate_entry_await_contract(program: &Program, entry: &str) -> Result<(), String> {
+    use crate::ast::{StatementKind, Type};
+    use crate::vm::await_admission::{expression_work, statement_work, Work};
+    let root = program.get_function(entry).ok_or("Python entry was not found")?;
+    let mut visited = HashSet::new();
+    let mut work = vec![Work::Function(root)];
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Function(function) => {
+                if visited.insert(function as *const _) {
+                    work.extend(function.body.iter().map(Work::Statement));
+                }
+            }
+            Work::Statement(statement) => {
+                if let StatementKind::Await { ty, call, .. } = &statement.kind {
+                    if let Some(callee) = program.get_function(&call.callee) {
+                        if matches!(ty, Type::Result(_)) != matches!(callee.return_type, Type::Result(_)) {
+                            // Reachable internals may be hidden: disclose neither names nor types.
+                            return Err("Python entry has an incompatible user-await Result binding; reconcile its current Result/non-Result contract before execution".into());
+                        }
+                    }
+                }
+                statement_work(&statement.kind, &mut work);
+            }
+            Work::Expression(expression) => expression_work(expression, &mut work),
+            Work::Call(call, _) => {
+                if let Some(callee) = program.get_function(&call.callee) {
+                    work.push(Work::Function(callee));
+                }
+                work.extend(call.args.iter().map(Work::Expression));
+            }
+            Work::Source(crate::ast::SourceType::Timer(expr)) => work.push(Work::Expression(expr)),
+            Work::Source(_) => {},
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_runtime_arguments(ops: &[Operation], program: &Program) -> Result<(), String> {
     let mut declared = HashMap::new();
     let mut shadowing = HashSet::new();
@@ -151,7 +191,6 @@ impl Calls<'_> {
                     let signature = self.signature(&target)?;
                     Target::User(Some(UserSignature {
                         effects: signature.effects,
-                        returns_result: signature.returns_result,
                     }))
                 } else {
                     Target::BuiltinOrConstructor {
@@ -210,7 +249,25 @@ impl Calls<'_> {
                 Call(value) => self.expression(&value.expr, caller)?,
                 Check(value) => self.expression(&value.expr, caller)?,
                 Return(value) => self.expression(&value.expr, caller)?,
-                Await(value) => self.expression_mode(&value.call, Site::AwaitBinding, caller)?,
+                Await(value) => {
+                    self.expression_mode(&value.call, Site::AwaitBinding, caller)?;
+                    // Runtime-signature defense: a later .ax edit must not turn a stored
+                    // plain-T await into an implicit Result unwrap. Payload type checking
+                    // remains in strict lowering; this visitor pins the outer contract.
+                    if let Expr::Call { callee, .. } = &value.call {
+                        if let Some(target) = qualified(callee).filter(|name| name.contains('.')) {
+                            let returns_result = self.signature(&target)?.returns_result;
+                            let binds_result = matches!(&value.ty, crate::parser::TypeExpr::Generic { name, .. } if name == "Result");
+                            if returns_result != binds_result {
+                                return Err(if returns_result {
+                                    format!("Python await of `{target}` preserves Result; use a Result binding, not plain T")
+                                } else {
+                                    format!("Python await of `{target}` returns a non-Result; a Result binding requires a Result-returning user function")
+                                });
+                            }
+                        }
+                    }
+                }
                 Spawn(value) => self.expression_mode(&value.call, Site::SpawnTarget, caller)?,
                 Match(value) => {
                     self.expression_mode(&value.expr, Site::DirectBuiltinMatch, caller)?;

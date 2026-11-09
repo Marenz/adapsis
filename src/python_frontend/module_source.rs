@@ -253,6 +253,17 @@ fn stored_case_to_parser(
     index: usize,
     case: &a::TestCase,
 ) -> Result<p::TestCase, Diagnostic> {
+    // A present typed payload is authoritative: invalid typed data refuses the
+    // save instead of falling back to the display strings. Absent payloads are
+    // legacy records and keep the string importer.
+    if let Some(typed) = &case.typed {
+        return typed.case().map_err(|_| {
+            diag(
+                module_name,
+                format!("stored test {target} case {} has an invalid typed payload", index + 1),
+            )
+        });
+    }
     let input = p::parse_test_input(0, &case.input).map_err(|e| {
         diag(
             module_name,

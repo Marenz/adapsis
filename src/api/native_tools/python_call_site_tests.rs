@@ -27,8 +27,8 @@ async fn python_native_call_modes_reject_user_async_match_and_nested_unawaited_c
             "annotated await",
         ),
         (
-            "async def f() -> int:\n    value: Result[int] = await NtCallSites.result(1)\n    return 0\n",
-            "#82",
+            "async def f() -> int:\n    value: int = await NtCallSites.result(1)\n    return 0\n",
+            "type mismatch",
         ),
         (
             "def f() -> int:\n    match NtCallSites.sync_result(1):\n        case Ok(value):\n            return NtCallSites.task(value)\n        case Err(error):\n            return 0\n",

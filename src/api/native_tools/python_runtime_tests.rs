@@ -362,7 +362,7 @@ async fn python_execution_checks_io_registry_names_and_aliases_after_edits() {
 }
 
 #[tokio::test]
-async fn python_user_result_await_is_refused_for_local_existing_and_printed_calls() {
+async fn python_user_result_await_is_accepted_for_local_existing_and_printed_calls() {
     let (cfg, mut ws, baseline) = setup().await;
     let source = "@effects(\"io\")\nasync def wrapped(url: str) -> Result[str]:\n    value: Result[str] = await http_get(url)\n    return value\n\n@effects(\"io\")\nasync def probe(url: str) -> Result[str]:\n    value: Result[str] = await wrapped(url)\n    return value\n";
     let local = execute_native_tool(
@@ -374,11 +374,11 @@ async fn python_user_result_await_is_refused_for_local_existing_and_printed_call
     )
     .await;
     assert!(
-        local.execution.has_errors && local.content.contains("#82"),
+        !local.execution.has_errors,
         "{}",
         local.content
     );
-    assert!(ws.program.get_function("PyResultLocal.wrapped").is_none());
+    assert!(ws.program.get_function("PyResultLocal.wrapped").is_some());
     let legacy = "+module PyResultTrusted\n+fn wrapped ()->Result<String> [async]\n +return Ok(\"ok\")\n+end\n+fn probe ()->Result<String> [async]\n +await value:Result<String> = PyResultTrusted.wrapped()\n +return value\n+end";
     let existing = execute_native_tool(
         "mutate",
@@ -398,7 +398,7 @@ async fn python_user_result_await_is_refused_for_local_existing_and_printed_call
         &baseline,
     )
     .await;
-    assert!(external.execution.has_errors && external.content.contains("#82"));
+    assert!(!external.execution.has_errors, "{}", external.content);
     let inspected = execute_native_tool(
         "inspect",
         r#"{"kind":"source","target":"PyResultTrusted.probe","format":"python"}"#,
@@ -407,7 +407,10 @@ async fn python_user_result_await_is_refused_for_local_existing_and_printed_call
         &baseline,
     )
     .await;
-    assert!(inspected.execution.has_errors && inspected.content.contains("#82"));
+    assert!(!inspected.execution.has_errors, "{}", inspected.content);
+    let printed: serde_json::Value = serde_json::from_str(&inspected.content).unwrap();
+    let resubmitted = execute_native_tool("mutate", &json!({"language":"python","module":"PyResultTrusted","source":printed["query_results"].as_str().unwrap()}).to_string(), &cfg, &mut ws, &baseline).await;
+    assert!(!resubmitted.execution.has_errors, "{}", resubmitted.content);
 }
 
 #[tokio::test]

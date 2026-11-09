@@ -188,6 +188,43 @@ fn source_policy_active(dir: &Path, state: Option<&LibraryState>) -> Result<bool
     source::manifest_present(dir)
 }
 
+/// Test-only: load a fixture library directory exactly as startup does.
+#[cfg(test)]
+pub(crate) fn load_library_from_dir_for_tests(program: &mut ast::Program, dir: &Path) -> LibraryState {
+    let mut state = LibraryState::new();
+    load_module_files(program, dir, &mut state);
+    state
+}
+
+pub(crate) const REWIND_REFUSAL: &str =
+    "rewind/undo not supported for manifest-managed libraries; make an explicit edit instead";
+
+/// Rewind rebuilds the Program from mutation history only. Disk-loaded managed
+/// modules have no startup baseline in that history, so a rewind would drop or
+/// misstate them. Refuse before any state change whenever source policy is
+/// active (retained, including an empty manifest) or cannot be inspected.
+/// A library directory that does not exist means no policy (legacy/CLI use).
+pub fn refuse_managed_rewind(state: Option<&LibraryState>) -> Result<()> {
+    refuse_managed_rewind_in(&library_dir(), state)
+}
+
+fn refuse_managed_rewind_in(dir: &Path, state: Option<&LibraryState>) -> Result<()> {
+    let retained = match state {
+        Some(state) => state.check_source_available().and_then(|()| state.has_source_manifest()),
+        None => Ok(false),
+    };
+    if !matches!(retained, Ok(false)) {
+        bail!(REWIND_REFUSAL);
+    }
+    if matches!(std::fs::symlink_metadata(dir), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(());
+    }
+    match source::manifest_present(dir) {
+        Ok(false) => Ok(()),
+        _ => bail!(REWIND_REFUSAL),
+    }
+}
+
 /// Default library directory path.
 ///
 /// `ADAPSIS_MODULES_DIR` overrides it, so a second instance can be run against

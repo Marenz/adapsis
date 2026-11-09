@@ -47,9 +47,9 @@ fn result_match_on_io_builtin_without_await() {
     let source = "@effects('io')\nasync def fetch(url: str) -> str:\n    match http_get(url):\n        case Ok(body):\n            return body\n        case Err(e):\n            return concat('ERR ', e)\n";
     let original = program(source);
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+match http_get(url)"));
-    assert!(lowered.canonical_adapsis.contains("+case Ok(body)"));
-    assert!(lowered.canonical_adapsis.contains("+case Err(e)"));
+    assert!(lowered.legacy_export().unwrap().contains("+match http_get(url)"));
+    assert!(lowered.legacy_export().unwrap().contains("+case Ok(body)"));
+    assert!(lowered.legacy_export().unwrap().contains("+case Err(e)"));
     let printed = printer::print_function(&original, "Example.fetch").unwrap();
     assert!(printed.contains("case Ok(body):"));
     assert!(printed.contains("case Err(e):"));
@@ -62,7 +62,7 @@ fn nested_patterns_and_wildcard_roundtrip() {
     let source = "@union\nclass Node:\n    Value: tuple[int]\n    Wrapped: tuple[\"Node\"]\n\ndef depth(n: Node) -> int:\n    match n:\n        case Value(_):\n            return 0\n        case Wrapped(Value(_)):\n            return 1\n        case _:\n            return -1\n";
     let original = program(source);
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+case Wrapped(Value(_))"));
+    assert!(lowered.legacy_export().unwrap().contains("+case Wrapped(Value(_))"));
     let printed = printer::print_function(&original, "Example.depth").unwrap();
     assert!(printed.contains("case Wrapped(Value(_)):"));
     let type_text = printer::print_type(&original, "Example.Node").unwrap();
@@ -87,9 +87,9 @@ fn literal_and_zero_payload_patterns_roundtrip() {
     let source = "@union\nclass Kind:\n    Tag: tuple[str]\n    Level: tuple[int]\n    Nil: tuple[()]\n\ndef kind_of(k: Kind) -> int:\n    match k:\n        case Tag(\"x\"):\n            return 1\n        case Level(0):\n            return 2\n        case Nil():\n            return 3\n        case _:\n            return 0\n";
     let original = program(source);
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+case Tag(\"x\")"));
-    assert!(lowered.canonical_adapsis.contains("+case Level(0)"));
-    assert!(lowered.canonical_adapsis.contains("+case Nil"));
+    assert!(lowered.legacy_export().unwrap().contains("+case Tag(\"x\")"));
+    assert!(lowered.legacy_export().unwrap().contains("+case Level(0)"));
+    assert!(lowered.legacy_export().unwrap().contains("+case Nil"));
     let printed = printer::print_function(&original, "Example.kind_of").unwrap();
     assert!(printed.contains("case Nil():"));
     let type_text = printer::print_type(&original, "Example.Kind").unwrap();
@@ -102,8 +102,8 @@ fn none_variant_value_and_case_roundtrip() {
     let source = "@union\nclass Maybe:\n    Some: tuple[int]\n    Nope: tuple[()]\n\ndef is_some(o: Maybe) -> bool:\n    match o:\n        case Some(_):\n            return True\n        case Nope():\n            return False\n";
     let original = program(source);
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+type Maybe = Some(Int) | Nope"));
-    assert!(lowered.canonical_adapsis.contains("+case Nope"));
+    assert!(lowered.legacy_export().unwrap().contains("+type Maybe = Some(Int) | Nope"));
+    assert!(lowered.legacy_export().unwrap().contains("+case Nope"));
     assert_eq!(evaluate(&original, "Example.is_some", "Nope"), "false");
     assert_eq!(evaluate(&original, "Example.is_some", "Some(1)"), "true");
     let printed = printer::print_function(&original, "Example.is_some").unwrap();
@@ -117,9 +117,9 @@ fn none_variant_value_and_case_roundtrip() {
 fn none_keyword_value_and_case_roundtrip_structurally() {
     let source = "def classify(o: Option[int]) -> str:\n    match o:\n        case Some(v):\n            return 'some'\n        case None:\n            return 'none'\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+case None"));
+    assert!(lowered.legacy_export().unwrap().contains("+case None"));
     let value = lower_module("def nothing() -> str:\n    return None\n", "Example").unwrap();
-    assert!(value.canonical_adapsis.contains("+return None"));
+    assert!(value.legacy_export().unwrap().contains("+return None"));
     let original = program(source);
     let printed = printer::print_function(&original, "Example.classify").unwrap();
     assert!(printed.contains("case None:"));

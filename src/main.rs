@@ -13,6 +13,7 @@ mod eval;
 mod events;
 pub mod intern;
 mod logging;
+mod cli_test;
 mod permissions;
 mod capabilities;
 pub mod library;
@@ -1094,136 +1095,8 @@ async fn main() -> Result<()> {
             println!("{program}");
         }
         Command::Test { path, language, module, tests } => {
-            let source = python_cli::test_source(&path, &language, module.as_deref(), tests.as_deref())?;
-            let operations = parser::parse(&source)?;
-            let mut program = ast::Program::default();
-            let mut test_ops = vec![];
-            let mut io_mocks: Vec<session::IoMock> = vec![];
-            let mut fn_stubs: Vec<session::FunctionStub> = vec![];
-            // Standalone registries for ?tasks / ?inspect queries (empty but real).
-            let task_registry: coroutine::TaskRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-            let snapshot_registry: coroutine::TaskSnapshotRegistry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-            for op in &operations {
-                match op {
-                    parser::Operation::Test(_) => test_ops.push(op.clone()),
-                    parser::Operation::Module(m) => {
-                        // Collect tests embedded inside module bodies
-                        for body_op in &m.body {
-                            if let parser::Operation::Test(_) = body_op {
-                                test_ops.push(body_op.clone());
-                            }
-                        }
-                        // Still apply the module itself
-                        match validator::apply_and_validate(&mut program, op) {
-                            Ok(msg) => println!("OK: {msg}"),
-                            Err(e) => eprintln!("ERROR: {e}"),
-                        }
-                    }
-                    parser::Operation::Mock { operation, patterns, response } => {
-                        let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                        io_mocks.push(session::IoMock {
-                            operation: operation.clone(),
-                            patterns: patterns.clone(),
-                            response: response.clone(),
-                        });
-                        println!("OK: mock {operation} {pattern_display}");
-                    }
-                    parser::Operation::Unmock => {
-                        let count = io_mocks.len();
-                        io_mocks.clear();
-                        println!("OK: cleared {count} mocks");
-                    }
-                    parser::Operation::Stub { function_name, patterns, response_expr } => {
-                        let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                        fn_stubs.push(session::FunctionStub {
-                            function_name: function_name.clone(),
-                            patterns: patterns.clone(),
-                            response_expr: response_expr.clone(),
-                        });
-                        println!("OK: stub {function_name} {pattern_display} -> {response_expr}");
-                    }
-                    parser::Operation::Unstub => {
-                        let count = fn_stubs.len();
-                        fn_stubs.clear();
-                        println!("OK: cleared {count} stubs");
-                    }
-                    parser::Operation::Trace(trace) => {
-                        println!("\n--- Tracing {} ---", trace.function_name);
-                        match eval::trace_function(&program, &trace.function_name, &trace.input) {
-                            Ok(steps) => {
-                                for step in &steps {
-                                    println!("  > {step}");
-                                }
-                            }
-                            Err(e) => eprintln!("  TRACE ERROR: {e}"),
-                        }
-                    }
-                    parser::Operation::Eval(ev) => {
-                        if let Some(ref expr) = ev.inline_expr {
-                            // Inline expression: evaluate directly
-                            match eval::eval_inline_expr(&program, expr) {
-                                Ok(val) => println!("  = {val}"),
-                                Err(e) => eprintln!("  EVAL ERROR: {e}"),
-                            }
-                        } else {
-                            match eval::eval_compiled_or_interpreted(
-                                &program,
-                                &ev.function_name,
-                                &ev.input,
-                            ) {
-                                Ok((result, compiled)) => {
-                                    let tag = if compiled { " [compiled]" } else { "" };
-                                    println!("  eval {}(...) = {result}{tag}", ev.function_name);
-                                }
-                                Err(e) => eprintln!("  EVAL ERROR: {e}"),
-                            }
-                        }
-                    }
-                    parser::Operation::Query(query) => {
-                        let response = if query.trim() == "?tasks" {
-                            api::format_tasks(&Some(task_registry.clone()))
-                        } else if let Some(tid) = api::parse_inspect_task_query(query.trim()) {
-                            api::format_inspect_task(&Some(task_registry.clone()), &Some(snapshot_registry.clone()), tid)
-                        } else {
-                            let table = typeck::build_symbol_table(&program);
-                            typeck::handle_query(&program, &table, query, &[])
-                        };
-                        println!("\n--- Query: {query} ---\n{response}");
-                    }
-                    _ => match validator::apply_and_validate(&mut program, op) {
-                        Ok(msg) => println!("OK: {msg}"),
-                        Err(e) => eprintln!("ERROR: {e}"),
-                    },
-                }
-            }
-            // Set up shared meta so function stubs are accessible during tests
-            {
-                let mut meta = session::SessionMeta::new();
-                meta.io_mocks = io_mocks.clone();
-                meta.function_stubs = fn_stubs.clone();
-                eval::set_shared_meta(Some(std::sync::Arc::new(std::sync::Mutex::new(meta))));
-            }
-            let mut passed = 0usize;
-            let mut failed = 0usize;
-            for test_op in &test_ops {
-                if let parser::Operation::Test(test) = test_op {
-                    println!("\n--- Testing {} ---", test.function_name);
-                    for (i, case) in test.cases.iter().enumerate() {
-                        match eval::eval_test_case_with_mocks(&program, &test.function_name, case, &io_mocks, &[]) {
-                            Ok(msg) => {
-                                passed += 1;
-                                println!("  PASS [{i}]: {msg}");
-                            }
-                            Err(e) => {
-                                failed += 1;
-                                eprintln!("  FAIL [{i}]: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-            println!("\nTEST SUMMARY: {passed} passed, {failed} failed");
-            if failed > 0 {
+            let operations = python_cli::test_operations(&path, &language, module.as_deref(), tests.as_deref())?;
+            if cli_test::run(&operations).failed > 0 {
                 std::process::exit(1);
             }
         }
@@ -1313,7 +1186,7 @@ async fn main() -> Result<()> {
                 let mut env = eval::Env::new_with_shared_interner(&program_clone.shared_interner);
                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
 
-                eval::eval_function_body_pub(&program_clone, &func_decl.body, &mut env)
+                eval::eval_declared_function_unframed(&program_clone, &func_clone, func_decl, &mut env)
             });
 
             // Event loop — process IO requests from coroutines
@@ -1376,7 +1249,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_named(&prog, &function_name, &func_decl.body, &mut env) {
+                                match eval::eval_declared_function(&prog, &function_name, &func_decl, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -1443,7 +1316,7 @@ async fn main() -> Result<()> {
                                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
                                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                                 env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_name)));
-                                                match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
+                                                match eval::eval_declared_function(&prog, &handler_name, &func, &mut env) {
                                                     Ok(val) => {
                                                         if crate::logging::content() {
                                                             eprintln!("[timer:{}] {} -> {}", alias, handler_name, val);
@@ -1504,7 +1377,7 @@ async fn main() -> Result<()> {
                 result = eval_task => {
                     match result? {
                         Ok(val) => println!("Result: {val}"),
-                        Err(e) => eprintln!("Error: {e}"),
+                        Err(error) => return Err(error),
                     }
                 }
                 _ = io_loop => {}
@@ -1802,7 +1675,7 @@ async fn main() -> Result<()> {
                                         env.set(&param.name, val.clone());
                                     }
                                 }
-                                match eval::eval_function_body_named(&program, &function_name, &func_decl.body, &mut env) {
+                                match eval::eval_declared_function(&program, &function_name, &func_decl, &mut env) {
                                     Ok(val) => {
                                         if let Ok(mut tasks) = registry.lock() {
                                             if let Some(info) = tasks.get_mut(&task_id) {
@@ -1876,7 +1749,7 @@ async fn main() -> Result<()> {
                                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
                                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                                 env.set("__module_name", eval::Value::String(std::sync::Arc::new(module_for_tick)));
-                                                match eval::eval_function_body_named(&prog, &handler_name, &func.body, &mut env) {
+                                                match eval::eval_declared_function(&prog, &handler_name, &func, &mut env) {
                                                     Ok(val) => {
                                                         if crate::logging::content() {
                                                             eprintln!("[timer:{}] {} -> {}", alias_for_tick, handler_name, val);
@@ -2786,7 +2659,7 @@ async fn main() -> Result<()> {
             if success {
                 println!("= {result}{tag}");
             } else {
-                println!("Error: {result}");
+                anyhow::bail!("{result}");
             }
         }
         Command::Query { query, api } => {

@@ -131,9 +131,11 @@ fn telegram_port_http_post_wrapper_boundary_observation() {
                     eval::set_shared_program(None);
                     let requests = responder.join().unwrap();
                     println!("WRAPPER_OBSERVATION direct_tree={direct_tree} qualified={qualified} parts={parts} fail={fail} requests={} result={result:?}", requests.len());
-                    // #82 dispatch admission now chooses tree BEFORE execution
-                    // for the normal route too. Result/error wrapping itself is
-                    // unchanged: transport Err still fails at the consumer.
+                    // Frozen legacy wrapper is misannotated String but returns builtin
+                    // Result. C now preserves the user-await value: BOTH success and
+                    // failure reach the String consumer with the wrong type. This is an
+                    // explicit compatibility characterization, not a fixture exemption
+                    // or the corrected/migrated app-union port (whose tests stay intact).
                     assert_eq!(requests.len(), 1);
                     if !parts {
                         match result.unwrap() {
@@ -145,14 +147,10 @@ fn telegram_port_http_post_wrapper_boundary_observation() {
                             }
                             other => panic!("unexpected direct wrapper: {other}"),
                         }
-                    } else if fail {
+                    } else {
                         assert_eq!(
                             result.unwrap_err().to_string(),
                             "index_of expects (String, String)"
-                        );
-                    } else {
-                        assert!(
-                            matches!(result.unwrap(), Value::String(ref text) if text.as_str() == "{\"ok\":true}")
                         );
                     }
                 }
@@ -216,5 +214,5 @@ fn run_entry(
             eval::eval_parser_expr_with_program(&field.value, program)?,
         );
     }
-    eval::eval_function_body_named(program, name, &function.body, &mut env)
+    eval::eval_declared_function(program, name, function, &mut env)
 }

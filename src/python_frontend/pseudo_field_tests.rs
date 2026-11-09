@@ -46,7 +46,7 @@ fn tree(program: &ast::Program, target: &str, args: Vec<Value>) -> String {
     for (param, arg) in function.params.iter().zip(args) {
         env.set(&param.name, arg);
     }
-    match eval::eval_function_body_named(program, target, &function.body, &mut env) {
+    match eval::eval_declared_function(program, target, function, &mut env) {
         Ok(value) => format!("{value}"),
         Err(error) => format!("ERR {error}"),
     }
@@ -291,10 +291,10 @@ fn everything_outside_the_type_gate_keeps_a_precise_refusal() {
 #[test]
 fn native_entry_and_preflight_agree_with_the_free_lowering() {
     for (python, ..) in forms() {
-        let free = lower_module(python, "G1").unwrap().canonical_adapsis;
+        let free = lower_module(python, "G1").unwrap().legacy_export().unwrap();
         let native = lower_module_with_program(python, "G1", &ast::Program::default())
             .unwrap_or_else(|e| panic!("{python}\n{e}"))
-            .canonical_adapsis;
+            .legacy_export().unwrap();
         assert_eq!(free, native);
     }
     for source in [

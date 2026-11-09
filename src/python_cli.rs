@@ -1,12 +1,12 @@
 //! Deterministic CLI demonstration of the production Python frontend.
 use anyhow::{Context, Result, bail};
 
-pub fn test_source(
+pub fn test_operations(
     path: &str,
     language: &str,
     module: Option<&str>,
     tests: Option<&str>,
-) -> Result<String> {
+) -> Result<Vec<crate::parser::Operation>> {
     match language {
         "adapsis" => {
             if module.is_some() || tests.is_some() {
@@ -14,7 +14,9 @@ pub fn test_source(
                     "--module and --tests require --language python; Adapsis files already contain their declarations and tests"
                 );
             }
-            std::fs::read_to_string(path).with_context(|| format!("read test source {path}"))
+            let source = std::fs::read_to_string(path)
+                .with_context(|| format!("read test source {path}"))?;
+            crate::parser::parse(&source)
         }
         "python" => {
             let module = module
@@ -41,10 +43,9 @@ pub fn test_source(
                 .map_err(anyhow::Error::msg)?;
             crate::python_frontend::validate_runtime_arguments(&tests.operations, &program)
                 .map_err(anyhow::Error::msg)?;
-            Ok(format!(
-                "{}\n{}",
-                module.canonical_adapsis, tests.canonical_adapsis
-            ))
+            let mut operations = module.operations;
+            operations.extend(tests.operations);
+            Ok(operations)
         }
         _ => bail!("unsupported test language; expected adapsis or python"),
     }
@@ -54,5 +55,45 @@ fn module_name(lowered: &crate::python_frontend::LoweredSource) -> Result<&str> 
     match lowered.operations.as_slice() {
         [crate::parser::Operation::Module(module)] => Ok(&module.name),
         _ => bail!("Python module lowering did not produce exactly one explicit module"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn typed_python_cli_normal_path_without_legacy_exporter() {
+        if !crate::logging::tests::child() {
+            crate::logging::tests::capture_with_env(
+                "python_cli::tests::typed_python_cli_normal_path_without_legacy_exporter",
+                false,
+                &[("ADAPSIS_TEST_DENY_LEGACY_EXPORT", "1")],
+            );
+            return;
+        }
+        let root = env!("CARGO_MANIFEST_DIR");
+        for (file, module, count) in [
+            ("basic", "CliNoExportBasic", 2),
+            ("flow", "CliNoExportFlow", 7),
+        ] {
+            let source = format!("{root}/examples/python/{file}.py");
+            let tests = format!("{root}/examples/python/test_{file}.py");
+            let operations =
+                super::test_operations(&source, "python", Some(module), Some(&tests)).unwrap();
+            let summary = crate::cli_test::run(&operations);
+            assert_eq!((summary.passed, summary.failed), (count, 0));
+        }
+        let lowered =
+            crate::python_frontend::lower_module("def value() -> int:\n    return 1\n", "Control")
+                .unwrap();
+        assert_eq!(
+            lowered.legacy_export().unwrap_err().message,
+            "legacy exporter unavailable in fixture"
+        );
+        assert_eq!(
+            crate::python_frontend::lower_input("7")
+                .unwrap_err()
+                .message,
+            "legacy exporter unavailable in fixture"
+        );
     }
 }

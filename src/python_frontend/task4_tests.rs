@@ -25,7 +25,7 @@ fn reject(source: &str, fragment: &str) -> Diagnostic {
 fn call_propagation_roundtrips_as_plus_call() {
     let source = "@effects('fail')\ndef f(name: str) -> str:\n    result: str = propagate(concat('hi ', name))\n    return result\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+call result:String = concat(\"hi \", name)"));
+    assert!(lowered.legacy_export().unwrap().contains("+call result:String = concat(\"hi \", name)"));
     let original = program(source);
     let printed = printer::print_function(&original, "Example.f").unwrap();
     assert!(printed.contains("propagate(concat("));
@@ -37,7 +37,7 @@ fn call_propagation_roundtrips_as_plus_call() {
 fn check_statement_roundtrips() {
     let source = "def f(x: int) -> int:\n    check('valid', x > 0, 'err_negative')\n    return x\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+check valid (x > 0) ~err_negative"));
+    assert!(lowered.legacy_export().unwrap().contains("+check valid (x > 0) ~err_negative"));
     let original = program(source);
     let printed = printer::print_function(&original, "Example.f").unwrap();
     assert!(printed.contains("check(\"valid\", (x > 0), \"err_negative\")"));
@@ -49,8 +49,8 @@ fn check_statement_roundtrips() {
 fn spawn_bare_and_bound_roundtrip() {
     let source = "def task() -> str:\n    return 'done'\n\n@effects('io')\nasync def f() -> str:\n    spawn(task())\n    t: int = spawn(task())\n    return 'ok'\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+spawn Example.task()"));
-    assert!(lowered.canonical_adapsis.contains("+spawn t:Int = Example.task()"));
+    assert!(lowered.legacy_export().unwrap().contains("+spawn Example.task()"));
+    assert!(lowered.legacy_export().unwrap().contains("+spawn t:Int = Example.task()"));
     let original = program(source);
     let printed = printer::print_function(&original, "Example.f").unwrap();
     assert!(printed.contains("spawn(Example.task())"));
@@ -64,8 +64,8 @@ fn spawn_bare_and_bound_roundtrip() {
 fn div_rem_helpers_lower_to_operators_and_eval() {
     let source = "def half(x: int) -> int:\n    return div(x, 2)\n\ndef parity(x: int) -> int:\n    return rem(x, 2)\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("+return (x / 2)"));
-    assert!(lowered.canonical_adapsis.contains("+return (x % 2)"));
+    assert!(lowered.legacy_export().unwrap().contains("+return (x / 2)"));
+    assert!(lowered.legacy_export().unwrap().contains("+return (x % 2)"));
     let original = program(source);
     assert_eq!(
         crate::eval::eval_call_with_input(&original, "Example.half", &parser::parse_test_input(1, "7").unwrap()).unwrap(),
@@ -85,7 +85,7 @@ fn div_rem_helpers_lower_to_operators_and_eval() {
 fn all_effects_roundtrip_through_effects_decorator() {
     let source = "@effects('rand', 'parallel', 'unsafe', 'yield')\ndef f() -> int:\n    return 1\n";
     let lowered = lower_module(source, "Example").unwrap();
-    assert!(lowered.canonical_adapsis.contains("[rand, parallel, unsafe, yield]"));
+    assert!(lowered.legacy_export().unwrap().contains("[rand, parallel, unsafe, yield]"));
     let original = program(source);
     let printed = printer::print_function(&original, "Example.f").unwrap();
     assert!(printed.contains("@effects(\"rand\", \"parallel\", \"unsafe\", \"yield\")"));

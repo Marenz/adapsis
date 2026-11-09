@@ -350,6 +350,59 @@ fn managed_python_load_modify_save_restart_preserves_cases_without_forging_passe
 }
 
 #[test]
+fn managed_python_loaded_cases_carry_typed_payload_and_invalid_typed_refuses_save() {
+    let dir = python_library();
+    let (mut program, state) = load(dir.path());
+    let tests = &program.get_function("A.value").unwrap().tests;
+    assert!(tests
+        .iter()
+        .all(|case| case.typed.is_some() && !case.passed));
+    for case in tests {
+        case.typed.as_ref().unwrap().case().unwrap();
+    }
+    // Display strings disagree with the typed payload: the printer must emit
+    // the validated typed case, never the legacy string fallback.
+    let mut function = (*program.get_function("A.value").unwrap()).clone();
+    function.tests[0].expected = "999".into();
+    let printed =
+        crate::python_frontend::print_python_module(&program_with(&program, function.clone()), "A")
+            .unwrap();
+    assert!(printed.contains("== 3") && !printed.contains("999"));
+    // A present but invalid typed payload is an error, not a silent fallback.
+    let mut json = serde_json::to_value(&function.tests[0]).unwrap();
+    json["typed"]["version"] = serde_json::json!(2);
+    function.tests[0] = serde_json::from_value(json).unwrap();
+    program = program_with(&program, function);
+    let receipt = flush(&program, &state, dir.path());
+    assert_eq!(receipt.failures.len(), 1);
+    assert!(state.pending_source_names().contains("A"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("A.py")).unwrap(),
+        PYTHON
+    );
+}
+
+fn program_with(
+    program: &crate::ast::Program,
+    function: crate::ast::FunctionDecl,
+) -> crate::ast::Program {
+    let mut program = program.clone();
+    let module = program
+        .modules
+        .iter_mut()
+        .find(|module| module.name == "A")
+        .unwrap();
+    let slot = module
+        .functions
+        .iter_mut()
+        .find(|f| f.name == function.name)
+        .unwrap();
+    *slot = std::sync::Arc::new(function);
+    program.rebuild_function_index();
+    program
+}
+
+#[test]
 #[ignore = "invoked only by the isolated parent roundtrip test in a fresh process"]
 fn managed_restart_child_loads_python_and_runs_cases() {
     let dir = std::path::PathBuf::from(
@@ -436,6 +489,8 @@ fn managed_python_load_ignores_stale_session_callees_and_commits_whole_set() {
 fn managed_python_unsupported_test_refuses_entire_save() {
     let dir = python_library();
     let (mut program, state) = load(dir.path());
+    // A legacy (untyped) record whose display string is unsupported.
+    program.get_function_mut("A.value").unwrap().tests[0].typed = None;
     program.get_function_mut("A.value").unwrap().tests[0].input =
         "arbitrary_unknown_helper()".to_string();
     let receipt = flush(&program, &state, dir.path());
@@ -641,6 +696,8 @@ fn managed_disjoint_mutations_queue_without_writing_and_flush_the_merged_live_pr
 fn managed_failed_save_keeps_pending_recovery_cache_without_making_it_source_authority() {
     let dir = python_library();
     let (mut program, state) = load(dir.path());
+    // A legacy (untyped) record whose display string is unsupported.
+    program.get_function_mut("A.value").unwrap().tests[0].typed = None;
     program.get_function_mut("A.value").unwrap().tests[0].input =
         "unsupported_saved_helper()".into();
     for _ in 0..2 {
@@ -760,4 +817,40 @@ fn managed_whitelist_refuses_unlisted_cached_code_and_ignores_route_hijack_files
         std::fs::read_to_string(dir.path().join("A.py")).unwrap(),
         routed
     );
+}
+
+#[test]
+fn managed_rejected_signature_change_restores_whole_function_live_and_on_disk() {
+    let dir = python_library();
+    let (program, state) = load(dir.path());
+    let original = program.get_function("A.value").unwrap().clone();
+    let mut session = crate::session::Session::new();
+    session.program = program;
+    session.meta.library_state = Some(state.clone());
+    // Changes params, return type and body; the stored one-argument cases fail.
+    let results = session
+        .apply("+module A\n+fn value (x:Int, y:Int)->String\n  +return \"changed\"\n+end\n")
+        .unwrap();
+    assert!(
+        results
+            .iter()
+            .any(|(message, ok)| !ok && message.contains("REJECTED")),
+        "{results:?}"
+    );
+    let live = session.program.get_function("A.value").unwrap();
+    assert_eq!(live.params, original.params);
+    assert_eq!(live.return_type, original.return_type);
+    assert_eq!(live.effects, original.effects);
+    assert_eq!(live.body, original.body);
+    assert_eq!(
+        live.tests, original.tests,
+        "pass flags are restored, not forged"
+    );
+    let receipt = flush(&session.program, &state, dir.path());
+    assert!(receipt.failures.is_empty(), "{:?}", receipt.failures);
+    let (reloaded, _) = load(dir.path());
+    let disk = reloaded.get_function("A.value").unwrap();
+    assert_eq!(disk.params, original.params);
+    assert_eq!(disk.return_type, original.return_type);
+    assert_eq!(disk.body, original.body);
 }

@@ -17,6 +17,10 @@ use crate::parser;
 use crate::validator;
 mod conversation_view;
 mod native_history;
+pub mod replay;
+mod stored_tests;
+mod retest;
+mod application;
 
 /// Per-resource locked map of `+shared` variable values (issue #9, Tier 2).
 ///
@@ -246,8 +250,10 @@ pub type SharedMeta = Arc<std::sync::Mutex<SessionMeta>>;
 pub struct MutationEntry {
     pub revision: usize,
     pub timestamp: String,
-    /// The raw Adapsis source for this mutation (so we can replay it)
+    /// Exact submitted source; origin identifies Python module metadata.
     pub source: String,
+    #[serde(default, skip_serializing_if = "replay::SourceOrigin::is_adapsis")]
+    pub origin: replay::SourceOrigin,
     /// Human-readable summary of what changed
     pub summary: String,
     /// Whether this mutation was successfully applied
@@ -295,10 +301,10 @@ pub struct SessionMeta {
     pub mutations: Vec<MutationEntry>,
     /// Working history (evals, tests, queries)
     pub history: Vec<HistoryEntry>,
-    /// Current revision number (= number of successful mutations)
+    /// Current recorded revision, including rejected/partial definition attempts.
     pub revision: usize,
-    /// All raw mutation sources (for replay)
-    pub sources: Vec<String>,
+    /// Legacy source strings or versioned Python actual-outcome checkpoints.
+    pub sources: Vec<replay::ReplayEntry>,
     /// Conversation history for the LLM (persists across /api/ask calls)
     /// DEPRECATED: use conversations manager instead. Kept for backward compat with existing sessions.
     #[serde(default)]
@@ -1128,7 +1134,7 @@ impl Session {
     }
 
     /// Run a single test mutation synchronously and push results.
-    fn run_test_sync(&mut self, test: &parser::TestMutation, results: &mut Vec<(String, bool)>) {
+    fn run_test_sync(&mut self, test: &parser::TestMutation, results: &mut Vec<(String, bool)>, typed: bool) {
         let mut all_passed = true;
         for case in &test.cases {
             match crate::eval::eval_test_case_with_mocks(
@@ -1146,7 +1152,7 @@ impl Session {
             }
         }
         if all_passed && !test.cases.is_empty() {
-            self.store_test(&test.function_name, &test.cases);
+            store_test_payload(&mut self.program, &test.function_name, &test.cases, typed);
         }
     }
 
@@ -1156,6 +1162,7 @@ impl Session {
         test: &parser::TestMutation,
         io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
         results: &mut Vec<(String, bool)>,
+        typed: bool,
     ) {
         let mut all_passed = true;
         let needs_async = self
@@ -1207,7 +1214,7 @@ impl Session {
             }
         }
         if all_passed && !test.cases.is_empty() {
-            self.store_test(&test.function_name, &test.cases);
+            store_test_payload(&mut self.program, &test.function_name, &test.cases, typed);
         }
     }
 
@@ -1247,151 +1254,22 @@ impl Session {
 
     /// Save pre-mutation backups of function bodies for affected functions
     /// that already have tests (for reject-on-fail).
-    fn backup_affected_bodies(&self, op: &parser::Operation) -> HashMap<String, Vec<ast::Statement>> {
+    /// Snapshot the complete prior declaration (shared Arc, not a deep copy) of
+    /// every tested function the operation may replace.
+    fn backup_affected_bodies(
+        &mut self,
+        op: &parser::Operation,
+    ) -> HashMap<String, std::sync::Arc<ast::FunctionDecl>> {
         let affected = Self::affected_function_names(op);
         let mut backups = HashMap::new();
         for name in &affected {
-            if let Some(func) = self.program.get_function(name) {
-                if !func.tests.is_empty() {
-                    backups.insert(name.clone(), func.body.clone());
+            if let Some(slot) = retest::function_slot(&mut self.program, name) {
+                if !slot.tests.is_empty() {
+                    backups.insert(name.clone(), slot.clone());
                 }
             }
         }
         backups
-    }
-
-    /// Invalidate test status for affected functions, then re-run any stored
-    /// tests. If any test fails, REVERT the function body to its pre-change
-    /// state (reject-on-fail). Returns a list of (fn_name, passed, detail)
-    /// for each re-run.
-    ///
-    /// `pre_backups` must be captured BEFORE `apply_and_validate` so the
-    /// backup contains the original (pre-mutation) function body.
-    fn invalidate_and_retest(
-        &mut self,
-        op: &parser::Operation,
-        pre_backups: HashMap<String, Vec<ast::Statement>>,
-    ) -> Vec<(String, bool, String)> {
-        let affected = Self::affected_function_names(op);
-        if affected.is_empty() {
-            return Vec::new();
-        }
-
-        let backups = pre_backups;
-
-        // Invalidate: reset AST passed flags
-        for name in &affected {
-            if let Some(func) = self.program.get_function_mut(name) {
-                for t in &mut func.tests {
-                    t.passed = false;
-                }
-            }
-        }
-
-        let mut retest_results = Vec::new();
-
-        for name in &affected {
-            // Read test cases from the function's AST (primary source of truth)
-            let ast_cases: Vec<ast::TestCase> = self.program.get_function(name)
-                .map(|f| f.tests.clone())
-                .unwrap_or_default();
-
-            if ast_cases.is_empty() {
-                continue;
-            }
-
-            // Reconstruct test source and re-run
-            let bare = name.rsplit('.').next().unwrap_or(name);
-            let mut test_src = format!("+test {bare}\n");
-            for case in &ast_cases {
-                // Reconstruct the expect portion, including matcher syntax
-                let expect_str = reconstruct_expect(&case.expected, case.matcher.as_deref());
-                test_src.push_str(&format!(
-                    "  +with {} -> expect {}\n",
-                    ast::escape_test_input_linebreaks(&case.input),
-                    ast::escape_test_input_linebreaks(&expect_str)
-                ));
-                for ac in &case.after_checks {
-                    test_src.push_str(&format!("  +after {} {} \"{}\"\n", ac.target, ac.matcher, ac.value));
-                }
-            }
-
-            match parser::parse(&test_src) {
-                Ok(ops) => {
-                    for test_op in &ops {
-                        if let parser::Operation::Test(test) = test_op {
-                            let mut all_passed = true;
-                            for case in &test.cases {
-                                match crate::eval::eval_test_case_with_mocks(
-                                    &self.program,
-                                    &test.function_name,
-                                    case,
-                                    &self.meta.io_mocks,
-                                    &self.runtime.http_routes,
-                                ) {
-                                    Ok(msg) => {
-                                        retest_results.push((
-                                            name.clone(),
-                                            true,
-                                            format!("retest PASS: {msg}"),
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        all_passed = false;
-                                        retest_results.push((
-                                            name.clone(),
-                                            false,
-                                            format!("retest FAIL: {e}"),
-                                        ));
-                                    }
-                                }
-                            }
-                            if all_passed {
-                                // Restore passed=true on AST tests after successful retest
-                                if let Some(func) = self.program.get_function_mut(name) {
-                                    for t in &mut func.tests {
-                                        t.passed = true;
-                                    }
-                                }
-                            } else {
-                                // Reject: revert to the backed-up body and restore test flags
-                                if let Some(old_body) = backups.get(name) {
-                                    if let Some(func) = self.program.get_function_mut(name) {
-                                        func.body = old_body.clone();
-                                        for t in &mut func.tests {
-                                            t.passed = true;
-                                        }
-                                    }
-                                    retest_results.push((
-                                        name.clone(),
-                                        false,
-                                        "REJECTED: replacement reverted because existing tests failed".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Parse error reconstructing tests — revert to be safe
-                    if let Some(old_body) = backups.get(name) {
-                        if let Some(func) = self.program.get_function_mut(name) {
-                            func.body = old_body.clone();
-                            for t in &mut func.tests {
-                                t.passed = true;
-                            }
-                        }
-                    }
-                    retest_results.push((
-                        name.clone(),
-                        false,
-                        format!("retest parse error (reverted): {e}"),
-                    ));
-                }
-            }
-        }
-
-        retest_results
     }
 
     /// Apply a block of Forge source code as a mutation (sync, mock-only tests).
@@ -1416,158 +1294,37 @@ impl Session {
         io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
     ) -> Result<Vec<(String, bool)>> {
         let operations = parser::parse(source)?;
+        self.apply_operations_async(&operations, &replay::Submission::adapsis(source), io_sender).await
+    }
+
+    pub async fn apply_operations_async(
+        &mut self,
+        operations: &[parser::Operation],
+        submission: &replay::Submission,
+        io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
+    ) -> Result<Vec<(String, bool)>> {
         let mut results = Vec::new();
         let mut any_definition = false;
+        let typed = matches!(submission.origin, replay::SourceOrigin::Python { .. });
+        submission.preflight_record(operations, &self.program, &self.meta)?;
+        let before_program = self.program.clone();
 
-        for op in &operations {
+        for op in operations {
+            if self.apply_control(op, &mut results) { continue; }
             match op {
                 parser::Operation::Test(test) => {
                     if io_sender.is_some() {
-                        self.run_test_async(test, io_sender, &mut results).await;
+                        self.run_test_async(test, io_sender, &mut results, typed).await;
                     } else {
-                        self.run_test_sync(test, &mut results);
+                        self.run_test_sync(test, &mut results, typed);
                     }
                 }
                 parser::Operation::Trace(_)
                 | parser::Operation::Eval(_)
                 | parser::Operation::Query(_) => {}
-                parser::Operation::Plan(action) => match action {
-                    parser::PlanAction::Set(steps) => {
-                        self.meta.plan = steps
-                            .iter()
-                            .map(|s| PlanStep {
-                                description: s.clone(),
-                                status: PlanStatus::Pending,
-                            })
-                            .collect();
-                        results.push((format!("Plan: {} steps", steps.len()), true));
-                    }
-                    parser::PlanAction::Progress(n) => {
-                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
-                            step.status = PlanStatus::Done;
-                            results.push((format!("Step {n} done"), true));
-                        }
-                    }
-                    parser::PlanAction::Fail(n) => {
-                        if let Some(step) = self.meta.plan.get_mut(n.saturating_sub(1)) {
-                            step.status = PlanStatus::Failed;
-                            results.push((format!("Step {n} failed"), true));
-                        }
-                    }
-                    parser::PlanAction::Show => {
-                        let plan_str = self
-                            .meta.plan
-                            .iter()
-                            .enumerate()
-                            .map(|(i, s)| {
-                                let icon = match s.status {
-                                    PlanStatus::Pending => "[ ]",
-                                    PlanStatus::InProgress => "[~]",
-                                    PlanStatus::Done => "[x]",
-                                    PlanStatus::Failed => "[!]",
-                                };
-                                format!("{} {}: {}", icon, i + 1, s.description)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        results.push((
-                            if plan_str.is_empty() {
-                                "No plan set".to_string()
-                            } else {
-                                format!("Plan:\n{plan_str}")
-                            },
-                            true,
-                        ));
-                    }
-                },
-                parser::Operation::Roadmap(action) => { results.push(self.handle_roadmap(action)); }
-                parser::Operation::Mock {
-                    operation,
-                    patterns,
-                    response,
-                } => {
-                    let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                    self.meta.io_mocks.push(IoMock {
-                        operation: operation.clone(),
-                        patterns: patterns.clone(),
-                        response: response.clone(),
-                    });
-                    results.push((
-                        format!(
-                            "mock: {operation} {pattern_display} -> \"{}\"",
-                            response.chars().take(50).collect::<String>()
-                        ),
-                        true,
-                    ));
-                }
-                parser::Operation::Unmock => {
-                    let count = self.meta.io_mocks.len();
-                    self.meta.io_mocks.clear();
-                    results.push((format!("cleared {count} mocks"), true));
-                }
-                parser::Operation::Stub { function_name, patterns, response_expr } => {
-                    let pattern_display = patterns.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(" ");
-                    self.meta.function_stubs.push(FunctionStub {
-                        function_name: function_name.clone(),
-                        patterns: patterns.clone(),
-                        response_expr: response_expr.clone(),
-                    });
-                    results.push((format!("stub: {function_name} {pattern_display} -> {}", response_expr.chars().take(60).collect::<String>()), true));
-                }
-                parser::Operation::Unstub => {
-                    let count = self.meta.function_stubs.len();
-                    self.meta.function_stubs.clear();
-                    results.push((format!("cleared {count} stubs"), true));
-                }
-                parser::Operation::Route { method, path, handler_fn } => {
-                    let qualified = self.qualify_route_handler(handler_fn);
-                    let route = ast::HttpRoute {
-                        method: method.clone(),
-                        path: path.clone(),
-                        handler_fn: qualified,
-                    };
-                    let msg = self.add_route(route);
-                    results.push((msg, true));
-                }
-                parser::Operation::RemoveRoute { method, path } => {
-                    match self.remove_route(method, path) {
-                        Ok(msg) => results.push((msg, true)),
-                        Err(e) => results.push((format!("{e}"), false)),
-                    }
-                }
-                parser::Operation::Sandbox(action) => {
-                    let msg = self.handle_sandbox(action);
-                    results.push(msg);
-                }
                 _ => {
                     any_definition = true;
-                    let pre_backups = self.backup_affected_bodies(op);
-                    match validator::apply_and_validate(&mut self.program, op) {
-                        Ok(msg) => {
-                            let pending: Vec<_> = self.program.pending_routes.drain(..).collect();
-                            for route in pending {
-                                let route_msg = self.add_route(route);
-                                results.push((route_msg, true));
-                            }
-                            results.push((msg, true));
-                            for (name, passed, detail) in self.invalidate_and_retest(op, pre_backups) {
-                                results.push((detail, passed));
-                                let _ = name;
-                            }
-                            if let parser::Operation::Module(m) = op {
-                                for body_op in &m.body {
-                                    if let parser::Operation::Test(test) = body_op {
-                                        if io_sender.is_some() {
-                                            self.run_test_async(test, io_sender, &mut results).await;
-                                        } else {
-                                            self.run_test_sync(test, &mut results);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => results.push((format!("{e}"), false)),
-                    }
+                    self.apply_declaration(op, io_sender, &mut results, typed).await;
                 }
             }
         }
@@ -1600,16 +1357,7 @@ impl Session {
         };
 
         if any_definition {
-            self.meta.revision += 1;
-            self.meta.mutations.push(MutationEntry {
-                revision: self.meta.revision,
-                timestamp: now(),
-                source: source.to_string(),
-                summary,
-                success,
-            });
-            self.meta.sources.push(source.to_string());
-
+            submission.record_into(&mut self.meta, operations, &before_program, &self.program, summary, success);
         }
 
         record_mutation_failures(&mut self.runtime, &results);
@@ -1727,7 +1475,15 @@ impl Session {
     /// Load session from a JSON file and replay mutations.
     pub fn load(path: &Path) -> Result<Self> {
         let json = std::fs::read_to_string(path)?;
-        let mut session: Session = serde_json::from_str(&json)?;
+        let mut session: Session = serde_json::from_str(&json).map_err(|error| anyhow!(
+            "invalid session encoding at line {}, column {}", error.line(), error.column()))?;
+        for (index, entry) in session.meta.sources.iter().enumerate() {
+            if matches!(entry, replay::ReplayEntry::Python(_)) {
+                entry.operations().map_err(|_| anyhow!("invalid python replay record at revision {}", index + 1))?;
+            }
+        }
+        replay::validate_stored_tests(&session.program)
+            .map_err(|_| anyhow!("invalid typed stored test payload"))?;
 
         // Rebuild function index (not serialized)
         session.program.rebuild_function_index();
@@ -1808,15 +1564,35 @@ pub async fn apply_to_tiers_async(
     source: &str,
     io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
 ) -> Result<Vec<(String, bool)>> {
+    let operations = match parser::parse(source) {
+        Ok(operations) => operations,
+        Err(error) => {
+            record_failure(runtime, format!("parse error: {error}"));
+            return Err(error);
+        }
+    };
+    apply_operations_to_tiers_async(program, runtime, meta, sandbox, &operations,
+        &replay::Submission::adapsis(source), io_sender).await
+}
+
+pub async fn apply_operations_to_tiers_async(
+    program: &mut ast::Program,
+    runtime: &mut RuntimeState,
+    meta: &mut SessionMeta,
+    sandbox: &mut Option<SandboxState>,
+    operations: &[parser::Operation],
+    submission: &replay::Submission,
+    io_sender: Option<&tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>>,
+) -> Result<Vec<(String, bool)>> {
     let mut session = Session {
         program: program.clone(),
         runtime: runtime.clone(),
         meta: meta.clone(),
         sandbox: sandbox.clone(),
     };
-    let result = session.apply_async(source, io_sender).await;
+    let result = session.apply_operations_async(operations, submission, io_sender).await;
     if let Err(e) = &result {
-        record_failure(&mut session.runtime, format!("parse error: {e}"));
+        record_failure(&mut session.runtime, format!("apply error: {e}"));
     }
     *program = session.program;
     *runtime = session.runtime;
@@ -1993,9 +1769,14 @@ pub fn is_function_tested(program: &ast::Program, fn_name: &str) -> bool {
 }
 
 pub fn store_test(program: &mut ast::Program, fn_name: &str, cases: &[parser::TestCase]) {
+    store_test_payload(program, fn_name, cases, false)
+}
+
+pub fn store_test_payload(program: &mut ast::Program, fn_name: &str, cases: &[parser::TestCase], typed: bool) {
     let ast_tests: Vec<ast::TestCase> = cases
         .iter()
         .map(|c| ast::TestCase {
+            typed: typed.then(|| replay::TypedTestCase::new(c)),
             input: format_expr(&c.input),
             expected: format_expr(&c.expected),
             passed: true,
@@ -2036,6 +1817,8 @@ pub fn rewind_to(
     sandbox: &mut Option<SandboxState>,
     target_revision: usize,
 ) -> Result<()> {
+    // Single choke point for !undo, /api/rewind and Session::rewind_to.
+    crate::library::refuse_managed_rewind(meta.library_state.as_ref())?;
     if target_revision > meta.sources.len() {
         return Err(anyhow!(
             "revision {} doesn't exist (latest is {})",
@@ -2044,22 +1827,9 @@ pub fn rewind_to(
         ));
     }
 
-    *program = ast::Program::default();
+    let rebuilt = replay::reconstruct(&meta.sources, &meta.mutations, target_revision)?;
+    *program = rebuilt;
     *runtime = RuntimeState::default();
-    for source in &meta.sources[..target_revision] {
-        let operations = parser::parse(source)?;
-        for op in &operations {
-            match op {
-                parser::Operation::Test(_)
-                | parser::Operation::Trace(_)
-                | parser::Operation::Eval(_)
-                | parser::Operation::Query(_) => {}
-                _ => {
-                    let _ = validator::apply_and_validate(program, op);
-                }
-            }
-        }
-    }
     meta.revision = target_revision;
     *sandbox = None;
     Ok(())

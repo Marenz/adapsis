@@ -129,7 +129,7 @@ fn wolfi_notes_path_matches_the_rust_persona_reader() {
         .expect("Wolfi.notes_path must exist");
     let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
     env.populate_shared_from_program(&program);
-    let value = eval::eval_function_body_named(&program, "Wolfi.notes_path", &func.body, &mut env)
+    let value = eval::eval_declared_function(&program, "Wolfi.notes_path", func, &mut env)
         .expect("Wolfi.notes_path must evaluate");
     let written = match value {
         eval::Value::String(s) => s.as_ref().clone(),

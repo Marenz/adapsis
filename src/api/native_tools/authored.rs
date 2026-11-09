@@ -84,17 +84,18 @@ pub(super) fn runtime_targets(
     match parsed {
         super::ParsedTool::Evaluate {
             function,
-            source,
+            operations: ops,
             python,
+            ..
         } => {
             exists(program, function)?;
-            let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
             if *python {
                 super::literals::require_python_entry(
                     program,
                     function,
                     super::scalar_entry::EntryUse::Execute(&ops),
                 )?;
+                crate::python_frontend::validate_entry_await_contract(program, function)?;
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }
             for op in ops {
@@ -106,13 +107,13 @@ pub(super) fn runtime_targets(
         }
         super::ParsedTool::Test {
             targets,
-            source,
+            operations: ops,
             python,
+            ..
         } => {
             targets
                 .iter()
                 .try_for_each(|target| exists(program, target))?;
-            let ops = crate::parser::parse(source).map_err(|error| error.to_string())?;
             if *python {
                 for target in targets {
                     super::literals::require_python_entry(
@@ -120,12 +121,13 @@ pub(super) fn runtime_targets(
                         target,
                         super::scalar_entry::EntryUse::Execute(&ops),
                     )?;
+                    crate::python_frontend::validate_entry_await_contract(program, target)?;
                 }
                 crate::python_frontend::validate_runtime_arguments(&ops, program)?;
             }
             for op in ops {
                 if let Operation::Test(test) = op {
-                    for case in test.cases {
+                    for case in &test.cases {
                         super::literals::check_runtime(&case.input, program)?;
                         super::literals::check_runtime(&case.expected, program)?;
                     }
@@ -134,12 +136,11 @@ pub(super) fn runtime_targets(
             Ok(())
         }
         super::ParsedTool::Mutate {
-            source,
+            operations: ops,
             python,
             roles,
             ..
         } => {
-            let ops = crate::parser::parse(source).map_err(|e| e.to_string())?;
             check_operations(
                 &ops,
                 config,

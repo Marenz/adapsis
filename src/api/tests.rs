@@ -3,6 +3,8 @@ use super::execute::collect_opencode_tasks;
 use axum::response::IntoResponse;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt as _; // for .oneshot()
+#[path = "result_contract_tests.rs"]
+mod result_contract_tests;
 
 #[path = "ask_completion_tests.rs"]
 mod ask_completion_tests;
@@ -10,6 +12,8 @@ mod ask_completion_tests;
 mod native_turn_tests;
 #[path = "execution_logging_tests.rs"]
 mod execution_logging_tests;
+#[path = "rewind_managed_tests.rs"]
+mod rewind_managed_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {

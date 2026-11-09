@@ -284,15 +284,39 @@ pub(super) async fn execute_code_with_baseline(
 ) -> CodeExecutionResult {
     let mut result = CodeExecutionResult::new();
 
-    if let Some(tools) = config.turn.as_ref().and_then(|t| t.guest_tools.as_ref()) {
-        if let Err(error) = crate::coroutine::scoped::validate_guest_code(code, tools, &session.program) {
-            result.push_err(error.to_string());
+    let operations = match crate::parser::parse(code) {
+        Ok(operations) => operations,
+        Err(error) => {
+            result.push_err(format_parse_error_with_context(&error, code));
             return result;
         }
-    }
+    };
+    execute_operations_with_baseline(operations, &crate::session::replay::Submission::adapsis(code),
+        config, session, agent_callback, completion_baseline).await
+}
 
-    match crate::parser::parse(code) {
-        Ok(ops) => {
+/// Internal typed entry. Native callers must finish whole-batch preflight and
+/// pinned authorization first; legacy/guest callers enter through the wrapper.
+pub(super) async fn execute_operations_with_baseline(
+    ops: Vec<crate::parser::Operation>,
+    submission: &crate::session::replay::Submission,
+    config: &AppConfig,
+    session: &mut WorkingSet,
+    agent_callback: Option<AgentCompletionCallback>,
+    completion_baseline: Option<&crate::ast::Program>,
+) -> CodeExecutionResult {
+    let mut result = CodeExecutionResult::new();
+    {
+            if let Some(tools) = config.turn.as_ref().and_then(|t| t.guest_tools.as_ref()) {
+                if let Err(error) = crate::coroutine::scoped::validate_guest_operations(&ops, tools, &session.program) {
+                    result.push_err(error.to_string());
+                    return result;
+                }
+            }
+            if let Err(error) = submission.check_recording(&ops, &session.meta) {
+                result.push_err(error.to_string());
+                return result;
+            }
             let opencode_tasks = collect_opencode_tasks(&ops);
             let mut needs_opencode_restart = false;
 
@@ -401,18 +425,8 @@ pub(super) async fn execute_code_with_baseline(
                     }
                 }
 
-                // Filter out !plan lines — already handled in the pre-pass above.
-                // Without this, apply_to_tiers_async re-parses the raw code and
-                // processes Plan operations a second time.
-                let mutation_code: String = code.lines()
-                    .filter(|line| {
-                        let trimmed = line.trim();
-                        !trimmed.starts_with("!plan ")
-                            && trimmed != "!plan"
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                match crate::session::apply_to_tiers_async(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, &mutation_code, config.io_sender.as_ref()).await {
+                let mutation_ops: Vec<_> = ops.iter().filter(|op| !matches!(op, crate::parser::Operation::Plan(_))).cloned().collect();
+                match crate::session::apply_operations_to_tiers_async(&mut session.program, &mut session.runtime, &mut session.meta, &mut session.sandbox, &mutation_ops, submission, config.io_sender.as_ref()).await {
                     Ok(res) => {
                         config.write_back_working_set(session).await;
                         for (msg, ok) in res {
@@ -468,7 +482,8 @@ pub(super) async fn execute_code_with_baseline(
                             }
                         }
                         if all_passed && !test.cases.is_empty() {
-                            crate::session::store_test(&mut session.program, &test.function_name, &test.cases);
+                            crate::session::store_test_payload(&mut session.program, &test.function_name, &test.cases,
+                                matches!(submission.origin, crate::session::replay::SourceOrigin::Python { .. }));
                         } else if !all_passed {
                             // Show the current function source alongside the
                             // failure so the model can fix the logic without a
@@ -1166,11 +1181,6 @@ pub(super) async fn execute_code_with_baseline(
                 result.needs_opencode_restart = true;
             }
         }
-        Err(e) => {
-            result.push_err(format_parse_error_with_context(&e, code));
-        }
-    }
-
     result
 }
 

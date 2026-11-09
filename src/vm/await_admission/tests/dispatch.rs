@@ -136,7 +136,7 @@ fn vm_user_await_original_handle_mocks_and_stubs_are_preserved() {
 }
 
 #[test]
-fn vm_user_await_pure_async_dispatch_preserves_frontend_result_restriction() {
+fn vm_user_await_python_result_acceptance_keeps_vm_pre_execution_refusal() {
     let program = program("+fn child ()->Int [async]\n  +return 7\n+end\n+fn root ()->Int [async]\n  +await value:Int = child()\n  +return value\n+end\n");
     let result = eval::eval_async_function(
         &program,
@@ -146,13 +146,12 @@ fn vm_user_await_pure_async_dispatch_preserves_frontend_result_restriction() {
     )
     .unwrap();
     assert!(matches!(result, Value::Int(7)));
-    let error = crate::python_frontend::lower_module("async def child() -> Result[str]:\n    return Ok('x')\nasync def root() -> str:\n    value: Result[str] = await child()\n    return 'x'\n", "Guard").unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("awaiting Result-returning user functions is unsupported"),
-        "{error}"
-    );
+    let lowered = crate::python_frontend::lower_module("async def child() -> Result[str]:\n    return Ok('x')\nasync def root() -> str:\n    value: Result[str] = await child()\n    match value:\n        case Ok(text):\n            return text\n        case Err(error):\n            return error\n", "Guard").unwrap();
+    let mut p = ast::Program::default();
+    for op in &lowered.operations { crate::validator::apply_and_validate(&mut p, op).unwrap(); }
+    let error = vm::compile_function(p.get_function("Guard.root").unwrap(), &p).unwrap_err();
+    assert!(error.to_string().contains("user-function await"), "{error}");
+    assert!(matches!(eval::eval_async_function(&p, "Guard.root", &parser::parse_single_expr("{}").unwrap(), CoroutineHandle::new_mock(vec![])).unwrap(), Value::String(text) if text.as_str()=="x"));
 }
 
 #[test]

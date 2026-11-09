@@ -194,7 +194,8 @@ fn roundtrip(expected: &ast::Program, bot: &parser::ModuleDecl, format: &parser:
                 .ok_or("stored target outside module")?.to_owned();
             if t.function_name.contains('.') {return Err("nested stored test target unsupported");}
         }
-        let mut canonical = lowered.canonical_adapsis;
+        // Explicit migration export oracle, never a production load path.
+        let mut canonical = lowered.legacy_export().map_err(|_| "canonical export failed")?;
         for op in &stored_tests {
             canonical.push('\n');
             canonical.push_str(&crate::python_frontend::emit::operations(std::slice::from_ref(op))

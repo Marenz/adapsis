@@ -4,7 +4,7 @@ use crate::parser as p;
 use rustpython_parser::ast as py;
 use std::collections::{HashMap, HashSet};
 
-pub fn lower_input(source: &str) -> Result<String, Diagnostic> {
+pub fn lower_input_expr(source: &str) -> Result<p::Expr, Diagnostic> {
     // This is parsed only; no Python code is executed. Validate the entire suite
     // so text closing the synthetic call cannot introduce another statement.
     let wrapped = format!("__input({source})");
@@ -24,26 +24,27 @@ pub fn lower_input(source: &str) -> Result<String, Diagnostic> {
             return Err(cx.at(c, "expected literal argument list"));
         }
         let value = arguments(&cx, c)?;
-        let emitted = super::emit::input(&value).map_err(|e| cx.error(0, e))?;
-        let reparsed = p::parse_test_input(1, &emitted).map_err(|e| {
-            cx.error(
-                0,
-                format!("canonical input cannot represent these literals: {e}"),
-            )
-        })?;
-        if format!("{value:?}") != format!("{reparsed:?}") {
-            return Err(cx.error(
-                0,
-                "canonical input structural roundtrip mismatch; input rejected",
-            ));
-        }
-        Ok(emitted)
+        super::ir_surface::validate(&[p::Operation::Test(p::TestMutation {
+            function_name: "Input.value".into(), cases: vec![p::TestCase {
+                input: value.clone(), expected: p::Expr::Int(0), matcher: None, after_checks: vec![],
+            }],
+        })]).map_err(|error| cx.error(0, error))?;
+        Ok(value)
     })();
     result.map_err(|mut e: Diagnostic| {
         if e.line == 1 {
             e.column = e.column.saturating_sub("__input(".len()).max(1);
         }
         e
+    })
+}
+
+/// Explicit legacy adapter. Typed native/CLI execution uses lower_input_expr.
+#[allow(dead_code)]
+pub fn lower_input(source: &str) -> Result<String, Diagnostic> {
+    let input = lower_input_expr(source)?;
+    super::emit::input(&input).map_err(|message| Diagnostic {
+        module: "<input>".into(), line: 1, column: 1, message,
     })
 }
 

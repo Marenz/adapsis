@@ -35,6 +35,10 @@ def test_case_0() -> None:
 starting with `test_` alone do not identify persisted tests. Every supported
 member and every stored case must be represented; an unsupported member/test
 refuses the entire save. Cases retain order within their target function.
+Cases loaded from `.py` attach a versioned typed payload (`store_test_payload(...,
+true)`); the printer prefers a present payload and refuses the save when it is
+invalid, using display strings only for legacy records without one. Transitional
+`legacy_ax` imports keep the legacy string adapter.
 Loading restores expectations but marks cases **untested**. Parsing source is
 not evidence of passing tests; rerun them through the existing test executor.
 
@@ -88,7 +92,22 @@ unchanged routes. The refusal leaves the live program, source hashes, pending
 edits and registrations untouched. This avoids invalidating in-flight mutation
 snapshots without introducing a new conflict protocol across every executor.
 Successful startup removes cached managed routes, then registers the newly
-loaded routes once. Unmanifested legacy reload remains unchanged.
+loaded routes once.
+
+`!undo` and `/api/rewind` are **refused before any state change** under an active
+manifest (retained, including an empty one), with the categorical error
+"rewind/undo not supported for manifest-managed libraries; make an explicit edit
+instead". Rewind rebuilds the Program from mutation history only; that history
+has no startup baseline for disk-loaded modules, so a rewind would silently drop
+or misstate them and could never be persisted truthfully. Make an explicit edit
+instead. A per-module startup baseline is tracked as future work. Without a
+manifest, rewind is unchanged, and the #122 earlier-rewind edit refusal is
+independent of this rule.
+
+A replacement rejected because existing stored tests fail restores the complete
+prior function declaration (parameters, return type, effects, body, docs and test
+flags), not only its body, so the live writer cannot persist a new signature over
+an old body. Unmanifested legacy reload remains unchanged.
 
 ## Persistence and failure semantics
 

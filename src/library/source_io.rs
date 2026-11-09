@@ -181,7 +181,11 @@ fn decode(catalog: &mut ast::Program, name: &str, text: &str, format: SourceForm
         {
             bail!("stored test must name one local function with one grouped case set");
         }
-        crate::session::store_test(catalog, &test.function_name, &test.cases);
+        // Verified Python source cases carry typed payloads; transitional
+        // legacy_ax imports keep the legacy string adapter. Parsing alone is
+        // not a test run, so the pass flag is cleared below.
+        let typed = format == SourceFormat::Python;
+        crate::session::store_test_payload(catalog, &test.function_name, &test.cases, typed);
         if let Some(function) = catalog.get_function_mut(&test.function_name) {
             for case in &mut function.tests {
                 case.passed = false;

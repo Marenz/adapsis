@@ -3264,7 +3264,10 @@ fn tiered_eval_preserves_struct_name_via_vm() {
 
     // Prove the middle tier is eligible and independently preserves identity.
     intern::set_display_interner(&program.shared_interner);
-    let vm_result = try_vm_execute(&program, func, &input).expect("VM should execute");
+    let vm::VmAttempt::Executed(Ok(value)) = try_vm_execute(&program, func, &input) else {
+        panic!("VM should execute successfully, not fall back");
+    };
+    let vm_result = value.to_string();
     assert!(
         vm_result.contains("Point{"),
         "VM must preserve the struct name, got: {vm_result}"
@@ -3586,17 +3589,14 @@ fn match_on_option_some_none() {
 
 #[test]
 fn pure_function_rejects_io_call() {
-    // A pure function (no effects) calling an IO builtin produces an error
-    // result (the function returns an Err value, not a hard crash)
-    let result = eval_fn_result(
+    // Rejection remains a structural execution error, not a successful Err string.
+    let program = build_program(
         "\
 +fn bad ()->String
   +return http_get(\"http://example.com\")
 ",
-        "bad",
-        "",
     );
-    // The eval catches the IO-without-await error and returns it
+    let result = eval_call_with_input(&program, "bad", &parser::Expr::StructLiteral(vec![])).unwrap_err().to_string();
     assert!(
         result.contains("async IO operation") || result.contains("http_get"),
         "expected IO rejection message, got: {result}"
@@ -5988,7 +5988,7 @@ fn undeclared_shared_var_still_errors() {
         "Bot.auth_header",
         &parser::Expr::StructLiteral(vec![]),
     )
-    .unwrap();
+    .unwrap_err().to_string();
     assert!(
         result.contains("undefined variable `bot_token`"),
         "expected undefined variable error, got: {result}"

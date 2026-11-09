@@ -20,7 +20,7 @@ fn tree(program: &ast::Program, target: &str, args: Vec<Value>) -> anyhow::Resul
     for (param, arg) in function.params.iter().zip(args) {
         env.set(&param.name, arg);
     }
-    eval::eval_function_body_named(program, target, &function.body, &mut env)
+    eval::eval_declared_function(program, target, function, &mut env)
 }
 
 fn bytecode(program: &ast::Program, target: &str, args: Vec<Value>) -> anyhow::Result<Value> {
@@ -112,10 +112,10 @@ fn python_boolean_io_count_order_matches_short_circuit_across_tiers() {
             "__coroutine_handle",
             Value::CoroutineHandle(coroutine::CoroutineHandle::new(sender)),
         );
-        let result = eval::eval_function_body_named(
+        let result = eval::eval_declared_function(
             &program,
             "probe",
-            &program.get_function("probe").unwrap().body,
+            program.get_function("probe").unwrap(),
             &mut env,
         )
         .unwrap();
@@ -251,7 +251,8 @@ fn python_audit_transcribe_voice_fixture_has_out_of_arm_error_reference() {
 #[test]
 fn python_result_match_adapsis_and_python_agree_across_tree_and_vm() {
     // #93 regression: both source origins lower to the same persisted AST,
-    // and the normal routing path must agree with direct tree/VM evaluation.
+    // and normal routing must agree with tree evaluation. Direct bytecode here certifies
+    // Result opcodes only: production Result admission is quarantined until B/C.
     for (ax_result, py_result, expected) in [
         ("Ok(5)", "Ok(5)", 5),
         ("Err(\"fixture\")", "Err('fixture')", 0),
@@ -273,7 +274,7 @@ fn python_result_match_adapsis_and_python_agree_across_tree_and_vm() {
             &python.modules[0]
         ));
         for (origin, program) in [("adapsis", &ax), ("python", &python)] {
-            let subject = bytecode(program, "ResultMatchProbe.wrap", vec![]).unwrap();
+            let subject = super::logical_tier_tests::vm_result_opcode_fixture_run(program, "ResultMatchProbe.wrap", vec![]).unwrap();
             match (&subject, expected) {
                 (Value::Ok(inner), 5) => assert!(matches!(inner.as_ref(), Value::Int(5))),
                 (Value::Err(message), 0) => assert_eq!(message, "fixture"),
@@ -283,7 +284,7 @@ fn python_result_match_adapsis_and_python_agree_across_tree_and_vm() {
                 matches!(tree(program, "ResultMatchProbe.read_value", vec![]).unwrap(), Value::Int(n) if n == expected)
             );
             assert!(
-                matches!(bytecode(program, "ResultMatchProbe.read_value", vec![]).unwrap(), Value::Int(n) if n == expected)
+                matches!(super::logical_tier_tests::vm_result_opcode_fixture_run(program, "ResultMatchProbe.read_value", vec![]).unwrap(), Value::Int(n) if n == expected)
             );
             let input = parser::parse_test_input(1, "").unwrap();
             let (actual, jitted) = eval::eval_compiled_or_interpreted_cached(
@@ -296,7 +297,7 @@ fn python_result_match_adapsis_and_python_agree_across_tree_and_vm() {
             .unwrap();
             assert_eq!(actual, expected.to_string());
             println!(
-                "RESULT_MATCH_REGRESSION origin={origin} subject={subject} tree={expected} vm={expected} routed={actual} jitted={jitted}"
+                "RESULT_MATCH_REGRESSION origin={origin} subject={subject} tree={expected} opcode_fixture={expected} routed_tree={actual} jitted={jitted}"
             );
         }
     }

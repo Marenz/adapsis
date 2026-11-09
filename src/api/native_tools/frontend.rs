@@ -34,21 +34,10 @@ pub(super) fn normalize(name: &str, mut map: Map<String, Value>) -> Result<Norma
             if !is_identifier(&module) || module.starts_with("__") {
                 return Err("python module metadata must be one non-dunder identifier, without dots or paths".into());
             }
-            let source = take_string(&map, "source", true, MAX_SOURCE_BYTES)?.unwrap();
-            if name == "test" {
-                let lowered = crate::python_frontend::lower_tests(&source, &module)
-                    .map_err(|error| error.to_string())?;
-                map.remove("module");
-                map.insert("source".into(), Value::String(lowered.canonical_adapsis));
-            }
+            take_string(&map, "source", true, MAX_SOURCE_BYTES)?;
         } else if map.contains_key("module") {
             return Err("module metadata is accepted only with language=python; Adapsis source declares +module explicitly".into());
         }
-    } else if name == "evaluate" && python {
-        let input = take_string(&map, "input", false, MAX_SOURCE_BYTES)?.unwrap_or_default();
-        let input =
-            crate::python_frontend::lower_input(&input).map_err(|error| error.to_string())?;
-        map.insert("input".into(), Value::String(input));
     }
     if name == "inspect" {
         if let Some(value) = map.remove("format") {
@@ -86,7 +75,8 @@ pub(super) fn parse_mutate(map: &Map<String, Value>, python: bool) -> Result<Par
         }
     }
     Ok(ParsedTool::Mutate {
-        source,
+        source: crate::session::replay::Submission::adapsis(&source),
+        operations: ops,
         modules,
         python,
         roles: None,
@@ -143,14 +133,16 @@ pub(super) fn finalize(
         &signatures,
         program,
     )?;
-    let mut parsed = parse_mutate(
-        &serde_json::Map::from_iter([("source".into(), Value::String(lowered.canonical_adapsis))]),
-        true,
-    )?;
-    if let ParsedTool::Mutate { roles: slot, .. } = &mut parsed {
-        *slot = Some(roles);
+    validate_mutate_ops(&lowered.operations)?;
+    literals::check_new_shared_defaults(&lowered.operations)?;
+    let mut modules = Vec::new();
+    for operation in &lowered.operations {
+        if let parser::Operation::Module(module) = operation { collect_module_names(module, &mut modules); }
     }
-    Ok(parsed)
+    Ok(ParsedTool::Mutate {
+        source: crate::session::replay::Submission::python(&module, &source),
+        operations: lowered.operations, modules, python: true, roles: Some(roles),
+    })
 }
 
 fn authorized_program(config: &AppConfig, model: &str, program: &Program) -> Program {
@@ -190,13 +182,19 @@ pub(super) fn print_source(
 }
 
 pub(super) fn parse_tests(map: &Map<String, Value>, python: bool) -> Result<ParsedTool, String> {
-    reject_extra_fields(map, &["source"])?;
+    reject_extra_fields(map, if python { &["source", "module"] } else { &["source"] })?;
     let source = take_string(map, "source", true, MAX_SOURCE_BYTES)?.unwrap();
     if source.trim().is_empty() {
         return Err("test `source` is empty".into());
     }
-    let ops =
-        parser::parse(&source).map_err(|error| format!("test `source` parse error: {error}"))?;
+    let (ops, submission) = if python {
+        let module = take_string(map, "module", true, MAX_TARGET_BYTES)?.unwrap();
+        let lowered = crate::python_frontend::lower_tests(&source, &module).map_err(|error| error.to_string())?;
+        (lowered.operations, crate::session::replay::Submission::python(&module, &source))
+    } else {
+        (parser::parse(&source).map_err(|error| format!("test `source` parse error: {error}"))?,
+            crate::session::replay::Submission::adapsis(&source))
+    };
     validate_test_ops(&ops)?;
     let targets = ops
         .iter()
@@ -206,7 +204,8 @@ pub(super) fn parse_tests(map: &Map<String, Value>, python: bool) -> Result<Pars
         })
         .collect();
     Ok(ParsedTool::Test {
-        source,
+        source: submission,
+        operations: ops,
         targets,
         python,
     })
@@ -221,29 +220,24 @@ pub(super) fn parse_evaluate(map: &Map<String, Value>, python: bool) -> Result<P
             "`function` must be a qualified function name (Module.func), got `{function}`"
         ));
     }
-    if input.contains('\n') || input.contains('\r') {
+    if !python && (input.contains('\n') || input.contains('\r')) {
         return Err("evaluate `input` must not contain newlines".into());
     }
-    if !input.trim().is_empty() {
-        let parsed = parser::parse_test_input(0, &input)
-            .map_err(|error| format!("evaluate `input` is not a valid expression: {error}"))?;
-        authored::literal(&parsed)?;
-    }
-    let source = if input.trim().is_empty() {
-        format!("!eval {function}")
+    let parsed = if python {
+        crate::python_frontend::lower_input_expr(&input).map_err(|error| error.to_string())?
+    } else if input.trim().is_empty() {
+        parser::Expr::StructLiteral(vec![])
     } else {
-        format!("!eval {function} {input}")
+        parser::parse_test_input(0, &input).map_err(|error| format!("evaluate `input` is not a valid expression: {error}"))?
     };
-    let ops =
-        parser::parse(&source).map_err(|error| format!("evaluate lowering failed: {error}"))?;
-    match ops.as_slice() {
-        [parser::Operation::Eval(eval)]
-            if eval.function_name == function && eval.inline_expr.is_none() => {}
-        _ => return Err("evaluate lowering produced unexpected operations (rejected)".into()),
-    }
+    authored::literal(&parsed)?;
+    let operations = vec![parser::Operation::Eval(parser::EvalMutation { function_name: function.clone(), input: parsed, inline_expr: None })];
+    let source = if python { crate::session::replay::Submission::python(module_of(&function), &input) }
+        else { crate::session::replay::Submission::adapsis(&format!("!eval {function} {input}")) };
     Ok(ParsedTool::Evaluate {
         function,
         source,
+        operations,
         python,
     })
 }

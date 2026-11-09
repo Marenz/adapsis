@@ -62,7 +62,7 @@ fn python_call_visitor_root_exceptions_do_not_reach_arguments_or_user_matches() 
     reject(
         "  +await value:Int = VisitTargets.result(1)\n  +return value",
         "[async]",
-        "#82",
+        "preserves Result",
     );
     reject(
         "  +await value:Int = VisitTargets.task(VisitTargets.task(1))\n  +return value",
