@@ -42,6 +42,26 @@ invalid, using display strings only for legacy records without one. Transitional
 Loading restores expectations but marks cases **untested**. Parsing source is
 not evidence of passing tests; rerun them through the existing test executor.
 
+**Proven local-call qualification.** Legacy modules often call their own
+functions bare (`g(x)` inside module `M`). The persistence printer prints such a
+call as `M.g(x)` only when the runtime's bare resolution, `Program::get_function`,
+returns exactly `M`'s own `g` declaration: no top-level `g` exists, and no
+earlier module claims the name. Runtime resolution is unchanged. The proof runs
+against the printed catalog and again against the whole live Program before a
+save; otherwise the save refuses. The round-trip gate is "equal modulo proven
+qualification": the original AST is rewritten only at the ledgered bare call
+sites, then compared strictly, so any other difference still fails. A name
+declared by several modules is still qualifiable when the runtime resolves it to
+the caller's own module today. Such sites are classified **order-dependent**: the
+save freezes today's observed binding, and the save log names each
+(module, callee). The opposite case refuses: a bare call that runs another module's
+function today. The save receipt also counts the rewritten sites per module.
+
+**Runtime types.** `Attachment` and any other runtime-defined named types
+(`builtins::RUNTIME_TYPES`, the single list) need no declaring module in the
+serializer's type catalog. A user declaration of the same name still takes
+precedence; other undeclared types are still refused.
+
 Dependencies form a closed, acyclic set inside the manifest. Include callable
 and type owners, including dependencies needed by supported stored tests. Each
 module lowers against only its declared dependency closure, never stale session

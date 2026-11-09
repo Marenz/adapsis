@@ -29,7 +29,32 @@ struct ModuleRefs {
     callees: Vec<String>,
 }
 
+/// Checked save printing plus its proven-qualification ledger: every bare local
+/// call that printed qualified, with the number of rewritten call sites.
+#[derive(Debug, Clone, Default)]
+pub struct QualificationLedger {
+    pub names: std::collections::BTreeSet<String>,
+    pub call_sites: usize,
+    /// CATALOG-LOCAL classification: the printed catalog may omit modules
+    /// that also declare a name, so these undercount order-dependence. The live
+    /// save (`library::source_io::persist_live`) recomputes against the whole
+    /// Program; its receipt is authoritative.
+    /// Proven names declared exactly once in the printed catalog.
+    pub catalog_unique: std::collections::BTreeSet<String>,
+    /// Proven names declared by several modules of the printed catalog.
+    pub catalog_order_dependent: std::collections::BTreeSet<String>,
+    /// (member, callee) sites whose callee is catalog-order-dependent.
+    pub catalog_order_dependent_sites: Vec<(String, String)>,
+}
+
 pub fn print_python_module(program: &a::Program, module_name: &str) -> Result<String, Diagnostic> {
+    print_python_module_with_ledger(program, module_name).map(|(text, _)| text)
+}
+
+pub fn print_python_module_with_ledger(
+    program: &a::Program,
+    module_name: &str,
+) -> Result<(String, QualificationLedger), Diagnostic> {
     if !super::identifier(module_name) {
         return Err(diag(module_name, "module name must be a simple identifier"));
     }
@@ -41,7 +66,9 @@ pub fn print_python_module(program: &a::Program, module_name: &str) -> Result<St
     validate_callees(program, &refs)?;
     let owners_before = type_owner_map(program, module_name, &refs.types)?;
 
-    let text = render_python_module(program, module)?;
+    let (text, proven) = render_python_module(program, module)?;
+    // The only permitted AST difference: ledgered bare→qualified call sites.
+    let (normalized, sites) = super::qualification::qualify_module(module, &proven);
 
     let without_current = without_module(program, module_name);
     let lowered = lower_python_module(&text, module_name, &without_current)?;
@@ -99,20 +126,38 @@ pub fn print_python_module(program: &a::Program, module_name: &str) -> Result<St
                 "candidate module missing after test attachment",
             )
         })?;
-    if !super::ast_equality::module(module, rebuilt) {
+    if !super::ast_equality::module(&normalized, rebuilt) {
         return Err(diag(
             module_name,
-            "Python roundtrip changed module structure or stored tests; refusing save",
+            "Python roundtrip changed module structure or stored tests beyond proven call qualification; refusing save",
         ));
     }
-    let again = render_python_module(&candidate_program, rebuilt)?;
-    if again != text {
+    let (again, again_proven) = render_python_module(&candidate_program, rebuilt)?;
+    if again != text || !again_proven.is_empty() {
         return Err(diag(
             module_name,
             "second Python print differs byte-for-byte; refusing save",
         ));
     }
-    Ok(text)
+    let (catalog_order_dependent, unique): (std::collections::BTreeSet<_>, _) = proven
+        .iter()
+        .cloned()
+        .partition(|name| super::qualification::declaration_count(program, name) > 1);
+    let catalog_order_dependent_sites = sites
+        .iter()
+        .filter(|(_, callee)| catalog_order_dependent.contains(callee))
+        .cloned()
+        .collect();
+    Ok((
+        text,
+        QualificationLedger {
+            names: proven,
+            call_sites: sites.len(),
+            catalog_unique: unique,
+            catalog_order_dependent,
+            catalog_order_dependent_sites,
+        },
+    ))
 }
 
 pub fn lower_python_module(
@@ -173,12 +218,15 @@ pub fn lower_python_module(
     })
 }
 
-fn render_python_module(program: &a::Program, module: &a::Module) -> Result<String, Diagnostic> {
-    let mut text = super::printer::module_body(program, module)
+fn render_python_module(
+    program: &a::Program,
+    module: &a::Module,
+) -> Result<(String, std::collections::BTreeSet<String>), Diagnostic> {
+    let (mut text, proven) = super::printer::module_body_qualifying(program, module)
         .map_err(|message| diag(&module.name, message))?;
     let groups = stored_groups(module)?;
     if groups.is_empty() {
-        return Ok(text);
+        return Ok((text, proven));
     }
     let blocks = render_test_groups(&module.name, module, &groups)?;
     if !text.ends_with('\n') {
@@ -186,7 +234,7 @@ fn render_python_module(program: &a::Program, module: &a::Module) -> Result<Stri
     }
     text.push('\n');
     text.push_str(&blocks.join("\n"));
-    Ok(text)
+    Ok((text, proven))
 }
 
 fn render_test_groups(
@@ -936,14 +984,20 @@ fn type_owner_map(
     let types = super::types::catalog_from_program(program);
     let mut owners = BTreeMap::new();
     for name in names {
-        let owner = super::types::resolve_name(&types, module_name, name)
+        let owner = match super::types::resolve_name(&types, module_name, name)
             .map_err(|message| diag(module_name, message))?
-            .ok_or_else(|| {
-                diag(
+        {
+            Some(owner) => owner,
+            // Runtime-defined types (builtins::RUNTIME_TYPES) have no declaring
+            // module; a user declaration of the same name still wins above.
+            None if crate::builtins::is_runtime_type(name) => format!("<runtime>.{name}"),
+            None => {
+                return Err(diag(
                     module_name,
                     format!("type {name} is not declared in the supplied catalog"),
-                )
-            })?;
+                ))
+            }
+        };
         owners.insert(name.clone(), owner);
     }
     Ok(owners)

@@ -2417,6 +2417,12 @@ async fn main() -> Result<()> {
                         Ok(receipt) => {
                             sess.program = receipt.program_snapshot;
                             eprintln!("[save] {} module(s) persisted; {} source failure(s)", receipt.saved_names.len(), receipt.failures.len());
+                            for (module, sites) in &receipt.qualified_call_sites {
+                                eprintln!("[save] module `{module}`: {sites} proven bare local call site(s) persisted qualified");
+                            }
+                            for (module, callee) in &receipt.order_dependent {
+                                eprintln!("[save] module `{module}`: bare `{callee}` is declared by several modules; save froze today's order-dependent binding to `{module}.{callee}`");
+                            }
                             for message in receipt.failures { eprintln!("[save] {message}"); }
                         }
                         Err(error) => {

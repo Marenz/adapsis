@@ -200,6 +200,12 @@ response has no Content-Disposition header.
   LibraryState owns runtime source-byte hashes, session AST is recovery cache.
   Source/session writes are not cross-file atomic; final hash-check/rename has a
   documented external-process race. See `docs/python-source-library.md`.
+  Persistence printing qualifies a bare local call ONLY when `get_function` provably
+  resolves it to the caller module's own declaration (catalog AND whole live Program);
+  `python_frontend/qualification.rs` applies the same ledgered rewrite to the original
+  so the round-trip comparison stays strict. Order-dependent names (declared by several
+  modules) are frozen to today's binding and logged; never add caller-module-first
+  runtime lookup. Runtime-defined named types live in `builtins::RUNTIME_TYPES` (Attachment).
   Focused isolated gates: `cargo test --release managed_` and
   `cargo test --release --test python_source_startup`. Default library format and
   deployment remain unchanged; migration requires separate backup/review gates.

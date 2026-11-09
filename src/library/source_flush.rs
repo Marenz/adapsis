@@ -17,6 +17,12 @@ pub struct SaveReceipt {
     pub program_snapshot: ast::Program,
     pub saved_names: Vec<String>,
     pub failures: Vec<String>,
+    /// Managed modules whose save qualified proven bare local calls, with the
+    /// number of rewritten call sites (the only permitted AST normalization).
+    pub qualified_call_sites: Vec<(String, usize)>,
+    /// (module, callee) qualifications whose name several live modules declare:
+    /// the save froze today's order-dependent binding. Shown to the owner.
+    pub order_dependent: Vec<(String, String)>,
 }
 
 pub async fn flush_live_sources(
@@ -67,6 +73,8 @@ fn flush_blocking(
                 program_snapshot: live.clone(),
                 saved_names: Vec::new(),
                 failures: vec![message],
+                qualified_call_sites: Vec::new(),
+                order_dependent: Vec::new(),
             });
         }
     }
@@ -75,12 +83,25 @@ fn flush_blocking(
         .unwrap_or_default();
     let mut saved_names = Vec::new();
     let mut failures = Vec::new();
+    let mut qualified_call_sites = Vec::new();
+    let mut order_dependent = Vec::new();
     for name in managed.iter().cloned() {
         let source_state = state.context("managed source state unavailable")?;
         let pending_request = source_state.queue_source(&name)?;
         let result = super::source_io::persist_live(&live, &name, source_state, dir);
         match result {
-            Ok(_) => {
+            Ok(qualified) => {
+                if let Some(ledger) = qualified {
+                    if ledger.call_sites > 0 {
+                        qualified_call_sites.push((name.clone(), ledger.call_sites));
+                    }
+                    order_dependent.extend(
+                        ledger
+                            .order_dependent
+                            .into_iter()
+                            .map(|callee| (name.clone(), callee)),
+                    );
+                }
                 let mut pending = source_state
                     .pending_sources
                     .lock()
@@ -129,5 +150,7 @@ fn flush_blocking(
         program_snapshot,
         saved_names,
         failures,
+        qualified_call_sites,
+        order_dependent,
     })
 }

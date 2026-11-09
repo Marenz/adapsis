@@ -12,6 +12,8 @@ mod lower;
 mod parity;
 mod module_source;
 mod printer;
+mod qualification;
+pub(crate) use qualification::declaration_count;
 mod runtime_arguments;
 mod call_sites;
 mod builtin_signatures;
@@ -36,6 +38,8 @@ mod tests_print;
 mod tests_print_tests;
 #[cfg(test)]
 mod module_source_tests;
+#[cfg(test)]
+mod qualification_tests;
 mod types;
 mod type_bindings;
 
@@ -82,7 +86,7 @@ pub use printer::print_function;
 #[cfg(test)]
 pub use printer::print_module;
 pub use printer::print_type;
-pub use module_source::{lower_python_module, print_python_module, LoweredPythonModule};
+pub use module_source::{lower_python_module, print_python_module, print_python_module_with_ledger, LoweredPythonModule, QualificationLedger};
 pub use runtime_arguments::validate_runtime_arguments;
 pub use runtime_arguments::validate_entry_await_contract;
 pub use references::{NativeReferences, resolve_native_references, retain_native_dependencies, check_constructor_environment};

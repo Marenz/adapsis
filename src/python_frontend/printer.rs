@@ -151,6 +151,21 @@ pub(super) fn module_body(program: &a::Program, module: &a::Module) -> Result<St
     printer.module(module)
 }
 
+/// Persistence printing: like `module_body`, but bare local calls whose runtime
+/// resolution is proven to be this module's own function print qualified. The
+/// returned ledger names every qualified bare callee; callers must verify that
+/// the reparsed AST differs ONLY by those qualifications.
+pub(super) fn module_body_qualifying(
+    program: &a::Program,
+    module: &a::Module,
+) -> Result<(String, std::collections::BTreeSet<String>), String> {
+    let mut printer = Printer::new(program);
+    printer.qualify_proven = true;
+    printer.set_module(&module.name);
+    let text = printer.module(module)?;
+    Ok((text, printer.qualified.into_inner()))
+}
+
 /// Resolve a type target (`TypeName` or `Module.TypeName`) to its owning module
 /// name and declaration. Bare names search every module (recursively) and the
 /// top-level type list.
@@ -348,6 +363,11 @@ struct Printer<'a> {
     env: HashMap<String, a::Type>,
     return_type: Option<a::Type>,
     current_module: String,
+    /// Persistence-only: qualify a bare local call when runtime resolution of
+    /// the bare name is PROVEN to be this module's own declaration.
+    qualify_proven: bool,
+    /// Ledger of bare names qualified under that proof.
+    qualified: std::cell::RefCell<std::collections::BTreeSet<String>>,
 }
 
 impl<'a> Printer<'a> {
@@ -358,7 +378,27 @@ impl<'a> Printer<'a> {
             env: HashMap::new(),
             return_type: None,
             current_module: String::new(),
+            qualify_proven: false,
+            qualified: Default::default(),
         }
+    }
+
+    /// True iff `Program::get_function(name)` (the runtime's bare resolution)
+    /// returns exactly the current module's own declaration: no top-level
+    /// function of that name and no earlier module claims it.
+    fn proven_local(&self, name: &str) -> bool {
+        if self.current_module.is_empty() || name.contains('.') {
+            return false;
+        }
+        let Some(module) = self.program.modules.iter().find(|m| m.name == self.current_module) else {
+            return false;
+        };
+        let Some(own) = module.functions.iter().find(|f| f.name == name) else {
+            return false;
+        };
+        self.program
+            .get_function(name)
+            .is_some_and(|resolved| std::ptr::eq(resolved, own.as_ref()))
     }
 
     fn catalog(&self) -> TypeCatalog {
@@ -921,6 +961,12 @@ impl<'a> Printer<'a> {
             }
             if !self.toplevel_callee(&name) {
                 if !crate::builtins::is_builtin(&name) {
+                    if self.qualify_proven && self.proven_local(&name) {
+                        self.qualified.borrow_mut().insert(name.clone());
+                        let qualified = format!("{}.{}", self.current_module, name);
+                        let qualified_call = a::CallExpr { callee: qualified, args: c.args.clone() };
+                        return self.call(&qualified_call, hint);
+                    }
                     return Err(format!("unqualified user call {name} has no exact Python roundtrip surface; qualification could change runtime resolution"));
                 }
                 if shadowed(self.program, &name) {

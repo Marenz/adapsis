@@ -1809,6 +1809,19 @@ static IO_BUILTIN_SET: std::sync::LazyLock<std::collections::HashSet<&'static st
         set
     });
 
+/// Named types the RUNTIME itself defines (no user declaration exists). Each
+/// corresponds to a dedicated `eval::Value` variant: `Attachment` ↔
+/// `Value::Attachment`, produced by `http_get_binary`/`read_file_binary` etc.
+/// and accepted by `llm_takeover`/`http_upload`/`conversation_notify`. Source
+/// annotations may name them without a declaring module. Single source of
+/// truth for tooling that must resolve annotation owners (Python serializer).
+pub const RUNTIME_TYPES: &[&str] = &["Attachment"];
+
+/// True when `name` is a runtime-defined named type (see [`RUNTIME_TYPES`]).
+pub fn is_runtime_type(name: &str) -> bool {
+    RUNTIME_TYPES.contains(&name)
+}
+
 /// Check if a name is a builtin (sync or IO). O(1) HashSet lookup.
 pub fn is_builtin(name: &str) -> bool {
     ALL_BUILTIN_SET.contains(name)

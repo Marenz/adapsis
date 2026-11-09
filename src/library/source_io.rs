@@ -268,17 +268,17 @@ pub(super) fn persist_live(
     name: &str,
     state: &LibraryState,
     dir: &Path,
-) -> Result<bool> {
+) -> Result<Option<SaveLedger>> {
     state.check_source_available()?;
     let Some(managed) = lock(&state.managed_sources)?.clone() else {
         if super::source::manifest_present(dir)? {
             bail!("new source manifest has not been loaded; restart the server before saving");
         }
-        return Ok(false);
+        return Ok(None);
     };
     managed.verify_manifest(dir)?;
     let Some(spec) = managed.manifest.modules.get(name) else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut catalog = dependency_catalog(program, &managed, name)?;
     let module = program
@@ -289,14 +289,44 @@ pub(super) fn persist_live(
     catalog.modules.push(module.clone());
     catalog.rebuild_function_index();
     check_catalog_budget(&catalog)?;
-    let python = python_frontend::print_python_module(&catalog, name)
+    let (python, ledger) = python_frontend::print_python_module_with_ledger(&catalog, name)
         .map_err(|diagnostic| anyhow::anyhow!("module `{name}` cannot be completely serialized as Python (line {}, column {}); source unchanged. Keep the session recovery checkpoint and repair unsupported members/tests before retrying", diagnostic.line, diagnostic.column))?;
-    let text = match spec.format {
-        SourceFormat::Python => python,
+    let (text, save_ledger) = match spec.format {
+        SourceFormat::Python => {
+            // The printer proved each qualification against the closed catalog.
+            // The stored bare call ran against the WHOLE live program, so the
+            // proof must also hold there, or qualification could change which
+            // function runs.
+            for callee in &ledger.names {
+                let own = module.functions.iter().find(|f| &f.name == callee);
+                let resolved = program.get_function(callee);
+                if !matches!((own, resolved), (Some(own), Some(resolved)) if std::ptr::eq(own.as_ref(), resolved))
+                {
+                    bail!("module `{name}`: a bare local call resolves to another declaration in the live program; qualification would change runtime behaviour, source unchanged");
+                }
+            }
+            // Classify against the WHOLE live program (the catalog may hide
+            // modules that also declare a name): these freeze today's binding.
+            let order_dependent = ledger
+                .names
+                .iter()
+                .filter(|callee| python_frontend::declaration_count(program, callee) > 1)
+                .cloned()
+                .collect();
+            (
+                python,
+                SaveLedger {
+                    call_sites: ledger.call_sites,
+                    order_dependent,
+                },
+            )
+        }
+        // legacy_ax persists the reconstructed .ax, which keeps bare calls
+        // verbatim: no qualification reaches disk, so nothing needs re-proof.
         SourceFormat::LegacyAx => {
             let text = super::reconstruct_module_source(module);
             super::validate_reconstructed_source(name, &text)?;
-            text
+            (text, SaveLedger::default())
         }
     };
     let hash = state.file_hash(name).context(
@@ -305,7 +335,15 @@ pub(super) fn persist_live(
     let filename = format!("{name}.{}", spec.format.extension());
     super::source::write_checked(dir, &filename, &text, &hash, &managed)?;
     state.record_file_hash(name, &text);
-    Ok(true)
+    Ok(Some(save_ledger))
+}
+
+/// Proven-qualification facts of one managed save.
+#[derive(Debug, Default)]
+pub(super) struct SaveLedger {
+    pub(super) call_sites: usize,
+    /// Qualified callees declared by several live modules (binding frozen).
+    pub(super) order_dependent: Vec<String>,
 }
 
 pub(super) fn verify_live_policy(state: &LibraryState, dir: &Path) -> Result<()> {

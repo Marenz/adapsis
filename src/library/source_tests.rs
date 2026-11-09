@@ -854,3 +854,102 @@ fn managed_rejected_signature_change_restores_whole_function_live_and_on_disk() 
     assert_eq!(disk.return_type, original.return_type);
     assert_eq!(disk.body, original.body);
 }
+
+#[test]
+fn managed_legacy_import_with_bare_local_calls_saves_qualified_python_and_counts_sites() {
+    let dir = directory();
+    std::fs::write(
+        dir.path().join(MANIFEST_FILE),
+        r#"{"version":1,"modules":{"Q":{"format":"python","dependencies":[]}}}"#,
+    )
+    .unwrap();
+    // Valid Python with qualified local calls loads; then the live Program is
+    // given bare local calls, as legacy .ax modules commonly carry.
+    std::fs::write(
+        dir.path().join("Q.py"),
+        "def g(x: int) -> int:\n    return x + 10\n\ndef f(x: int) -> int:\n    return Q.g(x)\n",
+    )
+    .unwrap();
+    let (mut program, state) = load(dir.path());
+    for op in crate::parser::parse("+module Q\n+fn f (x:Int)->Int\n  +return g(x)\n+end\n").unwrap()
+    {
+        crate::validator::apply_and_validate(&mut program, &op).unwrap();
+    }
+    let receipt = flush(&program, &state, dir.path());
+    assert!(receipt.failures.is_empty(), "{:?}", receipt.failures);
+    assert_eq!(receipt.qualified_call_sites, vec![("Q".to_string(), 1)]);
+    let (reloaded, _) = load(dir.path());
+    let crate::ast::StatementKind::Return {
+        value: crate::ast::Expr::Call(call),
+    } = &reloaded.get_function("Q.f").unwrap().body[0].kind
+    else {
+        panic!("unexpected reloaded shape")
+    };
+    assert_eq!(call.callee, "Q.g");
+}
+
+#[test]
+fn managed_flush_refuses_qualification_when_live_resolution_differs_from_catalog() {
+    let dir = python_library();
+    let (mut program, state) = load(dir.path());
+    // An unlisted live module earlier in order also defines `value`: the closed
+    // catalog proves A.value, but the stored bare call ran against the live set.
+    for op in crate::parser::parse("+module Early\n+fn value (x:Int)->Int\n  +return x\n+end\n+module A\n+fn caller (x:Int)->Int\n  +return value(x)\n+end\n").unwrap() {
+        crate::validator::apply_and_validate(&mut program, &op).unwrap();
+    }
+    let early = program
+        .modules
+        .iter()
+        .position(|m| m.name == "Early")
+        .unwrap();
+    let moved = program.modules.remove(early);
+    program.modules.insert(0, moved);
+    program.rebuild_function_index();
+    let receipt = flush(&program, &state, dir.path());
+    // `Early` is unlisted, so its snapshot write is refused too; the managed
+    // module must fail on the live-resolution proof specifically.
+    assert!(
+        receipt.failures.iter().any(|f| f.contains("module `A`")
+            && f.contains("resolves to another declaration in the live program")),
+        "{:?}",
+        receipt.failures
+    );
+    assert!(!receipt.saved_names.contains(&"A".to_string()));
+    assert!(receipt.qualified_call_sites.is_empty());
+    assert!(state.pending_source_names().contains("A"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("A.py")).unwrap(),
+        PYTHON
+    );
+}
+
+#[test]
+fn managed_legacy_ax_bare_self_call_persists_despite_earlier_same_name_module() {
+    let dir = directory();
+    // `Alpha` (python) loads before `Mod` (legacy_ax) and also declares `foo`.
+    std::fs::write(
+        dir.path().join(MANIFEST_FILE),
+        r#"{"version":1,"modules":{"Alpha":{"format":"python","dependencies":[]},"Mod":{"format":"legacy_ax","dependencies":[]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("Alpha.py"),
+        "def foo(x: int) -> int:\n    return x\n",
+    )
+    .unwrap();
+    let legacy = "+module Mod\n+fn foo (x:Int)->Int\n  +return x + 1\n+end\n+fn bar (x:Int)->Int\n  +return foo(x)\n+end\n";
+    std::fs::write(dir.path().join("Mod.ax"), legacy).unwrap();
+    let (mut program, state) = load(dir.path());
+    assert_eq!(program.modules[0].name, "Alpha");
+    program.get_function_mut("Mod.bar").unwrap().doc = Some("edited".into());
+    let receipt = flush(&program, &state, dir.path());
+    assert!(receipt.failures.is_empty(), "{:?}", receipt.failures);
+    assert!(receipt.saved_names.contains(&"Mod".to_string()));
+    assert!(receipt.qualified_call_sites.is_empty() && receipt.order_dependent.is_empty());
+    assert!(!state.pending_source_names().contains("Mod"));
+    let saved = std::fs::read_to_string(dir.path().join("Mod.ax")).unwrap();
+    assert!(
+        saved.contains("edited") && saved.contains("+return foo(x)"),
+        "{saved}"
+    );
+}
