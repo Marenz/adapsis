@@ -61,6 +61,8 @@ mod http_policy;
 mod http_policy_tests;
 mod matching;
 mod task_status;
+mod runtime_errors;
+pub(crate) use task_status::host_only;
 #[cfg(test)]
 mod task_status_tests;
 #[cfg(test)]
@@ -551,6 +553,7 @@ impl Runtime {
                 // actually spawns a process. Refusals never run `sh`.
                 if let Err(reason) = self.shell_policy.check(&command) {
                     crate::logging::diagnostic("shell-policy-refused", format_args!("{reason} (command: {command:?})"));
+                    crate::error_journal::record(crate::error_journal::Category::Refusal, "shell_exec", &reason);
                     let _ = reply.send(Err(anyhow::anyhow!(
                         "shell_exec refused: {reason}"
                     )));
@@ -1230,7 +1233,7 @@ impl CoroutineHandle {
     /// This is called from the synchronous evaluator, so we use block_on
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
-        self.check_guest_tool(op, args)?;
+        self.check_guest_tool(op, args).inspect_err(|e| { crate::error_journal::record(crate::error_journal::Category::Refusal, "guest_tool", e); })?;
         if op != "mock_set" && op != "mock_clear" {
             if let Some(result) = self.try_mock_io(op, args, false)? {
                 return Ok(result);
@@ -1257,6 +1260,7 @@ impl CoroutineHandle {
     /// Returns `Ok(Some(val))` if handled, `Ok(None)` to fall through to transport ops.
     fn execute_local_op(&self, op: &str, args: &[Value]) -> Result<Option<Value>> {
         match op {
+            "runtime_errors" => return self.runtime_errors(args).map(Some),
             "roadmap_list" => {
                 let result = crate::shared_state::get_shared_meta()
                     .and_then(|meta| meta.lock().ok().map(|m| crate::session::roadmap_list(&m.roadmap)))
@@ -1663,6 +1667,7 @@ impl CoroutineHandle {
                         Err(e) => {
                             let msg = format!("{}.startup error: {}", module_name, e);
                             crate::logging::diagnostic("module-startup-error", &msg);
+                            crate::error_journal::record(crate::error_journal::Category::Startup, &module_name, &e);
                             results.push(msg);
                         }
                     }

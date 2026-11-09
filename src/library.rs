@@ -53,6 +53,13 @@ impl LibraryState {
     /// otherwise append the same line every few seconds for the life of the
     /// process — an unbounded leak surfaced verbatim by `library_errors()`.
     pub(crate) fn record_error(&self, msg: String) {
+        crate::error_journal::record(crate::error_journal::Category::Library, "library", &msg);
+        self.push_error(msg);
+    }
+
+    /// `record_error` without journaling, for failures whose journal entry is
+    /// written separately in a sanitized form (boot-time module loads).
+    fn push_error(&self, msg: String) {
         if let Ok(mut errs) = self.errors.lock() {
             if errs.iter().any(|existing| existing == &msg) {
                 return;
@@ -440,7 +447,7 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
     state
 }
 
-fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut LibraryState) {
+pub(crate) fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut LibraryState) {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
@@ -481,7 +488,8 @@ fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut Library
                         let err_msg = format!("{e}");
                         let msg = format!("failed to load {}: {e}", path.display());
                         crate::logging::diagnostic("library-load-error", &msg);
-                        state.record_error(msg);
+                        state.push_error(msg);
+                        journal_load_failure(&file_module_name, &err_msg, "at startup");
                         state.record_load_error(file_module_name, err_msg);
                     }
                 }
@@ -490,12 +498,30 @@ fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut Library
                 let err_msg = format!("could not read file: {e}");
                 let msg = format!("could not read {}: {e}", path.display());
                 crate::logging::diagnostic("library-read-error", &msg);
-                state.record_error(msg);
+                state.push_error(msg);
+                journal_load_failure(&file_module_name, &err_msg, "at startup");
                 state.record_load_error(file_module_name, err_msg);
             }
         }
     }
 
+}
+
+/// Module load failure -> runtime error journal. Parser errors can quote the
+/// offending source, so only the module name and the error's line number are kept.
+/// The only journal entry for a boot or reload load failure (no raw duplicate).
+fn journal_load_failure(module_name: &str, error: &str, phase: &str) {
+    let line = error
+        .split("line ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .filter(|digits| !digits.is_empty());
+    let message = match line {
+        Some(line) => format!("failed to load {module_name}.ax {phase} (parse/validation error at line {line})"),
+        None if error.starts_with("could not read") => format!("failed to read {module_name}.ax {phase}"),
+        None => format!("failed to load {module_name}.ax {phase} (parse/validation error)"),
+    };
+    crate::error_journal::record(crate::error_journal::Category::Library, module_name, message);
 }
 
 /// Parse and apply a single module source string into the program.
@@ -862,6 +888,7 @@ fn record_reload_error(
     error: &anyhow::Error,
 ) {
     crate::logging::diagnostic("library-reload-error", format_args!("{module_name}: {error}"));
+    journal_load_failure(module_name, &error.to_string(), "on reload");
     if let Some(state) = lib_state {
         state.record_load_error(module_name.to_string(), error.to_string());
     }

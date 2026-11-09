@@ -10,6 +10,8 @@ mod ask_completion_tests;
 mod native_turn_tests;
 #[path = "execution_logging_tests.rs"]
 mod execution_logging_tests;
+#[path = "error_journal_route_tests.rs"]
+mod error_journal_route_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {

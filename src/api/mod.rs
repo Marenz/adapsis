@@ -1670,6 +1670,7 @@ async fn adapsis_route_dispatch(
     let program = {
         let prog = config.program.read().await;
         if prog.get_function(&handler_fn).is_none() {
+            crate::error_journal::record(crate::error_journal::Category::Route, &handler_fn, "route handler function not found in program");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("route handler function `{handler_fn}` not found in program"),
@@ -1680,6 +1681,8 @@ async fn adapsis_route_dispatch(
     };
 
     let body_str = String::from_utf8_lossy(&body).to_string();
+    let body_for_journal = body_str.clone();
+    let route_for_journal = format!("{method_str} {path}");
 
     let io_sender_for_blocking = config.io_sender.clone();
     // Base snapshot for the per-function CoW merge (issue #9).
@@ -1751,6 +1754,7 @@ async fn adapsis_route_dispatch(
         }
         Ok(Err(e)) => {
             crate::logging::diagnostic("webhook-handler-error", format_args!("{handler_fn_for_log}: {e:#}"));
+            crate::error_journal::record_route_error(&route_for_journal, &handler_fn_for_log, &format!("{e:#}"), &body_for_journal);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("handler error: {e:#}"),
@@ -1759,6 +1763,7 @@ async fn adapsis_route_dispatch(
         }
         Err(e) => {
             crate::logging::diagnostic("webhook-task-error", format_args!("{handler_fn_for_log}: {e}"));
+            crate::error_journal::record_route_error(&route_for_journal, &handler_fn_for_log, &e.to_string(), &body_for_journal);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("task error: {e}"),

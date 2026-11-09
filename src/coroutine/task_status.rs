@@ -14,7 +14,7 @@ use reqwest::Url;
 /// fragment are never reproduced, and unparsable input is never echoed back. (`Url::parse`
 /// itself strips surrounding whitespace; the `None` host arm is defensive, since http(s)
 /// URLs always parse with a host.)
-pub(super) fn host_only(raw: &str) -> String {
+pub(crate) fn host_only(raw: &str) -> String {
     match Url::parse(raw) {
         Ok(url) if matches!(url.scheme(), "http" | "https") => match url.host_str() {
             Some(host) => match url.port() {
