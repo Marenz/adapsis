@@ -14,6 +14,8 @@ mod native_turn_tests;
 mod execution_logging_tests;
 #[path = "rewind_managed_tests.rs"]
 mod rewind_managed_tests;
+#[path = "reject_identity_tests.rs"]
+mod reject_identity_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {
