@@ -3,6 +3,12 @@
 ## Overview
 Adapsis is an AI-native programming language and live agentic environment. Programs are built incrementally through validated mutations. The AI writes Adapsis code, gets immediate feedback, and iterates. The system can modify its own runtime via `!opencode`.
 
+## Design authority
+[DESIGN.md](DESIGN.md) is the authoritative, owner-confirmed decision record (2026-11-09).
+Narrowing or removing a recorded capability requires an explicit owner decision recorded
+there. Workers cite the DESIGN.md rows their change touches; reviewers check for
+narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
+
 ## Development baseline (2026-10-25 cleanup)
 - Current here Telegram deployment (2026-11-02): runtime binary `88b4275`;
   TelegramBot/TgFormat are now production-Python-frontend-authored modules
@@ -51,6 +57,8 @@ Adapsis is an AI-native programming language and live agentic environment. Progr
 
 ## Language Design Goals
 - **Optimized for LLM-driven construction**, not human typing
+- **Superseded by DESIGN.md (L1, L2):** `.ax` and `<code>` are being removed and Python is
+  the only language; the `+`/`!`/`?` syntax bullets below describe the legacy surface.
 - Every operation starts with `+`, `!`, or `?` — clear code vs prose distinction
   - `+` prefix = scoped declarations (belong to a module): `+module`, `+fn`, `+test`, `+doc`, `+shared`, `+route`, `+startup`, `+shutdown`, `+source`
   - `!` prefix = global runtime commands: `!eval`, `!agent`, `!plan`, `!roadmap`, `!done`, `!opencode`, `!reload`, `!msg`, `!stub`, `!unmock`
