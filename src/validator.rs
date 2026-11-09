@@ -999,6 +999,7 @@ pub fn convert_type_decl(decl: &parser::TypeDecl) -> Result<ast::TypeDecl> {
 fn convert_function(decl: &parser::FunctionDecl) -> Result<ast::FunctionDecl> {
     let mut params = vec![];
     for (i, p) in decl.params.iter().enumerate() {
+        crate::reserved_names::check_param(&p.name)?;
         params.push(ast::Param {
             id: format!("{}.p{}", decl.name, i),
             name: p.name.clone(),
@@ -1053,6 +1054,12 @@ fn propagate_declared_struct_type(ty: &ast::Type, value: &mut ast::Expr) {
 }
 
 pub fn convert_statement_op(op: &parser::Operation) -> Result<ast::Statement> {
+    let statement = convert_statement_unchecked(op)?;
+    crate::reserved_names::check_statement(&statement)?;
+    Ok(statement)
+}
+
+fn convert_statement_unchecked(op: &parser::Operation) -> Result<ast::Statement> {
     let kind = match op {
         parser::Operation::Let(decl) => {
             let ty = convert_type(&decl.ty)?;

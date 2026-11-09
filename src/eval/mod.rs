@@ -3581,6 +3581,11 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
             match name.as_str() {
                 "true" => Ok(Value::Bool(true)),
                 "false" => Ok(Value::Bool(false)),
+                // Defence in depth for ASTs that bypassed validation: runtime-internal
+                // bindings are never readable as values (see reserved_names).
+                reserved if crate::reserved_names::is_reserved(reserved) => {
+                    bail!("`{reserved}` is reserved for the runtime and cannot be read")
+                }
                 _ => {
                     // Try variable first
                     if let Ok(val) = env.get(name) {
@@ -3925,6 +3930,10 @@ fn eval_parser_expr_impl(
 
     match expr {
         parser::Expr::Ident(name) => {
+            // Inline `!eval` reads parser ASTs directly: same rule as eval_ast_expr.
+            if crate::reserved_names::is_reserved(name) {
+                bail!("`{name}` is reserved for the runtime and cannot be read");
+            }
             // With env: check variables first
             if let Some(ref mut env) = env {
                 if let Ok(val) = env.get(name) {
