@@ -119,11 +119,8 @@ pages without cursor movement, independent sources, duplicate/altered replay,
 unattested foreign/group/media updates, caller-forged metadata denial and finite
 receipt/page/incarnation capacity.
 
-Next checkpoint must carry an admitted sealed origin out-of-band through the
-actual Python intake → Spawn → takeover path, revalidate source/admission freshness
-and exact model-context/reply binding, and only then connect the record caller
-attestation issuer. No service capability may be forwarded to application handles.
-This checkpoint does not claim that chain exists yet.
+Origin propagation to records is described in the next section; it is still
+fixture-only and production `main` supplies no record store.
 
 The existing Python poller is unchanged and still owns live intake. Before any
 future cutover, reviewed authoritative `.py` guards must disable its poll loop and
@@ -134,3 +131,94 @@ mode guard, source activation or live cursor capture was performed here. #121
 Python source authority remains compatible; no evidence is persisted as module
 source/shared variables. #70 login/session work and #108 webhook authentication
 remain unchanged separate workstreams.
+
+## Origin propagation checkpoint (fixture-only)
+
+An admitted private-text event yields a sealed `InvocationOrigin` (one `Arc`,
+redacted Debug, no Serialize/Deserialize, no Adapsis or native constructor). It
+travels only out-of-band:
+
+- `CoroutineHandle.origin` defaults to `None` in every constructor; only the host
+  admission path sets it. `+spawn` copies it into `IoRequest::Spawn` (shared
+  `eval/spawn.rs`), and the shared `spawn_dispatch` (also used by production
+  `main`) installs it on the spawned handle. `llm_takeover` copies it into
+  `IoRequest::LlmTakeover`. Ordinary HTTP/route/source/timer/CLI/inject paths and
+  direct handler calls carry `None`. A handler or callback name is never trust.
+- `api/takeover_dispatch.rs` is the single production entry into the existing
+  `handle_llm_takeover` loop (no second loop). For an origin-bearing request it
+  first checks the exact original text, context, `speaker_id` metadata, reply
+  handler and reply argument (attachments refused), then durably CAS-claims the
+  event `started -> takeover_started` with a unique attempt ID. Mismatch and lost
+  races fail with a categorical message before the conversation, permission
+  profile, history or provider are touched. Cloned origins in one process also
+  share an in-memory one-shot latch. Origin-free requests keep legacy behaviour,
+  including the pre-loop permission-profile update.
+- Only a `ClaimedOrigin` reaches the new `TrustedCaller::from_ingress` issuer. The
+  record ceiling is captured from the ACTUAL generating model plus the context
+  permission profile, principal profile and process cap; guests/missing model
+  deny. The per-turn `RecordTurn` adjunct stays separate from `TurnIdentity`.
+- `AppConfig::coroutine_handle` is the one handle factory for executor evaluation.
+  It attaches record access only when the adjunct matches the turn's principal and
+  context, recaptures the CURRENT ceiling (pin ∩ current; never widens), and binds
+  through the grant registry. The backend rechecks generation/revocation per
+  operation. Everything else returns the legacy unbound handle.
+- **Revocable, per-handle ceiling.** The `TrustedCaller` carries a liveness flag
+  shared with the turn's `RecordTurn`. `takeover_dispatch` clears it on every exit
+  (finished, unknown, error, or the future being dropped), and the backend checks it
+  on every read/commit/receipt as well as at bind time. A record-bearing handle that
+  escapes its turn is therefore denied afterwards. Ceilings are evaluated per handle
+  (pin ∩ current at mint time); this is acceptable only because revocation exists.
+- **The turn's own profile is pinned.** The pin uses the dispatch's own
+  `permission_model`, not the shared conversation field (which a concurrent
+  origin-less dispatch to the same context can rewrite before this turn takes the
+  context lock). `coroutine_handle` intersects both the live field and that pinned
+  profile; either can only narrow.
+- **Origins are single-use.** The first takeover attempt (successful or not) takes
+  the intake store out of the lease. A spent origin is not forwarded by `+spawn` or
+  `llm_takeover`, so later calls and descendants run as origin-free legacy work with
+  no record access, and long-lived tasks do not retain the intake store.
+  **Burn-on-mismatch:** a refused (mismatched) first attempt also spends the origin.
+  A correctly bound retry from the same handler then runs as legacy work without
+  record access; the event was never claimed, stays `started`, and becomes `unknown`
+  on the next source reopen. A handler must bind correctly the first time.
+- After the loop: an accepted finish (native) or accepted `!done` (legacy) marks
+  the event `turn_finished`; provider/other failure marks `unknown`. Neither is a
+  delivery or external-effect certificate, and `unknown` is never auto-retried.
+
+Production wiring is deliberately inert: the IO loop passes `record_store: None`,
+no service flag/config/credential reader exists, and source construction remains
+`cfg(test)`. The intake service capability is never placed on a coroutine handle.
+
+Gate `cargo test --release --locked ingress_pipeline` (9): synthetic getMe/getUpdates
+-> admitted event -> authored `tests/fixtures/ingress/pipeline.py` entry -> real
+`+spawn` through `spawn_dispatch` -> worker `llm_takeover` through
+`takeover_dispatch` -> existing native loop with a scripted localhost provider ->
+`evaluate Flow.write` -> `records_commit` on a temp Ladybug with operator-provisioned
+grants. Positive: exactly one row + receipt, event `turn_finished`, duplicate spawned
+worker refused before any provider call (2 provider rounds total), no credential or
+origin text in history/provider requests. Negatives: identical JSON without origin
+writes nothing although the write was attempted (`record_access_denied` observed in
+the tool result); actual-model `None` and context-profile `Read` each block the
+write; context mismatch is refused before claim/conversation/provider; provider
+failure leaves the event `unknown`. A handle minted by the verified turn and used
+after `turn_finished` is denied (no row); a descendant spawned after consumption runs
+legacy to another context with its write denied; a verified turn pinned to an
+Execute profile stays denied after a concurrent admin dispatch resets the shared
+field before it acquires the lock. The last two regressions were checked to fail
+with revocation or pinning disabled.
+
+`eval::Value` embeds `CoroutineHandle` by value, so its size bounds tree-walker
+recursion before the depth guard fires. Record access and origin are therefore
+behind single pointers, and `value_stays_small_enough_for_deep_tree_recursion`
+pins `size_of::<Value>() <= 184`. (Before this, the full suite aborted with a stack
+overflow in `python_frontend_logical_call_operand_short_circuits_tree_and_vm`.)
+
+Not delivered: live activation, host poll loop/cutover, Python receiver mode
+guards, media/group attestation, external exactly-once delivery, #70 or #108.
+
+The `__` identifier prefix is reserved (`src/reserved_names.rs`): user-written
+reads, let/set/await/call/spawn bindings, parameters, loop bindings and match
+captures named `__*` are refused at validation, and the evaluator refuses to read
+`__*` identifiers. Only parser-generated `__pat_<n>` nested-pattern placeholders
+are allowed. This removes the in-language way to copy `__coroutine_handle`; it also
+protects the live `TurnIdentity` handle independently of records.

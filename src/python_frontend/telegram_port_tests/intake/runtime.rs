@@ -151,6 +151,7 @@ fn intercept(mut receiver: tokio::sync::mpsc::Receiver<IoRequest>, c: Case) {
             }
             request @ IoRequest::HttpUploadBytes { .. } => check_upload(request, &c),
             IoRequest::LlmTakeover {
+                origin: None,
                 context,
                 message,
                 reply_fn,

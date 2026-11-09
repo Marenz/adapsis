@@ -45,6 +45,8 @@ mod takeover_native;
 pub mod native_tools;
 mod http_context;
 mod working_set;
+pub(crate) mod takeover_dispatch;
+pub(crate) mod record_context;
 pub use llm_handlers::{ask, ask_stream, handle_llm_takeover};
 use llm_handlers::EventSender;
 
@@ -106,6 +108,7 @@ pub type SessionManager = Arc<Mutex<std::collections::HashMap<String, Arc<tokio:
 /// Extended state for the API, including LLM and OpenCode configuration.
 #[derive(Clone)]
 pub struct AppConfig {
+    pub(crate) record_turn: Option<std::sync::Arc<record_context::RecordTurn>>,
     /// Tier 1: Program AST — read-heavy, use read() for queries, write() briefly for mutations
     pub program: std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
     /// Tier 3: Session metadata — chat history, plan, roadmap, mocks, mutation log.
@@ -1795,6 +1798,7 @@ async fn inject_message(
     if let Some(ref sender) = config.io_sender {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let _ = sender.send(crate::coroutine::IoRequest::LlmTakeover {
+            origin: None,
             context: context.clone(),
             message: req.message.clone(),
             attachment: None,

@@ -213,6 +213,9 @@ impl RecordStore {
     ) -> Result<&'a RecordBinding, StoreError> {
         let binding = binding.ok_or(StoreError::Denied)?;
         let turn = turn.ok_or(StoreError::Denied)?;
+        if binding.attestation.as_ref().is_some_and(|caller| !caller.is_live()) {
+            return Err(StoreError::Denied);
+        }
         if !Arc::ptr_eq(&self.identity, &binding.store)
             || turn.guest_tools.is_some()
             || binding.principal != turn.principal
@@ -432,6 +435,30 @@ fn apply_batch(
 
 #[cfg(test)]
 impl RecordStore {
+    /// Stable per-store key for test bookkeeping. Pointer addresses can be reused
+    /// after a store is dropped, so a UUID minted once per store is used instead.
+    pub(crate) fn test_identity(&self) -> String {
+        static IDS: std::sync::Mutex<Vec<(std::sync::Weak<()>, String)>> = std::sync::Mutex::new(Vec::new());
+        let mut ids = IDS.lock().unwrap();
+        ids.retain(|(store, _)| store.strong_count() > 0);
+        if let Some((_, id)) = ids.iter().find(|(store, _)| store.upgrade().is_some_and(|s| Arc::ptr_eq(&s, &self.identity))) {
+            return id.clone();
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        ids.push((Arc::downgrade(&self.identity), id.clone()));
+        id
+    }
+
+    /// Operator observation in fixtures only; never used to execute the tested turn.
+    pub(crate) fn observe_row_for_test(&self,namespace:&str,key:&str)->Option<Record> {
+        storage::read_row(&self.connection().unwrap(),namespace,key).unwrap()
+    }
+
+    pub(crate) fn observe_receipt_for_test(&self,namespace:&str,principal:&str,context:&str,grant:&str,id:&str)->Option<Receipt> {
+        let turn=TurnIdentity { principal:principal.into(),context:context.into(),may_write:true,guest_tools:None };
+        let binding=self.grant_for_test(namespace,&turn,grant,true);
+        storage::read_receipt(&self.connection().unwrap(),&binding,id).unwrap().map(|(_,receipt)|receipt)
+    }
     pub(crate) fn disk_for_test(path: &std::path::Path) -> Result<Self, StoreError> {
         Self::initialize_for_test(Self::graph_for_test(path)?)
     }

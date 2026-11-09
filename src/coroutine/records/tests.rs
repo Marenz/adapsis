@@ -23,7 +23,7 @@ async fn records_bridge_backend_rejects_direct_requests_and_redacts_debug() {
     };
     for (access, turn) in [
         (None, Some(turn.clone())),
-        (Some(access.clone()), Some(different)),
+        (Some(std::sync::Arc::new(access.clone())), Some(different)),
     ] {
         let request = Request {
             access,

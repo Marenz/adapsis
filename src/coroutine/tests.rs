@@ -942,6 +942,7 @@ fn query_tasks_with_registry() {
         stubs: None,
         turn: None,
         record_access: None,
+        origin: None,
     };
 
     let result = unwrap_string(handle.execute_await("query_tasks", &[]).unwrap());

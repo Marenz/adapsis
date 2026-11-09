@@ -89,6 +89,7 @@ pub(super) async fn run(turn: TakeoverRun<'_>) -> anyhow::Result<String> {
     if let Some(error) = native.fatal.take() {
         return Err(error);
     }
+    if matches!(native.end,LoopEnd::Finished) { config.confirm_ingress_completion(); }
     let reply = render_reply(&native, budget.generations());
     eprintln!(
         "[llm_takeover:{}] native turn end={} generations={:?}",

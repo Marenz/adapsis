@@ -125,6 +125,7 @@ fn collect(mut receiver: tokio::sync::mpsc::Receiver<IoRequest>) -> Vec<(String,
     let mut spawned = Vec::new();
     while let Some(request) = receiver.blocking_recv() {
         let IoRequest::Spawn {
+            origin: None,
             function_name,
             args,
             reply,

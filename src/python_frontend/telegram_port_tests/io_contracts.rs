@@ -273,6 +273,7 @@ fn telegram_port_takeover_overload_contracts() {
             args.push(Value::string("{\"speaker_id\":\"fixture:user\"}"));
             let result = exchange("llm_takeover", args, |request| {
                 let IoRequest::LlmTakeover {
+                    origin: None,
                     context,
                     message,
                     attachment,

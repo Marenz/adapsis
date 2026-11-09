@@ -40,7 +40,7 @@ struct CompactionMemory {
     confidence: f64,
 }
 
-fn takeover_context_lock(context: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn takeover_context_lock(context: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     > = std::sync::OnceLock::new();
@@ -1211,6 +1211,7 @@ pub async fn handle_llm_takeover(
     log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     // `--native-tools`: eligible write-capable turns use the native protocol (#85).
     native_tools: bool,
+    record_turn: Option<std::sync::Arc<super::record_context::RecordTurn>>,
 ) -> anyhow::Result<String> {
     let context_lock = takeover_context_lock(&context);
     let _context_guard = context_lock.lock().await;
@@ -1341,6 +1342,7 @@ pub async fn handle_llm_takeover(
     // Build a temporary AppConfig so we can reuse execute_code()
     let (self_trigger_tx, _self_trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
     let tmp_config = AppConfig {
+        record_turn,
         program: program.clone(),
         meta: meta.clone(),
         llm_url: llm_url.to_string(),
@@ -1721,6 +1723,7 @@ pub async fn handle_llm_takeover(
         tmp_config.notify_save();
 
         if exec_result.done_accepted && !exec_result.has_errors {
+            tmp_config.confirm_ingress_completion();
             final_summary_pending = false;
             break;
         }

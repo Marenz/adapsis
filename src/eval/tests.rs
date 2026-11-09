@@ -6896,3 +6896,11 @@ fn async_eval_unmocked_io_error_is_surfaced() {
     let result = eval_async_function(&program, "fetch", &input, handle);
     assert!(result.is_err(), "unmocked IO should error: {result:?}");
 }
+
+/// Every tree-walker frame holds `Value`s by value, so `Value` growth shrinks the
+/// usable recursion depth before the evaluator's own depth guard can fire. Large
+/// payloads (coroutine record grants, origins) must stay behind pointers.
+#[test]
+fn value_stays_small_enough_for_deep_tree_recursion() {
+    assert!(std::mem::size_of::<Value>() <= 184, "Value is {} bytes", std::mem::size_of::<Value>());
+}

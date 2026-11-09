@@ -27,7 +27,7 @@ enum Operation {
 }
 
 pub struct Request {
-    access: Option<Access>,
+    access: Option<std::sync::Arc<Access>>,
     turn: Option<TurnIdentity>,
     operation: Operation,
 }
@@ -159,13 +159,13 @@ impl CoroutineHandle {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_records_for_test(
-        mut self,
-        store: RecordStore,
-        binding: RecordBinding,
-    ) -> Self {
-        self.record_access = Some(Access { store, binding });
+    pub(crate) fn with_record_access(mut self, store: RecordStore, binding: RecordBinding) -> Self {
+        self.record_access = Some(std::sync::Arc::new(Access { store, binding }));
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_records_for_test(self, store: RecordStore, binding: RecordBinding) -> Self {
+        self.with_record_access(store, binding)
     }
 }

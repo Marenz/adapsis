@@ -172,6 +172,7 @@ fn intercept(
                     .unwrap();
             }
             IoRequest::LlmTakeover {
+                origin: None,
                 context,
                 message,
                 attachment,

@@ -101,6 +101,7 @@ fn config_for(
 ) -> AppConfig {
     let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
     AppConfig {
+        record_turn: None,
         program: Arc::new(tokio::sync::RwLock::new(program)),
         meta: Arc::new(std::sync::Mutex::new(SessionMeta::new())),
         llm_url: String::new(),

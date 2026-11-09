@@ -30,6 +30,7 @@ mod record_provision;
 mod server;
 mod session;
 mod shared_state;
+mod spawn_dispatch;
 mod typeck;
 mod tui;
 mod validator;
@@ -89,6 +90,7 @@ async fn dispatch_conversation_callback(
     let (tx, rx) = tokio::sync::oneshot::channel();
     sender
         .send(coroutine::IoRequest::Spawn {
+            origin: None,
             function_name,
             args,
             reply: tx,
@@ -1334,7 +1336,7 @@ async fn main() -> Result<()> {
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
-                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
+                        coroutine::IoRequest::Spawn { function_name, args, origin, reply } => {
                             // Register the task
                             let task_id = rt_for_id.next_task_id();
                             let task_info = coroutine::TaskInfo {
@@ -1373,7 +1375,7 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
+                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg).with_origin(origin);
                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 // Bind args to params
@@ -1746,86 +1748,11 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
-                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
-                            let task_id = rt_for_id.next_task_id();
-                            let task_info = coroutine::TaskInfo {
-                                id: task_id,
-                                function_name: function_name.clone(),
-                                status: coroutine::WaitReason::Running,
-                                started_at: format!("{}s", std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
-                            };
-                            task_registry_for_spawn.lock().unwrap().insert(task_id, task_info);
-                            let _ = reply.send(Ok(task_id));
-
-                            let sender = io_sender_for_spawn.clone();
-                            let registry = task_registry_for_spawn.clone();
-                            let monitor_registry = registry.clone();
-                            let snap_reg = snap_registry_for_spawn2.clone();
-                            let runtime_for_blocking = shared_runtime_for_spawn.clone();
-                            let meta_for_blocking = shared_meta_for_spawn.clone();
-                            let program_for_blocking = shared_program_for_spawn.clone();
-                            let monitored_function = function_name.clone();
-                            let task = tokio::task::spawn_blocking(move || {
-                                let program = program_for_blocking.blocking_read().clone();
-                                let func_decl = match program.get_function(&function_name) {
-                                    Some(f) => f.clone(),
-                                    None => {
-                                        eprintln!("spawn: function `{function_name}` not found");
-                                        if let Ok(mut tasks) = registry.lock() {
-                                            if let Some(info) = tasks.get_mut(&task_id) {
-                                                info.status = coroutine::WaitReason::Failed(format!("function not found"));
-                                            }
-                                        }
-                                        return;
-                                    }
-                                };
-                                let runtime_for_env = runtime_for_blocking.clone();
-                                let ctx = eval::EvalContext::new_minimal(
-                                    runtime_for_blocking, meta_for_blocking,
-                                    &program, eval::make_shared_program_mut(&program),
-                                );
-                                ctx.install();
-
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
-                                let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
-                                env.populate_shared_from_program(&program);
-                                // Set shared runtime so +shared vars resolve from runtime state
-                                env.set_shared_runtime(runtime_for_env);
-                                // Initialize shared runtime vars so +shared defaults are available
-                                if let Some(rt) = eval::get_shared_runtime() {
-                                    eval::init_missing_shared_runtime_vars(&program, &rt);
-                                }
-                                env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
-                                for (i, param) in func_decl.params.iter().enumerate() {
-                                    if let Some(val) = args.get(i) {
-                                        env.set(&param.name, val.clone());
-                                    }
-                                }
-                                match eval::eval_function_body_named(&program, &function_name, &func_decl.body, &mut env) {
-                                    Ok(val) => {
-                                        if let Ok(mut tasks) = registry.lock() {
-                                            if let Some(info) = tasks.get_mut(&task_id) {
-                                                info.status = coroutine::WaitReason::Completed(format!("{val}"));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        crate::logging::diagnostic("spawn-error", &e);
-                                        if let Ok(mut tasks) = registry.lock() {
-                                            if let Some(info) = tasks.get_mut(&task_id) {
-                                                info.status = coroutine::WaitReason::Failed(format!("{e}"));
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                            tokio::spawn(monitor_spawned_task(
-                                task,
-                                monitor_registry,
-                                task_id,
-                                monitored_function,
-                            ));
+                        coroutine::IoRequest::Spawn { function_name, args, origin, reply } => {
+                            spawn_dispatch::dispatch(spawn_dispatch::Context {
+                                io:rt_for_id.clone(),program:shared_program_for_spawn.clone(),
+                                runtime:shared_runtime_for_spawn.clone(),meta:shared_meta_for_spawn.clone(),
+                            },function_name,args,origin,reply);
                         }
                         coroutine::IoRequest::SourceAdd {
                             module_name, source_type, interval_ms, alias, handler, reply,
@@ -1928,47 +1855,16 @@ async fn main() -> Result<()> {
                         coroutine::IoRequest::SourceList { reply } => {
                             let _ = reply.send(Ok(coroutine::format_source_list(&source_registry)));
                         }
-                        coroutine::IoRequest::LlmTakeover { context, message, attachment, source_metadata, reply_fn, reply_arg, permission_model, reply } => {
-                            // Set or clear permission_model on the conversation.
-                            // This is per-message: admin messages clear any restriction
-                            // that a non-admin may have set on a shared group context.
-                            {
-                                let mut meta_guard = shared_meta_for_spawn.lock().unwrap();
-                                let conv = meta_guard.conversations.get_or_create(&context);
-                                conv.permission_model = permission_model.clone();
-                            }
-
-                            let meta = shared_meta_for_spawn.clone();
-                            let program = shared_program_for_spawn.clone();
-                            let runtime = shared_runtime_for_spawn.clone();
-                            let llm_url = llm_url_for_spawn.clone();
-                            let llm_model = llm_model_for_spawn.read().unwrap().clone();
-                            let llm_key = llm_key_for_spawn.clone();
-                            let io_sender = io_sender_for_spawn.clone();
-                            let task_registry = task_registry_for_spawn.clone();
-                            let snap_registry = snap_registry_for_spawn2.clone();
-                            let oc_lock = opencode_lock_for_spawn.clone();
-                            let oc_git_dir = opencode_git_dir_for_spawn.read().unwrap().clone();
-                            let t_log = training_log_for_spawn.read().unwrap().clone();
-                            let al = access_level_for_spawn;
-                            let pc = perm_config_for_spawn.clone();
-                            let save_notify = save_notify_for_spawn.read().unwrap().clone();
-                            let ai_log = ai_log_for_spawn.read().unwrap().clone();
-                            let memory_graph = memory_graph_for_spawn.clone();
-                            let memory_embedder = memory_embedder_for_spawn.clone();
-
-                            tokio::spawn(async move {
-                                let result = crate::api::handle_llm_takeover(
-                                    context, message, attachment, source_metadata, memory_graph, memory_embedder, reply_fn, reply_arg,
-                                    meta, program, runtime,
-                                    &llm_url, &llm_model, llm_key,
-                                    io_sender, task_registry, snap_registry,
-                                    oc_lock, oc_git_dir, t_log,
-                                    al, pc,
-                                    save_notify, ai_log, native_tools,
-                                ).await;
-                                let _ = reply.send(result);
-                            });
+                        coroutine::IoRequest::LlmTakeover { context, message, attachment, source_metadata, reply_fn, reply_arg, permission_model, origin, reply } => {
+                            api::takeover_dispatch::dispatch(api::takeover_dispatch::Host {
+                                meta:shared_meta_for_spawn.clone(),program:shared_program_for_spawn.clone(),runtime:shared_runtime_for_spawn.clone(),
+                                url:llm_url_for_spawn.clone(),model:llm_model_for_spawn.read().unwrap().clone(),key:llm_key_for_spawn.clone(),
+                                sender:io_sender_for_spawn.clone(),tasks:task_registry_for_spawn.clone(),snapshots:snap_registry_for_spawn2.clone(),
+                                opencode_lock:opencode_lock_for_spawn.clone(),opencode_dir:opencode_git_dir_for_spawn.read().unwrap().clone(),
+                                training:training_log_for_spawn.read().unwrap().clone(),log:ai_log_for_spawn.read().unwrap().clone(),
+                                access:access_level_for_spawn,permissions:perm_config_for_spawn.clone(),save:save_notify_for_spawn.read().unwrap().clone(),
+                                native:native_tools,graph:memory_graph_for_spawn.clone(),embedder:memory_embedder_for_spawn.clone(),record_store:None,
+                            },api::takeover_dispatch::Input { context,message,attachment,metadata:source_metadata,reply_fn,reply_arg,permission_model,origin },reply);
                         }
                         coroutine::IoRequest::Scoped { request, reply } => {
                             let graph = memory_graph_for_spawn.clone();
@@ -2407,6 +2303,7 @@ async fn main() -> Result<()> {
             let access_level_for_config = access_level_parsed;
 
             let config = api::AppConfig {
+                record_turn: None,
                 program: tier1_program,
                 meta: shared_meta.clone(),
                 llm_url: url.clone(),
@@ -2667,6 +2564,7 @@ async fn main() -> Result<()> {
                         eprintln!("[startup] injecting goal into 'main' context");
                     }
                     let _ = inject_sender.send(crate::coroutine::IoRequest::LlmTakeover {
+                        origin: None,
                         context: "main".to_string(),
                         message: msg,
                         attachment: None,

@@ -169,6 +169,7 @@ fn collect(mut receiver: tokio::sync::mpsc::Receiver<IoRequest>, s: Script) -> V
                 reply.send(s.exists.map_err(anyhow::Error::msg)).unwrap();
             }
             IoRequest::Spawn {
+                origin: None,
                 function_name,
                 args,
                 reply,
@@ -558,6 +559,7 @@ fn dispatch_replica(
     let mut spawns = Vec::new();
     while let Ok(request) = receiver.try_recv() {
         let IoRequest::Spawn {
+            origin: None,
             function_name,
             args,
             reply,

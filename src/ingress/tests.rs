@@ -1,4 +1,5 @@
 use super::*;
+mod pipeline;
 use crate::memory_graph::records::RecordStore;
 use axum::{
     extract::State,

@@ -140,6 +140,7 @@ fn intercept(
         assert!(events.len() < 4, "unexpected retry");
         match request {
             IoRequest::LlmTakeover {
+                origin: None,
                 context,
                 message,
                 attachment,

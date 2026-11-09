@@ -275,7 +275,10 @@ impl IntakeStore {
         let (root, events) = self.event_rows(epoch)?;
         for event in events {
             let mut values = fields(&event);
-            if values.get("status").map(String::as_str) == Some("started") {
+            if matches!(
+                values.get("status").map(String::as_str),
+                Some("started" | "takeover_started")
+            ) {
                 if number(&values, "epoch")? >= epoch {
                     return Err(IngressError::StateUnavailable);
                 }
@@ -306,7 +309,7 @@ impl IntakeStore {
                 Some("accepted") if pending.events.len() < PAGE_LIMIT => {
                     pending.events.push(self.payload(&values)?)
                 }
-                Some("accepted") | Some("started") => {}
+                Some("accepted" | "started" | "takeover_started" | "turn_finished") => {}
                 Some("unknown") => pending.unknown += 1,
                 _ => return Err(IngressError::StateUnavailable),
             }
@@ -373,6 +376,77 @@ impl IntakeStore {
     #[cfg(test)]
     pub(super) fn gate_admission(&mut self, barrier: Arc<std::sync::Barrier>) {
         self.admission_gate = Some(barrier);
+    }
+
+    #[cfg(test)]
+    pub(super) fn status_for_test(&self, id: i64) -> String {
+        fields(&self.one(&event_key(id)).unwrap().unwrap())["status"].clone()
+    }
+
+    pub(super) fn takeover(
+        &self,
+        epoch: i64,
+        id: i64,
+        digest: &str,
+        claim: &str,
+    ) -> Result<(), IngressError> {
+        let (root, _) = self.root(epoch)?;
+        let event = self
+            .one(&event_key(id))?
+            .ok_or(IngressError::StateUnavailable)?;
+        let mut values = fields(&event);
+        if values.get("digest").map(String::as_str) != Some(digest) {
+            return Err(IngressError::Mismatch);
+        }
+        if values.get("status").map(String::as_str) != Some("started") {
+            return Err(IngressError::AlreadyStarted);
+        }
+        values.insert("status".into(), "takeover_started".into());
+        values.insert("claim".into(), claim.into());
+        self.commit(
+            &format!("takeover:{id}:{claim}"),
+            &[
+                (root.key, Some(root.revision)),
+                (event.key.clone(), Some(event.revision)),
+            ],
+            &[row(event.key, values)],
+        )
+    }
+
+    pub(super) fn finish_takeover(
+        &self,
+        epoch: i64,
+        id: i64,
+        claim: &str,
+        confirmed: bool,
+    ) -> Result<(), IngressError> {
+        let (root, _) = self.root(epoch)?;
+        let event = self
+            .one(&event_key(id))?
+            .ok_or(IngressError::StateUnavailable)?;
+        let mut values = fields(&event);
+        if values.get("status").map(String::as_str) != Some("takeover_started")
+            || values.get("claim").map(String::as_str) != Some(claim)
+        {
+            return Err(IngressError::Mismatch);
+        }
+        values.insert(
+            "status".into(),
+            if confirmed {
+                "turn_finished"
+            } else {
+                "unknown"
+            }
+            .into(),
+        );
+        self.commit(
+            &format!("finish:{id}:{claim}"),
+            &[
+                (root.key, Some(root.revision)),
+                (event.key.clone(), Some(event.revision)),
+            ],
+            &[row(event.key, values)],
+        )
     }
 }
 

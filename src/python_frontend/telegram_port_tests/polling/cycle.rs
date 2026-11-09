@@ -152,6 +152,7 @@ fn collect(
                     .unwrap();
             }
             IoRequest::Spawn {
+                origin: None,
                 function_name,
                 args,
                 reply,

@@ -1,7 +1,9 @@
 //! Finite authenticated receive substrate. Construction/activation is fixture-only.
 //! No caller attestation issuance, task policy, live poll loop or API builtin.
 #![allow(dead_code)]
+mod origin;
 mod state;
+pub(crate) use origin::{ClaimedOrigin, InvocationOrigin};
 mod strict_json;
 mod telegram_poll;
 #[cfg(test)]
@@ -51,6 +53,7 @@ struct SourceConfig {
 }
 
 /// Not serializable or constructible by an Adapsis source/event/payload.
+#[derive(Clone)]
 pub(crate) struct VerifiedIngress {
     source: String,
     update_id: i64,
@@ -100,6 +103,13 @@ pub(crate) struct Admitted {
     pub(crate) handler: String,
     pub(crate) payload: String,
     pub(crate) proof: Option<VerifiedIngress>,
+    origin: Option<InvocationOrigin>,
+}
+
+impl Admitted {
+    pub(crate) fn origin(&self) -> Option<InvocationOrigin> {
+        self.origin.clone()
+    }
 }
 
 pub(crate) struct Received {
@@ -191,6 +201,10 @@ impl PollSource {
         Ok(Admitted {
             handler: self.config.handler.clone(),
             payload: event.payload,
+            origin: event
+                .proof
+                .clone()
+                .map(|proof| InvocationOrigin::admitted(proof, self.state.clone())),
             proof: event.proof,
         })
     }

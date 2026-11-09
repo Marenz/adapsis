@@ -290,7 +290,7 @@ pub enum IoRequest {
         task: String,
         reply: oneshot::Sender<Result<String>>,
     },
-    Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
+    Spawn { function_name: String, args: Vec<Value>, origin: Option<crate::ingress::InvocationOrigin>, reply: oneshot::Sender<Result<TaskId>> },
     HttpGet { url: String, reply: oneshot::Sender<Result<String>> },
     HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
     /// HTTP POST that returns the response as a binary Attachment (for audio/image downloads).
@@ -333,6 +333,7 @@ pub enum IoRequest {
     /// Conversational LLM call with per-context history.
     /// Returns the text reply immediately; code execution happens in background.
     LlmTakeover {
+        origin: Option<crate::ingress::InvocationOrigin>,
         context: String,
         message: String,
         attachment: Option<crate::attachment::Attachment>,
@@ -971,7 +972,10 @@ pub struct CoroutineHandle {
     /// route handlers, `+startup` tasks and CLI evaluation — identity-scoped
     /// builtins refuse rather than guess in that case.
     turn: Option<TurnIdentity>,
-    record_access: Option<records::Access>,
+    // Boxed behind Arc: CoroutineHandle lives inline in eval::Value, and every
+    // tree-walker frame pays for Value's size (deep-recursion stack guard).
+    record_access: Option<Arc<records::Access>>,
+    origin: Option<crate::ingress::InvocationOrigin>,
 }
 
 /// Stringify a call argument for mock/stub matching (issue #7).
@@ -989,7 +993,7 @@ fn mock_arg_string(arg: &Value) -> String {
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None, record_access: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None, record_access: None, origin: None }
     }
 
     pub fn new_with_task(
@@ -998,27 +1002,27 @@ impl CoroutineHandle {
         registry: TaskRegistry,
         snapshot_registry: TaskSnapshotRegistry,
     ) -> Self {
-        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None, turn: None, record_access: None }
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None, turn: None, record_access: None, origin: None }
     }
 
     /// Create a mock handle for testing — no real IO, returns mock responses.
     #[allow(dead_code)]
     pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, record_access: None }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, record_access: None, origin: None }
     }
 
     /// Create a mock handle with function stubs for testing.
     pub fn new_mock_with_stubs(mocks: Vec<crate::session::IoMock>, stubs: Vec<crate::session::FunctionStub>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs), turn: None, record_access: None }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs), turn: None, record_access: None, origin: None }
     }
 
     /// Create a handle with mocks AND a real IO sender — mocks are checked first,
     /// unmatched operations fall through to real IO via the sender.
     #[cfg(test)]
     pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, record_access: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, record_access: None, origin: None }
     }
 
     /// Bind this handle to the conversational turn it executes for.
@@ -1028,6 +1032,13 @@ impl CoroutineHandle {
     pub fn with_turn(mut self, turn: Option<TurnIdentity>) -> Self {
         self.turn = turn;
         self
+    }
+
+    pub(crate) fn with_origin(mut self, origin:Option<crate::ingress::InvocationOrigin>)->Self { self.origin=origin; self }
+    /// Unspent origin only: once any takeover consumed it, descendants and later
+    /// calls run as origin-free legacy work with no record access.
+    pub(crate) fn invocation_origin(&self)->Option<crate::ingress::InvocationOrigin> {
+        self.origin.as_ref().filter(|origin| !origin.is_spent()).cloned()
     }
 
     /// Turn identity, or an actionable refusal.
@@ -2771,7 +2782,7 @@ impl CoroutineHandle {
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(
                     WaitReason::LlmTakeover(context.clone()),
-                    IoRequest::LlmTakeover { context, message, attachment, source_metadata, reply_fn, reply_arg, permission_model, reply: tx },
+                    IoRequest::LlmTakeover { context, message, attachment, source_metadata, reply_fn, reply_arg, permission_model, origin:self.invocation_origin(), reply: tx },
                     rx,
                 )?;
                 return Ok(Value::string(result));

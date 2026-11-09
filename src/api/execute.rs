@@ -578,13 +578,12 @@ pub(super) async fn execute_code_with_baseline(
                                 let fn_name = ev.function_name.clone();
                                 let input = ev.input.clone();
                                 let sender = sender.clone();
-                                let turn = config.turn.clone();
+                                let execution_config = config.clone();
                                 let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
                                 let eval_fn_name = ev.function_name.clone();
                                 let eval_result = tokio::task::spawn_blocking(move || {
                                     ctx.install();
-                                    let handle = crate::coroutine::CoroutineHandle::new(sender)
-                                        .with_turn(turn);
+                                    let handle = execution_config.coroutine_handle(sender);
                                     crate::eval::eval_async_function(&program, &fn_name, &input, handle)
                                 }).await;
                                 let (msg, success) = match &eval_result {
@@ -986,6 +985,7 @@ pub(super) async fn execute_code_with_baseline(
                                                 if let Some(sender) = agent_io_sender {
                                                     let (tx, _rx) = tokio::sync::oneshot::channel();
                                                     let _ = sender.send(crate::coroutine::IoRequest::Spawn {
+                                                        origin: None,
                                                         function_name: cb.reply_fn,
                                                         args: vec![
                                                             crate::eval::Value::string(cb.reply_arg),
@@ -1079,8 +1079,7 @@ pub(super) async fn execute_code_with_baseline(
                                 env.populate_shared_from_program(&session.program);
                                 if let Some(sender) = &config.io_sender {
                                     env.set("__coroutine_handle", crate::eval::Value::CoroutineHandle(
-                                        crate::coroutine::CoroutineHandle::new(sender.clone())
-                                            .with_turn(config.turn.clone())
+                                        config.coroutine_handle(sender.clone())
                                     ));
                                 }
                                 match crate::eval::eval_function_body_pub(&session.program, &[stmt], &mut env) {

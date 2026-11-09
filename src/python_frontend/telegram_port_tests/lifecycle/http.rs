@@ -20,6 +20,7 @@ fn build_config(
     let (io_tx, io_rx) = tokio::sync::mpsc::channel::<IoRequest>(32);
     let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
     let config = AppConfig {
+        record_turn: None,
         program: std::sync::Arc::new(tokio::sync::RwLock::new(program.clone())),
         meta: std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new())),
         llm_url: String::new(),
@@ -94,6 +95,7 @@ fn spawned(receiver: &mut tokio::sync::mpsc::Receiver<IoRequest>) -> Vec<(String
     let mut spawns = Vec::new();
     while let Ok(request) = receiver.try_recv() {
         let IoRequest::Spawn {
+            origin: None,
             function_name,
             args,
             reply,

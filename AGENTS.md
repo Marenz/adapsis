@@ -180,8 +180,13 @@ response has no Content-Disposition header.
   private intake service capabilities. It uses existing Ladybug record CAS, retains
   exact RawValue event bytes, fences source incarnations and admits one handler via
   unique attempt IDs. Accepted events recover; started events become unknown, never
-  auto-retried. No user TrustedCaller issuance or Spawn/takeover origin propagation
-  exists yet. See `docs/poll-ingress.md`; focused gate: `cargo test --release --locked ingress_poll`.
+  auto-retried. A sealed origin now propagates (fixture-only) through +spawn and
+  llm_takeover via `spawn_dispatch`/`api/takeover_dispatch.rs`; exact-binding CAS
+  claim precedes any conversation effect and is the ONLY `TrustedCaller` issuer;
+  production main passes `record_store: None`. Record access is revoked when the turn
+  ends and checked per backend op; origins are single-use. User code cannot name
+  `__*` identifiers (`src/reserved_names.rs`; runtime-installed handles). Keep `CoroutineHandle` payloads behind
+  pointers: `Value` embeds it and a size test guards tree recursion depth. See `docs/poll-ingress.md`; focused gate: `cargo test --release --locked ingress_poll`.
 
 - Generic record grants now have an explicit operator-only `records-provision`
   CLI (required existing DB path; dry-run read-only). Stable grant IDs, monotonic

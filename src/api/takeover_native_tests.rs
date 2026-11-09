@@ -150,6 +150,7 @@ impl Harness {
             None,
             self.log_file.clone(),
             self.native_tools,
+            None,
         );
         tokio::time::timeout(std::time::Duration::from_secs(30), future)
             .await

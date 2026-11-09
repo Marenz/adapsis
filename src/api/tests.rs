@@ -15,6 +15,7 @@ mod execution_logging_tests;
 fn test_config() -> AppConfig {
     let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
     AppConfig {
+        record_turn: None,
         program: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ast::Program::default())),
         meta: std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new())),
         llm_url: String::new(),
@@ -733,6 +734,7 @@ fn test_config_with_io() -> (
     let (io_tx, io_rx) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(32);
     let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
     let config = AppConfig {
+        record_turn: None,
         program: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ast::Program::default())),
         meta: std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new())),
         llm_url: String::new(),
