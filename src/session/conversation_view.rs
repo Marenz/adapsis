@@ -34,7 +34,8 @@ pub struct ViewPolicy {
     /// Everything outside the history: system prefix, runtime tail allowance and
     /// reserved output.
     pub overhead_tokens: usize,
-    pub max_message_chars: usize,
+    /// Per-message cap in UTF-8 bytes of the message text.
+    pub max_message_bytes: usize,
     /// Serialized request byte budget (85% / 50% of the route body limit) and
     /// the bytes outside the history (system prefix, tail, tool schemas, framing).
     pub trigger_bytes: usize,
@@ -44,6 +45,15 @@ pub struct ViewPolicy {
     pub image_bytes: usize,
     /// Serialized text bytes per provider token for this conversation.
     pub bytes_per_token: f32,
+}
+
+/// What a conversation's previous requests measured, for projecting the next.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Projection {
+    /// Serialized text bytes per provider token.
+    pub bytes_per_token: f32,
+    /// Real size of the previous turn's runtime tail (None: never measured).
+    pub tail_bytes: Option<usize>,
 }
 
 impl ViewPolicy {
@@ -56,13 +66,33 @@ impl ViewPolicy {
     pub const TAIL_ALLOWANCE_BYTES: usize = 64 * 1024;
 
     /// `known_tail_bytes`: measured size of the tail parts known before the view
-    /// (runtime/authority text, native tool schemas). `bytes_per_token`: the
-    /// conversation's calibrated ratio (`model_limits::bytes_per_token`).
-    pub fn for_model(model: &str, system: &str, known_tail_bytes: usize, bytes_per_token: f32) -> Self {
-        let mut policy = Self::from_limits(&crate::model_limits::for_model(model), system, bytes_per_token);
-        policy.overhead_bytes += known_tail_bytes;
-        policy.overhead_tokens += tokens_for_bytes(known_tail_bytes, bytes_per_token);
-        policy
+    /// (runtime/authority text, native tool schemas). `projection`: what the
+    /// conversation's previous requests measured (`Conversation::projection`).
+    pub fn for_model(model: &str, system: &str, known_tail_bytes: usize, projection: Projection) -> Self {
+        let limits = crate::model_limits::for_model(model);
+        Self::from_limits(&limits, system, projection.bytes_per_token).with_tail(
+            known_tail_bytes,
+            projection.tail_bytes.map(|tail| tail.min(limits.max_request_bytes / 4)),
+        )
+    }
+
+    /// Account the runtime tail. With a measurement (the previous turn's real
+    /// request minus its view: memories, episodes, activity, authority text and
+    /// tool schemas together) it replaces the fixed allowance, with a quarter of
+    /// margin because recall differs per turn; a larger known part still wins.
+    /// Without one, the allowance covers the unknown part beside the known one.
+    fn with_tail(mut self, known_tail_bytes: usize, measured_tail_bytes: Option<usize>) -> Self {
+        let tail = match measured_tail_bytes {
+            Some(measured) => {
+                self.overhead_bytes -= Self::TAIL_ALLOWANCE_BYTES;
+                self.overhead_tokens -= Self::TAIL_ALLOWANCE_TOKENS;
+                (measured + measured / 4).max(known_tail_bytes)
+            }
+            None => known_tail_bytes,
+        };
+        self.overhead_bytes += tail;
+        self.overhead_tokens += tokens_for_bytes(tail, self.bytes_per_token);
+        self
     }
 
     pub fn from_limits(limits: &crate::model_limits::ModelLimits, system: &str, bytes_per_token: f32) -> Self {
@@ -74,7 +104,7 @@ impl ViewPolicy {
             overhead_tokens: tokens_for_bytes(json_len(system), bytes_per_token)
                 + Self::TAIL_ALLOWANCE_TOKENS
                 + limits.output_reserve_tokens(),
-            max_message_chars: limits.max_message_chars(),
+            max_message_bytes: limits.max_message_bytes(),
             trigger_bytes: max_bytes * crate::model_limits::CHECKPOINT_TRIGGER_PERCENT / 100,
             target_bytes: max_bytes * crate::model_limits::CHECKPOINT_TARGET_PERCENT / 100,
             overhead_bytes: json_len(system) + Self::TAIL_ALLOWANCE_BYTES,
@@ -86,9 +116,9 @@ impl ViewPolicy {
     /// Test helper: token budget only (byte budget effectively unlimited), at the
     /// default bytes-per-token ratio.
     #[cfg(test)]
-    pub fn tokens_only(trigger_tokens: usize, target_tokens: usize, overhead_tokens: usize, max_message_chars: usize) -> Self {
+    pub fn tokens_only(trigger_tokens: usize, target_tokens: usize, overhead_tokens: usize, max_message_bytes: usize) -> Self {
         Self {
-            trigger_tokens, target_tokens, overhead_tokens, max_message_chars,
+            trigger_tokens, target_tokens, overhead_tokens, max_message_bytes,
             trigger_bytes: usize::MAX / 4, target_bytes: usize::MAX / 4, overhead_bytes: 0,
             image_bytes: IMAGE_BYTES,
             bytes_per_token: crate::model_limits::DEFAULT_BYTES_PER_TOKEN,
@@ -106,37 +136,48 @@ impl ViewPolicy {
 
 /// The model view of one over-long message: head and tail with a marker between
 /// them that tells the model the message was cut and by how many characters. The
-/// persisted message is never changed. The result has at most `max_chars`
-/// characters and depends only on the message and the cap (stable prefix).
-fn truncate_middle(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
+/// persisted message is never changed. The result has at most `max_bytes` UTF-8
+/// bytes (cut on character boundaries) and depends only on the message and the
+/// cap (stable prefix).
+fn truncate_middle(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
         return value.to_string();
     }
+    let floor = |mut index: usize| {
+        while !value.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
+    };
+    let ceil = |mut index: usize| {
+        while !value.is_char_boundary(index) {
+            index += 1;
+        }
+        index
+    };
     // Room is reserved for the widest possible count, so the cut never depends
-    // on the marker's own length.
-    let digits = count.to_string().len();
+    // on the marker's own length. Both templates are ASCII.
+    let digits = value.len().to_string().len();
     let long = "\n[... {} characters omitted here by the runtime to fit the model context; the stored message is complete ...]\n";
     let short = "\n[... {} characters omitted ...]\n";
     let width = |template: &str| template.len() - 2 + digits;
-    let template = if max_chars >= 4 * width(long) {
+    let template = if max_bytes >= 4 * width(long) {
         long
-    } else if max_chars >= width(short) + 16 {
+    } else if max_bytes >= width(short) + 16 {
         short
     } else {
-        return value.chars().take(max_chars).collect();
+        return value[..floor(max_bytes)].to_string();
     };
-    let kept = max_chars - width(template);
-    let head = kept / 2;
-    let tail = kept - head;
-    let prefix: String = value.chars().take(head).collect();
-    let suffix: String = value.chars().skip(count - tail).collect();
-    let marker = template.replace("{}", &(count - kept).to_string());
-    format!("{prefix}{marker}{suffix}")
+    let kept = max_bytes - width(template);
+    let head = floor(kept / 2);
+    let tail = ceil(value.len() - (kept - kept / 2));
+    let omitted = value[head..tail].chars().count();
+    let marker = template.replace("{}", &omitted.to_string());
+    format!("{}{marker}{}", &value[..head], &value[tail..])
 }
 
 fn json_len(text: &str) -> usize {
-    serde_json::to_string(text).map_or(text.len(), |json| json.len())
+    crate::model_limits::serialized_len(text)
 }
 
 /// Serialized size of an image part: a base64 data URL plus JSON framing.
@@ -163,16 +204,18 @@ struct Group {
 /// Per-message JSON framing estimate (role, keys, cache_control).
 const MESSAGE_FRAMING_BYTES: usize = 96;
 
-fn chars(message: &ChatMessage) -> usize {
-    message.content.chars().count()
+/// UTF-8 bytes of a message's text and tool-call arguments (what the
+/// per-message cap is compared with).
+fn raw_bytes(message: &ChatMessage) -> usize {
+    message.content.len()
         + message.tool_calls.as_ref().map_or(0, |calls| {
-            calls.iter().map(|c| c.arguments.chars().count() + c.name.len() + c.id.len()).sum()
+            calls.iter().map(|c| c.arguments.len() + c.name.len() + c.id.len()).sum()
         })
 }
 
-fn message_bytes(message: &ChatMessage, max_message_chars: usize) -> usize {
-    let content = if message.content.chars().count() > max_message_chars {
-        json_len(&truncate_middle(&message.content, max_message_chars))
+fn message_bytes(message: &ChatMessage, max_message_bytes: usize) -> usize {
+    let content = if message.content.len() > max_message_bytes {
+        json_len(&truncate_middle(&message.content, max_message_bytes))
     } else {
         json_len(&message.content)
     };
@@ -197,7 +240,7 @@ fn kept_image_sizes(conv: &Conversation, image_bytes: usize) -> std::collections
 }
 
 fn groups(conv: &Conversation, policy: &ViewPolicy) -> Vec<Group> {
-    let max_message_chars = policy.max_message_chars;
+    let max_message_bytes = policy.max_message_bytes;
     let kept_images = kept_image_sizes(conv, policy.image_bytes);
     let base = conv.messages.as_ptr() as usize;
     let size = std::mem::size_of::<ChatMessage>();
@@ -206,9 +249,9 @@ fn groups(conv: &Conversation, policy: &ViewPolicy) -> Vec<Group> {
         .map(|group| {
             let start = (group.as_ptr() as usize - base) / size;
             let batch = group.len() > 1;
-            let oversized_batch = batch && group.iter().any(|m| chars(m) > max_message_chars);
+            let oversized_batch = batch && group.iter().any(|m| raw_bytes(m) > max_message_bytes);
             // Serialized text bytes as sent; tokens follow from the calibrated ratio.
-            let text_bytes: usize = group.iter().map(|m| message_bytes(m, max_message_chars)).sum();
+            let text_bytes: usize = group.iter().map(|m| message_bytes(m, max_message_bytes)).sum();
             // Exactly the images the view will send (newest 3 total), as base64.
             // They are projected at a fixed token cost, outside the text ratio.
             let image_raw: &[usize] = if batch { &[] } else { kept_images.get(&start).map_or(&[], Vec::as_slice) };
@@ -231,15 +274,26 @@ fn checkpoint(conv: &mut Conversation, groups: &[Group], policy: &ViewPolicy) ->
     let Some(last) = groups.last() else { return false };
     let start = conv.view_start.min(last.start);
     let visible: Vec<&Group> = groups.iter().filter(|g| g.start >= start).collect();
-    let mut tokens: usize = visible.iter().map(|g| g.tokens).sum();
-    let mut bytes: usize = visible.iter().map(|g| g.bytes).sum();
+    let tokens: usize = visible.iter().map(|g| g.tokens).sum();
+    let bytes: usize = visible.iter().map(|g| g.bytes).sum();
     if !policy.over(tokens, bytes) {
         conv.view_start = start;
         return false;
     }
+    conv.view_start = cut_start(&visible, |tokens, bytes| policy.within_target(tokens, bytes));
+    true
+}
+
+/// Where the view starts after dropping the oldest visible groups until
+/// `fits(tokens, bytes)`: then on to the next user turn, so the view never
+/// starts mid-turn. A group is a whole native batch, so batches are never
+/// split, and the newest group always stays.
+fn cut_start(visible: &[&Group], fits: impl Fn(usize, usize) -> bool) -> usize {
+    let mut tokens: usize = visible.iter().map(|g| g.tokens).sum();
+    let mut bytes: usize = visible.iter().map(|g| g.bytes).sum();
     let mut cut = visible.len() - 1;
     for (i, group) in visible.iter().enumerate().take(visible.len() - 1) {
-        if policy.within_target(tokens, bytes) {
+        if fits(tokens, bytes) {
             cut = i;
             break;
         }
@@ -247,8 +301,24 @@ fn checkpoint(conv: &mut Conversation, groups: &[Group], policy: &ViewPolicy) ->
         bytes -= group.bytes;
     }
     let cut = (cut..visible.len() - 1).find(|&i| visible[i].user).unwrap_or(cut);
-    conv.view_start = visible[cut].start;
-    true
+    visible[cut].start
+}
+
+fn cold_start(conv: &mut Conversation, policy: &ViewPolicy, max_history_tokens: usize) -> Option<(usize, usize)> {
+    let all = groups(conv, policy);
+    let start = conv.view_start.min(all.last()?.start);
+    let visible: Vec<&Group> = all.iter().filter(|g| g.start >= start).collect();
+    let before: usize = visible.iter().map(|g| g.tokens).sum();
+    if before <= max_history_tokens {
+        return None;
+    }
+    let cut = cut_start(&visible, |tokens, _| tokens <= max_history_tokens);
+    if cut <= conv.view_start {
+        return None;
+    }
+    conv.view_start = cut;
+    let after = visible.iter().filter(|g| g.start >= cut).map(|g| g.tokens).sum();
+    Some((before, after))
 }
 
 /// Images retained in the view, anchored at `image_start`. On overflow the anchor
@@ -311,10 +381,27 @@ impl Conversation {
         Anchors { view_start: self.view_start, image_start: self.image_start }
     }
 
-    /// Bytes per token to project this conversation's next request with: its last
-    /// measured request, else the conservative default.
-    pub fn bytes_per_token(&self) -> f32 {
-        crate::model_limits::bytes_per_token(self.token_calibration.as_ref())
+    /// Bytes per token to project this conversation's next request to `model`
+    /// with: its last measured request if `model` answered it, else the
+    /// conservative default (another model, another tokenizer).
+    pub fn bytes_per_token(&self, model: &str) -> f32 {
+        crate::model_limits::bytes_per_token(self.token_calibration.as_ref(), model)
+    }
+
+    /// The measurements the next request to `model` is projected with.
+    pub fn projection(&self, model: &str) -> Projection {
+        Projection {
+            bytes_per_token: self.bytes_per_token(model),
+            tail_bytes: self.tail_bytes.map(|bytes| bytes as usize),
+        }
+    }
+
+    /// Cold start (#68): the provider cache is gone, so keep at most
+    /// `max_history_tokens` of history. Same mechanics as a checkpoint. Returns
+    /// the projected history tokens (before, after) when the anchor moved.
+    /// Only for the start of a turn: never call it between a turn's rounds.
+    pub fn cold_start(&mut self, policy: &ViewPolicy, max_history_tokens: usize) -> Option<(usize, usize)> {
+        cold_start(self, policy, max_history_tokens)
     }
 }
 
@@ -373,7 +460,7 @@ pub(super) fn build(conv: &mut Conversation, policy: &ViewPolicy) -> View {
             continue;
         }
         let message = &slice[0];
-        let content = truncate_middle(&message.content, policy.max_message_chars);
+        let content = truncate_middle(&message.content, policy.max_message_bytes);
         let attachments = images[group.start].clone();
         if content.is_empty() && attachments.is_empty() {
             continue;

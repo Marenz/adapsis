@@ -241,10 +241,7 @@ fn compaction_rule(model: &str, bytes_per_token: f32) -> CompactionRule {
     }
 }
 
-/// Size of one stored message as it would be serialized into a request.
-fn serialized_len(content: &str) -> usize {
-    serde_json::to_string(content).map_or(content.len(), |json| json.len())
-}
+use crate::model_limits::serialized_len;
 
 fn parse_compaction_output(text: &str) -> anyhow::Result<CompactionOutput> {
     let start = text.find('{').context("compaction response contained no JSON object")?;
@@ -264,8 +261,7 @@ async fn compact_context_if_needed(
     let context_for_read = context.to_string();
     let rule = compaction_rule(llm_model, bytes_per_token);
     let trigger = rule.trigger_bytes;
-    // The scan limit counts characters; bytes are never fewer than characters, so
-    // a limit of `trigger` characters always returns enough to decide in bytes.
+    // The scan limit and the thresholds below are the same unit: serialized bytes.
     let pending = tokio::task::spawn_blocking(move || {
         graph_for_read.pending_context_messages(&context_for_read, trigger)
     })
@@ -619,12 +615,11 @@ pub async fn ask(
             "Working directory: {}\n{}{}\n{}{}",
             config.project_dir, load_errors_ctx, plan_ctx, speaker_line, plan_hint
         );
-        let conv = meta.conversations.get_or_create("main");
-        conv.push_user(&context);
-        let view = checkpointed_view(conv, &request_model, &system_prompt, super::http_context::tail_bytes(&[&runtime_prompt]));
+        meta.conversations.get_or_create("main").push_user(&context);
+        let view = checkpointed_view(&mut meta.conversations, "main", &request_model, &system_prompt, super::http_context::tail_bytes(&[&runtime_prompt]));
         let mut log = crate::context_log::ContextLog::from_conversation(view.messages);
         log.push_runtime_text(runtime_prompt);
-        report_prompt_epoch("main", &prefix_key, &request_model, &system_prompt, &mut log, view.checkpointed);
+        report_prompt_epoch(&mut meta.conversations, "main", &prefix_key, &request_model, &system_prompt, &mut log, view.checkpointed);
         log.into_messages()
     };
     config.notify_save();
@@ -634,7 +629,7 @@ pub async fn ask(
 
         // Call LLM
         let started = std::time::Instant::now();
-        let sent = super::http_context::SentRequest::measure(&messages, 0);
+        let sent = super::http_context::SentRequest::measure(&request_model, &messages, 0);
         let result = llm.generate(messages.clone()).await;
         let recovered = llm.take_recovered();
         super::http_context::after_llm_call(recovered, &result, &config.meta, "main");
@@ -650,7 +645,7 @@ pub async fn ask(
             }
         };
         report_llm_usage("main", started, &output.usage);
-        sent.calibrate(&config.meta, "main", recovered, &output.usage);
+        sent.calibrate(&config.meta, "main", recovered, output.refused, &output.usage);
 
         messages.push(crate::llm::ChatMessage::assistant(&output.text));
         if !assistant_turn.is_empty() {
@@ -825,7 +820,7 @@ pub async fn ask_stream(
             return;
         }
 
-            let mut messages = {
+            let (mut messages, request_model) = {
             // Tier 1: read program briefly for summary
             let program_summary = {
                 let program = config_clone.program.read().await;
@@ -865,18 +860,17 @@ pub async fn ask_stream(
                     config_clone.project_dir,
                     load_errors_ctx,
                     plan_ctx, speaker_line, plan_hint);
-                let conv = meta.conversations.get_or_create("main");
-                conv.push_user(&context);
-                let view = checkpointed_view(conv, &request_model, &system_prompt, super::http_context::tail_bytes(&[&runtime_prompt]));
+                meta.conversations.get_or_create("main").push_user(&context);
+                let view = checkpointed_view(&mut meta.conversations, "main", &request_model, &system_prompt, super::http_context::tail_bytes(&[&runtime_prompt]));
                 let mut log = crate::context_log::ContextLog::from_conversation(view.messages);
                 log.push_runtime_text(runtime_prompt);
-                report_prompt_epoch("main", &prefix_key, &request_model, &system_prompt, &mut log, view.checkpointed);
+                report_prompt_epoch(&mut meta.conversations, "main", &prefix_key, &request_model, &system_prompt, &mut log, view.checkpointed);
                 let msgs = log.into_messages();
                 // guard dropped here — before any .await
                 (context, msgs)
             };
             tx.log("user", &context).await;
-            msgs
+            (msgs, request_model)
         }; // All locks released before LLM call
         config_clone.notify_save();
 
@@ -905,7 +899,7 @@ pub async fn ask_stream(
             // Once connected, chunks flow through the channel — no "waiting"
             // timer needed because the chunks themselves are progress.
             let started = std::time::Instant::now();
-            let sent = super::http_context::SentRequest::measure(&messages, 0);
+            let sent = super::http_context::SentRequest::measure(&request_model, &messages, 0);
             let recovered;
             let output = {
                 let result = llm.generate_streaming(messages.clone()).await;
@@ -945,7 +939,7 @@ pub async fn ask_stream(
                 }
             };
             report_llm_usage("main", started, &output.usage);
-            sent.calibrate(&config_clone.meta, "main", recovered, &output.usage);
+            sent.calibrate(&config_clone.meta, "main", recovered, output.refused, &output.usage);
 
             messages.push(crate::llm::ChatMessage::assistant(&output.text));
             if !assistant_turn.is_empty() {
@@ -1258,7 +1252,7 @@ pub async fn handle_llm_takeover(
         let bytes_per_token = meta
             .lock()
             .ok()
-            .and_then(|meta| meta.conversations.get(&context).map(|conv| conv.bytes_per_token()))
+            .and_then(|meta| meta.conversations.get(&context).map(|conv| conv.bytes_per_token(llm_model)))
             .unwrap_or(crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
         tokio::time::timeout(
             compaction_rule(llm_model, bytes_per_token).timeout,
@@ -1460,7 +1454,7 @@ pub async fn handle_llm_takeover(
         // #68: checkpointed view sized by the generating model's window, with the
         // measured authority block and native tool schemas counted.
         let schemas = native_config.as_ref().map_or(0, super::http_context::tool_schema_bytes);
-        checkpointed_view(conv, llm_model, &system, super::http_context::tail_bytes(&[&authority_block]) + schemas)
+        checkpointed_view(&mut meta_guard.conversations, &context, llm_model, &system, super::http_context::tail_bytes(&[&authority_block]) + schemas)
     }; // meta_guard dropped here
     let (messages, checkpointed) = (messages.messages, messages.checkpointed);
     let view_bytes = serde_json::to_vec(&messages).map_or(0, |bytes| bytes.len());
@@ -1533,7 +1527,7 @@ pub async fn handle_llm_takeover(
     // Compaction only changes episode summaries in the volatile tail; the cached
     // history changes only at a view checkpoint (#68).
     let _ = compacted;
-    report_prompt_epoch(&context, &prefix_key, llm_model, &system, &mut context_log, checkpointed);
+    report_prompt_epoch(&mut meta.lock().unwrap().conversations, &context, &prefix_key, llm_model, &system, &mut context_log, checkpointed);
     let messages = context_log.into_messages();
 
     eprintln!("[llm_takeover:{context}] calling LLM with {} messages", messages.len());
@@ -1595,14 +1589,14 @@ pub async fn handle_llm_takeover(
         eprintln!("[llm_takeover:{context}] iteration {}/{}", iteration + 1, iteration_budget);
 
         let started = std::time::Instant::now();
-        let sent = super::http_context::SentRequest::measure(&llm_messages, 0);
+        let sent = super::http_context::SentRequest::measure(llm_model, &llm_messages, 0);
         let result = llm.generate(llm_messages.clone()).await;
         let recovered = llm.take_recovered();
         super::http_context::after_llm_call(recovered, &result, &meta, &context);
         let output = match result {
             Ok(o) => {
                 report_llm_usage(&context, started, &o.usage);
-                sent.calibrate(&meta, &context, recovered, &o.usage);
+                sent.calibrate(&meta, &context, recovered, o.refused, &o.usage);
                 o
             }
             Err(e) => {
@@ -1816,14 +1810,14 @@ pub async fn handle_llm_takeover(
                     break;
                 }
                 let started = std::time::Instant::now();
-                let sent = super::http_context::SentRequest::measure(&llm_messages, 0);
+                let sent = super::http_context::SentRequest::measure(llm_model, &llm_messages, 0);
                 let result = llm.generate(llm_messages.clone()).await;
                 let recovered = llm.take_recovered();
                 super::http_context::after_llm_call(recovered, &result, &meta, &context);
                 match result {
                     Ok(output) => {
                         report_llm_usage(&context, started, &output.usage);
-                        sent.calibrate(&meta, &context, recovered, &output.usage);
+                        sent.calibrate(&meta, &context, recovered, output.refused, &output.usage);
                         if output.text.trim().is_empty() && output.code.trim().is_empty() {
                             let error = "model returned an empty final summary";
                             eprintln!("[llm_takeover:{context}] {error}");

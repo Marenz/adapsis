@@ -177,10 +177,10 @@ fn prepare(
         let conv = meta.conversations.get_or_create("main");
         conv.push_user(req.message.clone());
         let known = super::http_context::tail_bytes(&[&runtime]) + super::http_context::tool_schema_bytes(config);
-        let view = super::http_context::checkpointed_view(conv, &model, &stable, known);
+        let view = super::http_context::checkpointed_view(&mut meta.conversations, "main", &model, &stable, known);
         let mut log = crate::context_log::ContextLog::from_conversation(view.messages);
         log.push_runtime_text(runtime);
-        super::http_context::report_prompt_epoch("main", &key, &model, &stable, &mut log, view.checkpointed);
+        super::http_context::report_prompt_epoch(&mut meta.conversations, "main", &key, &model, &stable, &mut log, view.checkpointed);
         log.into_messages()
     };
     config.notify_save();
@@ -291,7 +291,7 @@ impl NativeLoop {
             let schema_bytes = super::http_context::schema_bytes(
                 request.tools.iter().map(|tool| (tool.name.as_str(), tool.description.as_str(), &tool.parameters)),
             );
-            let sent = super::http_context::SentRequest::measure(&request.messages, schema_bytes);
+            let sent = super::http_context::SentRequest::measure(&model, &request.messages, schema_bytes);
             let result = generate(&llm, request, tx, streaming).await;
             // `generate` flags shrunk retries and too-large failures on the client.
             // Persist the forced checkpoint now: the provider-error branch below
@@ -309,7 +309,9 @@ impl NativeLoop {
                 }
             };
             super::http_context::report_llm_usage(&self.context, started, &output.usage);
-            sent.calibrate(&config.meta, &self.context, recovered, &output.usage);
+            // A refused native turn is a provider error (unsupported finish
+            // reason) and never reaches this point.
+            sent.calibrate(&config.meta, &self.context, recovered, false, &output.usage);
             if final_round {
                 // The budget is spent: the status round is prose-only and can
                 // never execute a tool, even if the provider ignores tool_choice.

@@ -31,6 +31,10 @@ pub struct ContextLog {
     /// guarantees a cache read even when a turn appended more blocks than the
     /// provider's breakpoint lookback window.
     turn_boundary: Option<usize>,
+    /// Lifetime requested on every boundary (`cache_control.ttl`), from the
+    /// generating model's limits. One value for all boundaries, so the provider's
+    /// ordering rule (longer lifetimes first) cannot be violated.
+    cache_ttl: Option<&'static str>,
 }
 
 impl ContextLog {
@@ -67,7 +71,13 @@ impl ContextLog {
             tail,
             current,
             turn_boundary: None,
+            cache_ttl: None,
         }
+    }
+
+    /// Request `ttl` ("5m" or "1h") on every cache boundary of this request.
+    pub fn set_cache_ttl(&mut self, ttl: Option<crate::model_limits::CacheTtl>) {
+        self.cache_ttl = ttl.map(crate::model_limits::CacheTtl::wire);
     }
 
     /// Mark the previous request's history end (from [`Epoch::Continued`]).
@@ -120,7 +130,7 @@ impl ContextLog {
     /// turn used to produce on every following request.
     pub fn into_messages(mut self) -> Vec<ChatMessage> {
         if has_cacheable_content(&self.stable) {
-            self.stable = self.stable.with_cache_breakpoint();
+            self.stable = self.stable.with_cache_marker(self.cache_ttl);
         }
         let candidates: Vec<usize> =
             (0..self.history.len()).filter(|&index| is_cache_boundary(&self.history, index)).collect();
@@ -132,7 +142,7 @@ impl ContextLog {
         for index in [boundary, last].into_iter().flatten() {
             let message = &mut self.history[index];
             if message.cache_control.is_none() {
-                *message = message.clone().with_cache_breakpoint();
+                *message = message.clone().with_cache_marker(self.cache_ttl);
             }
         }
 
@@ -202,6 +212,14 @@ fn is_cache_boundary(history: &[ChatMessage], index: usize) -> bool {
     message.role == ChatRole::Assistant
         && history.get(index + 1).is_none_or(|next| next.role != ChatRole::Assistant)
         && (!message.tool_calls.is_empty() || has_cacheable_content(message))
+}
+
+/// How many leading messages of `history` a boundary placed for the first `upto`
+/// messages covers: up to and including the last boundary message before `upto`
+/// (0 when there is none). This is the history part of the prefix a request
+/// writes to, and a later request reads from, the provider cache.
+pub fn cached_history_len(history: &[ChatMessage], upto: usize) -> usize {
+    (0..upto.min(history.len())).rev().find(|&index| is_cache_boundary(history, index)).map_or(0, |index| index + 1)
 }
 
 fn has_cacheable_content(message: &ChatMessage) -> bool {
@@ -400,14 +418,24 @@ pub fn gateway_boundary_errors(messages: &[serde_json::Value]) -> Vec<String> {
         _ => String::new(),
     };
     let mut total = 0;
+    // The provider requires longer lifetimes before shorter ones (a plain marker is 5m).
+    let mut short_seen = false;
     // (provider role, markers, index of the last source message)
     let mut merged: Vec<(String, usize, usize)> = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         if let Some(marker) = message.get("cache_control") {
             total += 1;
-            if marker["type"] != "ephemeral" || marker.as_object().is_some_and(|o| o.keys().any(|k| k != "type" && k != "ttl")) {
+            let ttl = marker.get("ttl").map(|ttl| ttl.as_str().unwrap_or("?"));
+            if marker["type"] != "ephemeral"
+                || marker.as_object().is_some_and(|o| o.keys().any(|k| k != "type" && k != "ttl"))
+                || !matches!(ttl, None | Some("5m" | "1h"))
+            {
                 errors.push(format!("messages[{index}]: invalid cache_control {marker}"));
             }
+            if ttl == Some("1h") && short_seen {
+                errors.push(format!("messages[{index}]: a 1h boundary after a 5m boundary"));
+            }
+            short_seen |= ttl != Some("1h");
         }
         match role(message).as_str() {
             "system" => {
@@ -735,6 +763,65 @@ mod tests {
         // No assistant message yet: only the stable prefix is a boundary.
         let log = ContextLog::from_conversation(vec![ChatMessage::system("s"), ChatMessage::user("a"), ChatMessage::user("now")]);
         assert_eq!(marked(&log.into_messages()), vec![0]);
+    }
+
+    /// Owner decision 2026-11-10: a model whose limits ask for it gets the 1-hour
+    /// lifetime on EVERY boundary (one value, so the provider's "longer lifetimes
+    /// first" rule cannot be violated); other models get the plain marker.
+    #[test]
+    fn every_boundary_carries_the_requested_cache_lifetime() {
+        use crate::model_limits::CacheTtl;
+        let request = |ttl: Option<CacheTtl>| {
+            let call = crate::llm::ToolCall { id: "c0".into(), name: "finish".into(), arguments: "{}".into() };
+            let mut log = ContextLog::from_conversation(vec![
+                ChatMessage::system("stable"),
+                ChatMessage::user("q0"),
+                ChatMessage::assistant("a0"),
+                ChatMessage::user("q1"),
+                ChatMessage::assistant_with_tool_calls("", vec![call]),
+                ChatMessage::tool_result("c0", "done"),
+                ChatMessage::user("current"),
+            ]);
+            log.set_turn_boundary(2);
+            log.set_cache_ttl(ttl);
+            log.into_messages().iter().map(|m| serde_json::to_value(m).unwrap()).collect::<Vec<_>>()
+        };
+        let markers = |wire: &[serde_json::Value]| wire.iter().filter_map(|m| m.get("cache_control").cloned()).collect::<Vec<_>>();
+        let hour = request(Some(CacheTtl::OneHour));
+        assert_eq!(markers(&hour), vec![serde_json::json!({"type":"ephemeral","ttl":"1h"}); 3]);
+        assert_eq!(gateway_boundary_errors(&hour), Vec::<String>::new());
+        let five = request(Some(CacheTtl::FiveMinutes));
+        assert_eq!(markers(&five), vec![serde_json::json!({"type":"ephemeral","ttl":"5m"}); 3]);
+        assert_eq!(gateway_boundary_errors(&five), Vec::<String>::new());
+        // No setting: the plain marker, exactly as before.
+        let plain = request(None);
+        assert_eq!(markers(&plain), vec![serde_json::json!({"type":"ephemeral"}); 3]);
+        assert_eq!(gateway_boundary_errors(&plain), Vec::<String>::new());
+        // The lifetime changes nothing but the marker: same positions, same text.
+        let strip = |wire: &[serde_json::Value]| wire.iter().map(|m| { let mut m = m.clone(); m.as_object_mut().unwrap().remove("cache_control"); m }).collect::<Vec<_>>();
+        assert_eq!(strip(&hour), strip(&plain));
+        // The oracle knows the provider's ordering rule and the valid values.
+        let mut mixed = hour.clone();
+        mixed[0]["cache_control"] = serde_json::json!({"type":"ephemeral"});
+        assert!(gateway_boundary_errors(&mixed).iter().any(|e| e.contains("1h boundary after a 5m boundary")));
+        let mut invalid = hour;
+        invalid[0]["cache_control"]["ttl"] = serde_json::json!("2h");
+        assert!(gateway_boundary_errors(&invalid).iter().any(|e| e.contains("invalid cache_control")));
+    }
+
+    #[test]
+    fn cached_history_len_ends_at_the_last_boundary_before_a_position() {
+        let history = vec![
+            ChatMessage::user("q0"), ChatMessage::assistant("a0"), ChatMessage::user("failed"),
+            ChatMessage::user("q1"), ChatMessage::assistant("a1"), ChatMessage::assistant("a1b"), ChatMessage::user("q2"),
+        ];
+        assert_eq!(cached_history_len(&history, 0), 0);
+        assert_eq!(cached_history_len(&history, 1), 0, "no boundary before the first answer");
+        assert_eq!(cached_history_len(&history, 2), 2);
+        assert_eq!(cached_history_len(&history, 4), 2, "trailing user messages are not cached");
+        assert_eq!(cached_history_len(&history, 5), 2, "inside an assistant run only its end is a boundary");
+        assert_eq!(cached_history_len(&history, 6), 6);
+        assert_eq!(cached_history_len(&history, 99), 6);
     }
 
     /// The oracle itself: it reports exactly the shapes the gateway rejected

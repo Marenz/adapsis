@@ -1211,29 +1211,38 @@ schema since day one and was never set:
   except chatgpt/gpt-6-astra, gpt-6-sol, gpt-6-luna and gpt-6.1-sol (872k: Codex metadata
   max_context_window; 470,030 prompt tokens measured accepted on astra); others use the
   unknown default `ADAPSIS_CONTEXT_TOKENS` (128k).
-- **Token projection is calibrated per conversation (#68 follow-up).** There is no fixed
-  chars-per-token constant any more. `Conversation.token_calibration` (persisted; absent
-  in old sessions) holds the last answered request as `(serialized text bytes, provider
-  input tokens)`; `http_context::SentRequest::measure` takes the bytes before the call
-  (messages + native tool schemas, image base64 excluded) and `.calibrate` stores them with
-  `LlmUsage::accounted_input_tokens()` after it (ask, ask_stream, legacy and native
+- **Token projection is calibrated per conversation and model (#68 follow-up).** There is
+  no fixed chars-per-token constant. `Conversation.token_calibration` (persisted) holds the
+  last answered request as `(serialized text bytes, provider input tokens, model)`.
+  `request_meter::SentRequest::measure(model, messages, extra)` takes the bytes before the
+  call (messages + native tool schemas, image base64 excluded) and `.calibrate` stores them
+  with `LlmUsage::accounted_input_tokens()` after it (ask, ask_stream, legacy and native
   takeover, `!watch` self-trigger). The view checkpoint AND the compaction trigger convert
-  with `conv.bytes_per_token()`. Without a measurement the ratio is
-  `DEFAULT_BYTES_PER_TOKEN` = 2.5 (MEASURED 2026-11-10: the admin DM's ≈1.46 MB view was
-  counted as 593,447 tokens; the old 4 chars/token would have let it grow to ≈1.13M real
-  tokens). Clamped to 1.5–6.0; ignored when input tokens are zero/missing, under 2,000
-  text tokens, or the client had to shrink the request. Images cost a fixed
-  `IMAGE_TOKENS` (1,600) each and are subtracted before the ratio. The ratio moves only
-  the checkpoint position, never the bytes of the visible history. The per-message cap
-  stays on the fixed default (deterministic cut = stable prefix). New request paths must
-  call `SentRequest::measure`/`calibrate`, or their conversation stays on the default.
-  Owner decision: the full window is used, no smaller per-context chat budget; costs are
-  controlled by task/turn budgets.
+  with `conv.bytes_per_token(model)`: the measurement counts only for the model that made
+  it (another tokenizer), otherwise `DEFAULT_BYTES_PER_TOKEN` = 2.5 (MEASURED 2026-11-10:
+  the admin DM's ≈1.46 MB view was counted as 593,447 tokens; the old 4 chars/token would
+  have let it grow to ≈1.13M real tokens). Clamped to 1.5–6.0; ignored when input tokens
+  are zero/missing, under 2,000 text tokens, or the client had to shrink the request.
+  Images cost a fixed `IMAGE_TOKENS` (1,600) each and are subtracted before the ratio. The
+  ratio moves only the checkpoint position, never the bytes of the visible history. New
+  request paths must call `SentRequest::measure`/`calibrate`, or their conversation stays on
+  the default and its cache evidence is never recorded.
+- **Units:** budgets are serialized bytes (`model_limits::serialized_len`, a JSON string)
+  and tokens derived from them. `ModelLimits::max_message_bytes` (1/8 window at the fixed
+  default ratio, and 1/8 of the route limit) is UTF-8 bytes of message text;
+  `MemoryGraph::pending_context_messages(context, max_bytes)` and the compaction thresholds
+  count serialized bytes. Do not introduce character counts for budgets.
+- **Measured runtime tail:** `Conversation.tail_bytes` (persisted) is the first request of
+  the previous turn minus that turn's view: memories, episodes, activity, authority text
+  and tool schemas together. `ViewPolicy::for_model` uses it (plus a quarter of margin, at
+  most 1/4 of the route limit) instead of the fixed 16k-token / 64 KiB allowance, which
+  remains the no-measurement default.
 - **A capped message says so.** `conversation_view::truncate_middle` keeps head and tail
-  and inserts `[... N characters omitted here by the runtime to fit the model context; the
-  stored message is complete ...]` with the exact count (short form for small caps). The
-  cut depends only on the message and the cap; persisted history is never changed. A native
-  batch containing a message over the cap is still dropped from the view whole.
+  (cut on character boundaries, at most `max_message_bytes`) and inserts `[... N characters
+  omitted here by the runtime to fit the model context; the stored message is complete
+  ...]` with the exact count (short form for small caps). The cut depends only on the
+  message and the cap; persisted history is never changed. A native batch containing a
+  message over the cap is still dropped from the view whole.
 - **Cache boundaries sit only on assistant messages (2026-11-10 fix).** The gateway merges
   consecutive same-role messages (a tool result is a user message for Anthropic), puts an
   explicit `cache_control` marker on the final block of the MERGED message, and rejects two
@@ -1245,6 +1254,41 @@ schema since day one and was never set:
   message of an assistant run with text or tool calls. `context_log::gateway_boundary_errors`
   (test-only) is the oracle for the gateway's rules; use it on recorded wire requests in
   any new request-building test. Do not mark user, tool or envelope messages.
+- **Cache lifetime per route (`model_limits::BUILT_IN_CACHE`, `src/cache_lifetime.rs`).**
+  Each route has a requested marker lifetime (`cache_ttl`: "5m"/"1h", sent as
+  `cache_control.ttl` on EVERY boundary via `ContextLog::set_cache_ttl`, set in
+  `report_prompt_epoch`) and a default lifetime in seconds for the cold-start rule.
+  Built-ins need a source comment (MEASURED / DOCS / UNVERIFIED; UNKNOWN is a valid entry):
+  anthropic/* requests 1h = 3600 s (owner decision; DOCS + MEASURED), openai/* 1800 s
+  (DOCS), deepseek/* 3600 s (UNVERIFIED), moonshot/* 300 s (DOCS), chatgpt/* UNKNOWN (the
+  route reports zero cached tokens until llm-gateway #4), deepinfra/* and xiaomi-mimo/*
+  UNKNOWN. `models.toml`: `cache_ttl`, `cache_ttl_secs` (0 = never cold-start),
+  `cold_start_tokens` (default 100,000, env `ADAPSIS_COLD_START_TOKENS`).
+- **Learned lifetime.** `ConversationManager.cache_lifetimes` (persisted with the session,
+  per model id) records, for every answered request where a hit could be expected, the
+  pause since the conversation's previous request (START to START: the provider counts the
+  lifetime from the start of the request that wrote or read the entry) and hit/miss
+  (cache read ≥ 50% / ≤ 10% of the expected prefix). A hit at or past the default raises
+  the lifetime to that pause + 1 s. One miss changes nothing; the second-shortest miss is
+  a confirmed upper bound that lowers the lifetime below the default, or makes an unknown
+  route known. Misses expire after 14 days; values are clamped to 60 s – 7 days. Not
+  recorded: first request after a restart/checkpoint/prefix change, prefixes under 8,000
+  tokens, routes that report no cache reads, shrunk requests, REFUSED turns (MEASURED: a
+  refused request reports a cache write the next request cannot read; legacy
+  `LlmOutput.refused`, native refusals are provider errors), and the turn after a turn whose
+  first request failed or was refused. `TurnProbe` (in memory) carries this per turn.
+- **Cold start (`request_meter::turn_view`).** At the START of a turn only: if the pause
+  since the conversation's last answered request is at least the route's effective
+  lifetime, `view_start` moves once so the history is at most `cold_start_tokens` (and
+  never more than a budget checkpoint would leave: target minus overhead), same mechanics
+  as a checkpoint (user-turn boundary preferred, batches whole, newest turn kept). It is
+  reported as a checkpoint, so the cache epoch resets. Unknown lifetime or unknown pause
+  (session from before this field): no cold start. Rounds inside a turn never call
+  `turn_view`; `calibrate` never moves the view. Log lines: `[llm:<ctx>] cold start:
+  pause_s=… lifetime_s=… (learned|default) history_tokens=A->B view_start=X->Y` and per
+  request `[llm:<ctx>] cache: pause_s=… expected_tokens=… cached_read=… outcome=…
+  lifetime_s=… source=…` (metadata only). `checkpointed_view` must be called exactly once
+  per turn, before the turn's first request.
 - **Request body limit:** `max_request_bytes` per model (default `ADAPSIS_MAX_REQUEST_BYTES`
   or 60 MiB, under the gateway's 64 MiB limit from llm-gateway 332a3b0, deployed
   2026-11-10; the old gateway rejected bodies above 2 MiB). The view

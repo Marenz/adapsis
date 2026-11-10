@@ -156,7 +156,8 @@ fn capped_message_states_the_omitted_character_count_and_storage_is_untouched() 
     conv.push_user(original.clone());
     let view = build(&mut conv, &ViewPolicy::tokens_only(1_000_000, 500_000, 0, 1_000));
     let crate::llm::ChatContent::Text(shown) = &view.messages[1].content else { panic!("text") };
-    assert!(shown.chars().count() <= 1_000, "{}", shown.chars().count());
+    // The cap is in UTF-8 bytes; the original is 19,992 bytes / 10,000 characters.
+    assert!(shown.len() <= 1_000 && shown.len() > 990, "{}", shown.len());
     assert!(shown.starts_with("HEAD") && shown.ends_with("TAIL"));
     let marker = shown.lines().find(|line| line.starts_with("[... ")).expect("marker line");
     assert!(marker.contains("omitted here by the runtime") && marker.contains("the stored message is complete"), "{marker}");
@@ -170,10 +171,16 @@ fn capped_message_states_the_omitted_character_count_and_storage_is_untouched() 
     assert_eq!(truncate_middle("short", 1_000), "short");
     // Small caps use the short marker (still with the count); tiny caps keep the head.
     let small = truncate_middle(&original, 100);
-    assert!(small.contains(" characters omitted ...]") && small.chars().count() <= 100, "{small}");
+    assert!(small.contains(" characters omitted ...]") && small.len() <= 100, "{small}");
     let omitted: usize = small.lines().find(|l| l.starts_with("[... ")).unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
     assert_eq!(omitted, 10_000 - (small.chars().count() - small.lines().find(|l| l.starts_with("[... ")).unwrap().chars().count() - 2));
-    assert_eq!(truncate_middle(&original, 20), "HEADääääääääääääääää");
+    assert_eq!(truncate_middle(&original, 20), "HEADääääääää");
+    assert_eq!(truncate_middle(&original, 21), "HEADääääääää", "never cuts inside a character");
+    // Multi-byte text right at the cut positions stays valid at every cap.
+    for cap in 0..400 {
+        let cut = truncate_middle(&original, cap);
+        assert!(cut.len() <= cap, "cap {cap}: {}", cut.len());
+    }
     // The projection counts the same text the view sends.
     let policy = ViewPolicy::tokens_only(1_000_000, 500_000, 0, 1_000);
     assert_eq!(message_bytes(&conv.messages[1], 1_000), json_len(shown) + MESSAGE_FRAMING_BYTES);
@@ -194,6 +201,7 @@ fn conversation_view_thirty_turn_coding_simulation() {
         context_tokens: 1_000_000, output_tokens: 128_000,
         request_timeout: std::time::Duration::from_secs(1), chunk_timeout: std::time::Duration::from_secs(1),
         max_request_bytes: 64_000_000,
+        ..crate::model_limits::for_model("unknown/test-model")
     };
     let system = "s".repeat(36_000); // ~9k tokens, like the live admin DM prefix
     // A conversation measured at 4 bytes/token (the sizes below are in those terms).
@@ -254,9 +262,9 @@ fn old_view(conv: &Conversation) -> Vec<crate::llm::ChatMessage> {
     let mut out = Vec::new();
     for group in super::super::native_history::complete_groups(&conv.messages).into_iter().rev() {
         if group[0].role == "system" || out.len() + group.len() > 63 { continue; }
-        let cost: usize = group.iter().map(chars).sum();
+        let cost: usize = group.iter().map(raw_bytes).sum();
         if group.len() > 1 {
-            if cost <= remaining && group.iter().all(|m| chars(m) <= 40_000) {
+            if cost <= remaining && group.iter().all(|m| raw_bytes(m) <= 40_000) {
                 out.extend(group.iter().rev().cloned());
                 remaining -= cost;
             }
@@ -292,6 +300,7 @@ fn byte_limit_checkpoint_keeps_the_serialized_request_under_the_route_limit() {
         context_tokens: 1_000_000, output_tokens: 128_000,
         request_timeout: std::time::Duration::from_secs(1), chunk_timeout: std::time::Duration::from_secs(1),
         max_request_bytes: 2_000_000,
+        ..crate::model_limits::for_model("unknown/test-model")
     };
     let system = "s".repeat(36_000);
     // At the sparsest ratio the token target (≈2 MB of history) is looser than the
@@ -360,7 +369,7 @@ fn image_projection_counts_three_images_total_not_three_per_message() {
     let sent_parts = serde_json::to_string(&view.messages).unwrap().matches("data:image/png;base64,").count();
     assert_eq!(sent_parts, 3, "projection and the sent request agree");
     // Text is projected from its serialized bytes; images at a fixed cost outside the ratio.
-    assert_eq!(all[0].tokens, est(message_bytes(&conv.messages[1], policy.max_message_chars)) + 3 * IMAGE_TOKENS);
+    assert_eq!(all[0].tokens, est(message_bytes(&conv.messages[1], policy.max_message_bytes)) + 3 * IMAGE_TOKENS);
 }
 
 #[test]
@@ -384,6 +393,7 @@ fn opus_like() -> crate::model_limits::ModelLimits {
         context_tokens: 1_000_000, output_tokens: 128_000,
         request_timeout: std::time::Duration::from_secs(1), chunk_timeout: std::time::Duration::from_secs(1),
         max_request_bytes: 64_000_000,
+        ..crate::model_limits::for_model("unknown/test-model")
     }
 }
 
@@ -403,36 +413,69 @@ fn calibration_from_usage_is_applied_to_the_next_projection() {
         conv.push_user("newest");
     };
     let view = |conv: &mut Conversation| {
-        let policy = ViewPolicy::from_limits(&limits, "s", conv.bytes_per_token());
+        let policy = ViewPolicy::from_limits(&limits, "s", conv.bytes_per_token("m"));
         build(conv, &policy)
     };
     // Uncalibrated: 2.5 bytes/token -> ≈743k history + 144k overhead > 850k: cut.
     let mut fresh = Conversation::new();
     history(&mut fresh);
-    assert_eq!(fresh.bytes_per_token(), crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
+    assert_eq!(fresh.bytes_per_token("m"), crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
     assert!(view(&mut fresh).checkpointed, "the conservative default cuts");
     // Measured sparse (4 bytes/token): ≈464k + overhead stays under the trigger.
     let mut sparse = Conversation::new();
     history(&mut sparse);
-    sparse.token_calibration = TokenCalibration::measure(400_000, 0, 100_000);
-    assert_eq!(sparse.bytes_per_token(), 4.0);
+    sparse.token_calibration = TokenCalibration::measure("m", 400_000, 0, 100_000);
+    assert_eq!(sparse.bytes_per_token("m"), 4.0);
     assert!(!view(&mut sparse).checkpointed, "a measured 4 bytes/token keeps the whole history");
     assert_eq!(sparse.view_start, 0);
     // Measured dense (2 bytes/token): cut deeper than at the default.
     let mut dense = Conversation::new();
     history(&mut dense);
-    dense.token_calibration = TokenCalibration::measure(200_000, 0, 100_000);
+    dense.token_calibration = TokenCalibration::measure("m", 200_000, 0, 100_000);
     assert!(view(&mut dense).checkpointed);
     assert!(dense.view_start > fresh.view_start, "denser tokens leave room for less history: {} vs {}", dense.view_start, fresh.view_start);
     // The projection after the cut is within the target in the measured terms.
-    let policy = ViewPolicy::from_limits(&limits, "s", dense.bytes_per_token());
+    let policy = ViewPolicy::from_limits(&limits, "s", dense.bytes_per_token("m"));
     let kept: usize = groups(&dense, &policy).iter().filter(|g| g.start >= dense.view_start).map(|g| g.tokens).sum();
     assert!(policy.overhead_tokens + kept <= limits.target_tokens(), "{kept}");
     // A ratio change alone never rewrites the visible history of an unchanged
     // conversation below the trigger: only the trigger position depends on it.
     let before = json(&view(&mut sparse));
-    sparse.token_calibration = TokenCalibration::measure(350_000, 0, 100_000);
+    sparse.token_calibration = TokenCalibration::measure("m", 350_000, 0, 100_000);
     assert_eq!(json(&view(&mut sparse)), before);
+}
+
+/// Reviewer follow-up: the ratio is the tokenizer's, so a conversation whose
+/// generating model changes projects with the default until the new model has
+/// answered, and returns to nothing stale when it switches back.
+#[test]
+fn calibration_is_reset_when_the_generating_model_changes() {
+    use crate::model_limits::{DEFAULT_BYTES_PER_TOKEN, TokenCalibration};
+    let limits = opus_like();
+    let mut conv = Conversation::new();
+    conv.push_system("s");
+    for i in 0..300 {
+        conv.push_user(format!("q{i} {}", "u".repeat(3_000)));
+        conv.push_assistant(format!("a{i} {}", "r".repeat(3_000)));
+    }
+    conv.push_user("newest");
+    // Model A measured sparse tokens: the 1.83 MB history stays whole for A.
+    conv.token_calibration = TokenCalibration::measure("route/a", 400_000, 0, 100_000);
+    assert_eq!(conv.bytes_per_token("route/a"), 4.0);
+    let view_for = |conv: &mut Conversation, model: &str| {
+        let policy = ViewPolicy::from_limits(&limits, "s", conv.bytes_per_token(model));
+        build(conv, &policy)
+    };
+    assert!(!view_for(&mut conv.clone(), "route/a").checkpointed);
+    // The same conversation sent to model B: A's ratio does not apply, the
+    // conservative default does, and the view is cut.
+    assert_eq!(conv.bytes_per_token("route/b"), DEFAULT_BYTES_PER_TOKEN);
+    assert!(view_for(&mut conv.clone(), "route/b").checkpointed);
+    // B answers: its own measurement replaces A's.
+    conv.token_calibration = TokenCalibration::measure("route/b", 300_000, 0, 100_000);
+    assert_eq!(conv.bytes_per_token("route/b"), 3.0);
+    // Back on A there is no stale ratio either: default until A answers again.
+    assert_eq!(conv.bytes_per_token("route/a"), DEFAULT_BYTES_PER_TOKEN);
 }
 
 /// A coding session whose content really tokenizes at `real` bytes per token, run
@@ -449,13 +492,13 @@ fn run_dense_session(real: f64, fixed: Option<f32>) -> (usize, usize) {
     conv.push_system(system.clone());
     let (mut worst, mut checkpoints) = (0usize, 0usize);
     let request = |conv: &mut Conversation| {
-        let ratio = fixed.unwrap_or_else(|| conv.bytes_per_token());
+        let ratio = fixed.unwrap_or_else(|| conv.bytes_per_token("m"));
         let view = build(conv, &ViewPolicy::from_limits(&limits, &system, ratio));
         // The request as sent: the view plus a 40 KB runtime tail and tool schemas.
         let bytes: usize = view.messages.iter().map(|m| serde_json::to_string(m).unwrap().len()).sum::<usize>() + 40_000;
         let provider_tokens = (bytes as f64 / real).ceil() as usize;
         if fixed.is_none() {
-            if let Some(measured) = TokenCalibration::measure(bytes, 0, provider_tokens as u64) {
+            if let Some(measured) = TokenCalibration::measure("m", bytes, 0, provider_tokens as u64) {
                 conv.token_calibration = Some(measured);
             }
         }
@@ -509,22 +552,27 @@ fn token_calibration_persists_with_the_conversation_and_old_sessions_load() {
     use crate::model_limits::TokenCalibration;
     let mut conv = Conversation::new();
     conv.push_user("hello");
-    conv.token_calibration = TokenCalibration::measure(1_460_000, 0, 593_447);
+    conv.token_calibration = TokenCalibration::measure("m", 1_460_000, 0, 593_447);
     let json = serde_json::to_string(&conv).unwrap();
-    assert!(json.contains(r#""token_calibration":{"request_bytes":1460000,"input_tokens":593447}"#), "{json}");
+    assert!(json.contains(r#""token_calibration":{"request_bytes":1460000,"input_tokens":593447,"model":"m"}"#), "{json}");
     let restored: Conversation = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.token_calibration, conv.token_calibration);
-    assert!((restored.bytes_per_token() - 2.46).abs() < 0.01);
+    assert!((restored.bytes_per_token("m") - 2.46).abs() < 0.01);
     // A conversation without a measurement does not serialize the field, and a
     // session written before the field existed loads with the default ratio.
     let fresh = serde_json::to_string(&Conversation::new()).unwrap();
     assert!(!fresh.contains("token_calibration"), "{fresh}");
     let old: Conversation = serde_json::from_str(r#"{"messages":[{"role":"user","content":"hi"}],"view_start":0}"#).unwrap();
     assert_eq!(old.token_calibration, None);
-    assert_eq!(old.bytes_per_token(), crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
+    assert_eq!(old.bytes_per_token("m"), crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
+    // A calibration stored before the model was recorded (4733b2f) loads and is
+    // simply re-learned: it matches no model.
+    let unlabelled: Conversation = serde_json::from_str(
+        r#"{"messages":[],"token_calibration":{"request_bytes":400000,"input_tokens":100000}}"#).unwrap();
+    assert_eq!(unlabelled.bytes_per_token("m"), crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
     // Through the manager (the shape stored in the session file).
     let mut manager = crate::session::ConversationManager::default();
-    manager.get_or_create("ctx").token_calibration = TokenCalibration::measure(30_000, 0, 10_000);
+    manager.get_or_create("ctx").token_calibration = TokenCalibration::measure("m", 30_000, 0, 10_000);
     let restored: crate::session::ConversationManager = serde_json::from_str(&serde_json::to_string(&manager).unwrap()).unwrap();
-    assert_eq!(restored.get("ctx").unwrap().bytes_per_token(), 3.0);
+    assert_eq!(restored.get("ctx").unwrap().bytes_per_token("m"), 3.0);
 }

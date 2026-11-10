@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 #[path = "takeover_logging_tests.rs"]
 mod logging;
+#[path = "takeover_cache_tests.rs"]
+mod cache;
 
 const ADMIN: &str = "telegram:user:100000001";
 
@@ -36,6 +38,8 @@ struct Harness {
     permissions: Arc<crate::permissions::PermissionConfig>,
     native_tools: bool,
     log_file: Option<Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    /// The generating model (its limits decide the requested cache lifetime).
+    model: &'static str,
 }
 
 struct Provider {
@@ -58,7 +62,9 @@ fn sse_or_json(output: &Value, streaming: bool) -> axum::response::Response {
     }
     let delta = json!({"content": output["choices"][0]["message"]["content"]});
     let chunk = json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]});
-    let end = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":output["usage"]});
+    // Legacy fixtures answer without tool calls, so this is "stop" unless a test
+    // scripts another terminal reason (a refusal).
+    let end = json!({"choices":[{"index":0,"delta":{},"finish_reason":output["choices"][0]["finish_reason"]}],"usage":output["usage"]});
     (
         [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
         format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"),
@@ -113,6 +119,7 @@ impl Harness {
             permissions: Arc::new(crate::permissions::PermissionConfig::default()),
             native_tools,
             log_file: None,
+            model: "takeover-fixture",
         }
     }
 
@@ -143,7 +150,7 @@ impl Harness {
             self.program.clone(),
             Default::default(),
             &provider.url,
-            "takeover-fixture",
+            self.model,
             None,
             io_tx,
             Default::default(),
@@ -786,4 +793,43 @@ async fn legacy_takeover_requests_after_failed_turns_have_gateway_valid_cache_bo
     let roles: Vec<String> = requests[3]["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap().to_string()).collect();
     assert_eq!(roles, ["system", "user", "assistant", "user", "user", "user"]);
     assert_eq!(boundary_roles(&requests[3]), vec![(0, "system".to_string()), (2, "assistant".to_string())]);
+}
+
+/// The wire request of a real takeover turn carries the 1-hour lifetime on every
+/// cache boundary for an Anthropic model and no ttl for other models, on both
+/// protocols, and the gateway rules accept it.
+#[tokio::test]
+async fn takeover_requests_carry_the_one_hour_cache_lifetime_only_for_models_that_ask_for_it() {
+    for (native, model, ttl) in [
+        (true, "anthropic/claude-opus-5", Some("1h")),
+        (false, "anthropic/claude-opus-5", Some("1h")),
+        (true, "takeover-fixture", None),
+        (true, "chatgpt/gpt-6-astra", None),
+    ] {
+        let mut harness = Harness::new(native);
+        harness.model = model;
+        let context = format!("telegram:group:-8807{}{}", u8::from(native), model.len());
+        let answer = |text: &str, id: &str| if native {
+            response(text, vec![call(id, "finish", json!({}))])
+        } else {
+            response(&format!("{text}<code>!done</code>"), vec![])
+        };
+        let provider = provider(vec![answer("one", "f0"), answer("two", "f1"), answer("three", "f2")]).await;
+        for question in ["first", "second", "third"] {
+            harness.turn(&provider, &context, ADMIN, question).await;
+        }
+        let requests = provider.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3, "{model} native={native}");
+        for (index, request) in requests.iter().enumerate() {
+            let messages = request["messages"].as_array().unwrap();
+            assert_eq!(crate::context_log::gateway_boundary_errors(messages), Vec::<String>::new(), "{model} request {index}");
+            let markers: Vec<&Value> = messages.iter().filter_map(|m| m.get("cache_control")).collect();
+            // Stable prefix always; history boundaries from the second turn on.
+            assert_eq!(markers.len(), [1, 2, 3][index], "{model} native={native} request {index}");
+            for marker in markers {
+                assert_eq!(marker["type"], "ephemeral");
+                assert_eq!(marker.get("ttl").and_then(Value::as_str), ttl, "{model} native={native} request {index}");
+            }
+        }
+    }
 }

@@ -840,6 +840,18 @@ pub struct Conversation {
     /// this ratio instead of a fixed chars-per-token guess.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_calibration: Option<crate::model_limits::TokenCalibration>,
+    /// Real size of the previous turn's runtime tail: the first request's
+    /// serialized text bytes beyond the view. Replaces the fixed tail allowance
+    /// in the next projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_bytes: Option<u64>,
+    /// When this conversation's last answered request was sent (unix ms). The
+    /// pause since then decides a cold start and dates cache evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_request_ms: Option<u64>,
+    /// Accounting state of the turn in progress. Not persisted.
+    #[serde(skip)]
+    pub turn_probe: Option<crate::cache_lifetime::TurnProbe>,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -857,6 +869,9 @@ impl Conversation {
             view_start: 0,
             image_start: 0,
             token_calibration: None,
+            tail_bytes: None,
+            last_request_ms: None,
+            turn_probe: None,
         }
     }
 
@@ -941,11 +956,14 @@ impl Conversation {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConversationManager {
     pub contexts: HashMap<String, Conversation>,
+    /// Prompt-cache lifetime evidence per model route (#68 cold start).
+    #[serde(default, skip_serializing_if = "crate::cache_lifetime::RouteLifetimes::is_empty")]
+    pub cache_lifetimes: crate::cache_lifetime::RouteLifetimes,
 }
 
 impl ConversationManager {
     pub fn new() -> Self {
-        Self { contexts: HashMap::new() }
+        Self::default()
     }
 
     /// Get or create a conversation context.
@@ -2853,8 +2871,8 @@ mod tests {
         assert_eq!(conv.messages[2].content, "later event");
     }
 
-    fn policy(trigger: usize, target: usize, overhead: usize, max_message_chars: usize) -> conversation_view::ViewPolicy {
-        conversation_view::ViewPolicy::tokens_only(trigger, target, overhead, max_message_chars)
+    fn policy(trigger: usize, target: usize, overhead: usize, max_message_bytes: usize) -> conversation_view::ViewPolicy {
+        conversation_view::ViewPolicy::tokens_only(trigger, target, overhead, max_message_bytes)
     }
 
     #[test]

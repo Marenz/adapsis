@@ -60,7 +60,11 @@ pub(super) fn context_prompts(
 
 /// Observe the cache epoch for this request and mark the previous request's
 /// history end as a cache breakpoint when the history only appended (#68).
+/// It also tells the turn's request accounting which cached prefix a hit would
+/// cover (none after a reset), so cache hit/miss evidence is only recorded when
+/// a hit could be expected.
 pub(super) fn report_prompt_epoch(
+    manager: &mut crate::session::ConversationManager,
     context: &str,
     key: &crate::context_prompt::StablePrefixKey,
     model: &str,
@@ -68,13 +72,22 @@ pub(super) fn report_prompt_epoch(
     log: &mut crate::context_log::ContextLog,
     checkpointed: bool,
 ) {
-    match crate::context_log::observe_epoch(context, key, model, stable, log.history(), checkpointed) {
+    let previous_len = match crate::context_log::observe_epoch(context, key, model, stable, log.history(), checkpointed) {
         crate::context_log::Epoch::Reset { reason } => {
             eprintln!("[llm:{context}] prompt-cache epoch reset: {reason}");
+            None
         }
-        crate::context_log::Epoch::Continued { previous_len } => log.set_turn_boundary(previous_len),
-    }
+        crate::context_log::Epoch::Continued { previous_len } => {
+            log.set_turn_boundary(previous_len);
+            Some(previous_len)
+        }
+    };
+    // The lifetime every boundary of this request asks the provider for.
+    log.set_cache_ttl(crate::model_limits::for_model(model).cache_ttl);
+    super::request_meter::expect_cached_prefix(manager, context, stable, log.history(), previous_len);
 }
+
+pub(crate) use super::request_meter::SentRequest;
 
 /// Recovered reference images (sent in the runtime tail) must fit both the image
 /// budget and the route's remaining request headroom after the view and tail.
@@ -114,95 +127,29 @@ fn fit_images_to(
 }
 
 /// The checkpointed model view of `context` for the generating `model` (#68),
-/// with the stable system prompt installed. Call under the metadata lock; it
-/// never awaits.
+/// with the stable system prompt installed, built at the START OF A TURN (a cold
+/// start can happen here and nowhere else; see `request_meter::turn_view`). Call
+/// under the metadata lock; it never awaits.
 pub(super) fn checkpointed_view(
-    conv: &mut crate::session::Conversation,
+    manager: &mut crate::session::ConversationManager,
+    context: &str,
     model: &str,
     system: &str,
     known_tail_bytes: usize,
 ) -> crate::session::conversation_view::View {
-    conv.set_primary_system(system.to_string());
-    // Tokens are projected with this conversation's measured bytes-per-token.
-    let policy = crate::session::conversation_view::ViewPolicy::for_model(
-        model,
-        system,
-        known_tail_bytes,
-        conv.bytes_per_token(),
-    );
-    conv.model_view(&policy)
+    checkpointed_view_at(manager, context, model, system, known_tail_bytes, crate::cache_lifetime::now_ms())
 }
 
-/// The size of one request as sent, measured before the call so the provider's
-/// usage report can calibrate the conversation's token projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SentRequest {
-    /// Serialized bytes of the messages (plus tool schemas), image data excluded.
-    text_bytes: usize,
-    images: usize,
-}
-
-impl SentRequest {
-    /// `extra_bytes`: serialized size of request parts outside the messages
-    /// (native tool schemas).
-    pub(crate) fn measure(messages: &[crate::llm::ChatMessage], extra_bytes: usize) -> Self {
-        struct Count(usize);
-        impl std::io::Write for Count {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0 += buf.len();
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut count = Count(0);
-        let (mut images, mut image_bytes) = (0, 0);
-        for message in messages {
-            let _ = serde_json::to_writer(&mut count, message);
-            if let crate::llm::ChatContent::Parts(parts) = &message.content {
-                for part in parts {
-                    if let crate::llm::ChatContentPart::ImageUrl { image_url } = part {
-                        images += 1;
-                        image_bytes += image_url.url.len();
-                    }
-                }
-            }
-        }
-        Self { text_bytes: count.0.saturating_sub(image_bytes) + extra_bytes, images }
-    }
-
-    /// Store this request's measured bytes-per-token with the conversation. Not
-    /// for a request the client had to shrink (`recovered`): the bytes measured
-    /// here are then not what the provider counted. Usage reports without input
-    /// tokens are ignored.
-    pub(crate) fn calibrate(
-        self,
-        meta: &crate::session::SharedMeta,
-        context: &str,
-        recovered: bool,
-        usage: &crate::llm::LlmUsage,
-    ) {
-        if recovered {
-            return;
-        }
-        let Some(measured) = crate::model_limits::TokenCalibration::measure(
-            self.text_bytes,
-            self.images,
-            usage.accounted_input_tokens(),
-        ) else {
-            return;
-        };
-        eprintln!(
-            "[llm:{context}] token calibration: {} bytes / {} input tokens = {:.2} bytes/token",
-            measured.request_bytes,
-            measured.input_tokens,
-            measured.bytes_per_token()
-        );
-        if let Ok(mut meta) = meta.lock() {
-            meta.conversations.get_or_create(context).token_calibration = Some(measured);
-        }
-    }
+pub(super) fn checkpointed_view_at(
+    manager: &mut crate::session::ConversationManager,
+    context: &str,
+    model: &str,
+    system: &str,
+    known_tail_bytes: usize,
+    now_ms: u64,
+) -> crate::session::conversation_view::View {
+    manager.get_or_create(context).set_primary_system(system.to_string());
+    super::request_meter::turn_view(manager, context, model, system, known_tail_bytes, now_ms)
 }
 
 /// Self-trigger (`!watch`) request for the `main` conversation (#68): the event is
@@ -225,9 +172,9 @@ pub(crate) fn self_trigger_messages(
         .filter(|message| message.role == "system")
         .map(|message| message.content.clone())
         .unwrap_or_default();
-    let policy =
-        crate::session::conversation_view::ViewPolicy::for_model(model, &system, 0, conv.bytes_per_token());
-    conv.model_view(&policy).messages
+    // A watch event starts a turn of its own, like a user message.
+    super::request_meter::turn_view(&mut meta.conversations, "main", model, &system, 0, crate::cache_lifetime::now_ms())
+        .messages
 }
 
 /// Measured serialized size of runtime-tail parts known before the view.
@@ -370,73 +317,5 @@ mod recovery_anchor_tests {
         let refused: anyhow::Result<()> = Err(crate::llm::test_too_large_error());
         super::after_llm_call(false, &refused, &meta, "ctx");
         assert_eq!(view_start(&meta), 3, "an unrecoverable too-large failure persists it too");
-    }
-}
-
-#[cfg(test)]
-mod calibration_tests {
-    use super::SentRequest;
-    use crate::llm::{ChatMessage, LlmUsage};
-
-    fn meta() -> crate::session::SharedMeta {
-        std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionMeta::new()))
-    }
-
-    fn usage(prompt: u64, read: Option<u64>, created: Option<u64>) -> LlmUsage {
-        LlmUsage { prompt_tokens: prompt, cache_read_input_tokens: read, cache_creation_input_tokens: created, ..Default::default() }
-    }
-
-    fn ratio(meta: &crate::session::SharedMeta) -> f32 {
-        meta.lock().unwrap().conversations.get_or_create("ctx").bytes_per_token()
-    }
-
-    #[test]
-    fn calibration_measures_sent_text_bytes_without_image_data() {
-        let text = vec![ChatMessage::system("s".repeat(1_000)), ChatMessage::user("u".repeat(2_000))];
-        let plain = SentRequest::measure(&text, 0);
-        let wire: usize = text.iter().map(|m| serde_json::to_string(m).unwrap().len()).sum();
-        assert_eq!(plain, SentRequest { text_bytes: wire, images: 0 });
-        assert_eq!(SentRequest::measure(&text, 500).text_bytes, wire + 500, "tool schemas are part of the request");
-        // The same request with a 300 KB image: the base64 data is not text.
-        let photo = crate::attachment::Attachment::from_bytes(vec![7u8; 300_000], "image/png", "p.png").unwrap();
-        let with_image = vec![text[0].clone(), ChatMessage::user_with_attachments("u".repeat(2_000), &[photo])];
-        let measured = SentRequest::measure(&with_image, 0);
-        assert_eq!(measured.images, 1);
-        assert!(measured.text_bytes < wire + 200, "image bytes excluded: {} vs {wire}", measured.text_bytes);
-    }
-
-    #[test]
-    fn calibration_from_provider_usage_drives_the_next_view() {
-        let meta = meta();
-        let sent = SentRequest { text_bytes: 1_460_000, images: 0 };
-        assert_eq!(ratio(&meta), crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
-        // Anthropic shape: the total processed input is prompt + read + created.
-        sent.calibrate(&meta, "ctx", false, &usage(3_447, Some(0), Some(590_000)));
-        assert!((ratio(&meta) - 2.46).abs() < 0.01, "{}", ratio(&meta));
-        // ChatGPT shape: cache reads are inside prompt_tokens.
-        sent.calibrate(&meta, "ctx", false, &usage(365_000, Some(300_000), None));
-        assert_eq!(ratio(&meta), 4.0);
-        // Missing/zero usage and a request the client shrank leave it unchanged.
-        sent.calibrate(&meta, "ctx", false, &LlmUsage::default());
-        sent.calibrate(&meta, "ctx", true, &usage(1_000_000, None, None));
-        assert_eq!(ratio(&meta), 4.0);
-        // Implausible reports are clamped.
-        sent.calibrate(&meta, "ctx", false, &usage(5_000_000, None, None));
-        assert_eq!(ratio(&meta), crate::model_limits::MIN_BYTES_PER_TOKEN);
-        // The stored ratio is the one the next checkpointed view projects with.
-        let mut guard = meta.lock().unwrap();
-        let conv = guard.conversations.get_or_create("ctx");
-        // ≈1.2 MB: under the trigger at the default ratio, far over it at 1.5.
-        for i in 0..200 {
-            conv.push_user(format!("q{i} {}", "u".repeat(3_000)));
-            conv.push_assistant(format!("a{i} {}", "r".repeat(3_000)));
-        }
-        conv.push_user("newest");
-        let mut uncalibrated = conv.clone();
-        uncalibrated.token_calibration = None;
-        assert!(!super::checkpointed_view(&mut uncalibrated, "anthropic/claude-opus-5", "s", 0).checkpointed);
-        assert!(super::checkpointed_view(conv, "anthropic/claude-opus-5", "s", 0).checkpointed);
-        // Each context keeps its own measurement.
-        assert_eq!(guard.conversations.get_or_create("other").bytes_per_token(), crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
     }
 }

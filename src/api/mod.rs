@@ -44,6 +44,7 @@ mod takeover_budget;
 mod takeover_native;
 pub mod native_tools;
 pub(crate) mod http_context;
+mod request_meter;
 mod working_set;
 pub use llm_handlers::{ask, ask_stream, handle_llm_takeover};
 use llm_handlers::EventSender;

@@ -13,6 +13,8 @@ const MAX_SERVER_RETRY_DELAY: Duration = Duration::from_secs(15 * 60);
 
 mod native;
 mod recovery;
+#[cfg(test)]
+mod refusal_tests;
 mod tool_call;
 #[cfg(test)]
 #[path = "llm/logging_tests.rs"]
@@ -338,8 +340,18 @@ impl ChatMessage {
     /// so a message only benefits from caching if it is itself marked or sits
     /// before a marked message. Used for the stable system prefix and the end of
     /// the append-only history; never for per-turn volatile content (issue #68).
-    pub fn with_cache_breakpoint(mut self) -> Self {
-        self.cache_control = Some(serde_json::json!({"type": "ephemeral"}));
+    #[cfg(test)]
+    pub fn with_cache_breakpoint(self) -> Self {
+        self.with_cache_marker(None)
+    }
+
+    /// A cache breakpoint that asks for the lifetime `ttl` ("5m" or "1h"); None
+    /// is the plain marker (the provider's default lifetime).
+    pub fn with_cache_marker(mut self, ttl: Option<&str>) -> Self {
+        self.cache_control = Some(match ttl {
+            Some(ttl) => serde_json::json!({"type": "ephemeral", "ttl": ttl}),
+            None => serde_json::json!({"type": "ephemeral"}),
+        });
         self
     }
 
@@ -415,6 +427,10 @@ pub struct LlmOutput {
     pub code: String,
     /// Token accounting from the API response, when the provider reports it.
     pub usage: LlmUsage,
+    /// The provider refused the turn (`finish_reason` content_filter/refusal).
+    /// MEASURED 2026-11-10: such a request reports a cache write that the next
+    /// identical request cannot read, so it is no evidence about the cache.
+    pub refused: bool,
 }
 
 /// Token accounting for one LLM call.
@@ -659,6 +675,7 @@ impl OpenAiBackend {
         let mut content_text = String::new();
         let mut in_thinking = false;
         let mut usage: Option<TokenUsage> = None;
+        let mut refused = false;
 
         let chunk_timeout = self.chunk_timeout;
         let mut response = response;
@@ -680,7 +697,7 @@ impl OpenAiBackend {
                         let _ = sink.write_all(b"\n");
                     }
                     sink.flush().ok();
-                    let output = build_output_with_usage(thinking_text, content_text, usage);
+                    let output = build_output_with_usage(thinking_text, content_text, usage, refused);
                     if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
                         eprintln!("[llm:usage] {}", output.usage.summary());
                     }
@@ -694,6 +711,7 @@ impl OpenAiBackend {
                 }
 
                 for choice in chunk.choices {
+                    refused |= is_refusal(choice.finish_reason.as_deref());
                     if let Some(reasoning) = choice.delta.reasoning_content {
                         if !in_thinking {
                             in_thinking = true;
@@ -732,7 +750,7 @@ impl OpenAiBackend {
         }
         sink.flush().ok();
         eprintln!("[llm:done] {} chunks in {}ms, thinking={}chars content={}chars", chunk_count, stream_start.elapsed().as_millis(), thinking_text.len(), content_text.len());
-        let output = build_output_with_usage(thinking_text, content_text, usage);
+        let output = build_output_with_usage(thinking_text, content_text, usage, refused);
         if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
             eprintln!("[llm:usage] {}", output.usage.summary());
         }
@@ -849,17 +867,18 @@ impl OpenAiBackend {
             .await
             .map_err(|error| anyhow!(LlmError::Decode(format!("failed to deserialize chat completion response: {error}"))))?;
 
-        let msg = response
+        let choice = response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("chat completion response contained no choices"))?
-            .message;
+            .ok_or_else(|| anyhow!("chat completion response contained no choices"))?;
+        let refused = is_refusal(choice.finish_reason.as_deref());
+        let msg = choice.message;
 
         let thinking = msg.reasoning_content.unwrap_or_default();
         let content = msg.content.unwrap_or_default();
 
-        let output = build_output_with_usage(thinking, content, response.usage);
+        let output = build_output_with_usage(thinking, content, response.usage, refused);
         if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
             eprintln!("[llm:usage] {}", output.usage.summary());
         }
@@ -1109,6 +1128,7 @@ async fn stream_sse_to_channel(
     let mut content_text = String::new();
     let mut in_thinking = false;
     let mut usage: Option<TokenUsage> = None;
+    let mut refused = false;
 
     let stream_start = std::time::Instant::now();
     let mut chunk_count: u64 = 0;
@@ -1135,6 +1155,7 @@ async fn stream_sse_to_channel(
                     thinking_text.clone(),
                     content_text.clone(),
                     usage,
+                    refused,
                 );
                 let _ = tx.send(StreamChunk::Done(output)).await;
                 done = true;
@@ -1150,6 +1171,7 @@ async fn stream_sse_to_channel(
             }
 
             for choice in parsed.choices {
+                refused |= is_refusal(choice.finish_reason.as_deref());
                 if let Some(reasoning) = choice.delta.reasoning_content {
                     if !in_thinking {
                         in_thinking = true;
@@ -1189,7 +1211,7 @@ async fn stream_sse_to_channel(
         thinking_text.len(),
         content_text.len()
     );
-    let output = build_output_with_usage(thinking_text, content_text, usage);
+    let output = build_output_with_usage(thinking_text, content_text, usage, refused);
     let _ = tx.send(StreamChunk::Done(output)).await;
 }
 
@@ -1357,6 +1379,13 @@ struct ChatCompletionChunk {
 #[derive(Debug, Deserialize)]
 struct ChunkChoice {
     delta: ChunkDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+/// Whether a terminal `finish_reason` says the provider refused the turn.
+fn is_refusal(finish_reason: Option<&str>) -> bool {
+    matches!(finish_reason, Some("content_filter" | "refusal"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1407,6 +1436,8 @@ impl From<TokenUsage> for LlmUsage {
 #[derive(Debug, Deserialize)]
 struct ResponseChoice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1520,6 +1551,7 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
         thinking,
         code,
         usage: LlmUsage::default(),
+        refused: false,
     }
 }
 
@@ -1528,9 +1560,11 @@ fn build_output_with_usage(
     thinking: String,
     content: String,
     usage: Option<TokenUsage>,
+    refused: bool,
 ) -> LlmOutput {
     let mut output = build_output(thinking, content);
     output.usage = usage.map(LlmUsage::from).unwrap_or_default();
+    output.refused = refused;
     output
 }
 

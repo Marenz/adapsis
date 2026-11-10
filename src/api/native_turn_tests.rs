@@ -769,12 +769,13 @@ async fn native_turn_calibrates_the_token_projection_from_provider_usage() {
         let sent: usize = requests[0]["messages"].as_array().unwrap().iter().map(|m| m.to_string().len()).sum();
         let tools: usize = requests[0]["tools"].to_string().len();
         let meta = fixture.config.meta.lock().unwrap();
-        let measured = meta.conversations.get("main").unwrap().token_calibration.expect("calibrated");
+        let measured = meta.conversations.get("main").unwrap().token_calibration.clone().expect("calibrated");
         assert_eq!(measured.input_tokens, 4_000, "streaming={streaming}");
         // Messages plus tool schemas, within the schema framing estimate.
         let expected = (sent + tools) as u64;
         assert!(measured.request_bytes.abs_diff(expected) * 20 <= expected, "streaming={streaming}: {} vs {expected}", measured.request_bytes);
-        let ratio = meta.conversations.get("main").unwrap().bytes_per_token();
+        assert_eq!(measured.model, "native-fixture");
+        let ratio = meta.conversations.get("main").unwrap().bytes_per_token("native-fixture");
         assert!((crate::model_limits::MIN_BYTES_PER_TOKEN..=crate::model_limits::MAX_BYTES_PER_TOKEN).contains(&ratio));
     }
 }
