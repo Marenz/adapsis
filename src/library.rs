@@ -20,6 +20,7 @@ use crate::validator;
 mod source;
 mod source_io;
 mod source_flush;
+mod source_verify;
 pub use source_flush::{flush_live_sources, SaveReceipt};
 #[cfg(test)]
 mod source_tests;

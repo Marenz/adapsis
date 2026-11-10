@@ -289,12 +289,13 @@ fn flush(
 }
 
 #[test]
-fn managed_python_load_modify_save_restart_preserves_cases_without_forging_passed() {
+fn managed_python_load_modify_save_restart_preserves_cases_and_earns_passed() {
     let dir = python_library();
     let (mut program, state) = load(dir.path());
     let tests = program.get_function("A.value").unwrap().tests.clone();
     assert_eq!(tests.len(), 2);
-    assert!(tests.iter().all(|case| !case.passed));
+    // Earned by the mock-only startup re-run, not assumed from parsing.
+    assert!(tests.iter().all(|case| case.passed));
     run_cases(&program, PYTHON);
     // Real frontend + validator mutation, not replacement source installed by hand.
     let modified = PYTHON
@@ -324,7 +325,7 @@ fn managed_python_load_modify_save_restart_preserves_cases_without_forging_passe
     run_cases(&restarted, &text);
     let reloaded_tests = &restarted.get_function("A.value").unwrap().tests;
     assert_eq!(reloaded_tests.len(), 2);
-    assert!(reloaded_tests.iter().all(|case| !case.passed));
+    assert!(reloaded_tests.iter().all(|case| case.passed));
     assert_eq!(reloaded_tests[0].expected, "4");
     assert_eq!(reloaded_tests[1].expected, "5");
     // A fresh test-harness process uses the actual authoritative loader rather
@@ -354,9 +355,7 @@ fn managed_python_loaded_cases_carry_typed_payload_and_invalid_typed_refuses_sav
     let dir = python_library();
     let (mut program, state) = load(dir.path());
     let tests = &program.get_function("A.value").unwrap().tests;
-    assert!(tests
-        .iter()
-        .all(|case| case.typed.is_some() && !case.passed));
+    assert!(tests.iter().all(|case| case.typed.is_some() && case.passed));
     for case in tests {
         case.typed.as_ref().unwrap().case().unwrap();
     }
@@ -413,7 +412,7 @@ fn managed_restart_child_loads_python_and_runs_cases() {
     let text = std::fs::read_to_string(dir.join("A.py")).unwrap();
     let function = program.get_function("A.value").unwrap();
     assert_eq!(function.tests.len(), 2);
-    assert!(function.tests.iter().all(|case| !case.passed));
+    assert!(function.tests.iter().all(|case| case.passed));
     assert_eq!(function.tests[0].expected, "4");
     assert_eq!(function.tests[1].expected, "5");
     run_cases(&program, &text);
@@ -595,7 +594,7 @@ fn managed_legacy_import_refuses_duplicate_members_without_overwriting_source() 
     std::fs::write(dir.path().join("A.ax"), source).unwrap();
     let (mut program, state) = load(dir.path());
     assert_eq!(program.get_function("A.value").unwrap().tests.len(), 1);
-    assert!(!program.get_function("A.value").unwrap().tests[0].passed);
+    assert!(program.get_function("A.value").unwrap().tests[0].passed);
     let good = serde_json::to_string(&program).unwrap();
     let duplicate = format!("{source}+fn value (x:Int)->Int\n  +return x + 2\n+end\n");
     std::fs::write(dir.path().join("A.ax"), &duplicate).unwrap();
@@ -951,5 +950,97 @@ fn managed_legacy_ax_bare_self_call_persists_despite_earlier_same_name_module() 
     assert!(
         saved.contains("edited") && saved.contains("+return foo(x)"),
         "{saved}"
+    );
+}
+
+#[test]
+fn managed_startup_rerun_marks_only_cases_that_really_pass() {
+    let dir = directory();
+    std::fs::write(
+        dir.path().join(MANIFEST_FILE),
+        r#"{"version":1,"modules":{"V":{"format":"python","dependencies":[]}}}"#,
+    )
+    .unwrap();
+    // `good` passes; `wrong` has one right and one wrong expectation.
+    std::fs::write(
+        dir.path().join("V.py"),
+        "def good(x: int) -> int:\n    return x + 1\n\ndef wrong(x: int) -> int:\n    return x + 1\n\n@stored_test(\"V.good\")\ndef test_case_1() -> None:\n    assert good(1) == 2\n\n@stored_test(\"V.wrong\")\ndef test_case_2() -> None:\n    assert wrong(1) == 2\n\n@stored_test(\"V.wrong\")\ndef test_case_3() -> None:\n    assert wrong(1) == 99\n",
+    )
+    .unwrap();
+    let (program, state) = load(dir.path());
+    let flags = |name: &str| -> Vec<bool> {
+        program
+            .get_function(name)
+            .unwrap()
+            .tests
+            .iter()
+            .map(|case| case.passed)
+            .collect()
+    };
+    assert_eq!(flags("V.good"), [true]);
+    assert_eq!(flags("V.wrong"), [true, false]);
+    assert!(crate::session::is_function_tested(&program, "V.good"));
+    assert!(!crate::session::is_function_tested(&program, "V.wrong"));
+    // A failing case never refuses startup and never changes the source.
+    state.require_authoritative_sources().unwrap();
+    // Pass flags are runtime state: a save writes canonical source without
+    // them, and a reload earns the same flags again.
+    assert!(flush(&program, &state, dir.path()).failures.is_empty());
+    let saved = std::fs::read_to_string(dir.path().join("V.py")).unwrap();
+    assert!(!saved.contains("passed"), "{saved}");
+    let (reloaded, _) = load(dir.path());
+    let again = |name: &str| -> Vec<bool> {
+        reloaded
+            .get_function(name)
+            .unwrap()
+            .tests
+            .iter()
+            .map(|case| case.passed)
+            .collect()
+    };
+    assert_eq!(again("V.good"), [true]);
+    assert_eq!(again("V.wrong"), [true, false]);
+}
+
+#[test]
+fn managed_startup_rerun_cannot_perform_io() {
+    let dir = directory();
+    let marker = dir.path().join("io-marker");
+    let shell_marker = dir.path().join("shell-marker");
+    std::fs::write(
+        dir.path().join(MANIFEST_FILE),
+        r#"{"version":1,"modules":{"W":{"format":"python","dependencies":[]}}}"#,
+    )
+    .unwrap();
+    // `writes` and `shells` would do real IO; `guarded` returns before its IO.
+    let source = format!(
+        "@effects(\"io\")\nasync def writes(x: int) -> int:\n    done: str = await file_write({marker:?}, \"x\")\n    return x\n\n@effects(\"io\")\nasync def shells(x: int) -> int:\n    out: str = await shell_exec({shell:?})\n    return x\n\n@effects(\"io\")\nasync def guarded(x: int) -> int:\n    if x == 0:\n        return 0\n    done: str = await file_write({marker:?}, \"x\")\n    return x\n\n@stored_test(\"W.writes\")\ndef test_case_1() -> None:\n    assert writes(1) == 1\n\n@stored_test(\"W.shells\")\ndef test_case_2() -> None:\n    assert shells(1) == 1\n\n@stored_test(\"W.guarded\")\ndef test_case_3() -> None:\n    assert guarded(0) == 0\n\n@stored_test(\"W.guarded\")\ndef test_case_4() -> None:\n    assert guarded(1) == 1\n",
+        marker = marker.to_str().unwrap(),
+        shell = format!("touch {}", shell_marker.display()),
+    );
+    std::fs::write(dir.path().join("W.py"), source).unwrap();
+    let (program, state) = load(dir.path());
+    state.require_authoritative_sources().unwrap();
+    let flags = |name: &str| -> Vec<bool> {
+        program
+            .get_function(name)
+            .unwrap()
+            .tests
+            .iter()
+            .map(|case| case.passed)
+            .collect()
+    };
+    // Would-be IO fails closed: the cases stay untested and nothing happened.
+    assert_eq!(flags("W.writes"), [false]);
+    assert_eq!(flags("W.shells"), [false]);
+    // A path that returns before any IO passes; the IO path of the same function does not.
+    assert_eq!(flags("W.guarded"), [true, false]);
+    assert!(
+        !marker.exists(),
+        "file_write must not run during the startup re-run"
+    );
+    assert!(
+        !shell_marker.exists(),
+        "shell_exec must not run during the startup re-run"
     );
 }

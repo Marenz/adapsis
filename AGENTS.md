@@ -198,7 +198,10 @@ response has no Content-Disposition header.
   and `.ax`, or consult stale session modules while lowering managed source.
   Failed managed startup aborts before initialization; ALL managed hot reload
   requires restart, preserving live memory, baselines and queued edits.
-  Cases loaded from source are untested, not implicitly passed.
+  Cases parsed from source start untested; `library/source_verify.rs` re-runs them
+  once at managed startup with the mock-only test handle (no real IO possible) and
+  marks only passing cases passed. Failing cases stay untested, never refuse startup,
+  and are reported by function name/count (log) and one journal entry per module.
   `flush_live_sources` is the sole managed writer: a blocking worker holds live
   Program read -> source transaction -> metadata locks through checked printing
   and rename, with bounded inputs and no model/eval/IO awaits. Queued requests

@@ -55,8 +55,17 @@ Cases loaded from `.py` attach a versioned typed payload (`store_test_payload(..
 true)`); the printer prefers a present payload and refuses the save when it is
 invalid, using display strings only for legacy records without one. Transitional
 `legacy_ax` imports keep the legacy string adapter.
-Loading restores expectations but marks cases **untested**. Parsing source is
-not evidence of passing tests; rerun them through the existing test executor.
+Parsing source is not evidence of passing tests, so a loaded case starts
+**untested**. After the whole managed set has validated, startup re-runs every
+stored case once through the existing test evaluator with its strictly mock-only
+coroutine handle: no mocks are supplied, so any IO request fails closed and no
+real IO is possible. A case that passes is marked passed; a failing or erroring
+case stays untested and never refuses startup. This keeps the eval gate (functions
+with more than two statements need passing tests) working after a restart. The
+startup log has one summary line (cases, passed, untested, milliseconds) and one
+line per affected module naming functions and counts; the error journal gets one
+entry per module. Neither contains case content. Pass flags are runtime state and
+are never written to source.
 
 **Proven local-call qualification.** Legacy modules often call their own
 functions bare (`g(x)` inside module `M`). The persistence printer prints such a
@@ -112,7 +121,8 @@ with fallible `symlink_metadata` inspection; inspection errors never mean absent
 ## Startup, reload, and recovery
 
 The whole managed dependency set validates before replacing its in-memory
-modules. Validation executes neither lifecycle blocks nor tests. Valid source
+modules. Validation executes no lifecycle block; the only code it runs is the
+mock-only stored-case re-run described above. Valid source
 wins over session AST cache. A failed managed load aborts OS startup **before**
 route reconciliation, shared initialization, memory database opening, or lifecycle
 IO. It leaves both persisted source and session recovery checkpoint untouched.
