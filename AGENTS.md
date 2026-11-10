@@ -1295,10 +1295,26 @@ schema since day one and was never set:
   `report_prompt_epoch`) and a default lifetime in seconds for the cold-start rule.
   Built-ins need a source comment (MEASURED / DOCS / UNVERIFIED; UNKNOWN is a valid entry):
   anthropic/* requests 1h = 3600 s (owner decision; DOCS + MEASURED), openai/* 1800 s
-  (DOCS), deepseek/* 3600 s (UNVERIFIED), moonshot/* 300 s (DOCS), chatgpt/* UNKNOWN (the
-  route reports zero cached tokens until llm-gateway #4), deepinfra/* and xiaomi-mimo/*
-  UNKNOWN. `models.toml`: `cache_ttl`, `cache_ttl_secs` (0 = never cold-start),
+  (DOCS), deepseek/* 3600 s (UNVERIFIED), moonshot/* 300 s (DOCS), chatgpt/* 1800 s (DOCS +
+  MEASURED, probabilistic, see below), deepinfra/* and xiaomi-mimo/* UNKNOWN. `models.toml`: `cache_ttl`, `cache_ttl_secs` (0 = never cold-start),
   `cold_start_tokens` (default 100,000, env `ADAPSIS_COLD_START_TOKENS`).
+- **`prompt_cache_key` (ChatGPT/OpenAI routes).** Every conversation request carries a
+  stable key, `cache_lifetime::prompt_cache_key("conv", context, model)` =
+  `adapsis-conv-<32 hex>` (hash of purpose, context id and model; never message content, so
+  it survives checkpoints and cold starts; the context id itself does not leave the host).
+  `http_context::conversation_client` builds the client for ask, ask_stream, legacy and
+  native takeover and the `!watch` self-trigger; compaction uses `"compact"`. `llm_call`,
+  agents, agent summaries and CLI commands send NO key (the gateway derives one from model,
+  instructions and first input item). The gateway (llm-gateway #4, c4f0d36) validates the
+  key (1–64 printable ASCII), sends it upstream on chatgpt (body + `session-id` header) and
+  openai, and drops it for every other route; older gateways ignore the unknown field.
+- **Probabilistic routes (`model_limits::PROBABILISTIC_CACHE`, `cache_probabilistic`).**
+  chatgpt/* has a lifetime of 1800 s (DOCS minimum; MEASURED readable at 3900 s) and
+  PROBABILISTIC hits (MEASURED ≈60% at every gap from 12 s to 65 min). On such a route a
+  miss is not evidence: `classify_for` reports `miss-not-evidence`, it is never recorded,
+  stored misses are ignored, and only hits can raise the lifetime. One uncached answer
+  never means "cold"; the cold start is decided by the pause alone. Its usage reports
+  reads inside `prompt_tokens` and no writes.
 - **Learned lifetime.** `ConversationManager.cache_lifetimes` (persisted with the session,
   per model id) records, for every answered request where a hit could be expected, the
   pause since the conversation's previous request (START to START: the provider counts the

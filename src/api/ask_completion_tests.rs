@@ -226,6 +226,12 @@ async fn ask_and_ask_stream_requests_after_failed_turns_have_gateway_valid_cache
         for (index, request) in requests.iter().enumerate() {
             let messages = request["messages"].as_array().unwrap();
             assert_eq!(crate::context_log::gateway_boundary_errors(messages), Vec::<String>::new(), "streaming={streaming} request {index}");
+            // ask and ask_stream send the `main` conversation's stable cache key.
+            assert_eq!(
+                request["prompt_cache_key"].as_str(),
+                Some(crate::cache_lifetime::prompt_cache_key("conv", "main", "fixture").as_str()),
+                "streaming={streaming} request {index}"
+            );
         }
         // `ask` stores an assistant entry for a failed turn too, so its history
         // keeps alternating; every boundary is the stable prefix or an assistant

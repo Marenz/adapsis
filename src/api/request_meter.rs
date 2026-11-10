@@ -123,15 +123,14 @@ impl SentRequest {
             }
             probe.requests += 1;
         }
-        let outcome = cache_lifetime::classify(expected_tokens, usage.cache_read_input_tokens);
+        let limits = crate::model_limits::for_model(&self.model);
+        // On a probabilistic route an uncached answer is not a miss.
+        let outcome =
+            cache_lifetime::classify_for(expected_tokens, usage.cache_read_input_tokens, limits.cache_probabilistic);
         if let Some(pause) = pause_secs {
             manager.cache_lifetimes.record(&self.model, outcome, pause, self.started_ms);
         }
-        let lifetime = manager.cache_lifetimes.lifetime(
-            &self.model,
-            &crate::model_limits::for_model(&self.model),
-            self.started_ms,
-        );
+        let lifetime = manager.cache_lifetimes.lifetime(&self.model, &limits, self.started_ms);
         log_cache_metric(context, pause_secs, expected_tokens, usage, outcome, lifetime);
     }
 

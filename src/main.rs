@@ -2584,7 +2584,8 @@ async fn main() -> Result<()> {
                     if crate::logging::content() {
                         eprintln!("[self-trigger] {}", event_message.chars().take(80).collect::<String>());
                     }
-                    let llm = llm::LlmClient::new_with_model_and_key(&trigger_url, &trigger_model, trigger_key.clone());
+                    // The request is the `main` conversation's view: same cache key.
+                    let llm = api::http_context::conversation_client(&trigger_url, &trigger_model, trigger_key.clone(), "main");
 
                     // The event is a runtime notice in "main"; the request is the
                     // bounded checkpointed view (#68). AI decides whether to act.

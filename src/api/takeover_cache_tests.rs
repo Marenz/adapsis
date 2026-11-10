@@ -105,7 +105,7 @@ async fn takeover_cold_starts_only_at_a_turn_start_after_a_long_pause() {
 /// pause; and the cold start can be switched off per model.
 #[tokio::test]
 async fn takeover_does_not_cold_start_on_a_route_with_an_unknown_lifetime() {
-    for model in ["takeover-fixture", "chatgpt/gpt-6-astra"] {
+    for model in ["takeover-fixture", "deepinfra/zai-org/GLM-5.2"] {
         let mut harness = Harness::new(true);
         harness.model = model;
         let context = "telegram:group:-88081";
@@ -170,4 +170,91 @@ async fn takeover_accounts_requests_and_skips_refused_turns() {
     harness.turn(&provider, context, ADMIN, "fourth").await;
     assert_eq!(evidence(&harness).unwrap(), recorded, "no miss after a refused turn");
     assert!(conv(&harness, context, |c| c.last_request_ms) > before);
+}
+
+fn key_of(request: &Value) -> Option<&str> {
+    request.get("prompt_cache_key").and_then(Value::as_str)
+}
+
+/// Every conversation request carries a stable `prompt_cache_key`: the same for
+/// all rounds and turns of one context on one model, across a cold start,
+/// different per context and model, never derived from content, and valid for
+/// the gateway (1-64 printable ASCII). Compaction uses its own key.
+#[tokio::test]
+async fn takeover_requests_carry_a_stable_prompt_cache_key_per_context_and_model() {
+    const CHATGPT: &str = "chatgpt/gpt-6-astra";
+    let context = "telegram:group:-88083";
+    for native in [true, false] {
+        let mut harness = Harness::new(native);
+        harness.model = CHATGPT;
+        prefill(&harness, context, 100, 6_000);
+        let answer = |text: &str, id: &str| if native { finish(text, id) } else { response(&format!("{text}<code>!done</code>"), vec![]) };
+        let mut outputs = vec![answer("one", "f0")];
+        if native {
+            outputs.push(tool("look", "inspect", json!({"kind":"symbols"})));
+        }
+        outputs.extend([answer("two", "f1"), answer("cold", "f2"), answer("other context", "f3")]);
+        let provider = provider(outputs).await;
+        harness.turn(&provider, context, ADMIN, "first").await;
+        harness.turn(&provider, context, ADMIN, "second").await;
+        // A pause over the route's 1800 s lifetime: cold start, same key.
+        conv(&harness, context, |c| c.last_request_ms = Some(now_ms() - 2_000_000));
+        harness.turn(&provider, context, ADMIN, "third").await;
+        assert!(conv(&harness, context, |c| c.view_start) > 0, "native={native}: the chatgpt route cold-starts after 1800 s");
+        harness.turn(&provider, "telegram:group:-88084", ADMIN, "elsewhere").await;
+        let requests = provider.requests.lock().unwrap().clone();
+        let expected = crate::cache_lifetime::prompt_cache_key("conv", context, CHATGPT);
+        let (same, other) = requests.split_at(requests.len() - 1);
+        assert!(same.len() >= 3);
+        for (index, request) in same.iter().enumerate() {
+            assert_eq!(key_of(request), Some(expected.as_str()), "native={native} request {index}");
+        }
+        let key = key_of(&other[0]).expect("key on the other context");
+        assert_eq!(key, crate::cache_lifetime::prompt_cache_key("conv", "telegram:group:-88084", CHATGPT));
+        assert_ne!(key, expected, "another conversation is another cache identity");
+        assert!(expected.len() <= 64 && expected.bytes().all(|b| b.is_ascii_graphic()), "{expected}");
+        assert!(!expected.contains("88083"), "the context id does not leave the host");
+        // No cache_control ttl on this route, and the cold request is compact.
+        for request in &requests {
+            assert!(request["messages"].as_array().unwrap().iter().filter_map(|m| m.get("cache_control")).all(|marker| marker.get("ttl").is_none()));
+        }
+        // (The legacy protocol's system prompt carries the language reference.)
+        let (warm, cold) = (wire_bytes(&same[0]), wire_bytes(&same[same.len() - 1]));
+        assert!(warm > 600_000 && cold + 300_000 < warm, "native={native}: warm {warm}, cold {cold}");
+    }
+    // Another model on the same context is another key (another cache).
+    let mut harness = Harness::new(true);
+    harness.model = OPUS;
+    let provider = provider(vec![finish("one", "f0")]).await;
+    harness.turn(&provider, context, ADMIN, "first").await;
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(key_of(&requests[0]), Some(crate::cache_lifetime::prompt_cache_key("conv", context, OPUS).as_str()));
+    assert_ne!(key_of(&requests[0]), Some(crate::cache_lifetime::prompt_cache_key("conv", context, "chatgpt/gpt-6-astra").as_str()));
+}
+
+/// Compaction requests of a context share one key that is not the conversation's.
+#[tokio::test]
+async fn compaction_requests_use_their_own_prompt_cache_key() {
+    let context = "telegram:group:-88085";
+    let harness = Harness::new(true);
+    // Over the unknown model's compaction threshold (see the logging fixture).
+    for index in 0..40 {
+        harness.graph.ingest_message(&crate::memory_graph::SourceMessage {
+            id: format!("cache-key-compaction-{index}"), platform_message_id: None,
+            context_id: context.into(), context_kind: "test".into(), speaker_id: ADMIN.into(),
+            speaker_name: "fixture".into(), role: "user".into(), content: "x".repeat(6_000),
+            created_at_ms: index + 1,
+        }, ADMIN).unwrap();
+    }
+    let provider = provider(vec![
+        response(r#"{"summary":"ok","memories":[]}"#, vec![]),
+        finish("Ready.", "f0"),
+    ]).await;
+    assert_eq!(harness.turn(&provider, context, ADMIN, "hello").await, "Ready.");
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "compaction, then the turn");
+    assert!(requests[0].get("tools").is_none() && requests[1]["tools"].is_array());
+    assert_eq!(key_of(&requests[0]), Some(crate::cache_lifetime::prompt_cache_key("compact", context, "takeover-fixture").as_str()));
+    assert_eq!(key_of(&requests[1]), Some(crate::cache_lifetime::prompt_cache_key("conv", context, "takeover-fixture").as_str()));
+    assert_ne!(key_of(&requests[0]), key_of(&requests[1]));
 }

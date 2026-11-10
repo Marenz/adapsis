@@ -162,6 +162,7 @@ fn native_request_body(
         body["tools"] = serde_json::json!(tools);
         body["tool_choice"] = serde_json::json!("auto");
     }
+    backend.add_prompt_cache_key(&mut body);
 
     body
 }

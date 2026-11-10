@@ -149,10 +149,12 @@ const BUILT_IN_CACHE: &[(&str, Option<CacheTtl>, Option<u64>)] = &[
     // read refreshes the lifetime, which counts from the START of the request.
     // (Default marker without ttl: 300 s, DOCS + MEASURED hit 240 s / miss 420 s.)
     ("anthropic/", Some(CacheTtl::OneHour), Some(3_600)),
-    // UNKNOWN. MEASURED: zero cached tokens on every request, including identical
-    // requests 8-10 s apart on three models; the gateway sends no prompt_cache_key
-    // or session id (llm-gateway #4). No cold start until that is fixed and measured.
-    ("chatgpt/", None, None),
+    // DOCS: 1800 s is the OpenAI API minimum for GPT-5.6+ (developers.openai.com/
+    // api/docs/guides/prompt-caching). MEASURED 2026-11-10 by the gateway worker
+    // (llm-gateway #4, c4f0d36, which sends prompt_cache_key and session-id): still
+    // readable after 3900 s, no expiry observed. Hits are PROBABILISTIC on this
+    // route (see PROBABILISTIC_CACHE), so only hits can move the learned lifetime.
+    ("chatgpt/", None, Some(1_800)),
     // DOCS only (developers.openai.com/api/docs/guides/prompt-caching, GPT-5.6+):
     // 1800 s, a hit refreshes. Not measured.
     ("openai/", None, Some(1_800)),
@@ -166,6 +168,26 @@ const BUILT_IN_CACHE: &[(&str, Option<CacheTtl>, Option<u64>)] = &[
     // UNKNOWN: the provider DOCS give no value.
     ("xiaomi-mimo/", None, None),
 ];
+
+/// Routes whose cache hits are probabilistic: a request that could have read the
+/// cache often does not, at any pause. On such a route a miss is not evidence
+/// about the lifetime (`cache_lifetime` records hits only) and one uncached
+/// answer does not mean the cache is cold.
+///
+/// RULE: every entry carries a MEASURED source comment.
+const PROBABILISTIC_CACHE: &[&str] = &[
+    // MEASURED 2026-11-10 by the gateway worker (llm-gateway #4) with a stable
+    // prompt_cache_key: about 60% hits at every gap from 12 s to 65 min (15 of 26
+    // single reads; batches from 1 of 3 to 9 of 9 at 12 s). Live check after the
+    // gateway deploy: four identical gpt-6-astra requests 12 s apart read 0, 2048,
+    // 2048, 2048 of 2222 tokens. Reads are reported inside prompt_tokens (multiples
+    // of 128); there is no write counter.
+    "chatgpt/",
+];
+
+fn built_in_probabilistic(model: &str) -> bool {
+    PROBABILISTIC_CACHE.iter().any(|prefix| model.starts_with(prefix))
+}
 
 fn built_in_cache(model: &str) -> (Option<CacheTtl>, Option<u64>) {
     let table = BUILT_IN_CACHE;
@@ -205,6 +227,9 @@ pub struct ModelLimits {
     /// False when `models.toml` sets `cache_ttl_secs = 0`: this model never
     /// cold-starts, whatever is learned.
     pub cold_start: bool,
+    /// Cache hits on this route are probabilistic: misses are not evidence about
+    /// the lifetime (built-in `PROBABILISTIC_CACHE`, or `models.toml`).
+    pub cache_probabilistic: bool,
     /// History kept when a turn starts after a pause longer than the cache
     /// lifetime (tokens).
     pub cold_start_tokens: usize,
@@ -226,6 +251,7 @@ struct FileEntry {
     /// "5m" or "1h": the lifetime to request on cache breakpoints.
     cache_ttl: Option<String>,
     cache_ttl_secs: Option<u64>,
+    cache_probabilistic: Option<bool>,
     cold_start_tokens: Option<usize>,
 }
 
@@ -278,6 +304,7 @@ fn resolve(model: &str, file: &FileConfig, defaults: &Defaults) -> ModelLimits {
             None => cache_ttl.map(CacheTtl::secs).or(built_in_secs),
         },
         cold_start: entry.cache_ttl_secs != Some(0),
+        cache_probabilistic: entry.cache_probabilistic.unwrap_or_else(|| built_in_probabilistic(model)),
         cold_start_tokens: entry.cold_start_tokens.unwrap_or(defaults.cold_start_tokens).max(1_000),
     }
 }
@@ -513,9 +540,18 @@ mod tests {
         assert_eq!(cache("openai/gpt-6-astra", &none), (None, Some(1_800), true));
         assert_eq!(cache("deepseek/deepseek-v4-flash", &none), (None, Some(3_600), true));
         assert_eq!(cache("moonshot/kimi", &none), (None, Some(300), true));
+        // The ChatGPT route: a sourced lifetime, no requested ttl, probabilistic hits.
+        for id in ["chatgpt/gpt-6-astra", "chatgpt/gpt-5.6-sol"] {
+            assert_eq!(cache(id, &none), (None, Some(1_800), true), "{id}");
+            assert!(resolve(id, &none, &d(128_000)).cache_probabilistic, "{id}");
+        }
         // Unknown: listed-as-unknown routes, aliases and anything unlisted.
-        for id in ["chatgpt/gpt-6-astra", "deepinfra/zai-org/GLM-5.2", "xiaomi-mimo/mimo-v2", "deepseek-v4-flash", "dev-bot", "claude-opus"] {
+        for id in ["deepinfra/zai-org/GLM-5.2", "xiaomi-mimo/mimo-v2", "deepseek-v4-flash", "dev-bot", "claude-opus", "gemma4s"] {
             assert_eq!(cache(id, &none), (None, None, true), "{id}");
+        }
+        // Every other route is deterministic.
+        for id in ["anthropic/claude-opus-5", "openai/gpt-6-astra", "deepseek/x", "moonshot/kimi", "deepinfra/x", "dev-bot"] {
+            assert!(!resolve(id, &none, &d(128_000)).cache_probabilistic, "{id}");
         }
         assert_eq!((CacheTtl::FiveMinutes.wire(), CacheTtl::OneHour.wire()), ("5m", "1h"));
         assert_eq!(resolve("dev-bot", &none, &d(128_000)).cold_start_tokens, 100_000);
@@ -525,8 +561,12 @@ mod tests {
              [model.\"anthropic/claude-sonnet-5\"]\ncache_ttl_secs = 0\n\
              [model.\"local/qwen\"]\ncache_ttl_secs = 900\n\
              [model.\"anthropic/claude-opus-5-5\"]\ncache_ttl = \"2h\"\ncache_ttl_secs = 7200\n\
-             [model.\"chatgpt/gpt-6-astra\"]\ncache_ttl = \"1h\"\n",
+             [model.\"chatgpt/gpt-6-astra\"]\ncache_ttl = \"1h\"\ncache_probabilistic = false\n\
+             [model.\"local/flaky\"]\ncache_ttl_secs = 600\ncache_probabilistic = true\n",
         );
+        assert!(!resolve("chatgpt/gpt-6-astra", &file, &d(128_000)).cache_probabilistic, "models.toml overrides the built-in");
+        assert!(resolve("local/flaky", &file, &d(128_000)).cache_probabilistic);
+        assert!(resolve("chatgpt/gpt-6-sol", &file, &d(128_000)).cache_probabilistic);
         // The lifetime follows the requested ttl unless one is set explicitly.
         assert_eq!(cache("anthropic/claude-opus-5", &file), (Some(CacheTtl::FiveMinutes), Some(300), true));
         assert_eq!(resolve("anthropic/claude-opus-5", &file, &d(128_000)).cold_start_tokens, 250_000);
@@ -552,6 +592,16 @@ mod tests {
             if lines[i].ends_with("None),") {
                 assert!(comment.contains("UNKNOWN"), "{}: {comment}", lines[i]);
             }
+        }
+        // Every probabilistic route is backed by a measurement.
+        let table = &source[source.find("const PROBABILISTIC_CACHE").unwrap()..];
+        let table = &table[..table.find("];").unwrap()];
+        let lines: Vec<&str> = table.lines().map(str::trim).collect();
+        let entries: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].starts_with('"')).collect();
+        assert_eq!(entries.len(), PROBABILISTIC_CACHE.len());
+        for i in entries {
+            let comment = lines[..i].iter().rev().take_while(|l| l.starts_with("//")).cloned().collect::<Vec<_>>().join(" ");
+            assert!(comment.contains("MEASURED"), "{}: {comment}", lines[i]);
         }
     }
 
