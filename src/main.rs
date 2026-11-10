@@ -28,6 +28,7 @@ mod prompt;
 mod python_frontend;
 mod python_cli;
 mod repl;
+mod reserved_names;
 mod server;
 mod session;
 mod shared_state;
