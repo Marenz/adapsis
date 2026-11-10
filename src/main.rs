@@ -36,6 +36,7 @@ mod typeck;
 mod tui;
 mod validator;
 mod vm;
+mod workspace;
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
