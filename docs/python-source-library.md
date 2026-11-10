@@ -36,6 +36,13 @@ test semantics: inputs and expectations may call pure functions (`concat(..)`,
 effect-free user helpers) and use the `Ok`/`Err`/`Some`/`None` constructors.
 Calls take positional arguments and keep their exact callee spelling: a bare
 helper stays bare, so it resolves at run time exactly as the original case did.
+This differs on purpose from function bodies: a bare call in a body is only
+qualified when it provably resolves to the caller's own declaration, otherwise
+the save refuses. A bare call in stored test data is never rewritten, so it
+binds like the runtime binds it, by module order. If an earlier module that is
+not a dependency declares the same name, the test data calls THAT module's
+function (pinned by `bare_call_in_stored_test_data_resolves_by_module_order_not_caller_module`).
+Qualify the call in the test if the caller's own function is meant.
 Pure means a non-IO builtin or constructor, or a user function (resolved as the
 runtime resolves the spelling) declaring no effect other than `fail`. Anything
 else is refused, both when saving and when loading, with a diagnostic naming

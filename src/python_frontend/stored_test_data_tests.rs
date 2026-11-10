@@ -144,3 +144,34 @@ fn native_and_cli_literal_policy_is_unchanged() {
     let stored = "@stored_test(\"Native.f\")\ndef test_case_1() -> None:\n    assert Native.f(1) == 1\n";
     assert!(super::lower_tests(stored, "Native").is_err());
 }
+
+#[test]
+fn bare_call_in_stored_test_data_resolves_by_module_order_not_caller_module() {
+    // Pins the documented asymmetry: function bodies only qualify a bare call
+    // when it provably resolves to the caller's own declaration, but stored
+    // test data keeps its exact spelling and resolves like the runtime does,
+    // i.e. by module order. An earlier non-dependency module wins.
+    let p = program(concat!(
+        "+module EarlierN\n+fn foo (x:Int)->Int\n  +return x + 100\n+end\n",
+        "+module LaterM\n+fn foo (x:Int)->Int\n  +return x + 1\n+end\n",
+        "+fn id (x:Int)->Int\n  +return x\n+end\n",
+        "+test id\n  +with foo(1) -> expect 101\n",
+    ));
+    assert_eq!(p.modules[0].name, "EarlierN");
+    // Save/load use LaterM's closed catalog (EarlierN is not a dependency).
+    let catalog = {
+        let mut c = without(&p, "EarlierN");
+        c.rebuild_function_index();
+        c
+    };
+    let text = print_python_module(&catalog, "LaterM").unwrap();
+    assert!(text.contains("assert id(foo(1)) == 101"), "{text}");
+    let lowered = lower_python_module(&text, "LaterM", &without(&catalog, "LaterM")).unwrap();
+    let case = &lowered.tests[0].cases[0];
+    // In the whole program the bare `foo` binds to EarlierN.foo (101), not
+    // LaterM.foo (2): the reloaded typed case passes against the runtime order.
+    crate::eval::eval_test_case(&p, "LaterM.id", case).unwrap();
+    let mut only_later = without(&p, "EarlierN");
+    only_later.rebuild_function_index();
+    assert!(crate::eval::eval_test_case(&only_later, "LaterM.id", case).is_err());
+}
