@@ -282,6 +282,34 @@ mod recovery_tests {
         assert_eq!(backend.non_streaming_timeout(), NON_STREAMING_TIMEOUT_CAP);
         assert_eq!(NON_STREAMING_TIMEOUT_CAP, Duration::from_secs(1200));
     }
+
+    /// The self-heal retry keeps a contiguous suffix of the request, so its cache
+    /// boundaries stay valid for the gateway (markers stay on assistant run ends).
+    #[test]
+    fn shrunk_requests_keep_gateway_valid_cache_boundaries() {
+        let mut request = vec![ChatMessage::system("stable")];
+        for i in 0..30 {
+            request.push(ChatMessage::user(format!("q{i} {}", "x".repeat(2_000))));
+            request.push(ChatMessage::assistant(format!("a{i} {}", "y".repeat(2_000))));
+        }
+        request.push(ChatMessage::user("failed"));
+        request.push(ChatMessage::user("current"));
+        let mut log = crate::context_log::ContextLog::from_conversation(request);
+        log.set_turn_boundary(40);
+        let messages = log.into_messages();
+        let wire = |messages: &[ChatMessage]| messages.iter().map(|m| serde_json::to_value(m).unwrap()).collect::<Vec<_>>();
+        let marks = |messages: &[ChatMessage]| messages.iter().filter(|m| m.cache_control.is_some()).count();
+        assert_eq!(marks(&messages), 3);
+        let mut exercised = 0;
+        for target in [200_000, 60_000, 20_000, 8_000] {
+            if let Some(shrunk) = shrink_request(&messages, target) {
+                exercised += 1;
+                assert_eq!(crate::context_log::gateway_boundary_errors(&wire(&shrunk)), Vec::<String>::new(), "target {target}");
+                assert!(marks(&shrunk) >= 1);
+            }
+        }
+        assert!(exercised >= 2, "the shrink path was exercised: {exercised}");
+    }
 }
 
 #[cfg(test)]

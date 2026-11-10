@@ -286,11 +286,18 @@ impl NativeLoop {
                 "detail":format!("iteration {}/{}", iteration + 1, budget.limit())}))
                 .await;
             let started = std::time::Instant::now();
-            let result = generate(&llm, self.request(config, &model, !final_round), tx, streaming).await;
+            let request = self.request(config, &model, !final_round);
+            // The final round sends no schemas, so measure this request's own.
+            let schema_bytes = super::http_context::schema_bytes(
+                request.tools.iter().map(|tool| (tool.name.as_str(), tool.description.as_str(), &tool.parameters)),
+            );
+            let sent = super::http_context::SentRequest::measure(&request.messages, schema_bytes);
+            let result = generate(&llm, request, tx, streaming).await;
             // `generate` flags shrunk retries and too-large failures on the client.
             // Persist the forced checkpoint now: the provider-error branch below
             // ends the turn, and takeover turns save nothing else on that path.
-            if super::http_context::after_llm_call(llm.take_recovered(), &Ok::<(), anyhow::Error>(()), &config.meta, &self.context) {
+            let recovered = llm.take_recovered();
+            if super::http_context::after_llm_call(recovered, &Ok::<(), anyhow::Error>(()), &config.meta, &self.context) {
                 config.notify_save();
             }
             let output = match result {
@@ -302,6 +309,7 @@ impl NativeLoop {
                 }
             };
             super::http_context::report_llm_usage(&self.context, started, &output.usage);
+            sent.calibrate(&config.meta, &self.context, recovered, &output.usage);
             if final_round {
                 // The budget is spent: the status round is prose-only and can
                 // never execute a tool, even if the provider ignores tool_choice.

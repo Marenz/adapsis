@@ -25,13 +25,30 @@
 //! startup, and a 3 MB request now reaches model resolution. (Before it, axum's
 //! 2 MiB default rejected 2.2 MB bodies, measured 2026-11-09.) The conversation view
 //! keeps every request under the configured limit.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// Characters per token, consistent with the existing compaction estimate.
-pub const CHARS_PER_TOKEN: usize = 4;
+/// Serialized request bytes per provider-counted input token, used until a
+/// conversation has its own measurement (`TokenCalibration`).
+/// Source: MEASURED 2026-11-10 on the live admin DM (anthropic/claude-opus-5): a
+/// request whose serialized view was ≈1.46 MB was counted by the provider as
+/// 593,447 input tokens, i.e. ≈2.46 bytes/token. Tool-result JSON, code and German
+/// text tokenize far denser than the former 4 chars/token assumption, under which
+/// a history estimated at the 85% trigger would really have been ≈1.17M tokens.
+pub const DEFAULT_BYTES_PER_TOKEN: f32 = 2.5;
+/// Sane range for a measured ratio. Below 1.5 would mean almost one token per
+/// byte (denser than base64 or digit runs); above 6 is sparser than plain English
+/// prose (≈4–5). A measurement outside it is clamped, not trusted.
+pub const MIN_BYTES_PER_TOKEN: f32 = 1.5;
+pub const MAX_BYTES_PER_TOKEN: f32 = 6.0;
+/// Requests smaller than this say too little about the ratio to replace a
+/// previous measurement.
+const MIN_CALIBRATION_TOKENS: u64 = 2_000;
+/// Rough provider cost of one image in tokens. Images are projected separately and
+/// kept out of the text ratio.
+pub const IMAGE_TOKENS: usize = 1_600;
 const DEFAULT_CONTEXT_TOKENS: usize = 128_000;
 const DEFAULT_CHUNK_TIMEOUT_SECS: u64 = 120;
 /// 60 MiB: headroom under the gateway's measured 64 MiB limit (see module docs).
@@ -199,8 +216,56 @@ pub fn for_model(model: &str) -> ModelLimits {
     resolve(model, file, defaults)
 }
 
-pub fn estimate_tokens(chars: usize) -> usize {
-    chars.div_ceil(CHARS_PER_TOKEN)
+/// The last request of a conversation as the provider counted it: the basis for
+/// projecting the next request's tokens from its serialized size. Persisted with
+/// the conversation; the raw pair is stored and the ratio is clamped on read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCalibration {
+    /// Serialized text bytes of the sent request (image data excluded).
+    pub request_bytes: u64,
+    /// Provider-counted input tokens for it (image allowance subtracted).
+    pub input_tokens: u64,
+}
+
+impl TokenCalibration {
+    /// A measurement from one answered request, or `None` when it carries no
+    /// usable signal: no usage report (zero input tokens), an empty request, or
+    /// too few text tokens. `input_tokens` must be the total input the provider
+    /// processed (`LlmUsage::accounted_input_tokens`, which normalizes whether
+    /// cache reads are inside or beside the prompt count).
+    pub fn measure(text_bytes: usize, images: usize, input_tokens: u64) -> Option<Self> {
+        let text_tokens = input_tokens.saturating_sub((images * IMAGE_TOKENS) as u64);
+        (text_bytes > 0 && text_tokens >= MIN_CALIBRATION_TOKENS).then_some(Self {
+            request_bytes: text_bytes as u64,
+            input_tokens: text_tokens,
+        })
+    }
+
+    /// Measured bytes per token, clamped to the sane range.
+    pub fn bytes_per_token(&self) -> f32 {
+        if self.input_tokens == 0 {
+            return DEFAULT_BYTES_PER_TOKEN;
+        }
+        let ratio = self.request_bytes as f64 / self.input_tokens as f64;
+        (ratio as f32).clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN)
+    }
+}
+
+/// The ratio to project with: the conversation's measurement, else the default.
+pub fn bytes_per_token(calibration: Option<&TokenCalibration>) -> f32 {
+    calibration.map_or(DEFAULT_BYTES_PER_TOKEN, TokenCalibration::bytes_per_token)
+}
+
+/// Projected tokens for `bytes` of serialized text at `bytes_per_token`.
+pub fn tokens_for_bytes(bytes: usize, bytes_per_token: f32) -> usize {
+    let ratio = if bytes_per_token.is_finite() { bytes_per_token } else { DEFAULT_BYTES_PER_TOKEN };
+    (bytes as f64 / f64::from(ratio.clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN))).ceil() as usize
+}
+
+/// Serialized bytes that `tokens` stand for at `bytes_per_token`.
+pub fn bytes_for_tokens(tokens: usize, bytes_per_token: f32) -> usize {
+    let ratio = if bytes_per_token.is_finite() { bytes_per_token } else { DEFAULT_BYTES_PER_TOKEN };
+    (tokens as f64 * f64::from(ratio.clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN))) as usize
 }
 
 impl ModelLimits {
@@ -216,10 +281,11 @@ impl ModelLimits {
 
     /// Per-message cap in the model view: 1/8 of the window AND 1/8 of the request
     /// byte limit. One message alone can never trigger back-to-back checkpoints
-    /// (the 85%→50% step leaves 35%), and a deterministic per-message cut keeps the
+    /// (the 85%→50% step leaves 35%). The cap uses the fixed default ratio, never a
+    /// conversation's measured one: a deterministic per-message cut keeps the
     /// history byte-stable.
     pub fn max_message_chars(&self) -> usize {
-        (self.context_tokens / 8 * CHARS_PER_TOKEN).min(self.max_request_bytes / 8)
+        bytes_for_tokens(self.context_tokens / 8, DEFAULT_BYTES_PER_TOKEN).min(self.max_request_bytes / 8)
     }
 
     /// Reserved output space, part of every projected request.
@@ -296,12 +362,66 @@ mod tests {
         let opus = resolve("anthropic/claude-opus-5", &FileConfig::default(), &d(128_000));
         assert_eq!(opus.trigger_tokens(), 850_000);
         assert_eq!(opus.target_tokens(), 500_000);
-        assert_eq!(opus.max_message_chars(), 500_000, "window-bound under the 60 MiB route limit");
+        assert_eq!(opus.max_message_chars(), 312_500, "1/8 window at the default 2.5 bytes/token");
         let tight = Defaults { context_tokens: 128_000, max_request_bytes: 2_000_000 };
         assert_eq!(resolve("anthropic/claude-opus-5", &FileConfig::default(), &tight).max_message_chars(), 250_000, "a 2 MB route bounds it");
         let small = resolve("x", &FileConfig::default(), &d(128_000));
-        assert_eq!(small.max_message_chars(), 64_000, "still above the old 40k cap");
+        assert_eq!(small.max_message_chars(), 40_000);
         assert_eq!(small.request_timeout, Duration::from_secs(300 + 960 + 25));
-        assert_eq!(estimate_tokens(9), 3);
+    }
+
+    #[test]
+    fn calibration_default_is_conservative() {
+        // No measurement: 2.5 bytes/token, i.e. MORE tokens per byte than the old
+        // 4 chars/token guess, so a projection errs towards an early checkpoint.
+        assert_eq!(bytes_per_token(None), DEFAULT_BYTES_PER_TOKEN);
+        assert_eq!(DEFAULT_BYTES_PER_TOKEN, 2.5);
+        assert_eq!(tokens_for_bytes(1_000_000, bytes_per_token(None)), 400_000);
+        assert_eq!(bytes_for_tokens(400_000, bytes_per_token(None)), 1_000_000);
+        assert_eq!(tokens_for_bytes(9, 2.5), 4, "rounds up");
+        // A non-finite or out-of-range ratio never reaches the projection.
+        assert_eq!(tokens_for_bytes(1_000, f32::NAN), 400);
+        assert_eq!(tokens_for_bytes(6_000, 0.0), 4_000);
+        assert_eq!(tokens_for_bytes(6_000, 100.0), 1_000);
+    }
+
+    #[test]
+    fn calibration_learns_the_measured_ratio() {
+        // The live admin-DM measurement: ≈1.46 MB counted as 593,447 input tokens.
+        let measured = TokenCalibration::measure(1_460_000, 0, 593_447).unwrap();
+        let ratio = bytes_per_token(Some(&measured));
+        assert!((ratio - 2.46).abs() < 0.01, "{ratio}");
+        assert_eq!(tokens_for_bytes(1_460_000, ratio), 593_447);
+        // Images are taken out of the text ratio at their fixed projection cost.
+        let with_images = TokenCalibration::measure(40_000, 2, 10_000 + 2 * IMAGE_TOKENS as u64).unwrap();
+        assert_eq!(with_images, TokenCalibration { request_bytes: 40_000, input_tokens: 10_000 });
+        assert_eq!(with_images.bytes_per_token(), 4.0);
+    }
+
+    #[test]
+    fn calibration_clamps_and_ignores_unusable_usage() {
+        // Zero or missing input tokens, an empty request, or a request too small to
+        // say anything: no measurement, the previous one (or the default) stays.
+        assert_eq!(TokenCalibration::measure(500_000, 0, 0), None);
+        assert_eq!(TokenCalibration::measure(0, 0, 50_000), None);
+        assert_eq!(TokenCalibration::measure(4_000, 0, 1_999), None);
+        assert_eq!(TokenCalibration::measure(40_000, 3, 3 * IMAGE_TOKENS as u64), None, "only image tokens");
+        assert!(TokenCalibration::measure(4_000, 0, 2_000).is_some());
+        // Implausible ratios are clamped, not trusted.
+        let dense = TokenCalibration::measure(10_000, 0, 100_000).unwrap();
+        assert_eq!(dense.bytes_per_token(), MIN_BYTES_PER_TOKEN);
+        let sparse = TokenCalibration::measure(10_000_000, 0, 100_000).unwrap();
+        assert_eq!(sparse.bytes_per_token(), MAX_BYTES_PER_TOKEN);
+        // A hand-edited or corrupt persisted record cannot divide by zero.
+        let corrupt = TokenCalibration { request_bytes: 10, input_tokens: 0 };
+        assert_eq!(corrupt.bytes_per_token(), DEFAULT_BYTES_PER_TOKEN);
+    }
+
+    #[test]
+    fn calibration_round_trips_through_serde() {
+        let measured = TokenCalibration { request_bytes: 1_460_000, input_tokens: 593_447 };
+        let json = serde_json::to_string(&measured).unwrap();
+        assert_eq!(json, r#"{"request_bytes":1460000,"input_tokens":593447}"#);
+        assert_eq!(serde_json::from_str::<TokenCalibration>(&json).unwrap(), measured);
     }
 }

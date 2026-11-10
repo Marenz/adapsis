@@ -835,6 +835,11 @@ pub struct Conversation {
     /// only when the recent-image budget overflows.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub image_start: usize,
+    /// Last request of this conversation as the provider counted it (serialized
+    /// text bytes, input tokens). The next request's tokens are projected with
+    /// this ratio instead of a fixed chars-per-token guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_calibration: Option<crate::model_limits::TokenCalibration>,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -851,8 +856,10 @@ impl Conversation {
             permission_model: None,
             view_start: 0,
             image_start: 0,
+            token_calibration: None,
         }
     }
+
 
     #[cfg(test)]
     pub fn new_temporary() -> Self {
@@ -928,24 +935,6 @@ impl Conversation {
     pub fn force_view_checkpoint(&mut self) -> bool {
         conversation_view::force_checkpoint(self)
     }
-}
-
-fn truncate_middle(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
-        return value.to_string();
-    }
-    if max_chars < 32 {
-        return value.chars().take(max_chars).collect();
-    }
-    const MARKER: &str = "\n[... content omitted ...]\n";
-    let marker_chars = MARKER.chars().count();
-    let kept = max_chars - marker_chars;
-    let head = kept / 2;
-    let tail = kept - head;
-    let prefix: String = value.chars().take(head).collect();
-    let suffix: String = value.chars().skip(count - tail).collect();
-    format!("{prefix}{MARKER}{suffix}")
 }
 
 /// Manages multiple independent conversation contexts.
@@ -2896,7 +2885,7 @@ mod tests {
 
         assert!(serialized.contains("start"));
         assert!(serialized.contains("end"));
-        assert!(serialized.contains("content omitted"));
+        assert!(serialized.contains("characters omitted"));
         assert_eq!(conv.messages[1].content.chars().count(), 208);
     }
 

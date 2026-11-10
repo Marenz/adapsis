@@ -82,6 +82,12 @@ async fn provider(outputs: Vec<Value>) -> Provider {
                     .unwrap_or_else(|| response("unexpected extra request", vec![]));
                 let streaming = body["stream"] == true;
                 requests.push(body);
+                // `{"http_status": N}` scripts a provider failure (400: not retried).
+                if let Some(status) = output["http_status"].as_u64() {
+                    use axum::response::IntoResponse;
+                    let status = axum::http::StatusCode::from_u16(status as u16).unwrap();
+                    return (status, r#"{"error":{"message":"scripted provider failure"}}"#).into_response();
+                }
                 sse_or_json(&output, streaming)
             }
         }),
@@ -674,8 +680,110 @@ async fn takeover_history_is_append_only_across_turns_with_turn_boundary_breakpo
             assert_eq!(strip(a), strip(b), "history changed between turns");
         }
         assert!(new.len() > old.len(), "history grew");
-        // The previous history end is a breakpoint in the next request.
-        let boundary = old_history.iter().rposition(|m| m.get("content").is_some_and(|c| !c.to_string().trim_matches('"').trim().is_empty())).unwrap();
-        assert!(new[boundary].get("cache_control").is_some(), "turn boundary breakpoint missing at {boundary}");
+        // The previous request's history boundary (its last assistant message) is
+        // a breakpoint in the next request too.
+        if let Some(boundary) = old_history.iter().rposition(|m| m["role"] == "assistant") {
+            assert!(old[boundary].get("cache_control").is_some(), "history boundary missing at {boundary}");
+            assert!(new[boundary].get("cache_control").is_some(), "turn boundary breakpoint missing at {boundary}");
+        }
     }
+    for request in &requests {
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(crate::context_log::gateway_boundary_errors(messages), Vec::<String>::new());
+    }
+}
+
+fn boundary_roles(request: &Value) -> Vec<(usize, String)> {
+    request["messages"].as_array().unwrap().iter().enumerate()
+        .filter(|(_, m)| m.get("cache_control").is_some())
+        .map(|(i, m)| (i, m["role"].as_str().unwrap().to_string()))
+        .collect()
+}
+
+/// Regression for the deployed dd8cea4 build, through the real takeover loop:
+/// a native turn succeeds, the next turn's provider call fails (no assistant
+/// message is stored), and the turn after that must still be accepted. The old
+/// placement marked the `finish` tool result and the failed turn's user message,
+/// which the gateway merges into one provider message and rejects (HTTP 400),
+/// for every following request of that context.
+#[tokio::test]
+async fn native_takeover_request_after_a_failed_turn_has_gateway_valid_cache_boundaries() {
+    let harness = Harness::new(true);
+    let context = "telegram:group:-88069";
+    let provider = provider(vec![
+        tool("look", "inspect", json!({"kind":"symbols"})),
+        response("first answer", vec![call("fin0", "finish", json!({}))]),
+        json!({"http_status": 400}),
+        json!({"http_status": 400}),
+        response("recovered", vec![call("fin1", "finish", json!({}))]),
+        response("still fine", vec![call("fin2", "finish", json!({}))]),
+    ]).await;
+    assert_eq!(harness.turn(&provider, context, ADMIN, "first question").await, "first answer");
+    // Two failed turns in a row: each leaves only its user message behind.
+    for failed in ["second question", "third question"] {
+        let reply = harness.turn(&provider, context, ADMIN, failed).await;
+        assert!(reply.contains("technisches Problem"), "{reply}");
+    }
+    assert_eq!(harness.turn(&provider, context, ADMIN, "fourth question").await, "recovered");
+    assert_eq!(harness.turn(&provider, context, ADMIN, "fifth question").await, "still fine");
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 6);
+    for (index, request) in requests.iter().enumerate() {
+        let messages = request["messages"].as_array().unwrap();
+        // The gateway's merge rule and the Adapsis rule (no boundary on a tool or
+        // user history message, at most one per merged provider message).
+        assert_eq!(crate::context_log::gateway_boundary_errors(messages), Vec::<String>::new(), "request {index}");
+        assert!(messages.last().unwrap().get("cache_control").is_none(), "request {index}: envelope");
+    }
+    // Requests 2-4 follow the native turn: the stored history is
+    // user, assistant(inspect), tool, assistant(finish), tool, then the failed
+    // turns' user messages. The only history boundary is the finish batch.
+    for index in [2, 3, 4] {
+        let roles: Vec<String> = requests[index]["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap().to_string()).collect();
+        assert_eq!(&roles[..6], ["system", "user", "assistant", "tool", "assistant", "tool"], "request {index}");
+        assert!(roles[6..].iter().all(|role| role == "user"), "request {index}: {roles:?}");
+        assert_eq!(boundary_roles(&requests[index]), vec![(0, "system".to_string()), (4, "assistant".to_string())], "request {index}");
+    }
+    // The history only appended across the failures (the epoch continued, so the
+    // turn-boundary path ran), and after recovery the boundary moves on.
+    let strip = |m: &Value| { let mut m = m.clone(); m.as_object_mut().unwrap().remove("cache_control"); m.to_string() };
+    let (third, fourth) = (requests[3]["messages"].as_array().unwrap(), requests[4]["messages"].as_array().unwrap());
+    for (a, b) in third[..third.len() - 1].iter().zip(fourth.iter()) {
+        assert_eq!(strip(a), strip(b));
+    }
+    let last = boundary_roles(&requests[5]);
+    assert_eq!(last.len(), 3, "stable prefix, previous boundary, new history end: {last:?}");
+    assert!(last[1..].iter().all(|(_, role)| role == "assistant"));
+    assert_eq!(last[1].0, 4, "the previous request's boundary is read again");
+}
+
+/// The same failure sequence on the legacy (non-native) takeover protocol.
+#[tokio::test]
+async fn legacy_takeover_requests_after_failed_turns_have_gateway_valid_cache_boundaries() {
+    let harness = Harness::new(false);
+    let context = "telegram:group:-88070";
+    let provider = provider(vec![
+        response("first answer<code>!done</code>", vec![]),
+        json!({"http_status": 400}),
+        json!({"http_status": 400}),
+        response("recovered<code>!done</code>", vec![]),
+        response("still fine<code>!done</code>", vec![]),
+    ]).await;
+    harness.turn(&provider, context, ADMIN, "first question").await;
+    for failed in ["second question", "third question"] {
+        assert!(harness.turn(&provider, context, ADMIN, failed).await.contains("technisches Problem"));
+    }
+    harness.turn(&provider, context, ADMIN, "fourth question").await;
+    harness.turn(&provider, context, ADMIN, "fifth question").await;
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 5);
+    for (index, request) in requests.iter().enumerate() {
+        assert!(request.get("tools").is_none(), "legacy protocol");
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(crate::context_log::gateway_boundary_errors(messages), Vec::<String>::new(), "request {index}");
+    }
+    // After two failed turns the old placement marked both failed user messages.
+    let roles: Vec<String> = requests[3]["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap().to_string()).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user", "user", "user"]);
+    assert_eq!(boundary_roles(&requests[3]), vec![(0, "system".to_string()), (2, "assistant".to_string())]);
 }

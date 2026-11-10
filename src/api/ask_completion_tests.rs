@@ -166,3 +166,76 @@ async fn streaming_new_function_still_requires_tests() {
     assert!(response.has_errors);
     assert!(response.results.iter().any(|r| !r.success && r.message.contains("CompletionStreamNewDebt.pending")));
 }
+
+/// `/api/ask` and `/api/ask-stream` across failed turns: every request's cache
+/// boundaries must be acceptable to the gateway. The `main` epoch tracker is
+/// process-global and shared with other tests, so whether a given request also
+/// carries the turn-boundary marker is not asserted here; the rule holds for
+/// every boundary index (context_log tests) and deterministically through the
+/// takeover loop (takeover_native tests).
+#[tokio::test]
+async fn ask_and_ask_stream_requests_after_failed_turns_have_gateway_valid_cache_boundaries() {
+    for streaming in [false, true] {
+        let script: Vec<Option<&str>> = vec![
+            Some("first answer<code>!done</code>"), None, None,
+            Some("recovered<code>!done</code>"), Some("still fine<code>!done</code>"),
+        ];
+        let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let recorded = requests.clone();
+        let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(
+            move |Json(body): Json<serde_json::Value>| {
+                let recorded = recorded.clone();
+                let script = script.clone();
+                async move {
+                    let mut requests = recorded.lock().unwrap();
+                    let index = requests.len();
+                    requests.push(body);
+                    match script.get(index).copied().flatten() {
+                        Some(content) => {
+                            let chunk = serde_json::json!({"choices":[{"delta":{"content":content}}]});
+                            ([(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                             format!("data: {chunk}\n\ndata: [DONE]\n\n")).into_response()
+                        }
+                        // A provider failure that is not retried.
+                        None => (axum::http::StatusCode::BAD_REQUEST, r#"{"error":{"message":"scripted failure"}}"#).into_response(),
+                    }
+                }
+            }
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = test_config();
+        config.llm_url = format!("http://{address}");
+        config.max_iterations = 2;
+        *config.llm_model.write().unwrap() = "fixture".into();
+        for turn in 0..5 {
+            let request = Json(AskRequest { message: format!("question {turn}"), caller: None });
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                if streaming {
+                    let response = super::super::llm_handlers::ask_stream(State(config.clone()), request).await.into_response();
+                    let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                } else {
+                    let _ = super::super::llm_handlers::ask(State(config.clone()), request).await;
+                }
+            }).await.expect("ask turn timed out");
+        }
+        server.abort();
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 5, "streaming={streaming}: one request per turn");
+        for (index, request) in requests.iter().enumerate() {
+            let messages = request["messages"].as_array().unwrap();
+            assert_eq!(crate::context_log::gateway_boundary_errors(messages), Vec::<String>::new(), "streaming={streaming} request {index}");
+        }
+        // `ask` stores an assistant entry for a failed turn too, so its history
+        // keeps alternating; every boundary is the stable prefix or an assistant
+        // message, never a user message next to the runtime envelope.
+        let roles: Vec<&str> = requests[3]["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user", "assistant", "user", "assistant", "user"], "streaming={streaming}");
+        for request in &requests[1..] {
+            let marked: Vec<&str> = request["messages"].as_array().unwrap().iter()
+                .filter(|m| m.get("cache_control").is_some()).map(|m| m["role"].as_str().unwrap()).collect();
+            assert!(marked.len() >= 2 && marked[0] == "system" && marked[1..].iter().all(|role| *role == "assistant"), "streaming={streaming}: {marked:?}");
+        }
+    }
+}

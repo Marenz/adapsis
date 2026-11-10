@@ -7,21 +7,23 @@
 //! drops to ~50%, and the history grows append-only again. Persisted messages are
 //! never removed; older content stays in the session and in Ladybug (episodes).
 //!
-//! Two budgets apply, whichever is tighter: estimated tokens against the model
+//! Two budgets apply, whichever is tighter: projected tokens against the model
 //! window, and serialized bytes (image base64 included) against the route's
-//! request body limit (the local gateway rejects bodies above 2 MiB).
+//! request body limit. Tokens are projected from serialized text bytes with the
+//! conversation's calibrated bytes-per-token ratio (measured from the provider's
+//! usage report for the previous request; a conservative default before that),
+//! plus a fixed allowance per image.
 //!
 //! Everything that decides what a message looks like in the view is a function of
 //! the message and of the persisted checkpoint indices only: per-message caps are
 //! constant per model, and image retention is anchored at `image_start`, which
 //! moves only when the image budget overflows. No budget-dependent truncation.
-use super::{ChatMessage, Conversation, truncate_middle};
+use super::{ChatMessage, Conversation};
 
 const IMAGE_COUNT: usize = 3;
 /// Raw image byte budget ceiling; the policy may lower it to fit the route.
 const IMAGE_BYTES: usize = 20 * 1024 * 1024;
-/// Rough provider cost of one image in tokens, for projection only.
-const IMAGE_TOKENS: usize = 1_600;
+use crate::model_limits::{IMAGE_TOKENS, tokens_for_bytes};
 const OMITTED_NOTICE: &str = "older message(s) are omitted from this model context; the raw history is retained.";
 
 /// Budget inputs for one request, all in estimated tokens.
@@ -40,6 +42,8 @@ pub struct ViewPolicy {
     pub overhead_bytes: usize,
     /// Raw bytes of retained images (sent as base64, 4/3 larger).
     pub image_bytes: usize,
+    /// Serialized text bytes per provider token for this conversation.
+    pub bytes_per_token: f32,
 }
 
 impl ViewPolicy {
@@ -52,20 +56,22 @@ impl ViewPolicy {
     pub const TAIL_ALLOWANCE_BYTES: usize = 64 * 1024;
 
     /// `known_tail_bytes`: measured size of the tail parts known before the view
-    /// (runtime/authority text, native tool schemas).
-    pub fn for_model(model: &str, system: &str, known_tail_bytes: usize) -> Self {
-        let mut policy = Self::from_limits(&crate::model_limits::for_model(model), system);
+    /// (runtime/authority text, native tool schemas). `bytes_per_token`: the
+    /// conversation's calibrated ratio (`model_limits::bytes_per_token`).
+    pub fn for_model(model: &str, system: &str, known_tail_bytes: usize, bytes_per_token: f32) -> Self {
+        let mut policy = Self::from_limits(&crate::model_limits::for_model(model), system, bytes_per_token);
         policy.overhead_bytes += known_tail_bytes;
-        policy.overhead_tokens += crate::model_limits::estimate_tokens(known_tail_bytes);
+        policy.overhead_tokens += tokens_for_bytes(known_tail_bytes, bytes_per_token);
         policy
     }
 
-    pub fn from_limits(limits: &crate::model_limits::ModelLimits, system: &str) -> Self {
+    pub fn from_limits(limits: &crate::model_limits::ModelLimits, system: &str, bytes_per_token: f32) -> Self {
         let max_bytes = limits.max_request_bytes;
         Self {
+            bytes_per_token,
             trigger_tokens: limits.trigger_tokens(),
             target_tokens: limits.target_tokens(),
-            overhead_tokens: crate::model_limits::estimate_tokens(system.chars().count())
+            overhead_tokens: tokens_for_bytes(json_len(system), bytes_per_token)
                 + Self::TAIL_ALLOWANCE_TOKENS
                 + limits.output_reserve_tokens(),
             max_message_chars: limits.max_message_chars(),
@@ -77,13 +83,15 @@ impl ViewPolicy {
         }
     }
 
-    /// Test helper: token budget only (byte budget effectively unlimited).
+    /// Test helper: token budget only (byte budget effectively unlimited), at the
+    /// default bytes-per-token ratio.
     #[cfg(test)]
     pub fn tokens_only(trigger_tokens: usize, target_tokens: usize, overhead_tokens: usize, max_message_chars: usize) -> Self {
         Self {
             trigger_tokens, target_tokens, overhead_tokens, max_message_chars,
             trigger_bytes: usize::MAX / 4, target_bytes: usize::MAX / 4, overhead_bytes: 0,
             image_bytes: IMAGE_BYTES,
+            bytes_per_token: crate::model_limits::DEFAULT_BYTES_PER_TOKEN,
         }
     }
 
@@ -94,6 +102,37 @@ impl ViewPolicy {
     fn within_target(&self, tokens: usize, bytes: usize) -> bool {
         self.overhead_tokens + tokens <= self.target_tokens && self.overhead_bytes + bytes <= self.target_bytes
     }
+}
+
+/// The model view of one over-long message: head and tail with a marker between
+/// them that tells the model the message was cut and by how many characters. The
+/// persisted message is never changed. The result has at most `max_chars`
+/// characters and depends only on the message and the cap (stable prefix).
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    // Room is reserved for the widest possible count, so the cut never depends
+    // on the marker's own length.
+    let digits = count.to_string().len();
+    let long = "\n[... {} characters omitted here by the runtime to fit the model context; the stored message is complete ...]\n";
+    let short = "\n[... {} characters omitted ...]\n";
+    let width = |template: &str| template.len() - 2 + digits;
+    let template = if max_chars >= 4 * width(long) {
+        long
+    } else if max_chars >= width(short) + 16 {
+        short
+    } else {
+        return value.chars().take(max_chars).collect();
+    };
+    let kept = max_chars - width(template);
+    let head = kept / 2;
+    let tail = kept - head;
+    let prefix: String = value.chars().take(head).collect();
+    let suffix: String = value.chars().skip(count - tail).collect();
+    let marker = template.replace("{}", &(count - kept).to_string());
+    format!("{prefix}{marker}{suffix}")
 }
 
 fn json_len(text: &str) -> usize {
@@ -168,15 +207,16 @@ fn groups(conv: &Conversation, policy: &ViewPolicy) -> Vec<Group> {
             let start = (group.as_ptr() as usize - base) / size;
             let batch = group.len() > 1;
             let oversized_batch = batch && group.iter().any(|m| chars(m) > max_message_chars);
-            let message_chars: usize = group.iter().map(|m| chars(m).min(max_message_chars)).sum();
+            // Serialized text bytes as sent; tokens follow from the calibrated ratio.
+            let text_bytes: usize = group.iter().map(|m| message_bytes(m, max_message_chars)).sum();
             // Exactly the images the view will send (newest 3 total), as base64.
+            // They are projected at a fixed token cost, outside the text ratio.
             let image_raw: &[usize] = if batch { &[] } else { kept_images.get(&start).map_or(&[], Vec::as_slice) };
             Group {
                 start,
                 len: group.len(),
-                tokens: crate::model_limits::estimate_tokens(message_chars) + image_raw.len() * IMAGE_TOKENS,
-                bytes: group.iter().map(|m| message_bytes(m, max_message_chars)).sum::<usize>()
-                    + image_raw.iter().map(|&raw| image_part_bytes(raw)).sum::<usize>(),
+                tokens: tokens_for_bytes(text_bytes, policy.bytes_per_token) + image_raw.len() * IMAGE_TOKENS,
+                bytes: text_bytes + image_raw.iter().map(|&raw| image_part_bytes(raw)).sum::<usize>(),
                 user: !batch && group[0].role == "user",
                 oversized_batch,
             }
@@ -269,6 +309,12 @@ struct Anchors {
 impl Conversation {
     fn clone_indices(&self) -> Anchors {
         Anchors { view_start: self.view_start, image_start: self.image_start }
+    }
+
+    /// Bytes per token to project this conversation's next request with: its last
+    /// measured request, else the conservative default.
+    pub fn bytes_per_token(&self) -> f32 {
+        crate::model_limits::bytes_per_token(self.token_calibration.as_ref())
     }
 }
 

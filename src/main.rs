@@ -2596,10 +2596,13 @@ async fn main() -> Result<()> {
                         api::http_context::self_trigger_messages(&mut meta, &event_message, &trigger_model)
                     };
 
+                    let sent = api::http_context::SentRequest::measure(&messages, 0);
                     let result = llm.generate(messages).await;
-                    api::http_context::after_llm_call(llm.take_recovered(), &result, &trigger_meta, "main");
+                    let recovered = llm.take_recovered();
+                    api::http_context::after_llm_call(recovered, &result, &trigger_meta, "main");
                     match result {
                         Ok(output) => {
+                            sent.calibrate(&trigger_meta, "main", recovered, &output.usage);
                             let code = output.code.clone();
                             if crate::logging::content() {
                                 eprintln!("[self-trigger:response] {}...", output.text.chars().take(100).collect::<String>());

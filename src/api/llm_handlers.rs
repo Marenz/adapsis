@@ -215,10 +215,12 @@ pub(super) async fn persist_takeover_message(
 /// minus reserved output) and folds the oldest part toward the 50% target.
 /// One episode per turn, at most 1/8 of the window per summarizer call, so the
 /// summary stays focused and the turn's added latency stays bounded.
+/// Sizes are serialized bytes, converted from tokens with the conversation's
+/// calibrated bytes-per-token ratio (the same estimate as the view checkpoint).
 struct CompactionRule {
-    trigger_chars: usize,
-    target_chars: usize,
-    chunk_chars: usize,
+    trigger_bytes: usize,
+    target_bytes: usize,
+    chunk_bytes: usize,
     timeout: std::time::Duration,
 }
 
@@ -227,16 +229,21 @@ struct CompactionRule {
 /// the 15-minute retry gate applies.
 const COMPACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
-fn compaction_rule(model: &str) -> CompactionRule {
+fn compaction_rule(model: &str, bytes_per_token: f32) -> CompactionRule {
     let limits = crate::model_limits::for_model(model);
-    let chars = |tokens: usize| tokens.saturating_mul(crate::model_limits::CHARS_PER_TOKEN);
+    let bytes = |tokens: usize| crate::model_limits::bytes_for_tokens(tokens, bytes_per_token);
     let reserve = limits.output_reserve_tokens();
     CompactionRule {
-        trigger_chars: chars(limits.trigger_tokens().saturating_sub(reserve)),
-        target_chars: chars(limits.target_tokens().saturating_sub(reserve)),
-        chunk_chars: chars(limits.context_tokens / 8),
+        trigger_bytes: bytes(limits.trigger_tokens().saturating_sub(reserve)),
+        target_bytes: bytes(limits.target_tokens().saturating_sub(reserve)),
+        chunk_bytes: bytes(limits.context_tokens / 8),
         timeout: COMPACTION_TIMEOUT.min(limits.request_timeout),
     }
+}
+
+/// Size of one stored message as it would be serialized into a request.
+fn serialized_len(content: &str) -> usize {
+    serde_json::to_string(content).map_or(content.len(), |json| json.len())
 }
 
 fn parse_compaction_output(text: &str) -> anyhow::Result<CompactionOutput> {
@@ -251,37 +258,40 @@ async fn compact_context_if_needed(
     llm: &crate::llm::LlmClient,
     llm_model: &str,
     context: &str,
+    bytes_per_token: f32,
 ) -> anyhow::Result<bool> {
     let graph_for_read = graph.clone();
     let context_for_read = context.to_string();
-    let rule = compaction_rule(llm_model);
-    let trigger = rule.trigger_chars;
+    let rule = compaction_rule(llm_model, bytes_per_token);
+    let trigger = rule.trigger_bytes;
+    // The scan limit counts characters; bytes are never fewer than characters, so
+    // a limit of `trigger` characters always returns enough to decide in bytes.
     let pending = tokio::task::spawn_blocking(move || {
         graph_for_read.pending_context_messages(&context_for_read, trigger)
     })
     .await
     .context("join Ladybug compaction scan")??;
-    let pending_chars: usize = pending.iter().map(|message| message.content.chars().count()).sum();
+    let pending_bytes: usize = pending.iter().map(|message| serialized_len(&message.content)).sum();
     eprintln!(
-        "[memory:{context}] compaction scan: {} pending messages, {pending_chars}/{trigger} estimated characters",
+        "[memory:{context}] compaction scan: {} pending messages, {pending_bytes}/{trigger} serialized bytes at {bytes_per_token:.2} bytes/token",
         pending.len()
     );
-    if pending_chars < trigger || pending.len() < 4 {
+    if pending_bytes < trigger || pending.len() < 4 {
         return Ok(false);
     }
 
     let mut chunk = Vec::new();
-    let mut chunk_chars = 0usize;
-    let mut remaining = pending_chars;
+    let mut chunk_bytes = 0usize;
+    let mut remaining = pending_bytes;
     for message in pending {
-        let chars = message.content.chars().count();
+        let bytes = serialized_len(&message.content);
         if !chunk.is_empty()
-            && (chunk_chars.saturating_add(chars) > rule.chunk_chars || remaining <= rule.target_chars)
+            && (chunk_bytes.saturating_add(bytes) > rule.chunk_bytes || remaining <= rule.target_bytes)
         {
             break;
         }
-        chunk_chars = chunk_chars.saturating_add(chars);
-        remaining = remaining.saturating_sub(chars);
+        chunk_bytes = chunk_bytes.saturating_add(bytes);
+        remaining = remaining.saturating_sub(bytes);
         chunk.push(message);
     }
     if let Some(boundary) = chunk.iter().rposition(|message| {
@@ -624,8 +634,10 @@ pub async fn ask(
 
         // Call LLM
         let started = std::time::Instant::now();
+        let sent = super::http_context::SentRequest::measure(&messages, 0);
         let result = llm.generate(messages.clone()).await;
-        super::http_context::after_llm_call(llm.take_recovered(), &result, &config.meta, "main");
+        let recovered = llm.take_recovered();
+        super::http_context::after_llm_call(recovered, &result, &config.meta, "main");
         let output = match result {
             Ok(o) => o,
             Err(e) => {
@@ -638,6 +650,7 @@ pub async fn ask(
             }
         };
         report_llm_usage("main", started, &output.usage);
+        sent.calibrate(&config.meta, "main", recovered, &output.usage);
 
         messages.push(crate::llm::ChatMessage::assistant(&output.text));
         if !assistant_turn.is_empty() {
@@ -892,9 +905,12 @@ pub async fn ask_stream(
             // Once connected, chunks flow through the channel — no "waiting"
             // timer needed because the chunks themselves are progress.
             let started = std::time::Instant::now();
+            let sent = super::http_context::SentRequest::measure(&messages, 0);
+            let recovered;
             let output = {
                 let result = llm.generate_streaming(messages.clone()).await;
-                super::http_context::after_llm_call(llm.take_recovered(), &result, &config_clone.meta, "main");
+                recovered = llm.take_recovered();
+                super::http_context::after_llm_call(recovered, &result, &config_clone.meta, "main");
                 let mut rx = match result {
                     Ok(rx) => rx,
                     Err(e) => {
@@ -929,6 +945,7 @@ pub async fn ask_stream(
                 }
             };
             report_llm_usage("main", started, &output.usage);
+            sent.calibrate(&config_clone.meta, "main", recovered, &output.usage);
 
             messages.push(crate::llm::ChatMessage::assistant(&output.text));
             if !assistant_turn.is_empty() {
@@ -1237,14 +1254,21 @@ pub async fn handle_llm_takeover(
     }
     let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
     let compaction = if compaction_attempt_due(&context) {
+        // The same calibrated estimate as the view checkpoint drives compaction.
+        let bytes_per_token = meta
+            .lock()
+            .ok()
+            .and_then(|meta| meta.conversations.get(&context).map(|conv| conv.bytes_per_token()))
+            .unwrap_or(crate::model_limits::DEFAULT_BYTES_PER_TOKEN);
         tokio::time::timeout(
-            compaction_rule(llm_model).timeout,
+            compaction_rule(llm_model, bytes_per_token).timeout,
             compact_context_if_needed(
                 &memory_graph,
                 &memory_embedder,
                 &llm,
                 llm_model,
                 &context,
+                bytes_per_token,
             ),
         )
         .await
@@ -1571,11 +1595,14 @@ pub async fn handle_llm_takeover(
         eprintln!("[llm_takeover:{context}] iteration {}/{}", iteration + 1, iteration_budget);
 
         let started = std::time::Instant::now();
+        let sent = super::http_context::SentRequest::measure(&llm_messages, 0);
         let result = llm.generate(llm_messages.clone()).await;
-        super::http_context::after_llm_call(llm.take_recovered(), &result, &meta, &context);
+        let recovered = llm.take_recovered();
+        super::http_context::after_llm_call(recovered, &result, &meta, &context);
         let output = match result {
             Ok(o) => {
                 report_llm_usage(&context, started, &o.usage);
+                sent.calibrate(&meta, &context, recovered, &o.usage);
                 o
             }
             Err(e) => {
@@ -1789,11 +1816,14 @@ pub async fn handle_llm_takeover(
                     break;
                 }
                 let started = std::time::Instant::now();
+                let sent = super::http_context::SentRequest::measure(&llm_messages, 0);
                 let result = llm.generate(llm_messages.clone()).await;
-                super::http_context::after_llm_call(llm.take_recovered(), &result, &meta, &context);
+                let recovered = llm.take_recovered();
+                super::http_context::after_llm_call(recovered, &result, &meta, &context);
                 match result {
                     Ok(output) => {
                         report_llm_usage(&context, started, &output.usage);
+                        sent.calibrate(&meta, &context, recovered, &output.usage);
                         if output.text.trim().is_empty() && output.code.trim().is_empty() {
                             let error = "model returned an empty final summary";
                             eprintln!("[llm_takeover:{context}] {error}");
@@ -1934,13 +1964,28 @@ mod logging_gate_tests;
 mod compaction_rule_tests {
     #[test]
     fn compaction_rule_derives_from_the_model_window() {
-        let opus = super::compaction_rule("anthropic/claude-opus-5");
-        // (85% of 1M − 128k output) tokens × 4 chars; target (50% − 128k) × 4.
-        assert_eq!(opus.trigger_chars, (850_000 - 128_000) * 4);
-        assert_eq!(opus.target_chars, (500_000 - 128_000) * 4);
-        assert_eq!(opus.chunk_chars, 125_000 * 4);
+        let default = crate::model_limits::DEFAULT_BYTES_PER_TOKEN;
+        let opus = super::compaction_rule("anthropic/claude-opus-5", default);
+        // (85% of 1M − 128k output) tokens × 2.5 bytes; target (50% − 128k) × 2.5.
+        assert_eq!(opus.trigger_bytes, (850_000 - 128_000) * 5 / 2);
+        assert_eq!(opus.target_bytes, (500_000 - 128_000) * 5 / 2);
+        assert_eq!(opus.chunk_bytes, 125_000 * 5 / 2);
         assert_eq!(opus.timeout, std::time::Duration::from_secs(300), "own bound, not the model request timeout");
-        let unknown = super::compaction_rule("dev-bot");
-        assert!(unknown.trigger_chars < opus.trigger_chars && unknown.trigger_chars > 0);
+        let unknown = super::compaction_rule("dev-bot", default);
+        assert!(unknown.trigger_bytes < opus.trigger_bytes && unknown.trigger_bytes > 0);
+    }
+
+    #[test]
+    fn compaction_rule_follows_the_calibrated_ratio() {
+        // A conversation measured at 2 bytes/token compacts at fewer bytes than one
+        // measured at 4: the same token threshold, converted with its own ratio.
+        let dense = super::compaction_rule("anthropic/claude-opus-5", 2.0);
+        let sparse = super::compaction_rule("anthropic/claude-opus-5", 4.0);
+        assert_eq!(dense.trigger_bytes, (850_000 - 128_000) * 2);
+        assert_eq!(sparse.trigger_bytes, (850_000 - 128_000) * 4);
+        assert_eq!(dense.target_bytes * 2, sparse.target_bytes);
+        // Serialized size, not character count, is what gets compared against it.
+        assert_eq!(super::serialized_len("a\nb"), 6);
+        assert_eq!(super::serialized_len("ä"), 4);
     }
 }
