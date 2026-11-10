@@ -35,17 +35,33 @@ Evidence: [docs/design-intent-audit-20261109.md](docs/design-intent-audit-202611
 | N2 | Nodes | The web UI combines views. here and sleek see each other; both see edox. edox communicates (messages, notifications, requests) but sees no foreign task views. Frequenz titles may show here. | | active | |
 | N3 | Security | Node identity = WireGuard IP plus a per-node permission profile. | Signed node keys later (N7). | active | |
 | N4 | Security | Web UI is reachable on our WireGuard VPN only, with no login. It is NEVER bound to the Frequenz company network; bind explicitly to the WireGuard interface. | Login later (N8). | active | |
-| N5 | Security | No extra execution isolation; tasks run as the owner's user. | | active | |
-| N6 | Security | Secrets are named capabilities; tokens never enter model context or logs. | | active | |
+| N5 | Security | No extra execution isolation; tasks run as the owner's user. | Owner clarification 2026-11-10: ordinary owner-authority workspace bash; no bwrap filesystem secret masking requirement. Cgroups bound command lifetime, not filesystem authority. Accidental secret accessibility through bash is accepted; deliberately discovering/reading/dumping credentials must be discouraged in tool instructions. See clarification below. | active | #129 |
+| N6 | Security | Secrets are named capabilities; tokens never enter model context or logs through those capabilities. | Owner clarification 2026-11-10: secrets should live in a secret store, not scattered plaintext. Named capabilities remain planned; concrete store/provider and migration are not implemented or decided. This is not a claim that owner-authority bash cannot read secrets, nor that active avoidance is verified. Existing logging/redaction gates remain required. | active; implementation pending | #129 |
 | N7 | Security | Signed node keys. | Later. | deferred | |
 | N8 | Security | Web login. | Later. | deferred | |
+
+**Owner clarification (2026-11-10, relayed through the delegation manager):**
+"I think our secrets should generally be in a \"secret store\" and if there are
+any found through bash then so be it. they should be properly set anyway and of
+course the bot should actively try to avoid reading any in .env files and such,
+but it does that anyway nowadays, no?"
+
+This resolves the workspace secret-masking question in favor of ordinary
+owner-authority bash, without mandatory filesystem masking. Tool instructions
+must discourage deliberate discovery, reading or dumping of `.env`, credential
+and token files or process environments; that guidance is behavioral, not an
+isolation guarantee. The wiring slice must add it explicitly. A concrete secret
+store, its provider and migration remain follow-up decisions/implementation;
+neither an implemented store nor verified active avoidance follows from this
+clarification. It does not remove named secret capabilities or existing
+content-logging/redaction requirements.
 
 ## Language & tools
 
 | ID | Area | Decision | Rationale/notes | Status | Issue |
 |---|---|---|---|---|---|
 | L1 | Language | `.ax` and the legacy `<code>` mode are removed; Python is the only language. | Supersedes the `+`/`!`/`?` syntax goals in AGENTS.md. | active | #86 #89 |
-| L2 | Tools | Interaction = direct JSON tools (read / search / edit / run / git) plus `run` with ad-hoc Python, which replaces the role of `!`. | | active | #89 |
+| L2 | Tools | Interaction = direct JSON tools (read / search / edit / run / git) plus `run` with ad-hoc Python, which replaces the role of `!`. | Workspace bash follows N5/N6's 2026-11-10 clarification: ordinary owner authority, behavioral secret-avoidance instructions, named capabilities still planned. | active | #89 #129 |
 | L3 | Tools | Permission profiles map to JSON tool lists and are never widened. Execute-only speakers (e.g. Renate) get evaluate / inspect / finish; guests get their guest tools. | | active | |
 | L4 | Language | Restore IO testing via pytest / `unittest.mock`-style test-local mocks plus scripted IO sequences. | | active | |
 | L5 | Language | Restore route / startup / event-source declarations in Python and in native mode. | | active | |

@@ -6,7 +6,19 @@
 //! worktree_parent = "/home/owner/Projects/adapsis-workspaces"
 //! base = "origin/master"
 //! read_roots = ["/home/owner/Projects/llm-gateway"]   # optional
+//!
+//! [repo.adapsis.env]                                   # optional
+//! CARGO_TARGET_DIR = "/home/owner/.cache/adapsis-target"
 //! ```
+//!
+//! The `env` table is added to the environment of every command run in a
+//! workspace of that repository (after the fixed variables, before a
+//! request's own additions). Its first use is a shared `CARGO_TARGET_DIR`,
+//! because each worktree would otherwise build its own target directory of
+//! several gigabytes. Whoever sets that should know the price: builds in two
+//! worktrees then wait for each other on cargo's directory lock, and
+//! switching between branches evicts and rebuilds each other's artifacts.
+//! Values are used literally; there is no placeholder for the workspace name.
 //!
 //! Loading validates the *shape* of every entry and reports all problems at
 //! once. Whether a checkout exists and is a git repository is checked when a
@@ -21,7 +33,8 @@ use serde::Deserialize;
 
 use super::error::{Error, Result};
 use super::lifecycle::{validate_base, validate_name};
-use super::limits::{READ_ROOTS_MAX, REGISTRY_MAX_BYTES, REGISTRY_MAX_REPOSITORIES};
+use super::limits::{READ_ROOTS_MAX, REGISTRY_ENV_MAX_VARS, REGISTRY_MAX_BYTES, REGISTRY_MAX_REPOSITORIES};
+use super::run::check_env_pair;
 
 /// Environment variable naming the registry file.
 pub const REGISTRY_ENV: &str = "ADAPSIS_WORKSPACES_FILE";
@@ -37,6 +50,8 @@ pub struct Repository {
     pub base: String,
     /// Extra directories every workspace of this repository may read.
     pub read_roots: Vec<PathBuf>,
+    /// Variables added to the environment of every command in a workspace.
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,6 +74,8 @@ struct RawRepository {
     base: String,
     #[serde(default)]
     read_roots: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 impl Registry {
@@ -100,7 +117,7 @@ impl Registry {
     pub fn from_toml(text: &str) -> Result<Self> {
         let raw: RawRegistry = toml::from_str(text).map_err(|error| {
             Error::Registry(format!(
-                "not valid: {}. Expected `[repo.<name>]` tables with checkout, worktree_parent, base and optional read_roots",
+                "not valid: {}. Expected `[repo.<name>]` tables with checkout, worktree_parent, base, optional read_roots and an optional env table of strings",
                 error.message()
             ))
         })?;
@@ -183,9 +200,17 @@ fn repository(name: &str, raw: RawRepository) -> std::result::Result<Repository,
             Err(text) => note(format!("[{index}] {text}")),
         }
     }
+    if raw.env.len() > REGISTRY_ENV_MAX_VARS {
+        note(format!("{} env entries; the limit is {REGISTRY_ENV_MAX_VARS}", raw.env.len()));
+    }
+    for (variable, value) in &raw.env {
+        if let Err(reason) = check_env_pair(variable, value) {
+            note(format!("env: {reason}"));
+        }
+    }
     match (checkout, parent, problems.is_empty()) {
         (Some(checkout), Some(worktree_parent), true) => {
-            Ok(Repository { name: name.to_string(), checkout, worktree_parent, base: raw.base, read_roots })
+            Ok(Repository { name: name.to_string(), checkout, worktree_parent, base: raw.base, read_roots, env: raw.env })
         }
         _ => Err(problems),
     }

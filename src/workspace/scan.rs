@@ -6,6 +6,31 @@ use std::io::{self, BufRead, BufReader, Read};
 
 use sha2::{Digest, Sha256};
 
+/// A byte-level ceiling, independent of line boundaries or producer EOF.
+pub struct Ceiling<R> {
+    reader: R,
+    remaining: u64,
+    pub hit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl<R> Ceiling<R> {
+    pub fn new(reader: R, limit: u64) -> Self {
+        Self { reader, remaining: limit, hit: Default::default() }
+    }
+}
+impl<R: Read> Read for Ceiling<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if bytes.is_empty() { return Ok(0); }
+        if self.remaining == 0 {
+            self.hit.store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(0);
+        }
+        let len = bytes.len().min(self.remaining as usize);
+        let count = self.reader.read(&mut bytes[..len])?;
+        self.remaining -= count as u64;
+        Ok(count)
+    }
+}
+
 /// Read up to `limit` bytes from the start of `reader`.
 pub fn read_head(reader: &mut impl Read, limit: usize) -> io::Result<Vec<u8>> {
     let mut head = vec![0u8; limit];

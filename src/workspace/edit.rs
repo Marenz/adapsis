@@ -70,6 +70,9 @@ pub fn edit(workspace: &Workspace, ledger: &mut ReadLedger, path: &str, old: &st
     if old == new {
         return Err(Error::InvalidArgument("the old and the new text are identical; there is nothing to change".to_string()));
     }
+    if old.len() > super::limits::WRITE_MAX_BYTES || new.len() > super::limits::WRITE_MAX_BYTES {
+        return Err(Error::InvalidArgument("edit old/new inputs exceed the 2 MiB input cap".into()));
+    }
     let resolved = resolve(workspace, path, Access::Write)?;
     let loaded = load_for_change(&resolved, ledger, EDIT_MAX_FILE_BYTES)?;
     let text = String::from_utf8(loaded.bytes).map_err(|_| Error::WrongKind {
@@ -157,6 +160,7 @@ pub(super) enum Failure {
     NoMatch { mixed_endings: bool },
     Ambiguous { count: usize, lines: Vec<u64> },
     Unchanged,
+    TooLarge,
 }
 
 impl Failure {
@@ -173,6 +177,7 @@ impl Failure {
             },
             Failure::Ambiguous { count, lines } => Error::Ambiguous { path, count, lines },
             Failure::Unchanged => Error::InvalidArgument(format!("`{path}` was not changed: the replacement would leave the file as it is")),
+            Failure::TooLarge => Error::InvalidArgument(format!("`{path}` was not changed: prospective edit exceeds the 16 MiB result cap")),
         }
     }
 }
@@ -180,18 +185,26 @@ impl Failure {
 /// The replacement itself, on text: line-ending adaptation, the uniqueness
 /// rule, the final-newline rule, and the line range of the result.
 pub(super) fn replace_exact(text: &str, old: &str, new: &str, replace_all: bool) -> std::result::Result<Replaced, Failure> {
+    replace_bounded(text, old, new, replace_all, EDIT_MAX_FILE_BYTES as usize)
+}
+
+pub(super) fn replace_bounded(text: &str, old: &str, new: &str, replace_all: bool, cap: usize) -> std::result::Result<Replaced, Failure> {
     let crlf = is_crlf(text);
     let (old, new) = if crlf { (to_crlf(old), to_crlf(new)) } else { (old.to_string(), new.to_string()) };
-    let starts = occurrences(text, &old);
-    if starts.is_empty() {
+    let (occurrences, starts) = occurrences(text, &old);
+    if occurrences == 0 {
         return Err(Failure::NoMatch { mixed_endings: !crlf && text.contains('\r') });
     }
-    if starts.len() > 1 && !replace_all {
+    if occurrences > 1 && !replace_all {
         let lines = starts.iter().take(AMBIGUOUS_LINES_SHOWN).map(|start| line_of(text, *start)).collect();
-        return Err(Failure::Ambiguous { count: starts.len(), lines });
+        return Err(Failure::Ambiguous { count: occurrences, lines });
     }
     // Build the result left to right over non-overlapping matches.
-    let mut out = String::with_capacity(text.len() + new.len());
+    let count = if replace_all { text.match_indices(&old).count() } else { 1 };
+    let prospective = count.checked_mul(old.len()).and_then(|removed| text.len().checked_sub(removed))
+        .and_then(|rest| count.checked_mul(new.len()).and_then(|added| rest.checked_add(added)))
+        .and_then(|len| len.checked_add(2)).filter(|len| *len <= cap).ok_or(Failure::TooLarge)?;
+    let mut out = String::with_capacity(prospective);
     let (mut cursor, mut replacements, mut first_start, mut last_end) = (0usize, 0usize, 0usize, 0usize);
     for (start, _) in text.match_indices(&old) {
         out.push_str(&text[cursor..start]);
@@ -253,15 +266,17 @@ fn to_crlf(text: &str) -> String {
 
 /// Start offsets of every occurrence of `needle`, overlapping ones included:
 /// in `aaa` the text `aa` is not unique.
-fn occurrences(text: &str, needle: &str) -> Vec<usize> {
+fn occurrences(text: &str, needle: &str) -> (usize, Vec<usize>) {
     let step = needle.chars().next().map_or(1, char::len_utf8);
     let mut starts = Vec::new();
+    let mut count = 0;
     let mut from = 0;
     while let Some(found) = text.get(from..).and_then(|rest| rest.find(needle)) {
-        starts.push(from + found);
+        count += 1;
+        if starts.len() < AMBIGUOUS_LINES_SHOWN { starts.push(from + found); }
         from += found + step;
     }
-    starts
+    (count, starts)
 }
 
 /// 1-based line of the byte at `offset`.

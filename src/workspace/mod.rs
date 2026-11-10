@@ -13,7 +13,12 @@
 //! * `secure_write`, `edit`, `write`: the write side. A file is replaced
 //!   atomically and never through a symlink; an existing file is changed only
 //!   if it is what the model read.
-//! * `run`: one shell command in the workspace, bounded in time and output.
+//! * `run` + `contain`: one shell command in the workspace, bounded in time
+//!   and output, cancellable, contained in a systemd scope where possible.
+//! * `jobs` + `job_store` + `job_output`: commands that outlive the call and
+//!   a restart of this process, as systemd user services with their state
+//!   on disk.
+//! * `systemd`: the few things asked of the user manager.
 //! * `ledger`: what was read, so a later edit can require "read and unchanged".
 //! * `limits`: every cap, as a named policy value.
 //!
@@ -23,10 +28,17 @@
 // Wired into the native tools by the next slice; until then only tests call in.
 #![allow(dead_code)]
 
+mod contain;
+mod adapter;
+mod reservation;
+mod state_io;
 pub mod edit;
 pub mod error;
 pub mod git;
 pub mod glob;
+pub mod job_output;
+pub mod job_store;
+pub mod jobs;
 pub mod ledger;
 pub mod lifecycle;
 pub mod limits;
@@ -38,6 +50,7 @@ mod scan;
 pub mod search;
 pub mod secure_open;
 pub mod secure_write;
+pub mod systemd;
 mod walk;
 pub mod write;
 
@@ -48,6 +61,10 @@ mod test_support;
 mod edit_tests;
 #[cfg(test)]
 mod git_tests;
+#[cfg(test)]
+mod jobs_tests;
+#[cfg(test)]
+mod repair_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
@@ -84,7 +101,15 @@ pub use resolve::{Access, Area, Kind, Resolved, resolve};
 #[allow(unused_imports)]
 pub use search::{SearchLine, SearchMode, SearchRequest, SearchResult, search};
 #[allow(unused_imports)]
-pub use run::{Exit, RunRequest, RunResult, run, run_with};
+pub use contain::Cancel;
+#[allow(unused_imports)]
+pub use job_output::{JobOutput, job_output, render_jobs};
+#[allow(unused_imports)]
+pub use job_store::{JobRecord, JobState};
+#[allow(unused_imports)]
+pub use jobs::{JobEntry, JobRequest, JobStatus, JobStore, job_kill, job_list, job_start, job_status};
+#[allow(unused_imports)]
+pub use run::{Contained, Containment, Exit, RunOptions, RunRequest, RunResult, run, run_with};
 #[allow(unused_imports)]
 pub use walk::Stop;
 #[allow(unused_imports)]

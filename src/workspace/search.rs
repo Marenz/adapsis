@@ -88,6 +88,8 @@ impl SearchLine {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
+    /// Files whose scan reached the byte ceiling before observing EOF.
+    pub scan_capped_files: u64,
     pub mode: SearchMode,
     pub lines: Vec<SearchLine>,
     /// Matches (content) or files (files, count) in `lines`.
@@ -118,6 +120,7 @@ pub fn search(workspace: &Workspace, request: &SearchRequest) -> Result<SearchRe
         output_bytes: 0,
         budget: Budget::new(),
         result: SearchResult {
+            scan_capped_files: 0,
             mode: request.mode,
             lines: Vec::new(),
             shown: 0,
@@ -226,7 +229,9 @@ impl Engine<'_> {
             return;
         }
         self.result.files_searched += 1;
-        let scanner = LineScanner::new(Cursor::new(head).chain(file));
+        let bounded = super::scan::Ceiling::new(Cursor::new(head).chain(file), super::limits::SEARCH_SCAN_MAX_BYTES);
+        let hit = bounded.hit.clone();
+        let scanner = LineScanner::new(bounded);
         let outcome = match self.result.mode {
             SearchMode::Content => self.content(scanner, display),
             SearchMode::Files | SearchMode::Count => self.tally(scanner, display),
@@ -234,6 +239,7 @@ impl Engine<'_> {
         if outcome.is_err() {
             self.result.unreadable += 1;
         }
+        if hit.load(std::sync::atomic::Ordering::Relaxed) { self.result.scan_capped_files += 1; }
     }
 
     /// Normalize a scanned line for matching: note an over-long line, drop
@@ -354,6 +360,9 @@ impl SearchResult {
     pub fn render(&self) -> String {
         let mut out: Vec<String> = self.lines.iter().map(SearchLine::render).collect();
         let unit = if self.mode == SearchMode::Content { "matches" } else { "files" };
+        if self.scan_capped_files > 0 {
+            out.push(format!("[partial search: {} file(s) reached the {} byte scan ceiling; later content was not searched]", self.scan_capped_files, super::limits::SEARCH_SCAN_MAX_BYTES));
+        }
         if self.shown == 0 && self.omitted == 0 {
             out.push(format!("no {unit} found ({} text files searched)", self.files_searched));
         }

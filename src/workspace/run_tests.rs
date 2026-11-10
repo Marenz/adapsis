@@ -8,7 +8,9 @@ use super::limits::{
     RUN_COMMAND_MAX_BYTES, RUN_ENV_MAX_VARS, RUN_OUTPUT_DEFAULT_BYTES, RUN_OUTPUT_MAX_BYTES, RUN_OUTPUT_MIN_BYTES, RUN_TIMEOUT_DEFAULT,
     RUN_TIMEOUT_MAX, RUN_TIMEOUT_MIN,
 };
-use super::run::{Exit, LaunchContext, RunRequest, RunResult, bash_argv, environment, run_with};
+use super::contain::Cancel;
+use super::run::{Contained, Containment, Exit, LaunchContext, Launcher, RunOptions, RunRequest, RunResult, bash_argv, environment, run_with};
+use super::systemd;
 use super::test_support::{Fixture, symlink, write};
 
 fn request(command: &str) -> RunRequest {
@@ -16,13 +18,35 @@ fn request(command: &str) -> RunRequest {
 }
 
 /// Run with an explicit policy, so the tests do not depend on the
-/// developer's `ADAPSIS_SHELL_POLICY`.
+/// developer's `ADAPSIS_SHELL_POLICY`. Containment is automatic: a scope
+/// where this machine has a user manager, the process group elsewhere.
 fn run(fixture: &Fixture, request: &RunRequest) -> RunResult {
-    run_with(&fixture.workspace, request, &ShellPolicy::Unrestricted, &bash_argv).unwrap()
+    run_with(&fixture.workspace, request, &RunOptions::new(&ShellPolicy::Unrestricted)).unwrap()
 }
 
 fn fails(fixture: &Fixture, request: &RunRequest) -> Error {
-    run_with(&fixture.workspace, request, &ShellPolicy::Unrestricted, &bash_argv).unwrap_err()
+    run_with(&fixture.workspace, request, &RunOptions::new(&ShellPolicy::Unrestricted)).unwrap_err()
+}
+
+fn run_contained(fixture: &Fixture, request: &RunRequest, containment: Containment) -> RunResult {
+    let options = RunOptions { containment, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+    run_with(&fixture.workspace, request, &options).unwrap()
+}
+
+fn run_launched(fixture: &Fixture, request: &RunRequest, launcher: Launcher<'_>) -> Result<RunResult, Error> {
+    let options = RunOptions { launcher, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+    run_with(&fixture.workspace, request, &options)
+}
+
+/// Both containments where both exist; the tests that are about stopping
+/// things run once for each.
+fn containments() -> Vec<Containment> {
+    if systemd::available() {
+        vec![Containment::Scope, Containment::ProcessGroup]
+    } else {
+        eprintln!("note: no systemd user manager here; scope containment is not tested");
+        vec![Containment::ProcessGroup]
+    }
 }
 
 fn sh(fixture: &Fixture, command: &str) -> RunResult {
@@ -141,7 +165,7 @@ fn run_environment_is_fixed_plus_explicit_additions() {
 #[test]
 fn run_environment_builder_validates_and_overrides() {
     let home = Some(OsString::from("/home/owner"));
-    let fixed = environment(&request("true"), home.clone()).unwrap();
+    let fixed = environment(&[], &[], home.clone()).unwrap();
     let get = |environment: &[(OsString, OsString)], name: &str| {
         environment.iter().find(|(key, _)| key == name).map(|(_, value)| value.to_string_lossy().into_owned())
     };
@@ -150,51 +174,64 @@ fn run_environment_builder_validates_and_overrides() {
     assert_eq!(fixed.len(), 5);
     // Without a usable HOME the command still gets a sane environment.
     for bad_home in [None, Some(OsString::from("")), Some(OsString::from("relative/home"))] {
-        let fallback = environment(&request("true"), bad_home).unwrap();
+        let fallback = environment(&[], &[], bad_home).unwrap();
         assert_eq!(get(&fallback, "HOME").as_deref(), Some("/"));
         assert!(get(&fallback, "PATH").unwrap().ends_with("/usr/local/bin:/usr/bin:/bin"));
     }
-    let mut replacing = request("true");
-    replacing.env = vec![("PATH".to_string(), "/opt/tool/bin:/usr/bin".to_string()), ("A_1".to_string(), "x=y".to_string())];
-    let replaced = environment(&replacing, home.clone()).unwrap();
+    let replacing = vec![("PATH".to_string(), "/opt/tool/bin:/usr/bin".to_string()), ("A_1".to_string(), "x=y".to_string())];
+    let replaced = environment(&[], &replacing, home.clone()).unwrap();
     assert_eq!(get(&replaced, "PATH").as_deref(), Some("/opt/tool/bin:/usr/bin"), "an explicit addition replaces the fixed value");
     assert_eq!(replaced.iter().filter(|(key, _)| key == "PATH").count(), 1);
     assert_eq!(get(&replaced, "A_1").as_deref(), Some("x=y"));
 
     for bad_name in ["", "1ABC", "A-B", "A B", "A=B", "ÄPFEL", "A\0"] {
-        let mut bad = request("true");
-        bad.env = vec![(bad_name.to_string(), "v".to_string())];
-        let error = environment(&bad, home.clone()).unwrap_err();
+        let bad = vec![(bad_name.to_string(), "v".to_string())];
+        let error = environment(&[], &bad, home.clone()).unwrap_err();
         assert!(error.to_string().contains("is not valid"), "{bad_name:?}: {error}");
     }
-    let mut nul = request("true");
-    nul.env = vec![("OK".to_string(), "a\0b".to_string())];
-    assert!(environment(&nul, home.clone()).unwrap_err().to_string().contains("NUL byte"));
-    let mut many = request("true");
-    many.env = (0..=RUN_ENV_MAX_VARS).map(|index| (format!("V{index}"), String::new())).collect();
-    assert!(environment(&many, home.clone()).unwrap_err().to_string().contains("the limit is 64"));
-    let mut large = request("true");
-    large.env = vec![("BIG".to_string(), "x".repeat(40_000))];
-    assert!(environment(&large, home).unwrap_err().to_string().contains("the limit is 32768"));
+    let nul = vec![("OK".to_string(), "a\0b".to_string())];
+    assert!(environment(&[], &nul, home.clone()).unwrap_err().to_string().contains("NUL byte"));
+    let many: Vec<(String, String)> = (0..=RUN_ENV_MAX_VARS).map(|index| (format!("V{index}"), String::new())).collect();
+    assert!(environment(&[], &many, home.clone()).unwrap_err().to_string().contains("the limit is 64"));
+    let large = vec![("BIG".to_string(), "x".repeat(40_000))];
+    assert!(environment(&[], &large, home.clone()).unwrap_err().to_string().contains("the limit is 32768"));
+    // The repository's table sits between the fixed variables and the request.
+    let repository = vec![("CARGO_TARGET_DIR".to_string(), "/shared/target".to_string()), ("LANG".to_string(), "de_DE.UTF-8".to_string())];
+    let request_env = vec![("CARGO_TARGET_DIR".to_string(), "/mine".to_string())];
+    let layered = environment(&repository, &request_env, home.clone()).unwrap();
+    assert_eq!(get(&layered, "LANG").as_deref(), Some("de_DE.UTF-8"), "the repository replaces a fixed value");
+    assert_eq!(get(&layered, "CARGO_TARGET_DIR").as_deref(), Some("/mine"), "the request replaces the repository's value");
+    assert_eq!(get(&environment(&repository, &[], home).unwrap(), "CARGO_TARGET_DIR").as_deref(), Some("/shared/target"));
 }
 
 #[test]
 fn run_times_out_and_stops_the_whole_group() {
-    let fixture = Fixture::plain();
-    let mut slow = request("echo started; sleep 600 & echo $! > child.pid; echo $$ > shell.pid; wait");
-    slow.timeout = Some(Duration::from_millis(1500));
-    let started = Instant::now();
-    let result = run(&fixture, &slow);
-    assert!(started.elapsed() < Duration::from_secs(120), "took {:?}", started.elapsed());
-    assert_eq!((result.exit, result.output.as_str(), result.timeout), (Exit::TimedOut, "started\n", Duration::from_millis(1500)));
-    assert!(!result.success());
-    assert_eq!(
-        result.render(),
-        "started\n[timed out after 1.5 s; the command and everything it started were stopped. Set a longer timeout (up to 3600 s) if it needs one]"
-    );
-    for file in ["child.pid", "shell.pid"] {
-        let pid = std::fs::read_to_string(fixture.root.join(file)).unwrap();
-        assert!(gone(&pid), "{file} {pid} survived the timeout");
+    for containment in containments() {
+        let fixture = Fixture::plain();
+        let mut slow = request("echo started; sleep 600 & echo $! > child.pid; echo $$ > shell.pid; wait");
+        slow.timeout = Some(Duration::from_millis(1500));
+        let started = Instant::now();
+        let result = run_contained(&fixture, &slow, containment);
+        assert!(started.elapsed() < Duration::from_secs(120), "took {:?}", started.elapsed());
+        assert_eq!((result.exit, result.output.as_str(), result.timeout), (Exit::TimedOut, "started\n", Duration::from_millis(1500)));
+        assert!(!result.success());
+        let rendered = result.render();
+        let timed_out = "started\n[timed out after 1.5 s; the command and everything it started were stopped. Set a longer timeout (up to 3600 s) if it needs one]";
+        // The gap of the fallback is named exactly where it matters.
+        match containment {
+            Containment::ProcessGroup => {
+                assert_eq!(result.containment, Contained::ProcessGroup);
+                assert_eq!(rendered, format!("{timed_out}\n[note: no systemd user manager was reachable, so only the command's process group was stopped; a process that detached itself (setsid) may still be running]"));
+            }
+            _ => {
+                assert_eq!(result.containment, Contained::Scope);
+                assert_eq!(rendered, timed_out);
+            }
+        }
+        for file in ["child.pid", "shell.pid"] {
+            let pid = std::fs::read_to_string(fixture.root.join(file)).unwrap();
+            assert!(gone(&pid), "{containment:?}: {file} {pid} survived the timeout");
+        }
     }
 }
 
@@ -293,7 +330,7 @@ fn run_stops_background_processes_and_says_so() {
     assert!(result.leftover_killed >= 2, "{}", result.leftover_killed);
     assert!(
         result.render().contains(&format!(
-            "[note: {} process(es) the command left running in the background were stopped when it returned; a command cannot leave a server running yet]",
+            "[note: {} process(es) the command left running in the background were stopped when it returned; start a background job for a command that has to keep running]",
             result.leftover_killed
         )),
         "{}",
@@ -312,7 +349,7 @@ fn run_stops_background_processes_and_says_so() {
 #[test]
 fn run_applies_the_shell_policy_before_starting_anything() {
     let fixture = Fixture::plain();
-    let run_under = |policy: &ShellPolicy, command: &str| run_with(&fixture.workspace, &request(command), policy, &bash_argv);
+    let run_under = |policy: &ShellPolicy, command: &str| run_with(&fixture.workspace, &request(command), &RunOptions::new(policy));
     // The destructive-command guard holds under every policy.
     for policy in [ShellPolicy::Unrestricted, ShellPolicy::Allowlist(vec!["touch".to_string(), "rm".to_string()])] {
         for command in ["touch ran; rm -rf /", "touch ran; dd if=/dev/zero of=/dev/sda", "touch ran; :(){ :|:& };:"] {
@@ -361,7 +398,7 @@ fn run_launcher_is_a_seam() {
     };
     let mut in_sub = request("echo \"$WRAPPED $SEEN_CWD $(pwd)\"");
     in_sub.cwd = "sub".to_string();
-    let result = run_with(&fixture.workspace, &in_sub, &ShellPolicy::Unrestricted, &wrapped).unwrap();
+    let result = run_launched(&fixture, &in_sub, &wrapped).unwrap();
     let sub = fixture.root.join("sub");
     assert_eq!(result.output, format!("yes {} {}\n", sub.display(), sub.display()));
     // The default launcher is bash from an absolute path with the command as one argument.
@@ -373,12 +410,19 @@ fn run_launcher_is_a_seam() {
     // A launcher must name its program absolutely (a bare name would be a PATH lookup and a fork).
     for bad in [vec![], vec![OsString::from("bash"), OsString::from("-c"), OsString::from("true")]] {
         let launcher = move |_: &LaunchContext<'_>| bad.clone();
-        let error = run_with(&fixture.workspace, &request("true"), &ShellPolicy::Unrestricted, &launcher).unwrap_err();
+        let error = run_launched(&fixture, &request("true"), &launcher).unwrap_err();
         assert!(error.to_string().contains("absolute program path"), "{error}");
     }
     let absent = |_: &LaunchContext<'_>| vec![OsString::from("/nonexistent/program")];
-    let error = run_with(&fixture.workspace, &request("true"), &ShellPolicy::Unrestricted, &absent).unwrap_err();
+    // Without a scope the missing program is our own start failure; inside a
+    // scope it is the scope's shell that cannot execute it.
+    let options = RunOptions { launcher: &absent, containment: Containment::ProcessGroup, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+    let error = run_with(&fixture.workspace, &request("true"), &options).unwrap_err();
     assert_eq!(error.to_string(), "cannot start `/nonexistent/program`: entity not found");
+    if systemd::available() {
+        let in_scope = run_launched(&fixture, &request("true"), &absent).unwrap();
+        assert!(matches!(in_scope.exit, Exit::Code(125 | 126 | 127)), "{:?}: {}", in_scope.exit, in_scope.output);
+    }
 }
 
 #[test]
@@ -391,4 +435,183 @@ fn run_many_short_commands_leave_nothing_behind() {
     }
     // 40 commands must not cost 40 grace periods.
     assert!(started.elapsed() < Duration::from_secs(60), "took {:?}", started.elapsed());
+}
+
+// --- containment, cancel, the repository environment --------------------------
+
+fn kill_pid(pid: &str) {
+    if let Ok(pid) = pid.trim().parse::<i32>() {
+        // SAFETY: kill(2) touches no memory; the pid is a process this test started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+fn no_units_left(pattern: &str) -> bool {
+    (0..200).any(|_| {
+        let listed = systemd::systemctl(&["list-units", "--all", "--no-legend", pattern], "list").map(|output| output.stdout_text()).unwrap_or_default();
+        if !listed.trim().is_empty() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        listed.trim().is_empty()
+    })
+}
+
+#[test]
+fn run_scope_contains_processes_that_leave_the_process_group() {
+    if !systemd::available() {
+        eprintln!("skipped: no systemd user manager");
+        return;
+    }
+    let fixture = Fixture::plain();
+    let prefix = format!("{}-contain-test", super::run::default_unit_prefix());
+    let run_scoped = |request: &RunRequest| {
+        let options = RunOptions { containment: Containment::Scope, unit_prefix: &prefix, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+        run_with(&fixture.workspace, request, &options).unwrap()
+    };
+    // Timeout: a detached child is stopped with the rest.
+    let mut detached = request("setsid sleep 600 & echo $! > detached.pid; echo started; sleep 600");
+    detached.timeout = Some(Duration::from_millis(1200));
+    let result = run_scoped(&detached);
+    assert_eq!((result.exit, result.output.as_str(), result.containment), (Exit::TimedOut, "started\n", Contained::Scope));
+    assert!(gone(&std::fs::read_to_string(fixture.root.join("detached.pid")).unwrap()), "setsid escaped the scope");
+    // Normal return: a detached leftover is found, stopped and counted.
+    let result = run_scoped(&request("setsid sleep 600 > /dev/null 2>&1 & echo $! > leftover.pid; echo done"));
+    assert_eq!((result.exit, result.output.as_str(), result.leftover_killed), (Exit::Code(0), "done\n", 1));
+    assert!(gone(&std::fs::read_to_string(fixture.root.join("leftover.pid")).unwrap()));
+    assert!(!result.render().contains("no systemd user manager"), "{}", result.render());
+    // Auto means a scope here.
+    assert_eq!(run(&fixture, &request("true")).containment, Contained::Scope);
+    // Scopes are collected: no unit of this test process stays behind, failed or not.
+    let pattern = format!("{prefix}-run-*");
+    assert!(no_units_left(&pattern), "units left behind: {pattern}");
+}
+
+#[test]
+fn run_process_group_fallback_has_the_stated_gap() {
+    let fixture = Fixture::plain();
+    let mut detached = request("setsid sleep 600 & echo $! > detached.pid; echo started; sleep 600");
+    detached.timeout = Some(Duration::from_millis(800));
+    let result = run_contained(&fixture, &detached, Containment::ProcessGroup);
+    assert_eq!((result.exit, result.containment), (Exit::TimedOut, Contained::ProcessGroup));
+    assert!(result.render().contains("a process that detached itself (setsid) may still be running"), "{}", result.render());
+    // That note is true: this is exactly the process that got away.
+    let pid = std::fs::read_to_string(fixture.root.join("detached.pid")).unwrap();
+    assert!(alive(&pid), "the gap this fallback documents was not there");
+    kill_pid(&pid);
+    assert!(gone(&pid));
+    // A command that needed no stopping gets no such note.
+    let quiet = run_contained(&fixture, &request("echo fine"), Containment::ProcessGroup);
+    assert_eq!(quiet.containment, Contained::ProcessGroup);
+    assert!(!quiet.render().contains("note"), "{}", quiet.render());
+}
+
+#[test]
+fn run_falls_back_when_the_scope_cannot_be_created_and_runs_the_command_once() {
+    let fixture = Fixture::plain();
+    // A unit name longer than systemd allows stands in for "systemd-run failed".
+    let too_long = "x".repeat(300);
+    let options = RunOptions { unit_prefix: &too_long, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+    let result = run_with(&fixture.workspace, &request("echo ran >> count.txt; echo hello"), &options).unwrap();
+    assert_eq!((result.exit, result.output.as_str(), result.containment), (Exit::Code(0), "hello\n", Contained::ProcessGroup));
+    assert_eq!(std::fs::read_to_string(fixture.root.join("count.txt")).unwrap(), "ran\n", "the command ran exactly once");
+    if systemd::available() {
+        // Asked for a scope explicitly, the same failure is an error and nothing runs.
+        let strict = RunOptions { containment: Containment::Scope, ..options };
+        let error = run_with(&fixture.workspace, &request("echo ran >> count.txt"), &strict).unwrap_err();
+        assert!(matches!(error, Error::Systemd { .. }) && error.to_string().contains("the command was not run"), "{error}");
+        assert_eq!(std::fs::read_to_string(fixture.root.join("count.txt")).unwrap(), "ran\n");
+        // A prefix systemd would rewrite is refused before anything starts.
+        let rewritten = RunOptions { unit_prefix: "not a/valid unit", ..RunOptions::new(&ShellPolicy::Unrestricted) };
+        let error = run_with(&fixture.workspace, &request("true"), &rewritten).unwrap_err();
+        assert!(error.to_string().contains("unit prefix"), "{error}");
+    }
+}
+
+#[test]
+fn run_passes_the_command_text_through_unchanged() {
+    // systemd expands `$VAR` and `%` specifiers in some command lines; none of that may reach a command.
+    for containment in containments() {
+        let fixture = Fixture::plain();
+        let mut literal = request("X=inner; echo \"$$ ${X} $X %h %% $0 ${UNSET:-default}\" '$HOME ${HOME} %n'");
+        literal.env = vec![("UNRELATED".to_string(), "$PATH %u".to_string())];
+        let result = run_contained(&fixture, &literal, containment);
+        let line = result.output.trim_end();
+        let pid = line.split(' ').next().unwrap();
+        assert!(pid.parse::<u32>().is_ok(), "{containment:?}: `$$` did not reach bash: {line}");
+        assert_eq!(&line[pid.len()..], " inner inner %h %% /bin/bash default $HOME ${HOME} %n", "{containment:?}");
+        let value = run_contained(&fixture, &RunRequest { command: "printf '%s' \"$UNRELATED\"".to_string(), ..literal.clone() }, containment);
+        assert_eq!(value.output, "$PATH %u", "{containment:?}: an environment value was expanded");
+    }
+}
+
+#[test]
+fn run_environment_is_exact_in_every_containment() {
+    for containment in containments() {
+        let fixture = Fixture::plain();
+        let names = |output: &str| -> Vec<String> { output.lines().filter_map(|line| line.split('=').next()).map(str::to_string).collect() };
+        let plain = run_contained(&fixture, &request("env"), containment);
+        let mut seen = names(&plain.output);
+        seen.sort();
+        seen.retain(|name| !["PWD", "SHLVL", "OLDPWD", "_"].contains(&name.as_str()));
+        assert_eq!(seen, vec!["GIT_TERMINAL_PROMPT", "HOME", "LANG", "PATH", "TERM"], "{containment:?}: {}", plain.output);
+        // A variable the scope machinery itself uses can still be requested.
+        let mut asked = request("echo \"$XDG_RUNTIME_DIR|$INVOCATION_ID\"");
+        asked.env = vec![("XDG_RUNTIME_DIR".to_string(), "/custom/runtime".to_string())];
+        assert_eq!(run_contained(&fixture, &asked, containment).output, "/custom/runtime|\n", "{containment:?}");
+    }
+}
+
+#[test]
+fn run_applies_the_repository_environment() {
+    let mut fixture = Fixture::plain();
+    fixture.workspace.env = vec![("CARGO_TARGET_DIR".to_string(), "/shared/target".to_string()), ("FROM_REGISTRY".to_string(), "yes".to_string())];
+    let result = sh(&fixture, "echo \"$CARGO_TARGET_DIR $FROM_REGISTRY\"");
+    assert_eq!(result.output, "/shared/target yes\n");
+    let mut overriding = request("echo \"$CARGO_TARGET_DIR $FROM_REGISTRY\"");
+    overriding.env = vec![("CARGO_TARGET_DIR".to_string(), "/mine".to_string())];
+    assert_eq!(run(&fixture, &overriding).output, "/mine yes\n", "the request wins over the repository");
+    // An invalid entry (a registry loaded by hand) is refused, not passed on.
+    fixture.workspace.env = vec![("BAD NAME".to_string(), "x".to_string())];
+    assert!(fails(&fixture, &request("true")).to_string().contains("is not valid"));
+}
+
+#[test]
+fn run_can_be_cancelled_while_it_runs() {
+    for containment in containments() {
+        let fixture = Fixture::plain();
+        let cancel = Cancel::new();
+        let trigger = {
+            let (cancel, marker) = (cancel.clone(), fixture.root.join("child.pid"));
+            std::thread::spawn(move || {
+                // Cancel once the command is demonstrably running.
+                let give_up = Instant::now() + Duration::from_secs(120);
+                while !marker.exists() && Instant::now() < give_up {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.cancel();
+            })
+        };
+        let options = RunOptions { cancel: Some(&cancel), containment, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+        let started = Instant::now();
+        let result = run_with(&fixture.workspace, &request("echo started; sleep 600 & echo $! > child.pid; wait; echo never"), &options).unwrap();
+        trigger.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(120), "took {:?}", started.elapsed());
+        assert_eq!((result.exit, result.output.as_str()), (Exit::Cancelled, "started\n"), "{containment:?}");
+        assert!(!result.success());
+        assert!(result.render().starts_with("started\n[cancelled after "), "{}", result.render());
+        assert!(result.render().contains("the command and everything it started were stopped"));
+        assert!(gone(&std::fs::read_to_string(fixture.root.join("child.pid")).unwrap()), "{containment:?}: a child survived the cancel");
+        assert!(cancel.is_cancelled());
+
+        // A handle that is already cancelled starts nothing at all.
+        let options = RunOptions { cancel: Some(&cancel), containment, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+        let result = run_with(&fixture.workspace, &request("touch started-anyway"), &options).unwrap();
+        assert_eq!((result.exit, result.total_bytes), (Exit::Cancelled, 0));
+        assert!(!fixture.root.join("started-anyway").exists());
+        // A fresh handle that is never used changes nothing.
+        let unused = Cancel::new();
+        let options = RunOptions { cancel: Some(&unused), containment, ..RunOptions::new(&ShellPolicy::Unrestricted) };
+        assert_eq!(run_with(&fixture.workspace, &request("echo ok"), &options).unwrap().exit, Exit::Code(0));
+    }
 }

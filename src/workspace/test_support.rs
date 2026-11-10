@@ -49,6 +49,7 @@ impl Fixture {
             worktree_parent: top.join("worktrees"),
             base: "main".to_string(),
             read_roots: vec![extra.clone()],
+            env: Default::default(),
         };
         let workspace = Workspace::at(&repository, "fixture", &root, "main").expect("workspace");
         Self { temp, top, root, outside, extra, workspace }
@@ -114,6 +115,7 @@ impl RepoFixture {
             worktree_parent: top.join("worktrees"),
             base: "main".to_string(),
             read_roots: Vec::new(),
+            env: Default::default(),
         };
         Self { temp, top, repository }
     }

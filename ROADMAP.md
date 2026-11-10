@@ -1,5 +1,136 @@
 # AdapsisOS Roadmap
 
+## Workspace tools #129 — S3 recovery (2026-11-10)
+
+- **Current: final independent review ACCEPT.** Reviewer
+  `ses_e3e9595a2ffeksds1nSOBYRxZ2` closed original B1–B5/F1–F3 and accepted
+  the final memfd-lifetime delta; manager verified the three tested source
+  hashes below. Final full release gate: **2456 passed / 1 known strict
+  Python-parity failure / 6 ignored**, integration **5/5/4 passed**.
+  S1–S3 are library foundations only: **not wired into native tools and not
+  live-certified/deployed**. Manager owns the reviewed-source/docs commit.
+- Nonblocking followups are tracked in **#139**: account for unreadable job
+  records as potentially running, a global state-tree budget beyond the
+  per-directory cap, and the conservative prospective edit-cap edge. These
+  were not silently folded into the final lifetime correction.
+
+### Historical S3 review checkpoints — superseded, not current commit status
+
+The frozen/uncommitted labels and base hashes below describe those earlier
+checkpoints only; the current review outcome is ACCEPT above. They do not
+claim that a later manager integration remains uncommitted.
+
+- **Final minimal memfd-lifetime delta (frozen):** the delta review closed
+  B1–B5/F1–F3 but found an ABA race when cancel/deadline returned from handoff
+  waiting before the adapter opened its source. `drop(environment)` now occurs
+  only after supervision stops/reaps the adapter. Successful handoff may close
+  the adapter's own reader earlier, but the parent conservatively retains its
+  descriptor until reap; cancel/deadline alone never authorize fd reuse.
+- Two deterministic options-scoped inert-adapter/stop-barrier regressions cover
+  cancellation and deadline: pause before source open, attempt fd reuse with 64
+  other-request sentinel memfds, verify original inode remains pinned and only
+  original env is consumed, one invocation/no replay, then ordinary env control.
+  Both tests fail when the old early drop is restored and pass with the fix.
+  Production change is only the ownership/drop order; adapter override is
+  `cfg(test)` and scoped to the run options, with no process-global mutation.
+- Final affected release gates: run tests **23/23**, repair tests **6/6**.
+  Exactly one final full suite: **2456 passed / 1 known strict Python-parity
+  failure / 6 ignored**, integration **5/5/4 passed**, unit run 40.21 s.
+  Logs: `/tmp/opencode/ws-memfd-negative.log`, `ws-memfd-run-focused.log`,
+  `ws-memfd-repair-focused.log`, `ws-memfd-full.log` (same directory).
+  Final `git diff --check` passes and test-unit listing is empty. Cached quota
+  remains **94%**, Sol pin unchanged. No extra full gates or source edits after
+  this checkpoint. Nonblocking unreadable-job concurrency accounting, global
+  state-tree budget and conservative exact edit-cap followups are untouched.
+- Historical pre-integration base HEAD: `c809071df5b7e1dcf139e0209b80ce1a30dadfe1`.
+  Tested minimal-delta source SHA-256:
+  - `run.rs`: `b2fd760806a987f19573e4e0dfc98ed257b30efd868be3db95cb1bba9b1d0524`
+  - `contain.rs`: `16aba0806a7febfe91aadddb6d34ec7ae5d9d015bdefb811e23cc073bc8d15a7`
+  - `repair_tests.rs`: `05a5bd5164c417161caac5314b6bfc7732e6d051f0d1df6347c9bd55e4894800`
+
+- **Independent review repair checkpoint (supersedes the initial S3 freeze
+  below):** the initial candidate was rejected for B1–B5. One bounded repair
+  pass also addresses F1–F3, with no wiring or feature expansion. Frozen for
+  the same reviewer's delta recheck: focused release **183 passed**; one full
+  repair `cargo test --release --no-fail-fast` **2454 passed / 1 known strict
+  Python-parity failure / 6 ignored**, integration **5/5/4 passed**. Logs:
+  `/tmp/opencode/ws-repair-release-focused.log`, `/tmp/opencode/ws-repair-full.log`.
+- B1: static trusted `/usr/bin/python3 -I` adapters structurally separate clean
+  supervisors/clients from payload env dictionaries. Foreground CLOEXEC memfds
+  are explicit handoffs, 0600, bounded to 512 KiB, and closed after adapter read;
+  no env values are in argv. Establishment precedes payload `BASH_ENV`; startup
+  effects/exit cannot trigger Auto replay. Jobs stage private JSON env through
+  nofollow descriptors, then small-process `Popen(env=...)` (not a daemon fork).
+  Python is an explicit dependency; it does not sandbox the owner's command.
+- B2/B3/B4: shared per-workspace reservation serializes start/close/list/prune/
+  forget and status observation. Fallible enumeration propagates directory and
+  per-entry errors; malformed/unreadable/missing-existing-history `last-id`
+  refuses allocation. Private state uses held directory descriptors, nofollow
+  open/mkdir/read/atomic-write/unlink operations and recursive nofollow removal;
+  static links refuse and swapped paths cannot redirect operations outside.
+  Configured-root ancestors and bind mounts remain operator-trusted limitations.
+- B5: unit signal/inspection errors propagate cleanup uncertainty, rather than
+  silently substituting process-group proof. `Exit::CleanupUncertain` and
+  `RunResult.cleanup_errors` forbid a successful/fully-stopped claim or replay.
+  Real scopes still stop detached children; injected post-start kill and
+  show/cgroup failures return truthful uncertainty.
+- F1/F2/F3: edit inputs at most 2 MiB each, checked prospective output at most
+  16 MiB before allocation, at most 10 ambiguity offsets retained; search has a
+  64 MiB per-file byte ceiling even for a growing newline-free stream, with a
+  partial-result note. Semantic v1 job-record invariants are checked before a
+  terminal record is used or pruned. Record fields/version remain v1; malformed
+  type-correct data is refused/preserved. Env staging changed from unpublished
+  shell/NUL handling to private JSON, with no deployed staging migration claim.
+- All eight review IDs have discriminating tests, including a barrier start/
+  close race, outside sentinel link checks and a held-dir swap, endless generated
+  reader, expansion refusal preserving file/ledger, BASH_ENV effects exactly
+  once, and semantic-record preservation. Final test-unit listing is empty and
+  `git diff --check` passes. No repair commits/deployment/stash. Final readable
+  cached OpenAI weekly quota **94%**, pinned Sol unchanged; no further tests
+  after this docs-only recovery update.
+
+- S1/S2 accepted and committed by manager as `cce4cb2` / `c809071`.
+  S3 writer continues in `/home/marenz/Projects/adapsis-ws` on
+  `work/workspace-tools`; manager session `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`.
+- Owner routing/budget decision: Anthropic exhausted; resume approved S3 on
+  OpenAI, no extra agents. Preserve about 70% weekly quota; pause and report
+  at <=75% remaining or an unreadable meter. Cached weekly quota at resumption
+  is 97%. No commits/deployment by this worker.
+- Initial S3 candidate (then uncommitted): systemd scopes for foreground/cancel, services and private
+  versioned disk records for restart-surviving jobs, head/tail output and
+  per-repository environment. Frozen after focused release **173 passed** and
+  one full `cargo test --release --no-fail-fast`: **2444 passed / 1 known
+  strict Python-parity failure / 6 ignored**, plus integration **5/5/4 passed**.
+  Logs: `/tmp/opencode/ws-s3-focused.log`, `/tmp/opencode/ws-s3-full.log`.
+  No additional full gate after these docs-only updates.
+- Job record `version: 1`: private `job.json`, command/cwd/unit identity,
+  start/end timestamps, runtime/output caps, environment names only, state,
+  exit status and end reason. `last-id` prevents retention from reusing ids;
+  unit names encode component lengths and a 128-bit state-root digest to
+  separate hyphenated repo/workspace pairs and isolated stores. A manager
+  that cannot be reached means unverifiable, never proof a job stopped;
+  close refuses those records as well as confirmed running jobs.
+- Regression evidence includes killing a separate starter process, reopening
+  its record and finishing the same surviving job; detached `setsid` children
+  are stopped by scopes/services; manager environment is absent from jobs;
+  both foreground containments and cancellation are covered. Only uniquely
+  prefixed test units were used; final `adapsis-wstest-*` listing is empty.
+  No live service/config changes, commits or pushes by this worker.
+- Session `ses_e3a2152a2fferDqyzS23BuI8K9` pinned to
+  `openai/gpt-6.1-sol` (medium), per owner. Final readable cached weekly quota
+  **97%**; freeze/report completed above the <=75% pause threshold.
+- Owner secret decision (2026-11-10, verbatim): "I think our secrets should
+  generally be in a \"secret store\" and if there are any found through bash
+  then so be it. they should be properly set anyway and of course the bot
+  should actively try to avoid reading any in .env files and such, but it does
+  that anyway nowadays, no?" N5/N6/L2 in DESIGN.md record ordinary
+  owner-authority bash, no mandatory bwrap filesystem secret masking, and
+  required behavioral guidance against deliberate credential discovery/read/
+  dump in bash/read/search. That guidance is for the wiring slice; an actual
+  secret store/provider and migration remain undecided/unimplemented, and
+  active avoidance has not been verified. Named capabilities and existing
+  logging/redaction gates remain required. No secret scans were performed.
+
 ## Current acceptance checkpoint — typed Python execution/replay (#121/#122)
 
 - Uncommitted candidate on manager-integrated baseline `8911fba`: typed operations

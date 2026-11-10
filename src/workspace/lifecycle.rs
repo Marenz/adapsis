@@ -5,6 +5,7 @@
 //! * `find` re-binds to a worktree that `open` created earlier (after a restart).
 //! * `status` reports branch, ahead/behind of the base and uncommitted files.
 //! * `close` removes a clean worktree and keeps the branch, so commits survive.
+//!   It refuses while background jobs of the workspace are running.
 //!
 //! The base a workspace was opened from is the one fact that has to outlive
 //! the process. It is kept in the checkout's git configuration as
@@ -22,6 +23,7 @@ use std::time::Duration;
 
 use super::error::{Error, Result, shown};
 use super::git;
+use super::jobs::JobStore;
 use super::limits::{
     BASE_REF_MAX_LEN, DIRTY_LIST_MAX, GIT_TIMEOUT, GIT_WORKTREE_TIMEOUT, MAX_WORKTREES_PER_REPO, NAME_MAX_LEN,
 };
@@ -49,6 +51,8 @@ pub struct Workspace {
     /// The registered checkout the worktree belongs to.
     pub checkout: PathBuf,
     pub read_roots: Vec<PathBuf>,
+    /// The repository's `env` table: added to every command's environment.
+    pub env: Vec<(String, String)>,
 }
 
 impl Workspace {
@@ -74,6 +78,7 @@ impl Workspace {
             base: base.to_string(),
             checkout: repo.checkout.clone(),
             read_roots,
+            env: repo.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect(),
         })
     }
 }
@@ -336,6 +341,10 @@ pub fn close_with(workspace: &Workspace, options: GitOptions) -> Result<()> {
     if std::fs::canonicalize(&workspace.checkout).is_ok_and(|checkout| checkout == workspace.path) {
         return Err(Error::Lifecycle(format!("workspace `{}` is the registered checkout itself and is never removed", workspace.name)));
     }
+    let jobs = JobStore::standard();
+    let reservation = super::reservation::for_workspace(workspace);
+    let _workspace_guard = reservation.lock().unwrap_or_else(|p| p.into_inner());
+    jobs.close_guard_locked(workspace)?;
     let current = status_with(workspace, options)?;
     if current.dirty_count > 0 {
         return Err(Error::Dirty {
@@ -346,6 +355,7 @@ pub fn close_with(workspace: &Workspace, options: GitOptions) -> Result<()> {
     }
     let args: [&OsStr; 3] = [OsStr::new("worktree"), OsStr::new("remove"), workspace.path.as_os_str()];
     git::run_ok(&workspace.checkout, &args, "worktree remove", options.worktree)?;
+    jobs.forget_locked(workspace)?;
     if let Ok(branches) = adapsis_branches(&workspace.checkout, options) {
         prune_keys_in(&workspace.checkout, &branches, options);
     }

@@ -117,6 +117,43 @@ pub const RUN_COMMAND_MAX_BYTES: usize = 32 * 1024;
 /// Most environment additions of one request, and their total size.
 pub const RUN_ENV_MAX_VARS: usize = 64;
 pub const RUN_ENV_MAX_BYTES: usize = 32 * 1024;
+/// Encoded env handoff cap, also fixed in the static Python adapter (512 KiB).
+pub const RUN_ENV_ENCODED_MAX_BYTES: usize = 512 * 1024;
+/// Bound private-record decoding and recursive private-state inspection.
+pub const JOB_RECORD_MAX_BYTES: u64 = 1024 * 1024;
+pub const JOB_STATE_MAX_DEPTH: usize = 64;
+pub const JOB_STATE_MAX_ENTRIES: usize = 4096;
+
+// --- containment and background jobs ---------------------------------------
+
+/// Timeout of one `systemctl` / `systemd-run` client call.
+pub const SYSTEMD_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the answer to "is a systemd user manager reachable" is reused.
+pub const SYSTEMD_PROBE_TTL: Duration = Duration::from_secs(60);
+/// A foreground command's scope gets `RuntimeMaxSec` this far above our own
+/// timeout: the backstop for a command orphaned by a restart of this process.
+pub const RUN_BACKSTOP_MARGIN: Duration = Duration::from_secs(30);
+/// Bytes kept from the start of a job's output. A build or test log fits
+/// many times; a runaway cannot fill the disk.
+pub const JOB_OUTPUT_HEAD_BYTES: u64 = 16 * 1024 * 1024;
+/// Bytes kept from the end of a job's output once the head is full (best
+/// effort: written when the stream ends, lost if the job is killed hard).
+pub const JOB_OUTPUT_TAIL_BYTES: u64 = 256 * 1024;
+/// Jobs running at once in one workspace.
+pub const JOBS_RUNNING_MAX: usize = 2;
+/// Job records kept per workspace; the oldest finished one makes room.
+pub const JOBS_KEPT_MAX: usize = 8;
+/// Finished jobs older than this are removed.
+pub const JOB_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
+/// Runtime limit of a job that gives none, and the longest a caller may ask.
+pub const JOB_RUNTIME_DEFAULT: Duration = Duration::from_secs(3600);
+pub const JOB_RUNTIME_MAX: Duration = Duration::from_secs(6 * 3600);
+/// Shortest runtime limit; a smaller request is raised to it.
+pub const JOB_RUNTIME_MIN: Duration = Duration::from_secs(1);
+/// Time systemd gives a stopping job between SIGTERM and SIGKILL.
+pub const JOB_STOP_GRACE: Duration = Duration::from_secs(5);
+/// Most environment variables a repository may define in the registry.
+pub const REGISTRY_ENV_MAX_VARS: usize = 32;
 
 // --- search ---------------------------------------------------------------
 
@@ -132,6 +169,9 @@ pub const PATTERN_MAX_BYTES: usize = 1000;
 pub const REGEX_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 /// Bytes of one line that are searched; the rest of a longer line is skipped.
 pub const SEARCH_LINE_MAX_BYTES: usize = 64 * 1024;
+/// Hard per-file scan ceiling, including a growing file with no newline.
+/// The result explicitly reports partial scanning when the ceiling is reached.
+pub const SEARCH_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Characters of one matching or context line that are shown.
 pub const SEARCH_LINE_SHOWN_CHARS: usize = 500;
 /// Most context lines on each side of a match.

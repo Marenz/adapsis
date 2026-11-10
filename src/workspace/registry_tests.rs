@@ -146,3 +146,21 @@ fn registry_load_in_tests_reads_no_real_file() {
         assert!(Registry::load().unwrap().is_empty());
     }
 }
+
+#[test]
+fn registry_environment_is_a_validated_string_table() {
+    let configured = format!("{VALID}\n[repo.gateway.env]\nCARGO_TARGET_DIR = '/shared/target'\nLANG = 'de_DE.UTF-8'\n");
+    let registry = Registry::from_toml(&configured).unwrap();
+    assert!(registry.get("adapsis").unwrap().env.is_empty());
+    assert_eq!(registry.get("gateway").unwrap().env["CARGO_TARGET_DIR"], "/shared/target");
+    for (suffix, expected) in [
+        ("[repo.gateway.env]\n'BAD NAME' = 'x'", "is not valid"),
+        ("[repo.gateway.env]\nX = 17", "string"),
+        ("[repo.gateway.env]\nX = \"a\\u0000b\"", "NUL byte"),
+        ("[repo.gateway]\nunknown = true", "duplicate"),
+    ] {
+        assert!(problems(&format!("{VALID}\n{suffix}")).contains(expected), "{suffix}");
+    }
+    let many = (0..33).map(|i| format!("V{i} = 'x'\n")).collect::<String>();
+    assert!(problems(&format!("{VALID}\n[repo.gateway.env]\n{many}")).contains("the limit is 32"));
+}

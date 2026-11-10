@@ -183,6 +183,37 @@ response has no Content-Disposition header.
 
 ## Architecture
 
+### Workspace foundation (#129, S1–S3 library only)
+
+`src/workspace/` owns repository/worktree lifecycle, bounded read/search/glob,
+read-ledger-checked atomic edit/write, foreground commands/cancel and durable
+background jobs. This is reviewed library code, **not native-tool wiring or live
+deployment certification**. Focused gate: `cargo test --release workspace::`.
+
+- Registry: `~/.config/adapsis/workspaces.toml`, override
+  `ADAPSIS_WORKSPACES_FILE`; optional per-repository `env` is applied before
+  request overrides. Private job state: `~/.local/share/adapsis/workspaces`,
+  override `ADAPSIS_WORKSPACE_STATE_DIR`. Test defaults never use live paths.
+- Dependencies: Linux `/proc`/cgroup v2, `/usr/bin/python3 -I` static trusted
+  adapters, `systemd-run`/`systemctl` user manager, `env`, and bash. Jobs require
+  the user manager; foreground commands can explicitly report process-group
+  fallback. Cgroup lifetime containment is not filesystem isolation (DESIGN N5).
+- Keep clean supervisor/client environments structurally separate from payload
+  environment dictionaries. Never export payload variables into a supervisor
+  shell or interpolate them into adapter source/argv. Foreground environment
+  memfds stay owned **through adapter stop/reap**; cancel/deadline is not proof
+  of handoff. Releasing early creates a cross-request fd-reuse/ABA race.
+- Private state operations use held directory descriptors and nofollow
+  open/mkdir/read/atomic-write/unlink operations, including recursive deletion.
+  Errors and unverifiable records fail closed. Root ancestors/bind mounts remain
+  operator-trusted; maintain one active daemon per state root.
+- Reservation order: lifecycle-global (where used) → per-workspace reservation
+  → descriptor operations. Start/close/list/prune/forget/status share it; internal
+  locked helpers must not reacquire it. Invoke these blocking APIs through
+  `spawn_blocking`, without Program/runtime/session state locks held.
+- Preserve `Exit::CleanupUncertain` / cleanup errors as failure: never turn them
+  into success, a fully-stopped claim, or permission to replay a command.
+
 - Issue #121 opt-in source library: `library-sources.json` explicitly maps module
   names to `python`/transitional `legacy_ax` plus a closed acyclic dependency set.
   Active manifests whitelist source files: unlisted files are diagnosed without

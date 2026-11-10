@@ -294,3 +294,12 @@ fn lifecycle_git_timeout_is_an_error_not_a_hang() {
     assert!(started.elapsed() < Duration::from_secs(240), "took {:?}", started.elapsed());
     assert!(text.contains("did not finish within 1500 ms") && text.contains("may be partly created"), "{text}");
 }
+
+#[test]
+fn lifecycle_bind_carries_repository_environment() {
+    let mut fixture = RepoFixture::new();
+    fixture.repository.env.insert("CARGO_TARGET_DIR".into(), "/shared/target".into());
+    let opened = open(&fixture.repository, "environment", None).unwrap();
+    assert_eq!(opened.env, vec![("CARGO_TARGET_DIR".into(), "/shared/target".into())]);
+    assert_eq!(find(&fixture.repository, "environment").unwrap().env, opened.env);
+}
