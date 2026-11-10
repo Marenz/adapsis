@@ -69,6 +69,55 @@ pub const SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Files remembered by one read ledger; the oldest record is dropped.
 pub const LEDGER_MAX_ENTRIES: usize = 512;
 
+// --- write and edit ------------------------------------------------------
+
+/// Largest content one `write` accepts. The content travels through a model's
+/// output, so anything near this size is a runaway, not a source file.
+pub const WRITE_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// Largest file `edit` loads (it holds the old and the new content in memory).
+pub const EDIT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// Line numbers listed when the text to replace is ambiguous.
+pub const AMBIGUOUS_LINES_SHOWN: usize = 10;
+
+// --- run ------------------------------------------------------------------
+
+/// Timeout of a command that gives none. Long enough for git, a linter or an
+/// incremental `cargo check`; short enough that a command waiting for input
+/// that never comes costs two minutes, not a turn.
+pub const RUN_TIMEOUT_DEFAULT: Duration = Duration::from_secs(120);
+/// Longest timeout a caller may ask for. A cold release build plus the full
+/// test suite of this repository takes about a quarter of an hour; an hour
+/// leaves room for a slower machine and nothing runs unattended for longer.
+pub const RUN_TIMEOUT_MAX: Duration = Duration::from_secs(3600);
+/// Shortest timeout; a smaller request is raised to it.
+pub const RUN_TIMEOUT_MIN: Duration = Duration::from_millis(100);
+/// Captured output when the caller gives no limit: about 8,000 tokens, enough
+/// for a failing test with its backtrace and the summary.
+pub const RUN_OUTPUT_DEFAULT_BYTES: usize = 32 * 1024;
+/// Largest output a caller may ask for (a full test log); beyond it the
+/// command should write to a file and the model should `read` or `search` it.
+pub const RUN_OUTPUT_MAX_BYTES: usize = 256 * 1024;
+/// Smallest output limit; a smaller request is raised to it.
+pub const RUN_OUTPUT_MIN_BYTES: usize = 1024;
+/// Share of the output limit kept from the start; the rest is kept from the
+/// end. The end carries the verdict (test summary, last error), the start the
+/// first error of a build, so the end gets the larger share.
+pub const RUN_OUTPUT_HEAD_PERCENT: usize = 40;
+/// Time between SIGTERM and SIGKILL when a command is stopped.
+pub const RUN_KILL_GRACE: Duration = Duration::from_secs(2);
+/// How long to wait for the output pipe to close after the command exited
+/// (a background child may hold it), before everything left is stopped.
+pub const RUN_PIPE_GRACE: Duration = Duration::from_millis(500);
+/// How long to wait for the reader to drain the pipe once every process of
+/// the group is gone. Reached only if a process left the group (setsid) and
+/// kept the pipe open.
+pub const RUN_DRAIN_GRACE: Duration = Duration::from_secs(5);
+/// Longest command line, in bytes.
+pub const RUN_COMMAND_MAX_BYTES: usize = 32 * 1024;
+/// Most environment additions of one request, and their total size.
+pub const RUN_ENV_MAX_VARS: usize = 64;
+pub const RUN_ENV_MAX_BYTES: usize = 32 * 1024;
+
 // --- search ---------------------------------------------------------------
 
 /// Matches returned when the caller gives no limit.

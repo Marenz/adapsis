@@ -202,20 +202,21 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
 }
 
 fn kill_group(child: &mut Child) {
-    signal_group(child.id());
+    signal_group(child.id(), libc::SIGKILL);
     let _ = child.kill();
     let _ = child.wait();
 }
 
-/// SIGKILL the process group led by `pid` (the child was started with
-/// `process_group(0)`, so its pid is the group id).
-fn signal_group(pid: u32) {
+/// Signal the process group led by `pid` (a child started with
+/// `process_group(0)`, so its pid is the group id). Only safe while that
+/// child has not been reaped: until then its pid cannot be reused.
+pub(super) fn signal_group(pid: u32, signal: libc::c_int) {
     if let Ok(pid) = i32::try_from(pid) {
         if pid > 1 {
             // SAFETY: kill(2) with a negative pid signals a process group and
             // touches no memory. The group id is our own child's pid.
             unsafe {
-                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(-pid, signal);
             }
         }
     }

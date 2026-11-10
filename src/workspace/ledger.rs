@@ -57,8 +57,10 @@ impl Freshness {
             Freshness::Unchanged => None,
             Freshness::Unread => Some("the file has not been read in this conversation; read it first"),
             Freshness::Changed => Some("the file changed since it was read; read it again"),
-            Freshness::Missing => Some("the file no longer exists"),
-            Freshness::Unverifiable => Some("the file is too large or too unstable to be verified as unchanged"),
+            Freshness::Missing => Some("the file was read earlier but no longer exists; read the directory again"),
+            Freshness::Unverifiable => {
+                Some("the file is too large, or changed while it was being read, so it cannot be verified as unchanged; read it again")
+            }
         }
     }
 }
@@ -107,15 +109,23 @@ impl ReadLedger {
         if resolved.kind == Kind::Missing {
             return Ok(Freshness::Missing);
         }
-        let current = match file_facts(&resolved) {
-            Ok(current) => current,
-            Err(super::error::Error::NotFound { .. }) => return Ok(Freshness::Missing),
-            Err(error) => return Err(error),
-        };
-        Ok(match (&recorded.sha256, &current.sha256) {
+        let _ = recorded;
+        match file_facts(&resolved) {
+            Ok(current) => Ok(self.judge(&resolved.display, &current)),
+            Err(super::error::Error::NotFound { .. }) => Ok(Freshness::Missing),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Compare facts the caller just took from a file with its record. An
+    /// edit uses this with the facts of the very bytes it is about to change,
+    /// so "unchanged" is decided on what is edited, not on an earlier look.
+    pub fn judge(&self, path: &str, current: &FileFacts) -> Freshness {
+        let Some(recorded) = self.recorded(path) else { return Freshness::Unread };
+        match (&recorded.sha256, &current.sha256) {
             (Some(before), Some(now)) if before == now && recorded.size == current.size => Freshness::Unchanged,
             (Some(_), Some(_)) => Freshness::Changed,
             _ => Freshness::Unverifiable,
-        })
+        }
     }
 }

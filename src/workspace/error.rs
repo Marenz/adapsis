@@ -7,6 +7,7 @@
 
 use std::fmt;
 
+use super::ledger::Freshness;
 use super::limits::ECHO_MAX_CHARS;
 
 /// The path rule a refused path broke.
@@ -75,6 +76,16 @@ pub enum Error {
     Lifecycle(String),
     /// `close` refused because the worktree has uncommitted changes.
     Dirty { workspace: String, files: Vec<String>, omitted: usize },
+    /// A change to an existing file was refused because the file is not
+    /// provably what the model read.
+    NotFresh { path: String, state: Freshness },
+    /// `edit`: the text to replace does not occur. `hint` says what to check.
+    NoMatch { path: String, hint: &'static str },
+    /// `edit`: the text to replace occurs more than once. `lines` are the
+    /// first line numbers where it starts.
+    Ambiguous { path: String, count: usize, lines: Vec<u64> },
+    /// `run`: the command was refused before anything was started.
+    CommandRefused(String),
 }
 
 impl Error {
@@ -130,6 +141,20 @@ impl fmt::Display for Error {
                 write!(f, "git {action} did not finish within {millis} ms and was stopped")
             }
             Error::Lifecycle(text) => f.write_str(text),
+            Error::NotFresh { path, state } => {
+                write!(f, "`{path}` was not changed: {}", state.refusal().unwrap_or("it could not be verified"))
+            }
+            Error::NoMatch { path, hint } => write!(f, "`{path}` was not changed: the text to replace was not found. {hint}"),
+            Error::Ambiguous { path, count, lines } => {
+                let places: Vec<String> = lines.iter().map(u64::to_string).collect();
+                let more = if *count > lines.len() { ", …" } else { "" };
+                write!(
+                    f,
+                    "`{path}` was not changed: the text to replace occurs {count} times (starting at lines {}{more}). Add surrounding lines to make it unique, or set replace_all",
+                    places.join(", ")
+                )
+            }
+            Error::CommandRefused(reason) => write!(f, "command not run: {reason}"),
             Error::Dirty { workspace, files, omitted } => {
                 write!(f, "workspace `{workspace}` has uncommitted changes and was not closed; commit or discard them first:")?;
                 for file in files {

@@ -66,6 +66,9 @@ pub enum Kind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
+    /// The access the path was resolved for. A write primitive accepts only
+    /// a `Write` resolution, so the write rules cannot be skipped.
+    pub access: Access,
     /// The caller's spelling, made safe to echo in messages.
     pub supplied: String,
     /// The symlink-free absolute location.
@@ -298,6 +301,6 @@ impl Walk<'_> {
             Access::Write => {}
         }
         let display = display_of(workspace, &real);
-        Ok(Resolved { supplied: shown(self.supplied), real, base, relative, area, kind, display })
+        Ok(Resolved { access: self.access, supplied: shown(self.supplied), real, base, relative, area, kind, display })
     }
 }

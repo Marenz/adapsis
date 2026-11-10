@@ -102,7 +102,7 @@ fn open_beneath(base: &Path, relative: &Path, flags: libc::c_int, strategy: Stra
         Strategy::Auto => !OPENAT2_UNAVAILABLE.load(Ordering::Relaxed),
     };
     if try_openat2 {
-        match openat2(&base, relative, flags) {
+        match openat2(&base, relative, flags, 0) {
             Err(error) if strategy == Strategy::Auto && openat2_unusable(&error) => {
                 if error.raw_os_error() == Some(libc::ENOSYS) {
                     OPENAT2_UNAVAILABLE.store(true, Ordering::Relaxed);
@@ -132,16 +132,66 @@ fn normal_components(relative: &Path) -> io::Result<Vec<&OsStr>> {
     if names.is_empty() { Err(io::Error::from(io::ErrorKind::InvalidInput)) } else { Ok(names) }
 }
 
-fn c_string(text: &OsStr) -> io::Result<CString> {
+/// Open one entry `name` of the open directory `directory` without following
+/// a symlink, with the chosen strategy. `name` must be a single plain
+/// component. `mode` is used only together with `O_CREAT`.
+///
+/// This is the step the write side is built from: every directory on the way
+/// to a file is opened like this, relative to the descriptor of its parent.
+pub(super) fn open_entry(
+    directory: &OwnedFd,
+    name: &OsStr,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+    strategy: Strategy,
+) -> io::Result<OwnedFd> {
+    let path = Path::new(name);
+    if normal_components(path)?.len() != 1 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let try_openat2 = match strategy {
+        Strategy::Walk => false,
+        Strategy::Openat2 => true,
+        Strategy::Auto => !OPENAT2_UNAVAILABLE.load(Ordering::Relaxed),
+    };
+    if try_openat2 {
+        match openat2(directory, path, flags, mode) {
+            Err(error) if strategy == Strategy::Auto && openat2_unusable(&error) => {
+                if error.raw_os_error() == Some(libc::ENOSYS) {
+                    OPENAT2_UNAVAILABLE.store(true, Ordering::Relaxed);
+                }
+            }
+            other => return other,
+        }
+    }
+    match open_raw_mode(directory.as_raw_fd(), name, flags | libc::O_NOFOLLOW, mode) {
+        // O_DIRECTORY|O_NOFOLLOW reports a symlink as "not a directory".
+        Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) && is_symlink(directory, name) => {
+            Err(io::Error::from_raw_os_error(libc::ELOOP))
+        }
+        other => other,
+    }
+}
+
+/// Open a directory by path as the base of beneath-operations.
+pub(super) fn open_base(base: &Path) -> io::Result<OwnedFd> {
+    open_raw(libc::AT_FDCWD, base.as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+}
+
+pub(super) fn c_string(text: &OsStr) -> io::Result<CString> {
     CString::new(text.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
 fn open_raw(directory: libc::c_int, name: &OsStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+    open_raw_mode(directory, name, flags, 0)
+}
+
+fn open_raw_mode(directory: libc::c_int, name: &OsStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<OwnedFd> {
     let name = c_string(name)?;
     loop {
         // SAFETY: `name` is a valid NUL-terminated string that outlives the
         // call; `directory` is AT_FDCWD or a descriptor we hold open.
-        let fd = unsafe { libc::openat(directory, name.as_ptr(), flags) };
+        let fd = unsafe { libc::openat(directory, name.as_ptr(), flags, libc::c_uint::from(mode)) };
         if fd >= 0 {
             // SAFETY: the kernel just returned this descriptor to us alone.
             return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
@@ -160,11 +210,11 @@ struct OpenHow {
     resolve: u64,
 }
 
-fn openat2(base: &OwnedFd, relative: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
+fn openat2(base: &OwnedFd, relative: &Path, flags: libc::c_int, mode: libc::mode_t) -> io::Result<OwnedFd> {
     let path = c_string(relative.as_os_str())?;
     let how = OpenHow {
         flags: u64::try_from(flags).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?,
-        mode: 0,
+        mode: u64::from(mode),
         resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
     };
     loop {
