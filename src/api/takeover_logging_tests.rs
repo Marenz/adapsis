@@ -57,13 +57,14 @@ async fn native_compaction_shape_error_is_redacted_in_both_sinks() {
     let path = dir.path().join("activity.log");
     harness.log_file = Some(Arc::new(tokio::sync::Mutex::new(
         tokio::fs::File::create(&path).await.unwrap())));
-    // Cross the real default threshold (358400 chars, >=4 records), without
-    // mutating process env or calling a hand-crafted error directly at a sink.
+    // Cross the real default threshold for an unknown model (192000 serialized
+    // bytes at the default 2.5 bytes/token; one 40000-byte chunk of >=4 records),
+    // without mutating process env or calling a hand-crafted error directly at a sink.
     for index in 0..40 {
         harness.graph.ingest_message(&crate::memory_graph::SourceMessage {
             id: format!("compaction-log-{index}"), platform_message_id: None,
             context_id: context.into(), context_kind: "test".into(), speaker_id: ADMIN.into(),
-            speaker_name: "fixture".into(), role: "user".into(), content: "x".repeat(10_000),
+            speaker_name: "fixture".into(), role: "user".into(), content: "x".repeat(6_000),
             created_at_ms: index + 1,
         }, ADMIN).unwrap();
     }

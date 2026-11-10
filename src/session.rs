@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::ast;
 use crate::parser;
 use crate::validator;
-mod conversation_view;
+pub mod conversation_view;
 mod native_history;
 pub mod replay;
 mod stored_tests;
@@ -832,6 +832,36 @@ pub struct Conversation {
     /// Can only restrict, not expand beyond the active model's permissions.
     #[serde(default)]
     pub permission_model: Option<String>,
+    /// #68 checkpoint: index of the first message visible to the model. Moves
+    /// only at an explicit checkpoint, so the model history is append-only and
+    /// byte-stable between checkpoints. Messages before it remain persisted.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub view_start: usize,
+    /// #68 image anchor: only images at or after this index are sent. Moves
+    /// only when the recent-image budget overflows.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub image_start: usize,
+    /// Last request of this conversation as the provider counted it (serialized
+    /// text bytes, input tokens). The next request's tokens are projected with
+    /// this ratio instead of a fixed chars-per-token guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_calibration: Option<crate::model_limits::TokenCalibration>,
+    /// Real size of the previous turn's runtime tail: the first request's
+    /// serialized text bytes beyond the view. Replaces the fixed tail allowance
+    /// in the next projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_bytes: Option<u64>,
+    /// When this conversation's last answered request was sent (unix ms). The
+    /// pause since then decides a cold start and dates cache evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_request_ms: Option<u64>,
+    /// Accounting state of the turn in progress. Not persisted.
+    #[serde(skip)]
+    pub turn_probe: Option<crate::cache_lifetime::TurnProbe>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Conversation {
@@ -842,8 +872,15 @@ impl Conversation {
             reply_fn: None,
             reply_arg: None,
             permission_model: None,
+            view_start: 0,
+            image_start: 0,
+            token_calibration: None,
+            tail_bytes: None,
+            last_request_ms: None,
+            turn_probe: None,
         }
     }
+
 
     #[cfg(test)]
     pub fn new_temporary() -> Self {
@@ -892,58 +929,47 @@ impl Conversation {
             *existing = message;
         } else {
             self.messages.insert(0, message);
+            // Keep the #68 checkpoint indices pointing at the same messages.
+            for index in [&mut self.view_start, &mut self.image_start] {
+                if *index > 0 {
+                    *index += 1;
+                }
+            }
         }
     }
 
-    /// Convert conversation history to LLM-compatible message format.
+    /// Convert the full conversation history to LLM messages. Test-only: every
+    /// production request uses the checkpointed `model_view` (#68).
+    #[cfg(test)]
     pub fn to_llm_messages(&self) -> Vec<crate::llm::ChatMessage> {
         native_history::complete_groups(&self.messages).into_iter().flatten()
             .map(native_history::to_llm).collect()
     }
 
-    /// Build a bounded model-visible view without deleting persisted history.
-    pub fn to_llm_messages_bounded(
-        &self,
-        max_messages: usize,
-        max_chars: usize,
-        max_message_chars: usize,
-    ) -> Vec<crate::llm::ChatMessage> {
-        conversation_view::build(self, max_messages, max_chars, max_message_chars)
+    /// Checkpointed model view (#68). Never deletes persisted history; may
+    /// advance the persisted checkpoint indices, so it takes `&mut self`.
+    pub fn model_view(&mut self, policy: &conversation_view::ViewPolicy) -> conversation_view::View {
+        conversation_view::build(self, policy)
     }
 
-    /// Trim conversation to at most `max` messages, preserving the system prompt.
-    pub fn trim(&mut self, max: usize) {
-        native_history::trim(self, max);
+    /// Self-heal after a too-large refusal: only the newest turn stays visible.
+    pub fn force_view_checkpoint(&mut self) -> bool {
+        conversation_view::force_checkpoint(self)
     }
-}
-
-fn truncate_middle(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
-        return value.to_string();
-    }
-    if max_chars < 32 {
-        return value.chars().take(max_chars).collect();
-    }
-    const MARKER: &str = "\n[... content omitted ...]\n";
-    let marker_chars = MARKER.chars().count();
-    let kept = max_chars - marker_chars;
-    let head = kept / 2;
-    let tail = kept - head;
-    let prefix: String = value.chars().take(head).collect();
-    let suffix: String = value.chars().skip(count - tail).collect();
-    format!("{prefix}{MARKER}{suffix}")
 }
 
 /// Manages multiple independent conversation contexts.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConversationManager {
     pub contexts: HashMap<String, Conversation>,
+    /// Prompt-cache lifetime evidence per model route (#68 cold start).
+    #[serde(default, skip_serializing_if = "crate::cache_lifetime::RouteLifetimes::is_empty")]
+    pub cache_lifetimes: crate::cache_lifetime::RouteLifetimes,
 }
 
 impl ConversationManager {
     pub fn new() -> Self {
-        Self { contexts: HashMap::new() }
+        Self::default()
     }
 
     /// Get or create a conversation context.
@@ -2615,6 +2641,10 @@ mod tests {
         assert_eq!(conv.messages[2].content, "later event");
     }
 
+    fn policy(trigger: usize, target: usize, overhead: usize, max_message_bytes: usize) -> conversation_view::ViewPolicy {
+        conversation_view::ViewPolicy::tokens_only(trigger, target, overhead, max_message_bytes)
+    }
+
     #[test]
     fn bounded_conversation_view_retains_raw_history() {
         let mut conv = Conversation::new();
@@ -2622,12 +2652,11 @@ mod tests {
         for index in 0..10 {
             conv.push_user(format!("message {index}: {}", "x".repeat(30)));
         }
-
-        let bounded = conv.to_llm_messages_bounded(5, 120, 50);
-
-        assert!(bounded.len() <= 6, "system, omission marker, and recent messages");
+        // 10 messages of ~10 tokens: 100 > trigger 60 -> cut down to <= 30.
+        let view = conv.model_view(&policy(60, 30, 0, 1_000));
+        assert!(view.checkpointed);
         assert_eq!(conv.messages.len(), 11, "building a view must not prune persisted history");
-        let serialized = serde_json::to_string(&bounded).unwrap();
+        let serialized = serde_json::to_string(&view.messages).unwrap();
         assert!(serialized.contains("older message(s) are omitted"));
         assert!(serialized.contains("message 9"));
         assert!(!serialized.contains("message 0"));
@@ -2639,12 +2668,12 @@ mod tests {
         conv.push_system("system");
         conv.push_user(format!("start{}end", "x".repeat(200)));
 
-        let bounded = conv.to_llm_messages_bounded(4, 100, 60);
-        let serialized = serde_json::to_string(&bounded).unwrap();
+        let view = conv.model_view(&policy(10_000, 5_000, 0, 60));
+        let serialized = serde_json::to_string(&view.messages).unwrap();
 
         assert!(serialized.contains("start"));
         assert!(serialized.contains("end"));
-        assert!(serialized.contains("content omitted"));
+        assert!(serialized.contains("characters omitted"));
         assert_eq!(conv.messages[1].content.chars().count(), 208);
     }
 
@@ -2652,14 +2681,35 @@ mod tests {
     fn bounded_conversation_view_keeps_latest_turn_when_system_exceeds_budget() {
         let mut conv = Conversation::new();
         conv.push_system("s".repeat(200));
+        conv.push_user("earlier");
         conv.push_user("latest question");
 
-        let bounded = conv.to_llm_messages_bounded(4, 50, 50);
+        // Overhead alone exceeds both thresholds: only the newest turn remains.
+        let view = conv.model_view(&policy(10, 5, 1_000, 50));
 
-        match &bounded.last().unwrap().content {
+        match &view.messages.last().unwrap().content {
             crate::llm::ChatContent::Text(text) => assert_eq!(text, "latest question"),
             crate::llm::ChatContent::Parts(_) => panic!("expected a text-only user turn"),
         }
+        assert!(!serde_json::to_string(&view.messages).unwrap().contains("earlier"));
+    }
+
+    #[test]
+    fn conversation_checkpoint_indices_survive_inserted_system_and_serde() {
+        let mut conv = Conversation::new();
+        conv.push_user("a");
+        conv.push_user("b");
+        conv.view_start = 1;
+        conv.image_start = 1;
+        conv.set_primary_system("prompt");
+        assert_eq!((conv.view_start, conv.image_start), (2, 2), "still points at `b`");
+        let json = serde_json::to_string(&conv).unwrap();
+        let restored: Conversation = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.view_start, 2);
+        let fresh = serde_json::to_string(&Conversation::new()).unwrap();
+        assert!(!fresh.contains("view_start"), "zero indices are not serialized: {fresh}");
+        let old: Conversation = serde_json::from_str(r#"{"messages":[]}"#).unwrap();
+        assert_eq!((old.view_start, old.image_start), (0, 0));
     }
 
     #[test]

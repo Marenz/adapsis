@@ -125,11 +125,11 @@ pub(super) struct NativeLoop {
     training_context: String,
     /// Conversation key whose session history receives complete batches.
     context: String,
-    /// HTTP policy for `main`: trim history and persist the incomplete-turn
-    /// note as an assistant turn. Takeover conversations rely on the bounded
-    /// view + Ladybug compaction and report incompleteness only in the reply,
-    /// as the legacy takeover loop does.
-    trim_history: bool,
+    /// HTTP policy for `main`: persist the incomplete-turn note as an
+    /// assistant turn. Takeover conversations report incompleteness only in the
+    /// reply, as the legacy takeover loop does. Persisted history is never
+    /// trimmed (#68): the checkpointed view bounds what the model sees.
+    persist_incomplete_note: bool,
     /// Latest non-empty user-visible prose (takeover reply text).
     pub(super) prose: String,
     ladybug: Option<super::takeover_native::LadybugSink>,
@@ -175,20 +175,12 @@ fn prepare(
     let messages = {
         let mut meta = config.meta.lock().unwrap();
         let conv = meta.conversations.get_or_create("main");
-        conv.set_primary_system(stable.clone());
         conv.push_user(req.message.clone());
-        let mut log = crate::context_log::ContextLog::from_conversation(
-            conv.to_llm_messages_bounded(100, 120_000, 16_000),
-        );
+        let known = super::http_context::tail_bytes(&[&runtime]) + super::http_context::tool_schema_bytes(config);
+        let view = super::http_context::checkpointed_view(&mut meta.conversations, "main", &model, &stable, known);
+        let mut log = crate::context_log::ContextLog::from_conversation(view.messages);
         log.push_runtime_text(runtime);
-        super::http_context::report_prompt_epoch(
-            "main",
-            &key,
-            &model,
-            &stable,
-            log.history(),
-            false,
-        );
+        super::http_context::report_prompt_epoch(&mut meta.conversations, "main", &key, &model, &stable, &mut log, view.checkpointed);
         log.into_messages()
     };
     config.notify_save();
@@ -201,10 +193,16 @@ async fn generate(
     tx: &EventSender,
     streaming: bool,
 ) -> Result<NativeResponse, String> {
+    let flag = |e: anyhow::Error| {
+        if crate::llm::is_too_large(&e) {
+            llm.mark_recovered();
+        }
+        e.to_string()
+    };
     if !streaming {
-        return llm.complete_turn(request).await.map_err(|e| e.to_string());
+        return llm.complete_turn(request).await.map_err(flag);
     }
-    let mut rx = llm.stream_turn(request).await.map_err(|e| e.to_string())?;
+    let mut rx = llm.stream_turn(request).await.map_err(flag)?;
     let mut final_output = None;
     while let Some(event) = rx.recv().await {
         match event {
@@ -230,7 +228,7 @@ impl NativeLoop {
         messages: Vec<ChatMessage>,
         training_context: String,
         context: &str,
-        trim_history: bool,
+        persist_incomplete_note: bool,
         ladybug: Option<super::takeover_native::LadybugSink>,
     ) -> Self {
         Self {
@@ -239,7 +237,7 @@ impl NativeLoop {
             finished: false,
             training_context,
             context: context.to_string(),
-            trim_history,
+            persist_incomplete_note,
             prose: String::new(),
             ladybug,
             end: LoopEnd::Exhausted,
@@ -288,7 +286,21 @@ impl NativeLoop {
                 "detail":format!("iteration {}/{}", iteration + 1, budget.limit())}))
                 .await;
             let started = std::time::Instant::now();
-            let output = match generate(&llm, self.request(config, !final_round), tx, streaming).await {
+            let request = self.request(config, &model, !final_round);
+            // The final round sends no schemas, so measure this request's own.
+            let schema_bytes = super::http_context::schema_bytes(
+                request.tools.iter().map(|tool| (tool.name.as_str(), tool.description.as_str(), &tool.parameters)),
+            );
+            let sent = super::http_context::SentRequest::measure(&model, &request.messages, schema_bytes);
+            let result = generate(&llm, request, tx, streaming).await;
+            // `generate` flags shrunk retries and too-large failures on the client.
+            // Persist the forced checkpoint now: the provider-error branch below
+            // ends the turn, and takeover turns save nothing else on that path.
+            let recovered = llm.take_recovered();
+            if super::http_context::after_llm_call(recovered, &Ok::<(), anyhow::Error>(()), &config.meta, &self.context) {
+                config.notify_save();
+            }
+            let output = match result {
                 Ok(output) => output,
                 Err(error) => {
                     self.error(format!("Native provider error: {error}"), tx).await;
@@ -297,6 +309,9 @@ impl NativeLoop {
                 }
             };
             super::http_context::report_llm_usage(&self.context, started, &output.usage);
+            // A refused native turn is a provider error (unsupported finish
+            // reason) and never reaches this point.
+            sent.calibrate(&config.meta, &self.context, recovered, false, &output.usage);
             if final_round {
                 // The budget is spent: the status round is prose-only and can
                 // never execute a tool, even if the provider ignores tool_choice.
@@ -343,13 +358,14 @@ impl NativeLoop {
     }
 
     /// `with_tools = false` sends no tool schemas (`tool_choice: none`).
-    fn request(&self, config: &AppConfig, with_tools: bool) -> TurnRequest {
+    fn request(&self, config: &AppConfig, model: &str, with_tools: bool) -> TurnRequest {
         TurnRequest {
             messages: self.messages.clone(),
             // -1 = omit, matching the legacy client: claude-opus-5 rejects any
             // explicit temperature with 400 "temperature is deprecated".
             temperature: -1.0,
-            max_tokens: 8192,
+            // #68: the generating model's configured output limit.
+            max_tokens: crate::model_limits::for_model(model).output_tokens,
             tools: super::native_tools::tool_definitions(config)
                 .into_iter()
                 .filter(|_| with_tools)
@@ -403,7 +419,7 @@ impl NativeLoop {
             self.error("Iteration limit or provider failure without successful finish; task completion is unconfirmed.".into(), tx).await;
             // HTTP records the outcome in `main`; takeover conversations only
             // tell the person in the reply, as the legacy takeover loop does.
-            if self.trim_history {
+            if self.persist_incomplete_note {
                 self.persist_assistant(
                     config,
                     "Native turn ended without successful finish; task completion is unconfirmed.".into(),
@@ -425,9 +441,6 @@ impl NativeLoop {
             let mut meta = config.meta.lock().unwrap();
             let conv = meta.conversations.get_or_create(&self.context);
             conv.push_assistant(content);
-            if self.trim_history {
-                conv.trim(51);
-            }
         }
         config.notify_save();
     }
@@ -541,9 +554,6 @@ impl NativeLoop {
             let mut meta = config.meta.lock().unwrap();
             let conv = meta.conversations.get_or_create(&self.context);
             conv.push_native_batch(output.content, output.tool_calls, results);
-            if self.trim_history {
-                conv.trim(101);
-            }
         }
         config.notify_save();
     }

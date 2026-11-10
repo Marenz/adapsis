@@ -207,6 +207,10 @@ async fn lifecycle(streaming: bool, module: &str) {
     let requests = fixture.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
     assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 5);
+    // #68: the output limit is the generating model's configured limit, not 8192.
+    let expected = crate::model_limits::for_model(requests[0]["model"].as_str().unwrap()).output_tokens;
+    assert!(expected >= 32_000);
+    assert!(requests.iter().all(|r| r["max_tokens"] == expected), "{:?}", requests[0]["max_tokens"]);
     // Regression: an explicit temperature makes claude-opus-5 reject every
     // native turn (400 "temperature is deprecated"); omit it like legacy.
     assert!(
@@ -747,5 +751,31 @@ async fn native_missing_targets_are_neutral_in_http_and_sse_results() {
             !wire.contains(&private) && !wire.contains("SECRET_DIAGNOSTIC"),
             "{wire}"
         );
+    }
+}
+
+/// The native loop records each answered request's size against the provider's
+/// reported input tokens, per conversation, for the next view's projection.
+#[tokio::test]
+async fn native_turn_calibrates_the_token_projection_from_provider_usage() {
+    for streaming in [false, true] {
+        let mut answer = tool("done", "finish", json!({}));
+        // Anthropic wire shape: total processed input = prompt + read + created.
+        answer["usage"] = json!({"prompt_tokens":1_000,"completion_tokens":5,"total_tokens":1_005,
+            "cache_read_input_tokens":0,"cache_creation_input_tokens":3_000});
+        let fixture = Fixture::new(vec![answer], "").await;
+        fixture.run(streaming).await;
+        let requests = fixture.requests.lock().unwrap();
+        let sent: usize = requests[0]["messages"].as_array().unwrap().iter().map(|m| m.to_string().len()).sum();
+        let tools: usize = requests[0]["tools"].to_string().len();
+        let meta = fixture.config.meta.lock().unwrap();
+        let measured = meta.conversations.get("main").unwrap().token_calibration.clone().expect("calibrated");
+        assert_eq!(measured.input_tokens, 4_000, "streaming={streaming}");
+        // Messages plus tool schemas, within the schema framing estimate.
+        let expected = (sent + tools) as u64;
+        assert!(measured.request_bytes.abs_diff(expected) * 20 <= expected, "streaming={streaming}: {} vs {expected}", measured.request_bytes);
+        assert_eq!(measured.model, "native-fixture");
+        let ratio = meta.conversations.get("main").unwrap().bytes_per_token("native-fixture");
+        assert!((crate::model_limits::MIN_BYTES_PER_TOKEN..=crate::model_limits::MAX_BYTES_PER_TOKEN).contains(&ratio));
     }
 }

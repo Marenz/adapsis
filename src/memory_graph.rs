@@ -662,10 +662,14 @@ impl MemoryGraph {
         Ok(id)
     }
 
+    /// Messages of `context_id` not yet covered by an episode, oldest first. The
+    /// scan stops with the first message that takes the total past `max_bytes`,
+    /// measured as serialized request bytes (`model_limits::serialized_len`), the
+    /// unit the compaction thresholds use.
     pub fn pending_context_messages(
         &self,
         context_id: &str,
-        max_chars: usize,
+        max_bytes: usize,
     ) -> Result<Vec<GraphMessage>> {
         let connection = Connection::new(&self.database)?;
         let mut end_statement = connection.prepare(
@@ -681,7 +685,7 @@ impl MemoryGraph {
         let rows = connection.execute(&mut statement, vec![("context_id", context_id.into())])?;
         let mut past_checkpoint = last_end.is_none();
         let mut messages = Vec::new();
-        let mut chars = 0usize;
+        let mut bytes = 0usize;
         for row in rows {
             let id = string_value(&row[0])?;
             if !past_checkpoint {
@@ -691,9 +695,9 @@ impl MemoryGraph {
                 continue;
             }
             let content = string_value(&row[2])?;
-            let content_chars = content.chars().count();
-            let reached_limit = !messages.is_empty() && chars.saturating_add(content_chars) > max_chars;
-            chars = chars.saturating_add(content_chars);
+            let content_bytes = crate::model_limits::serialized_len(&content);
+            let reached_limit = !messages.is_empty() && bytes.saturating_add(content_bytes) > max_bytes;
+            bytes = bytes.saturating_add(content_bytes);
             messages.push(GraphMessage {
                 id,
                 role: string_value(&row[1])?,

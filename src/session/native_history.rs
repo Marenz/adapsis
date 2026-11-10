@@ -56,33 +56,6 @@ pub(super) fn to_llm(message: &ChatMessage) -> crate::llm::ChatMessage {
     }
 }
 
-pub(super) fn trim(conv: &mut Conversation, max: usize) {
-    if max < 2 || conv.messages.len() <= max {
-        return;
-    }
-    let system = conv
-        .messages
-        .first()
-        .filter(|m| m.role == "system")
-        .cloned();
-    let mut remaining = max - usize::from(system.is_some());
-    let mut selected = Vec::new();
-    for group in complete_groups(&conv.messages).into_iter().rev() {
-        if system.is_some() && std::ptr::eq(&group[0], &conv.messages[0]) {
-            continue;
-        }
-        if group.len() > remaining {
-            break;
-        }
-        selected.push(group.to_vec());
-        remaining -= group.len();
-    }
-    conv.messages = system
-        .into_iter()
-        .chain(selected.into_iter().rev().flatten())
-        .collect();
-}
-
 impl Conversation {
     /// Append one fully correlated batch under the caller's metadata lock. Never
     /// save an assistant envelope before its complete result set is available.
@@ -152,32 +125,26 @@ mod tests {
         assert_eq!(messages[2].tool_calls[0].id, "call1");
         assert_eq!(messages[3].role, crate::llm::ChatRole::Tool);
         assert_eq!(messages[3].tool_call_id.as_deref(), Some("call1"));
-        let bounded = restored.to_llm_messages_bounded(20, 100, 50);
+        let mut restored = restored;
+        let bounded = restored.model_view(&super::super::conversation_view::ViewPolicy::tokens_only(10_000, 5_000, 0, 50)).messages;
         assert_eq!(bounded.len(), 5);
         assert_eq!(bounded[2].tool_calls.len(), 1);
     }
 
     #[test]
-    fn budgets_omit_whole_pairs_without_truncating_arguments() {
-        let conv = conversation();
-        for messages in [
-            conv.to_llm_messages_bounded(3, 100, 100),
-            conv.to_llm_messages_bounded(20, 10, 100),
+    fn checkpoints_and_size_caps_omit_whole_pairs_without_truncating_arguments() {
+        use super::super::conversation_view::ViewPolicy;
+        // A checkpoint past the batch drops the whole pair; an oversized batch is
+        // omitted whole rather than truncated into an invalid protocol.
+        for policy in [
+            ViewPolicy::tokens_only(1, 0, 0, 1_000),
+            ViewPolicy::tokens_only(10_000, 5_000, 0, 5),
         ] {
-            assert!(
-                messages
-                    .iter()
-                    .all(|m| m.tool_calls.is_empty() && m.tool_call_id.is_none())
-            );
+            let mut conv = conversation();
+            let messages = conv.model_view(&policy).messages;
+            assert!(messages.iter().all(|m| m.tool_calls.is_empty() && m.tool_call_id.is_none()));
+            assert_eq!(conv.messages.len(), 5, "persisted history untouched");
         }
-        let mut trimmed = conv;
-        trimmed.trim(3);
-        assert!(
-            trimmed
-                .to_llm_messages()
-                .iter()
-                .all(|m| m.tool_calls.is_empty() && m.tool_call_id.is_none())
-        );
     }
 
     #[test]
@@ -210,31 +177,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(old).unwrap(),
             serde_json::json!({"role":"assistant","content":"hello"})
-        );
-    }
-
-    #[test]
-    fn native_trim_keeps_recent_secondary_system_notifications() {
-        let mut conv = Conversation::new();
-        conv.push_system("primary");
-        for _ in 0..60 {
-            conv.push_user("old");
-        }
-        conv.push_system("job result");
-        conv.push_user("latest");
-        conv.trim(51);
-        assert_eq!(conv.messages[0].content, "primary");
-        assert!(
-            conv.messages
-                .iter()
-                .any(|m| m.role == "system" && m.content == "job result")
-        );
-        assert_eq!(
-            conv.messages
-                .iter()
-                .filter(|m| m.content == "primary")
-                .count(),
-            1
         );
     }
 }

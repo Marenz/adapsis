@@ -849,8 +849,8 @@ replaces that branch with one composer.
     are reported as an error and never executed, and the turn stays unconfirmed.
     The incomplete-turn note is reply-only for takeover (HTTP still persists it
     in `main`). Takeover batches go to the
-    context's own conversation without HTTP's `trim(101)`, relying on the bounded
-    view + compaction like legacy. Every non-empty assistant text is also written
+    context's own conversation; no conversation is trimmed any more (#68), the
+    checkpointed view + compaction bound what the model sees. Every non-empty assistant text is also written
     to Ladybug as `agent:kronk`. A Ladybug write failure aborts the turn (`Err`),
     as legacy does. `NativeLoop.generator` keeps the generating model separate
     from the pinned permission model.
@@ -1371,14 +1371,133 @@ schema since day one and was never set:
 - Compaction is non-destructive: raw messages remain forever. The active conversation
   model creates immutable `Episode` summaries and source-backed index `Memory` nodes.
   Failed compaction leaves raw history pending and uses prior episodes plus recent turns.
-- Checkpoint generation times out after 30 seconds and retries at most once per context every
-  15 minutes, so a slow provider cannot block every conversational turn.
-- The transient takeover view keeps up to 60k characters of recent conversation independently
-  of the mandatory system prompt. Subtracting the system-prompt size from this budget can omit
-  the newest user turn when the system prompt alone exceeds the limit.
-- Compaction defaults: 128k model context, 70% trigger, 32k output/tool reserve, and
-  120k-character checkpoint chunks. Override with `ADAPSIS_CONTEXT_TOKENS`,
-  `ADAPSIS_COMPACTION_PERCENT`, and `ADAPSIS_OUTPUT_RESERVE_TOKENS`.
+- **Per-model limits (#68), `src/model_limits.rs`:** context window, output limit, request
+  and chunk-gap timeouts per model, from `ADAPSIS_MODELS_FILE` /
+  `~/.config/adapsis/models.toml`, then sourced built-ins (exact ids; `provider/` prefixes
+  are supported): anthropic claude-opus-5 / opus-5-5 (output 128k MEASURED on opus-5; 1M
+  context from Anthropic /v1/models metadata + context-window docs), sonnet-5 / sonnet-5-5
+  (registry), openai/gpt-6-astra 1.05M/128k (registry). Every built-in needs a source comment (measured error with date,
+  provider metadata/docs or registry); never a guessed value. ChatGPT-route models have no entry
+  except chatgpt/gpt-6-astra, gpt-6-sol, gpt-6-luna and gpt-6.1-sol (872k: Codex metadata
+  max_context_window; 470,030 prompt tokens measured accepted on astra); others use the
+  unknown default `ADAPSIS_CONTEXT_TOKENS` (128k).
+- **Token projection is calibrated per conversation and model (#68 follow-up).** There is
+  no fixed chars-per-token constant. `Conversation.token_calibration` (persisted) holds the
+  last answered request as `(serialized text bytes, provider input tokens, model)`.
+  `request_meter::SentRequest::measure(model, messages, extra)` takes the bytes before the
+  call (messages + native tool schemas, image base64 excluded) and `.calibrate` stores them
+  with `LlmUsage::accounted_input_tokens()` after it (ask, ask_stream, legacy and native
+  takeover, `!watch` self-trigger). The view checkpoint AND the compaction trigger convert
+  with `conv.bytes_per_token(model)`: the measurement counts only for the model that made
+  it (another tokenizer), otherwise `DEFAULT_BYTES_PER_TOKEN` = 2.5 (MEASURED 2026-11-10:
+  the admin DM's ≈1.46 MB view was counted as 593,447 tokens; the old 4 chars/token would
+  have let it grow to ≈1.13M real tokens). Clamped to 1.5–6.0; ignored when input tokens
+  are zero/missing, under 2,000 text tokens, or the client had to shrink the request.
+  Images cost a fixed `IMAGE_TOKENS` (1,600) each and are subtracted before the ratio. The
+  ratio moves only the checkpoint position, never the bytes of the visible history. New
+  request paths must call `SentRequest::measure`/`calibrate`, or their conversation stays on
+  the default and its cache evidence is never recorded.
+- **Units:** budgets are serialized bytes (`model_limits::serialized_len`, a JSON string)
+  and tokens derived from them. `ModelLimits::max_message_bytes` (1/8 window at the fixed
+  default ratio, and 1/8 of the route limit) is UTF-8 bytes of message text;
+  `MemoryGraph::pending_context_messages(context, max_bytes)` and the compaction thresholds
+  count serialized bytes. Do not introduce character counts for budgets.
+- **Measured runtime tail:** `Conversation.tail_bytes` (persisted) is the first request of
+  the previous turn minus that turn's view: memories, episodes, activity, authority text
+  and tool schemas together. `ViewPolicy::for_model` uses it (plus a quarter of margin, at
+  most 1/4 of the route limit) instead of the fixed 16k-token / 64 KiB allowance, which
+  remains the no-measurement default.
+- **A capped message says so.** `conversation_view::truncate_middle` keeps head and tail
+  (cut on character boundaries, at most `max_message_bytes`) and inserts `[... N characters
+  omitted here by the runtime to fit the model context; the stored message is complete
+  ...]` with the exact count (short form for small caps). The cut depends only on the
+  message and the cap; persisted history is never changed. A native batch containing a
+  message over the cap is still dropped from the view whole.
+- **Cache boundaries sit only on assistant messages (2026-11-10 fix).** The gateway merges
+  consecutive same-role messages (a tool result is a user message for Anthropic), puts an
+  explicit `cache_control` marker on the final block of the MERGED message, and rejects two
+  markers in one merged message with HTTP 400 ("distinct cache boundaries that collapse
+  into one Anthropic message"). dd8cea4 marked the last non-empty history message; after a
+  native turn that is the `finish` tool result, so (a) the marker landed after the volatile
+  runtime tail and (b) one failed turn later every request of that context was rejected
+  until restart. `context_log::is_cache_boundary` now allows a boundary only on the last
+  message of an assistant run with text or tool calls. `context_log::gateway_boundary_errors`
+  (test-only) is the oracle for the gateway's rules; use it on recorded wire requests in
+  any new request-building test. Do not mark user, tool or envelope messages.
+- **Cache lifetime per route (`model_limits::BUILT_IN_CACHE`, `src/cache_lifetime.rs`).**
+  Each route has a requested marker lifetime (`cache_ttl`: "5m"/"1h", sent as
+  `cache_control.ttl` on EVERY boundary via `ContextLog::set_cache_ttl`, set in
+  `report_prompt_epoch`) and a default lifetime in seconds for the cold-start rule.
+  Built-ins need a source comment (MEASURED / DOCS / UNVERIFIED; UNKNOWN is a valid entry):
+  anthropic/* requests 1h = 3600 s (owner decision; DOCS + MEASURED), openai/* 1800 s
+  (DOCS), deepseek/* 3600 s (UNVERIFIED), moonshot/* 300 s (DOCS), chatgpt/* UNKNOWN (the
+  route reports zero cached tokens until llm-gateway #4), deepinfra/* and xiaomi-mimo/*
+  UNKNOWN. `models.toml`: `cache_ttl`, `cache_ttl_secs` (0 = never cold-start),
+  `cold_start_tokens` (default 100,000, env `ADAPSIS_COLD_START_TOKENS`).
+- **Learned lifetime.** `ConversationManager.cache_lifetimes` (persisted with the session,
+  per model id) records, for every answered request where a hit could be expected, the
+  pause since the conversation's previous request (START to START: the provider counts the
+  lifetime from the start of the request that wrote or read the entry) and hit/miss
+  (cache read ≥ 50% / ≤ 10% of the expected prefix). A hit at or past the default raises
+  the lifetime to that pause + 1 s. One miss changes nothing; the second-shortest miss is
+  a confirmed upper bound that lowers the lifetime below the default, or makes an unknown
+  route known. Misses expire after 14 days; values are clamped to 60 s – 7 days. Not
+  recorded: first request after a restart/checkpoint/prefix change, prefixes under 8,000
+  tokens, routes that report no cache reads, shrunk requests, REFUSED turns (MEASURED: a
+  refused request reports a cache write the next request cannot read; legacy
+  `LlmOutput.refused`, native refusals are provider errors), and the turn after a turn whose
+  first request failed or was refused. `TurnProbe` (in memory) carries this per turn.
+- **Cold start (`request_meter::turn_view`).** At the START of a turn only: if the pause
+  since the conversation's last answered request is at least the route's effective
+  lifetime, `view_start` moves once so the history is at most `cold_start_tokens` (and
+  never more than a budget checkpoint would leave: target minus overhead), same mechanics
+  as a checkpoint (user-turn boundary preferred, batches whole, newest turn kept). It is
+  reported as a checkpoint, so the cache epoch resets. Unknown lifetime or unknown pause
+  (session from before this field): no cold start. Rounds inside a turn never call
+  `turn_view`; `calibrate` never moves the view. Log lines: `[llm:<ctx>] cold start:
+  pause_s=… lifetime_s=… (learned|default) history_tokens=A->B view_start=X->Y` and per
+  request `[llm:<ctx>] cache: pause_s=… expected_tokens=… cached_read=… outcome=…
+  lifetime_s=… source=…` (metadata only). `checkpointed_view` must be called exactly once
+  per turn, before the turn's first request.
+- **Request body limit:** `max_request_bytes` per model (default `ADAPSIS_MAX_REQUEST_BYTES`
+  or 60 MiB, under the gateway's 64 MiB limit from llm-gateway 332a3b0, deployed
+  2026-11-10; the old gateway rejected bodies above 2 MiB). The view
+  checkpoints on bytes as well as tokens (image base64 counted; images limited to ~30% of
+  the route), recovered tail images are fitted to the remaining headroom, and
+  `OpenAiBackend::send_request` refuses an oversized body before sending
+  (`LlmError::RequestTooLarge`). A provider 413 is not retried and says so.
+- **Self-heal (#68):** a too-large refusal (pre-send, 413, or a provider context-length
+  400) is retried ONCE with `llm::shrink_request` (system prefix + current turn from the last
+  runtime envelope + the newest whole history units that fit half the size), and the caller
+  persists a forced view checkpoint (`http_context::after_llm_call`: only the newest turn
+  stays visible), so a context can never stay stuck. Known tail parts (runtime/authority
+  text, native tool schemas) are measured into the projection; 64 KiB covers the rest.
+- **Timeouts (#68):** streaming requests bound the wait for response headers by the
+  per-model chunk-gap timeout (120 s; `send_streaming_request`, not reqwest's per-request
+  timeout, which would also cut long streams), then the same gap between chunks, plus the
+  derived total; non-streaming requests (fallback, native `complete_turn`, which
+  native takeover uses) cap at 20 min; any timeout is retried at most once. Compaction
+  has its own 5-minute bound.
+- Secondary `system` messages (runtime notifications, agent results) are sent as user-role
+  `[Runtime notice …]` messages; providers hoist system messages ahead of history, which
+  broke the cached prefix. The `!watch` self-trigger stores its event the same way and sends
+  the checkpointed view of `main`, never the full history.
+- **Checkpointed view (#68), `session/conversation_view.rs`:** the model history is
+  append-only and byte-stable between checkpoints. `Conversation.view_start` moves only when
+  the projected request (system + 16k tail allowance + output reserve + history) exceeds
+  85% of the generating model's window, in ONE step down to 50%, preferring a user-turn
+  boundary, never splitting a native batch, never cutting the newest turn. Per-message cap
+  = 1/8 window (deterministic). Images: newest 3 / 20 MB from `image_start`, which jumps to
+  the newest image message on overflow (one break per ~3 images). The omission notice stays
+  in the volatile tail. Persisted history is never trimmed (the old `trim(51/101)` and the
+  64-message / 60k-char view caps are gone). `ContextLog` marks a third cache breakpoint
+  at the previous request's history end (from the epoch tracker), so long turns stay
+  within the provider's breakpoint lookback.
+- Compaction uses the same rule: it starts when uncompacted history passes 85% of the
+  window minus reserved output, folds the oldest part toward 50%, one episode of at most
+  1/8 window per turn, timed out at the model's request timeout, and retries at most once
+  per context every 15 minutes. Compaction changes only the volatile tail, so it is no
+  longer an epoch reset; only a view checkpoint is.
 - `memory_cypher(query)` exposes ACL-filtered, read-only Cypher anchored at
   `MATCH (memory:Memory {id: $memory_id})`. It deliberately rejects query shapes that can
   escape the authorized memory anchor. The principal is **bound to the turn**, not passed
