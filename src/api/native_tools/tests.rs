@@ -42,6 +42,12 @@ mod python_scalar_tests;
 mod c_result_tests;
 #[path = "python_result_acceptance_tests.rs"]
 mod python_result_acceptance_tests;
+#[path = "run_tests.rs"]
+mod run_tests;
+#[path = "run_authority_tests.rs"]
+mod run_authority_tests;
+#[path = "run_freeze_tests.rs"]
+mod run_freeze_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -171,7 +177,7 @@ fn tool_definitions_are_complete_and_closed() {
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["inspect", "mutate", "test", "evaluate", "finish"]
+        vec!["inspect", "mutate", "test", "evaluate", "run", "finish"]
     );
     for d in &defs {
         assert_eq!(d.parameters["additionalProperties"], false, "{:?}", d.name);
@@ -188,7 +194,7 @@ fn memory_tool_schemas_present_only_with_a_turn_identity() {
         .iter()
         .map(|d| d.name.clone())
         .collect();
-    assert_eq!(names, ["inspect", "mutate", "test", "evaluate", "finish"]);
+    assert_eq!(names, ["inspect", "mutate", "test", "evaluate", "run", "finish"]);
 
     let mut with_turn = no_turn;
     with_turn.turn = Some(TurnIdentity {
@@ -208,6 +214,7 @@ fn memory_tool_schemas_present_only_with_a_turn_identity() {
             "mutate",
             "test",
             "evaluate",
+            "run",
             "finish",
             "memory_inspect",
             "memory_remember",

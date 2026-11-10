@@ -7,6 +7,8 @@ use crate::eval;
 
 use super::{AppConfig, MutationResult, TestCaseResult, WorkingSet};
 
+pub(super) mod io_eval;
+
 pub(super) fn collect_opencode_tasks(ops: &[crate::parser::Operation]) -> Vec<String> {
     ops.iter()
         .filter_map(|op| match op {
@@ -586,26 +588,13 @@ pub(super) async fn execute_operations_with_baseline(
 
                         if needs_async {
                             if let Some(sender) = &config.io_sender {
-                                let program = session.program.clone();
-                                // Base for the per-function CoW merge (issue #9).
-                                let base_program = program.clone();
-                                let program_mut = crate::eval::make_shared_program_mut(&program);
                                 let fn_name = ev.function_name.clone();
                                 let input = ev.input.clone();
-                                let sender = sender.clone();
-                                let turn = config.turn.clone();
-                                let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
-                                let eval_fn_name = ev.function_name.clone();
-                                let eval_result = tokio::task::spawn_blocking(move || {
-                                    ctx.install();
-                                    let handle = crate::coroutine::CoroutineHandle::new(sender)
-                                        .with_turn(turn);
-                                    crate::eval::eval_async_function(&program, &fn_name, &input, handle)
-                                }).await;
-                                let (msg, success) = match &eval_result {
-                                    Ok(Ok(val)) => (format!("eval {}() = {val}", eval_fn_name), true),
-                                    Ok(Err(e)) => { (format!("eval error: {e}"), false) }
-                                    Err(e) => { (format!("eval task error: {e}"), false) }
+                                let evaluation = io_eval::evaluate_with_io(config, &session.program, sender.clone(),
+                                    io_eval::ProgramPolicy::Editable, move |program, handle| crate::eval::eval_async_function(program, &fn_name, &input, handle)).await;
+                                let (msg, success) = match &evaluation.outcome {
+                                    Ok(val) => (format!("eval {}() = {val}", ev.function_name), true),
+                                    Err(failure) => (failure.describe("eval"), false),
                                 };
                                 if crate::logging::content() {
                                     eprintln!("[execute_code:eval] {msg}");
@@ -615,9 +604,9 @@ pub(super) async fn execute_operations_with_baseline(
                                 } else {
                                     result.push_err(msg);
                                 }
-                                if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                if let Some(mutated) = evaluation.after {
                                     session.program = mutated.clone();
-                                    config.program.write().await.merge_changed_from(&base_program, &mutated);
+                                    config.program.write().await.merge_changed_from(&evaluation.base, &mutated);
                                 }
                                 config.sync_async_side_effects_into(session);
                             }
@@ -1006,6 +995,7 @@ pub(super) async fn execute_operations_with_baseline(
                                                             crate::eval::Value::string(cb.reply_arg),
                                                             crate::eval::Value::string(reply),
                                                         ],
+                                                        program_frozen: false,
                                                         reply: tx,
                                                     }).await;
                                                 }

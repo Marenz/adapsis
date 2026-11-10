@@ -1,6 +1,7 @@
 //! Builtin function registry.
 //! Single source of truth for all builtin names and their descriptions.
 mod json;
+pub mod program_effects;
 
 /// A builtin function entry.
 pub struct Builtin {
@@ -989,7 +990,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Returns persistent module library status as a String, including directory path, loaded modules, and files on disk. Same output as `?library`. Takes no arguments. Requires `+await`.",
         category: BuiltinCategory::Io,
     },
-    // Program mutation builtins — modify the live program AST
+    // Program mutation builtins — modify the live program AST (classified in program_effects.rs)
     Builtin {
         name: "mutate",
         aliases: &[],
@@ -997,7 +998,7 @@ pub static IO_BUILTINS: &[Builtin] = &[
         long: "Parses a String of Adapsis code (mutations like +fn, +type, +module, etc.) and applies them to the live program. \
                Returns a summary like \"Applied 3 mutations\" on success, or fails with the parse/validation error. \
                This is the general-purpose mutation builtin — it does the same thing as sending code to the main loop. \
-               Takes `(code:String)`. Requires `+await`.",
+               Takes `(code:String)`. Requires `+await`. Refused inside a native `run` block, which cannot change the program.",
         category: BuiltinCategory::Io,
     },
     Builtin {

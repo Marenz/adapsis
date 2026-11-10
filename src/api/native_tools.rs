@@ -33,6 +33,8 @@
 //! * `evaluate` → target module **Execute**.
 //! * `test` → target module **Write** (test persistence mutates the AST).
 //! * `mutate` → **Write** on every mentioned module (nested included).
+//! * `run` → the `mutate` checks for a function containing the block (**Write** on its
+//!   scope module, **Execute** on every referenced module); see `native_tools/run.rs`.
 //! * `finish` → `!done` against the *same* immutable baseline.
 //!
 //! Authority is read **only** from the caller-pinned config (`llm_model`) and
@@ -49,6 +51,7 @@ use crate::parser;
 mod authored;
 mod frontend;
 mod literals;
+mod run;
 mod scalar_entry;
 
 // ── Bounds ─────────────────────────────────────────────────────────────────
@@ -205,6 +208,7 @@ pub fn tool_definitions(config: &AppConfig) -> Vec<ToolDefinition> {
                 }),
             ),
         },
+        run::definition(obj),
         ToolDefinition {
             name: "finish".into(),
             description: "Signal task completion (!done) against the current turn's baseline.".into(),
@@ -281,6 +285,10 @@ enum ParsedTool {
     Inspect { kind: InspectKind, target: Option<String>, format: frontend::SourceFormat },
     Mutate { source: crate::session::replay::Submission, operations: Vec<parser::Operation>, modules: Vec<String>, python: bool, roles: Option<crate::python_frontend::NativeReferences> },
     PythonMutate { source: String, module: String, preflight: crate::python_frontend::NativePreflight },
+    /// An ad-hoc block before signature-aware admission (`run`).
+    PythonRun { source: String, module: String, preflight: crate::python_frontend::NativePreflight },
+    /// An admitted ad-hoc block; never applied to a Program.
+    Run(run::Block),
     Test { source: crate::session::replay::Submission, operations: Vec<parser::Operation>, targets: Vec<String>, python: bool },
     Evaluate { function: String, source: crate::session::replay::Submission, operations: Vec<parser::Operation>, python: bool },
     MemoryInspect { query: String },
@@ -555,6 +563,7 @@ fn parse_tool(name: &str, arguments: &str) -> Result<ParsedTool, String> {
         "mutate" => frontend::parse_mutate(&map, false),
         "test" => frontend::parse_tests(&map, normalized.python),
         "evaluate" => frontend::parse_evaluate(&map, normalized.python),
+        "run" => run::parse(&map),
         "memory_inspect" => {
             reject_extra_fields(&map, &["query"])?;
             let query = take_string(&map, "query", false, MAX_TARGET_BYTES)?.unwrap_or_default();
@@ -657,9 +666,14 @@ pub fn validate_native_tool_authorized(
 /// shared by [`validate_native_tool_authorized`] and [`execute_native_tool`].
 fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> Result<(), String> {
     match parsed {
-        ParsedTool::PythonMutate { module, preflight, .. } => {
+        // A block is authorized as the function it is lowered to: same two rules.
+        ParsedTool::PythonMutate { module, preflight, .. }
+        | ParsedTool::PythonRun { module, preflight, .. } => {
             if resolve_module(config, model, module) < PermissionLevel::Write {
-                return Err(format!("permission denied: cannot modify module '{module}' (need Write)"));
+                return Err(match parsed {
+                    ParsedTool::PythonRun { .. } => run::write_denied(module),
+                    _ => format!("permission denied: cannot modify module '{module}' (need Write)"),
+                });
             }
             for target in &preflight.references {
                 if resolve_module(config, model, module_of(target)) < PermissionLevel::Execute {
@@ -688,14 +702,10 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
             InspectKind::Tasks | InspectKind::Library => {}
         },
         ParsedTool::Mutate { modules, operations, roles, .. } => {
-            for m in modules {
-                if resolve_module(config, &model, m) < PermissionLevel::Write {
-                    return Err(format!(
-                        "permission denied: cannot modify module '{m}' (need Write)"
-                    ));
-                }
-            }
-            authored::check_operations(operations, config, model, None, roles.as_ref())?;
+            authorize_declarations(modules, operations, roles.as_ref(), config, model)?;
+        }
+        ParsedTool::Run(block) => {
+            authorize_declarations(&block.modules, &block.operations, Some(&block.roles), config, model)?;
         }
         ParsedTool::Test { targets, .. } => {
             for t in targets {
@@ -733,6 +743,25 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
         ParsedTool::Finish => {}
     }
     Ok(())
+}
+
+/// Canonical declarations: Write on every declaring module, then the authored-reference
+/// rules. `mutate` applies them; `run` passes the same check for its unapplied block.
+fn authorize_declarations(
+    modules: &[String],
+    operations: &[parser::Operation],
+    roles: Option<&crate::python_frontend::NativeReferences>,
+    config: &AppConfig,
+    model: &str,
+) -> Result<(), String> {
+    for module in modules {
+        if resolve_module(config, model, module) < PermissionLevel::Write {
+            return Err(format!(
+                "permission denied: cannot modify module '{module}' (need Write)"
+            ));
+        }
+    }
+    authored::check_operations(operations, config, model, None, roles)
 }
 
 // ── Envelope / result helpers ──────────────────────────────────────────────
@@ -1214,7 +1243,8 @@ pub async fn execute_native_tool(
         Err(error) => return denied_result(name, error),
     };
     match parsed {
-        ParsedTool::PythonMutate { .. } => denied_result(name, "Python mutation was not finalized".into()),
+        ParsedTool::PythonMutate { .. } | ParsedTool::PythonRun { .. } => denied_result(name, "Python source was not finalized".into()),
+        ParsedTool::Run(block) => run::execute(name, block, config, session).await,
         ParsedTool::Inspect { kind, target, format } => execute_inspect(config, session, &model, kind, target, format),
         ParsedTool::Mutate { source, operations, .. } => {
             let code =

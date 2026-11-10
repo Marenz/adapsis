@@ -97,6 +97,7 @@ fn spawned(receiver: &mut tokio::sync::mpsc::Receiver<IoRequest>) -> Vec<(String
             function_name,
             args,
             reply,
+            ..
         } = request
         else {
             panic!("the webhook handler may only spawn")

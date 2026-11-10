@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 mod python_turn_tests;
 #[path = "native_repair_turn_tests.rs"]
 mod native_repair_turn_tests;
+#[path = "run_turn_tests.rs"]
+mod run_turn_tests;
 
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}})
@@ -206,7 +208,7 @@ async fn lifecycle(streaming: bool, module: &str) {
     );
     let requests = fixture.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 6);
     // Regression: an explicit temperature makes claude-opus-5 reject every
     // native turn (400 "temperature is deprecated"); omit it like legacy.
     assert!(

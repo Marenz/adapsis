@@ -221,7 +221,7 @@ async fn native_takeover_python_mutate_test_evaluate_finish_delivers_prose() {
     assert!(speaker.contains("Change the runtime itself (`!opencode`): no"));
     assert!(speaker.contains("Add or modify code: yes"));
     assert!(!system.contains("NEVER use <tool_call>"), "no legacy language prompt");
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 10);
     assert!(requests.iter().all(|r| r.get("temperature").is_none()));
     assert!(requests.iter().all(|r| r["model"] == "takeover-fixture"));
     let first = all_text(&requests[0]);
@@ -547,6 +547,39 @@ async fn native_takeover_memory_inspect_then_correct_authorized_memory() {
         "{active:?}"
     );
     assert!(!active.iter().any(|m| m.content == "Opus 5 does not exist"));
+}
+
+/// #129: a `run` block in a native takeover turn executes with the turn's identity, so a
+/// turn-bound builtin inside it sees this conversation's memories (and only those), and
+/// nothing about the block is declared or recorded as a mutation.
+#[tokio::test]
+async fn native_takeover_run_block_uses_the_turn_identity_and_persists_nothing() {
+    let context = "telegram:100000001";
+    let harness = Harness::new(true);
+    let embedder = crate::memory_graph::MemoryEmbedder::deterministic();
+    remember(&harness, &embedder, "RunBlockVisibleNote", context, ADMIN, crate::memory_graph::MemoryScope::Context);
+    remember(&harness, &embedder, "RunBlockForeignNote", "telegram:group:-100000099", "telegram:user:100000555",
+        crate::memory_graph::MemoryScope::Context);
+    let io = spawn_memory_io(harness.graph.clone(), Arc::new(embedder));
+    let provider = provider(vec![
+        tool("block", "run", json!({"source": "seen: str = await memory_inspect()\nreturn seen\n"})),
+        response("Looked.", vec![call("done", "finish", json!({}))]),
+    ])
+    .await;
+    let reply = harness.turn_with_io(&provider, io, context, ADMIN, "What do you remember?").await;
+    assert_eq!(reply, "Looked.");
+    let requests = provider.requests.lock().unwrap().clone();
+    let names: Vec<&str> = requests[0]["tools"].as_array().unwrap().iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap()).collect();
+    assert_eq!(&names[..6], ["inspect", "mutate", "test", "evaluate", "run", "finish"]);
+    let delivered = all_text(&requests[1]);
+    assert!(delivered.contains("\"tool_call_id\":\"block\""), "{delivered}");
+    assert!(delivered.contains("RunBlockVisibleNote"), "{delivered}");
+    assert!(!delivered.contains("RunBlockForeignNote"), "{delivered}");
+    assert!(harness.program.read().await.modules.is_empty());
+    let meta = harness.meta.lock().unwrap();
+    assert_eq!(meta.revision, 0);
+    assert!(meta.mutations.is_empty() && meta.sources.is_empty());
 }
 
 #[tokio::test]

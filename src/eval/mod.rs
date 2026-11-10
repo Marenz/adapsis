@@ -16,7 +16,7 @@ mod statement_execution;
 mod tracing;
 pub use tracing::trace_function;
 pub(crate) use statement_execution::eval_function_body;
-pub use invocation::{eval_declared_function, eval_declared_function_unframed};
+pub use invocation::{eval_declared_function, eval_declared_function_unframed, eval_detached_block};
 pub(crate) mod result_contract;
 #[cfg(test)]
 mod jit_cache_tests;
@@ -2079,17 +2079,12 @@ fn execute_statement(
                         set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     }
                     // Ensure mutation builtins can write to the program AST via thread-local.
+                    // The classification lives next to the registry (builtins/program_effects.rs).
                     let is_mutation_builtin = matches!(
-                        call.callee.as_str(),
-                        "mutate"
-                            | "fn_remove"
-                            | "type_remove"
-                            | "module_remove"
-                            | "module_create"
-                            | "fn_replace"
-                            | "move_symbols"
+                        crate::builtins::program_effects::program_access(&call.callee),
+                        Some(crate::builtins::program_effects::ProgramAccess::Edits)
                     );
-                    if is_mutation_builtin {
+                    if is_mutation_builtin && !handle.program_frozen() {
                         // Create a mutable wrapper if not already set
                         if get_shared_program_mut().is_none() {
                             set_shared_program_mut(Some(std::sync::Arc::new(
@@ -2124,6 +2119,7 @@ fn execute_statement(
                     .try_send(crate::coroutine::IoRequest::Spawn {
                         function_name: spawn_fn_name,
                         args,
+                        program_frozen: handle.program_frozen(),
                         reply: reply_tx,
                     })
                     .map_err(|e| anyhow::anyhow!("+spawn failed to send: {e}"))?;
@@ -4141,10 +4137,8 @@ pub fn eval_async_function(
     }
 
     // Tree-walker fallback
-    let mut env = Env::new_with_shared_interner(&program.shared_interner);
-    env.populate_shared_from_program(program);
     let input_val = eval_parser_expr_with_program(input, program)?;
-    env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    let mut env = invocation::async_tree_env(program, handle);
     bind_input_to_params(program, func, &input_val, &mut env);
     eval_declared_function(program, function_name, func, &mut env)
 }

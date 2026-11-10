@@ -140,21 +140,27 @@ pub(super) fn runtime_targets(
             python,
             roles,
             ..
-        } => {
-            check_operations(
-                &ops,
-                config,
-                &model_name(config),
-                Some((program, *python)),
-                roles.as_ref(),
-            )?;
-            if *python {
-                crate::python_frontend::validate_runtime_arguments(&ops, program)?;
-            }
-            Ok(())
+        } => declarations(ops, *python, roles.as_ref(), config, program),
+        // An ad-hoc block is checked as the Python declaration it is lowered to.
+        super::ParsedTool::Run(block) => {
+            declarations(&block.operations, true, Some(&block.roles), config, program)
         }
         _ => Ok(()),
     }
+}
+
+fn declarations(
+    ops: &[Operation],
+    python: bool,
+    roles: Option<&crate::python_frontend::NativeReferences>,
+    config: &AppConfig,
+    program: &Program,
+) -> Result<(), String> {
+    check_operations(ops, config, &model_name(config), Some((program, python)), roles)?;
+    if python {
+        crate::python_frontend::validate_runtime_arguments(ops, program)?;
+    }
+    Ok(())
 }
 
 fn exists(program: &Program, target: &str) -> Result<(), String> {

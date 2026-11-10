@@ -4,7 +4,14 @@
 /// [`crate::coroutine::TurnIdentity`] (takeover turns), which is exactly when the
 /// turn-bound memory tool schemas are advertised. HTTP native turns have no turn
 /// identity and no memory tools, so their prompt must not claim them.
+/// The `run` example shown to the model. A test lowers it through the production
+/// frontend, so the documented form is always an admitted one.
+const RUN_EXAMPLE: &str = r#"text: str = await file_read("/tmp/x.txt")
+n: int = len(text)
+return concat("bytes: ", to_string(n))"#;
+
 pub fn native_tool_prompt(context: &str, with_memory: bool) -> String {
+    let program_writers = crate::builtins::program_effects::program_changing_builtins().join(", ");
     let memory_tool_list = if with_memory {
         "memory_inspect, memory_remember, memory_correct, memory_forget, "
     } else {
@@ -39,7 +46,7 @@ memberships across all governing groups, not a new current-context-only rule."#
         r#"You are the Adapsis programming assistant in context `{context}`.
 
 ## Fixed native tool protocol
-Use only the supplied native tools to act: inspect, mutate, test, evaluate,
+Use only the supplied native tools to act: inspect, mutate, test, evaluate, run,
 {memory_tool_list}finish.
 Text, <code> blocks, legacy commands and provider stop markers perform no action.
 Every answer or clarification requires a successful finish call. Finish must be
@@ -116,6 +123,30 @@ def test_add_two() -> None:
    Multiple literal arguments may use input="1, 2" or input="left=1, right=2".
 5. Call finish alone. Functions with more than two statements need passing tests
    before evaluation/completion. Resubmitting functions may require tests again.
+
+## One-off execution: run
+Call run with `source` set to a block of statements when you need to DO something
+once instead of declaring it: read a file, call a function with computed arguments,
+look at a value. The block is written exactly like the body of an async function in
+the subset below, and may await runtime IO builtins and user functions directly:
+
+{RUN_EXAMPLE}
+
+Annotate every new binding and bind every await (`written: str = await
+file_write(path, text)`); a bare await or an unannotated `x = await ...` is refused.
+`return` gives the value back as text; without a returned value the call succeeds
+with an empty result. All returns of one block have one type (use to_string(x) for text).
+Call user functions as Module.function, or pass module="Example" to resolve that
+module's functions, types and shared variables by bare name (needs Write on it).
+def, class and import are refused: declare code with mutate.
+Nothing a run does is declared, stored, tested or recorded as a mutation, and a later
+call cannot see its bindings. Shared variables changed by called functions do
+persist. A run block cannot change the program: the builtins that change code
+({program_writers}) are refused in the block, and fail with an error when a function
+or task the block started calls them. IO performed before such an error stays done.
+A failed check, a propagated Err or a runtime error is a failed call, not a value. Results are capped at 100,000 characters with an explicit
+truncation notice; source at 32,000 bytes. run has no test gate and no time limit
+beyond the loop and recursion guards: do not start work that cannot finish.
 
 ## Admitted Python subset (full parity is not complete)
 Annotate every parameter, return and new local binding. Types: int, float, bool,
@@ -238,9 +269,10 @@ background agents (!agent), !opencode runtime changes, model switching, IO
 mocks/stubs, removal commands and every other legacy <code> command. Long-term
 memory is available through the native memory_inspect / memory_remember /
 memory_correct / memory_forget tools (Ladybug), bound to this conversation.
-Messaging, files and raw HTTP are reachable only by evaluating an existing
-module function that wraps them. If the person asks for an unavailable feature,
-say so plainly instead of pretending it happened."#
+Messaging, files and raw HTTP are reachable by awaiting the runtime builtin in a
+run block, or by evaluating an existing module function that wraps them. If the
+person asks for an unavailable feature, say so plainly instead of pretending it
+happened."#
         .to_string()
 }
 
@@ -267,5 +299,27 @@ mod tests {
             "Do not trawl another person's private chat", "contribution\nmemberships"] {
             assert!(takeover.contains(guidance), "missing guidance: {guidance}");
         }
+    }
+
+    /// #129: the documented `run` example is the annotated form and is admitted as
+    /// written; the unannotated form a model tends to write first is not.
+    #[test]
+    fn the_run_example_in_the_prompt_is_admitted_by_the_frontend() {
+        for prompt in [native_tool_prompt("main", false), native_tool_prompt("telegram:1", true)] {
+            assert!(prompt.contains("inspect, mutate, test, evaluate, run,"), "{prompt}");
+            assert!(prompt.contains(RUN_EXAMPLE), "{prompt}");
+            assert!(prompt.contains("text: str = await file_read(\"/tmp/x.txt\")"));
+            for builtin in crate::builtins::program_effects::program_changing_builtins() {
+                assert!(prompt.contains(builtin), "{builtin}");
+            }
+        }
+        let scope = crate::reserved_names::RUN_SCOPE;
+        let program = crate::ast::Program::default();
+        crate::python_frontend::preflight_block(RUN_EXAMPLE, scope).unwrap();
+        crate::python_frontend::lower_block_with_program(RUN_EXAMPLE, scope, "run_block", &program).unwrap();
+        let unannotated = RUN_EXAMPLE.replace(": str", "").replace(": int", "");
+        let error = crate::python_frontend::preflight_block(&unannotated, scope).err().unwrap();
+        assert!(error.message.contains("`text: str = await file_read(path)`"), "{error}");
+        assert!(native_takeover_mechanics().contains("run block"));
     }
 }

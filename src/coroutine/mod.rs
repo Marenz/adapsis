@@ -60,6 +60,7 @@ mod http_policy;
 #[cfg(test)]
 mod http_policy_tests;
 mod matching;
+mod program_freeze;
 mod task_status;
 mod runtime_errors;
 pub(crate) use task_status::host_only;
@@ -290,7 +291,9 @@ pub enum IoRequest {
         task: String,
         reply: oneshot::Sender<Result<String>>,
     },
-    Spawn { function_name: String, args: Vec<Value>, reply: oneshot::Sender<Result<TaskId>> },
+    /// `program_frozen`: the spawning handle's Program freeze, inherited by the task
+    /// (`CoroutineHandle::for_spawned_task`). Runtime-originated spawns pass `false`.
+    Spawn { function_name: String, args: Vec<Value>, program_frozen: bool, reply: oneshot::Sender<Result<TaskId>> },
     HttpGet { url: String, reply: oneshot::Sender<Result<String>> },
     HttpPost { url: String, body: String, content_type: String, reply: oneshot::Sender<Result<String>> },
     /// HTTP POST that returns the response as a binary Attachment (for audio/image downloads).
@@ -971,24 +974,14 @@ pub struct CoroutineHandle {
     /// route handlers, `+startup` tasks and CLI evaluation — identity-scoped
     /// builtins refuse rather than guess in that case.
     turn: Option<TurnIdentity>,
-}
-
-/// Stringify a call argument for mock/stub matching (issue #7).
-///
-/// For `Value::String` this returns the **raw content** (no surrounding Display
-/// quotes), so patterns match what the user actually wrote — and so anchored
-/// exact patterns (`^...$`) work. Other value kinds use their `Display` form.
-/// Substring patterns are unaffected (the quote chars were never their target).
-fn mock_arg_string(arg: &Value) -> String {
-    match arg {
-        Value::String(s) => s.as_ref().clone(),
-        other => format!("{other}"),
-    }
+    /// Set for a native `run` block (#129): program-changing builtins are refused at
+    /// dispatch. Travels with every clone of the handle and into tasks it spawns.
+    program_frozen: bool,
 }
 
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None, program_frozen: false }
     }
 
     pub fn new_with_task(
@@ -997,27 +990,27 @@ impl CoroutineHandle {
         registry: TaskRegistry,
         snapshot_registry: TaskSnapshotRegistry,
     ) -> Self {
-        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None, turn: None }
+        Self { io_tx, task_id: Some(task_id), task_registry: Some(registry), snapshot_registry: Some(snapshot_registry), mocks: None, stubs: None, turn: None, program_frozen: false }
     }
 
     /// Create a mock handle for testing — no real IO, returns mock responses.
     #[allow(dead_code)]
     pub fn new_mock(mocks: Vec<crate::session::IoMock>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, program_frozen: false }
     }
 
     /// Create a mock handle with function stubs for testing.
     pub fn new_mock_with_stubs(mocks: Vec<crate::session::IoMock>, stubs: Vec<crate::session::FunctionStub>) -> Self {
         let (tx, _) = mpsc::channel(1);
-        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs), turn: None }
+        Self { io_tx: tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: Some(stubs), turn: None, program_frozen: false }
     }
 
     /// Create a handle with mocks AND a real IO sender — mocks are checked first,
     /// unmatched operations fall through to real IO via the sender.
     #[cfg(test)]
     pub fn new_mock_with_sender(mocks: Vec<crate::session::IoMock>, io_tx: mpsc::Sender<IoRequest>) -> Self {
-        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None }
+        Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: Some(mocks), stubs: None, turn: None, program_frozen: false }
     }
 
     /// Bind this handle to the conversational turn it executes for.
@@ -1167,7 +1160,7 @@ impl CoroutineHandle {
             return Ok(None);
         };
 
-        let arg_strs: Vec<String> = args.iter().map(mock_arg_string).collect();
+        let arg_strs: Vec<String> = args.iter().map(matching::mock_arg_string).collect();
         let arg_str = arg_strs.join(" ");
         'mock_loop: for mock in mocks {
             if mock.operation != op {
@@ -1204,7 +1197,7 @@ impl CoroutineHandle {
         let Some(stubs) = &self.stubs else {
             return Ok(None);
         };
-        let arg_strs: Vec<String> = args.iter().map(mock_arg_string).collect();
+        let arg_strs: Vec<String> = args.iter().map(matching::mock_arg_string).collect();
         let arg_str = arg_strs.join(" ");
         'stub_loop: for stub in stubs {
             if stub.function_name != func_name {
@@ -1233,6 +1226,7 @@ impl CoroutineHandle {
     /// This is called from the synchronous evaluator, so we use block_on
     /// within a spawn_blocking context.
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
+        self.check_program_frozen(op)?;
         self.check_guest_tool(op, args).inspect_err(|e| { crate::error_journal::record(crate::error_journal::Category::Refusal, "guest_tool", e); })?;
         if op != "mock_set" && op != "mock_clear" {
             if let Some(result) = self.try_mock_io(op, args, false)? {

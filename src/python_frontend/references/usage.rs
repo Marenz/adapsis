@@ -39,6 +39,17 @@ pub(in crate::python_frontend) fn collect(
     Ok(usage)
 }
 
+/// An ad-hoc statement block has no parameters and declares nothing: every name starts
+/// unbound, exactly as at the first line of a parameterless function body.
+pub(in crate::python_frontend) fn collect_block(
+    cx: &Context<'_>,
+    body: &[py::Stmt],
+) -> Result<Usage, Diagnostic> {
+    let mut usage = Usage::default();
+    usage.block(cx, body, &mut HashSet::new())?;
+    Ok(usage)
+}
+
 impl Usage {
     fn block(
         &mut self,

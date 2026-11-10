@@ -155,6 +155,7 @@ fn collect(
                 function_name,
                 args,
                 reply,
+                ..
             } => {
                 assert_eq!(function_name, "TelegramBot.process_update");
                 drop(reply);

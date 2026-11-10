@@ -53,6 +53,36 @@ pub fn eval_declared_function_unframed(
     )
 }
 
+/// The tree-walker environment of an async entry point: shared slots materialized from
+/// the Program and the coroutine handle that services every `+await`. One construction
+/// for named-function evaluation and ad-hoc blocks, so both reach IO the same way.
+pub(super) fn async_tree_env(
+    program: &ast::Program,
+    handle: crate::coroutine::CoroutineHandle,
+) -> Env {
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
+    env.populate_shared_from_program(program);
+    env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    env
+}
+
+/// Execute the statements of an ad-hoc block (#129) that is NOT declared in `program`.
+///
+/// This is the raw named-block entry lifecycle blocks use: a module frame for `+shared`
+/// resolution and no declared-return contract, so the value of `return` comes back as
+/// written and a language failure (failed check, propagated Err) stays an error. It always
+/// runs on the tree-walker: the only tier that executes statements without a Program
+/// entry, and the one whose callees keep `Env`-based shared access.
+pub fn eval_detached_block(
+    program: &ast::Program,
+    frame: &str,
+    body: &[ast::Statement],
+    handle: crate::coroutine::CoroutineHandle,
+) -> Result<Value> {
+    let mut env = async_tree_env(program, handle);
+    super::eval_function_body_named(program, frame, body, &mut env)
+}
+
 pub(super) fn invoke(
     program: &ast::Program,
     name: &str,

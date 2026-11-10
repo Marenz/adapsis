@@ -81,6 +81,8 @@ mod condition_tier_tests;
 mod telegram_port_tests;
 #[cfg(test)]
 mod task_domain_tests;
+#[cfg(test)]
+mod block_tests;
 
 use rustpython_parser::{ast as py, ast::Ranged, Parse};
 
@@ -90,8 +92,8 @@ pub use printer::print_module;
 pub use printer::print_type;
 pub use module_source::{lower_python_module, print_python_module, print_python_module_with_ledger, LoweredPythonModule, QualificationLedger};
 pub use runtime_arguments::validate_runtime_arguments;
-pub use runtime_arguments::validate_entry_await_contract;
-pub use references::{NativeReferences, resolve_native_references, retain_native_dependencies, check_constructor_environment};
+pub use runtime_arguments::{validate_await_contract_from, validate_entry_await_contract};
+pub use references::{NativeReferences, resolve_native_references, retain_native_dependencies, check_constructor_environment, check_constructor_environment_from};
 pub use lower::Preflight as NativePreflight;
 pub(crate) use references::COLLISION as CONSTRUCTOR_ROLE_ERROR;
 pub(crate) use call_sites::runtime_shadowed;
@@ -176,6 +178,15 @@ pub fn preflight_module(source: &str, module: &str) -> Result<lower::Preflight, 
 /// The caller must pass only authority-filtered runtime signatures. Native
 /// dispatch does this after checking all direct source references.
 pub fn lower_module_with_program(source: &str, module: &str, program: &crate::ast::Program) -> Result<LoweredSource, Diagnostic> {
+    let signatures = scope_signatures(program, module);
+    let types = types::catalog_from_program(program);
+    let shared = types::module_shared_vars(program, module);
+    lower::module_with_signatures(source, module, signatures, &types, &shared, true)
+}
+
+/// Qualified signatures of the supplied program plus bare spellings for `module`'s own
+/// functions: the name resolution a declaration inside `module` gets.
+fn scope_signatures(program: &crate::ast::Program, module: &str) -> std::collections::HashMap<String, expressions::Signature> {
     let mut signatures = std::collections::HashMap::new();
     printer::collect_signatures(&program.modules, "", &mut signatures);
     let prefix = format!("{module}.");
@@ -183,9 +194,24 @@ pub fn lower_module_with_program(source: &str, module: &str, program: &crate::as
         name.strip_prefix(&prefix).filter(|name| !name.contains('.')).map(|name| (name.to_string(), signature.clone()))
     }).collect();
     signatures.extend(local);
+    signatures
+}
+
+/// Program-free structural preflight of an ad-hoc statement block (#129). `scope` is the
+/// module whose names resolve bare; the same authorization contract as
+/// [`preflight_module`] applies to the returned references.
+pub fn preflight_block(source: &str, scope: &str) -> Result<lower::Preflight, Diagnostic> {
+    lower::block::preflight(source, scope)
+}
+
+/// Lower an ad-hoc statement block as the body of ONE parameterless function `function`
+/// inside `scope`. The caller must pass only authority-filtered runtime signatures, and
+/// must never apply the returned declaration to a Program: it exists to be checked and
+/// executed once.
+pub fn lower_block_with_program(source: &str, scope: &str, function: &str, program: &crate::ast::Program) -> Result<LoweredSource, Diagnostic> {
     let types = types::catalog_from_program(program);
-    let shared = types::module_shared_vars(program, module);
-    lower::module_with_signatures(source, module, signatures, &types, &shared, true)
+    let shared = types::module_shared_vars(program, scope);
+    lower::block::lower(source, scope, function, scope_signatures(program, scope), &types, &shared)
 }
 
 struct Context<'a> {

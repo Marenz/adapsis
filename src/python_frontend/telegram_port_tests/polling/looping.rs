@@ -231,6 +231,7 @@ fn collect(
                 function_name,
                 args,
                 reply,
+                ..
             } => {
                 drop(reply);
                 let args = args

@@ -6,6 +6,8 @@ use crate::parser as p;
 use rustpython_parser::ast as py;
 use std::collections::{HashMap, HashSet};
 
+pub(super) mod block;
+
 pub(super) fn module(source: &str, module: &str) -> Result<LoweredSource, Diagnostic> {
     module_with_signatures(
         source,
@@ -37,21 +39,7 @@ pub(super) fn module_with_signatures(
     let catalog = collect_module_catalog(&cx, &items, signatures, types, program_shared)?;
     if require_resolved {
         let references = preflight(source, module)?;
-        for reference in references.references {
-            if !catalog.signatures.contains_key(&reference) {
-                return Err(cx.error(0, format!("Python callable `{reference}` has no authorized supported signature; declare the target first")));
-            }
-        }
-        for name in references.local_calls {
-            let target = format!("{module}.{name}");
-            if !catalog.signatures.contains_key(&target)
-                && super::types::variant_payloads(&catalog.types, &name, module)
-                    .map_err(|message| cx.error(0, message))?
-                    .is_none()
-            {
-                return Err(cx.error(0, format!("Python callable `{target}` has no authorized supported signature; declare the target first")));
-            }
-        }
+        require_resolved_references(&cx, &references, &catalog.signatures, &catalog.types)?;
     }
     validate_shared_default_types(&cx, &items, &catalog)?;
     let body = lower_module_items(&cx, &items, &catalog)?;
@@ -62,6 +50,32 @@ pub(super) fn module_with_signatures(
     })];
     let source_map = suite.iter().map(|stmt| cx.span(stmt, 0)).collect();
     cx.finish(operations, source_map)
+}
+
+/// Every direct call reference must have an authorized signature (or be a constructor of
+/// the scope's own union) before strict lowering runs. Shared by module and block lowering.
+fn require_resolved_references(
+    cx: &Context<'_>,
+    references: &Preflight,
+    signatures: &HashMap<String, Signature>,
+    types: &TypeCatalog,
+) -> Result<(), Diagnostic> {
+    for reference in &references.references {
+        if !signatures.contains_key(reference) {
+            return Err(cx.error(0, format!("Python callable `{reference}` has no authorized supported signature; declare the target first")));
+        }
+    }
+    for name in &references.local_calls {
+        let target = format!("{}.{name}", cx.module);
+        if !signatures.contains_key(&target)
+            && super::types::variant_payloads(types, name, cx.module)
+                .map_err(|message| cx.error(0, message))?
+                .is_none()
+        {
+            return Err(cx.error(0, format!("Python callable `{target}` has no authorized supported signature; declare the target first")));
+        }
+    }
+    Ok(())
 }
 
 fn collect_module_items<'a>(
@@ -395,7 +409,6 @@ pub(super) fn preflight(source: &str, module: &str) -> Result<Preflight, Diagnos
     let mut names = HashSet::new();
     let mut references = Vec::new();
     let mut type_references = Vec::new();
-    let mut local_calls = Vec::new();
     let mut declared_types = Vec::new();
     let mut declared_functions = Vec::new();
     for (index, stmt) in suite.iter().enumerate() {
@@ -442,6 +455,20 @@ pub(super) fn preflight(source: &str, module: &str) -> Result<Preflight, Diagnos
             "module submission requires at least one annotated function, type or shared declaration",
         ));
     }
+    let usage = super::references::usage::collect(&cx, &suite)?;
+    Ok(assemble_preflight(references, type_references, declared_types, declared_functions, usage))
+}
+
+/// Split bare candidates from qualified references and attach the source-only value usage.
+/// Shared by module submissions and ad-hoc blocks (`block.rs`).
+fn assemble_preflight(
+    mut references: Vec<String>,
+    mut type_references: Vec<String>,
+    declared_types: Vec<p::TypeDecl>,
+    declared_functions: Vec<String>,
+    usage: super::references::usage::Usage,
+) -> Preflight {
+    let mut local_calls = Vec::new();
     // Bare candidates carry no fabricated function role. Classification against
     // existing target-module declarations happens only after authority checks.
     references.retain(|reference| {
@@ -454,7 +481,6 @@ pub(super) fn preflight(source: &str, module: &str) -> Result<Preflight, Diagnos
     });
     local_calls.sort();
     local_calls.dedup();
-    let usage = super::references::usage::collect(&cx, &suite)?;
     references.extend(usage.namespaces);
     let mut value_references: Vec<_> = usage.values.into_iter().collect();
     let mut bare_calls: Vec<_> = usage.calls.into_iter().collect();
@@ -464,7 +490,7 @@ pub(super) fn preflight(source: &str, module: &str) -> Result<Preflight, Diagnos
     references.dedup();
     type_references.sort();
     type_references.dedup();
-    Ok(Preflight {
+    Preflight {
         references,
         type_references,
         local_calls,
@@ -472,7 +498,7 @@ pub(super) fn preflight(source: &str, module: &str) -> Result<Preflight, Diagnos
         declared_functions,
         value_references,
         bare_calls,
-    })
+    }
 }
 
 impl<'a> Definition<'a> {
@@ -578,6 +604,7 @@ impl<'a> Definition<'a> {
             env: HashMap::new(),
             seen: HashSet::new(),
             result: sig.result.clone(),
+            infer_result: false,
             effects: &sig.effects,
         };
         let mut params = Vec::new();
@@ -622,6 +649,7 @@ impl<'a> Definition<'a> {
             env: HashMap::new(),
             seen: HashSet::new(),
             result: sig.result.clone(),
+            infer_result: false,
             effects: &sig.effects,
         };
         let (doc, stmts) = match self.body.first().and_then(super::docstring) {
@@ -841,6 +869,8 @@ struct Lower<'a, 'b> {
     env: HashMap<String, Ty>,
     seen: HashSet<String>,
     result: Ty,
+    /// Ad-hoc blocks only (`block.rs`): the first typed `return` fixes `result`.
+    infer_result: bool,
     effects: &'a [String],
 }
 
@@ -902,6 +932,10 @@ impl Lower<'_, '_> {
             py::Stmt::Return(r) => {
                 let value = r.value.as_deref().ok_or_else(|| self.cx.at(s, "bare return is unsupported; runtime has no None/unit value"))?;
                 let (expr, ty) = self.expressions().lower(value)?;
+                if self.infer_result {
+                    block::infer_result(self, &ty, value)?;
+                    return Ok(p::Operation::Return(p::ReturnDecl { expr }));
+                }
                 let expected = super::types::resolve_ty(self.types, &self.result).map_err(|e| self.cx.at(value, e))?;
                 let actual = super::types::resolve_ty(self.types, &ty).map_err(|e| self.cx.at(value, e))?;
                 if !super::result_returns::implicit_inner_matches(&expected, &actual) {
@@ -1012,6 +1046,9 @@ impl Lower<'_, '_> {
         let py::Expr::Name(n) = &a.targets[0] else {
             return Err(self.cx.at(a, "assignment target must be a simple existing name; list mutation/unpacking is unsupported"));
         };
+        if matches!(a.value.as_ref(), py::Expr::Await(_)) {
+            return Err(self.cx.at(a, super::surface::UNANNOTATED_AWAIT));
+        }
         let expected = self
             .env
             .get(n.id.as_str())
@@ -1108,6 +1145,9 @@ impl Lower<'_, '_> {
 
     /// A bare expression statement must call a reserved source/event helper.
     fn source_event_statement(&self, e: &py::StmtExpr) -> Result<p::Operation, Diagnostic> {
+        if matches!(e.value.as_ref(), py::Expr::Await(_)) {
+            return Err(self.cx.at(e, super::surface::BARE_AWAIT));
+        }
         let py::Expr::Call(c) = e.value.as_ref() else {
             return Err(self
                 .cx

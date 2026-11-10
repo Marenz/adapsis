@@ -93,6 +93,7 @@ async fn dispatch_conversation_callback(
         .send(coroutine::IoRequest::Spawn {
             function_name,
             args,
+            program_frozen: false,
             reply: tx,
         })
         .await
@@ -1217,7 +1218,7 @@ async fn main() -> Result<()> {
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
-                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
+                        coroutine::IoRequest::Spawn { function_name, args, program_frozen, reply } => {
                             // Register the task
                             let task_id = rt_for_id.next_task_id();
                             let task_info = coroutine::TaskInfo {
@@ -1257,7 +1258,7 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
+                                let handle = coroutine::CoroutineHandle::for_spawned_task(sender, task_id, registry.clone(), snap_reg, program_frozen);
                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 // Bind args to params
@@ -1633,7 +1634,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
-                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
+                        coroutine::IoRequest::Spawn { function_name, args, program_frozen, reply } => {
                             let task_id = rt_for_id.next_task_id();
                             let task_info = coroutine::TaskInfo {
                                 id: task_id,
@@ -1675,7 +1676,7 @@ async fn main() -> Result<()> {
                                 );
                                 ctx.install();
 
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
+                                let handle = coroutine::CoroutineHandle::for_spawned_task(sender, task_id, registry.clone(), snap_reg, program_frozen);
                                 let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
                                 env.populate_shared_from_program(&program);
                                 // Set shared runtime so +shared vars resolve from runtime state

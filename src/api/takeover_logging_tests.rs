@@ -82,6 +82,34 @@ async fn native_compaction_shape_error_is_redacted_in_both_sinks() {
     assert!(harness.graph.episode_summaries(context, 6).unwrap().is_empty());
 }
 
+/// #129/#88: a `run` block's source and result are content. Through a complete native
+/// takeover turn with a `--log-file`, neither reaches stdout, stderr or the log file by
+/// default; the model still receives both results in its tool messages.
+#[tokio::test]
+async fn native_run_source_and_result_stay_out_of_the_journal_and_the_log_file() {
+    if captured("api::takeover_native::tests::logging::native_run_source_and_result_stay_out_of_the_journal_and_the_log_file",
+        "CANARY_RUN_TURN", "run-error") { return; }
+    let mut harness = Harness::new(true);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("activity.log");
+    harness.log_file = Some(Arc::new(tokio::sync::Mutex::new(
+        tokio::fs::File::create(&path).await.unwrap())));
+    let provider = provider(vec![
+        tool("value", "run", json!({"source": "text: str = \"CANARY_RUN_TURN_SOURCE\"\nreturn concat(text, \"_RESULT\")\n"})),
+        tool("failure", "run", json!({"source": "check(\"probe\", 1 > 2, \"CANARY_RUN_TURN_ERROR\")\nreturn 1\n"})),
+        response("Ran both.", vec![call("done", "finish", json!({}))]),
+    ]).await;
+    assert_eq!(harness.turn(&provider, "telegram:group:-88010", ADMIN, "run it").await, "Ran both.");
+    let requests = provider.requests.lock().unwrap();
+    let delivered = requests[2]["messages"].to_string();
+    assert!(delivered.contains("CANARY_RUN_TURN_SOURCE_RESULT"), "{delivered}");
+    assert!(delivered.contains("CANARY_RUN_TURN_ERROR"), "{delivered}");
+    let log = tokio::fs::read_to_string(path).await.unwrap();
+    // The takeover log file carries user/ai-text entries only; tool content never.
+    assert!(!log.contains("CANARY_RUN_TURN"), "{log}");
+    assert_eq!(log.contains("Ran both."), crate::logging::content(), "{log}");
+}
+
 #[tokio::test]
 async fn native_provider_error_feeds_the_runtime_error_journal() {
     let last = |text: &str| serde_json::from_str::<Value>(text).unwrap();

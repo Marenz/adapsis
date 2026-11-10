@@ -1,5 +1,12 @@
 use super::source::{ManagedSources, MANIFEST_FILE};
 
+impl super::LibraryState {
+    /// Test-only view of the first-writer-wins baseline (module name -> source hash).
+    pub(crate) fn file_hashes_for_tests(&self) -> std::collections::HashMap<String, String> {
+        self.file_hashes.lock().unwrap().clone()
+    }
+}
+
 fn assert_retained_policy_guard(empty: bool, dangling: bool) {
     let dir = python_library();
     if empty {

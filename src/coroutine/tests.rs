@@ -942,6 +942,7 @@ fn query_tasks_with_registry() {
         mocks: Some(vec![]),
         stubs: None,
         turn: None,
+        program_frozen: false,
     };
 
     let result = unwrap_string(handle.execute_await("query_tasks", &[]).unwrap());

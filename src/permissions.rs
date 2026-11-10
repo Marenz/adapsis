@@ -155,6 +155,12 @@ impl PermissionConfig {
         let config: Self = toml::from_str(&content).map_err(|e| {
             anyhow::anyhow!("failed to parse permissions file {}: {e}", path.display())
         })?;
+        for (group, modules) in &config.groups {
+            // Unscoped native `run` blocks are authorized at the level of this reserved,
+            // undeclarable scope name; a group entry would silently change that level.
+            anyhow::ensure!(!modules.iter().any(|module| module == crate::reserved_names::RUN_SCOPE),
+                "group {group}: module name {} is reserved and cannot be listed", crate::reserved_names::RUN_SCOPE);
+        }
         for (profile, ops) in &config.guest_profiles {
             anyhow::ensure!(config.model.contains_key(profile), "guest profile {profile} has no model permissions");
             for op in ops {
@@ -352,6 +358,20 @@ mod tests {
         let bad = include_str!("../config/guest-creative.toml").replace("\"web_search\"", "\"shell_exec\"");
         std::fs::write(file.path(), bad).unwrap();
         assert!(PermissionConfig::load(file.path()).unwrap_err().to_string().contains("unsupported tool shell_exec"));
+    }
+
+    /// #129: unscoped native `run` blocks are authorized at the level of the reserved,
+    /// undeclarable scratch scope; a group entry for that name would silently change it.
+    #[test]
+    fn the_run_scratch_scope_cannot_be_listed_in_a_group() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let scope = crate::reserved_names::RUN_SCOPE;
+        std::fs::write(file.path(), format!("[groups]\ncore = [\"Bot\", \"{scope}\"]\n[model.m]\ncore = \"write\"\n")).unwrap();
+        let error = PermissionConfig::load(file.path()).unwrap_err().to_string();
+        assert!(error.contains("group core") && error.contains(scope) && error.contains("reserved"), "{error}");
+        std::fs::write(file.path(), "[groups]\ncore = [\"Bot\"]\n[model.m]\ncore = \"write\"\n").unwrap();
+        let config = PermissionConfig::load(file.path()).unwrap();
+        assert_eq!(config.group_for_module(scope), "user");
     }
 
     #[test]

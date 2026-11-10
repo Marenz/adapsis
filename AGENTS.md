@@ -823,6 +823,77 @@ replaces that branch with one composer.
   semantics, so a corrected error can coexist with `completed: true`.
   The main conversation's permission profile intersects the active model per
   group in a pinned turn snapshot; an override can only narrow execution.
+- **Native `run`: one ad-hoc Python block, executed once (#129, DESIGN L2).**
+  `{"source", "module"?}`; offered exactly where `mutate` is (write-capable, non-guest
+  HTTP and takeover turns). It replaces the role of `!eval`/top-level statements.
+  `api/native_tools/run.rs` owns it; the pieces it shares must stay shared:
+  - **Lowering** (`python_frontend/lower/block.rs`): the source is parsed AS WRITTEN (no
+    synthetic `def`, so positions are exact; rustpython-parser 0.4.0 accepts module-level
+    `return`/`await`) and lowered by the unchanged `surface`/`usage`/`Lower` statement
+    rules as the body of one parameterless function with effects io, fail, mut, async.
+    The first typed `return` fixes the result type (`Lower.infer_result`), later returns
+    must match, falling off the end is allowed, and the plain-T-under-Result rule (G7) is
+    NOT applied. `x = await f()` and a bare `await f()` are refused with one text each
+    that shows the annotated form (`surface::UNANNOTATED_AWAIT`/`BARE_AWAIT`); the texts
+    are the shared frontend's, so `mutate` function bodies get them too.
+  - **Admission** = the Python `mutate` admission: `frontend::admit_python` is the one
+    signature-aware path (authorized catalog, reference roles, type-binding guard,
+    `validate_mutate_ops`), `authorize_declarations`/`authored::declarations` the one
+    authorization and runtime-target check, and `validator::detached_module_function`
+    (`validator/detached.rs`, also used by `apply_module`) the validator rules including
+    the reserved `__` prefix. Plus Python evaluate's reachable-graph checks
+    (`validate_await_contract_from`, `check_constructor_environment_from`). Not applied:
+    evaluate's whole-program builtin-shadow check (per-reference rule, as for mutate).
+    Never add a check to `mutate` without it reaching `run` through these helpers.
+  - **Scope.** `module: "M"` resolves M's names bare and needs Write on M (the block is
+    M's code, it can assign M's `+shared` variables). Without `module` the scope is
+    `reserved_names::RUN_SCOPE` (`RunToolScratch`): user functions are `Module.function`,
+    and the Write level of an unlisted module is required. `validator::apply_module`
+    refuses to declare a module of that name (every declaration path passes it), an
+    unscoped run is refused if a session file carries one anyway, and
+    `PermissionConfig::load` refuses the name in `[groups]` (a group entry would change
+    the level unscoped runs need).
+  - **Execution**: `execute/io_eval.rs::evaluate_with_io` is the blocking task native
+    `evaluate` uses (EvalContext, `CoroutineHandle::new(sender).with_turn(config.turn)`),
+    then `eval::eval_detached_block`: the raw named-block entry of lifecycle blocks, always
+    the tree-walker, no invocation normalization (the `return` value as written; a failed
+    check or propagated Err is an error, `success: false`). Every IO-boundary guard is
+    downstream of that handle and unchanged.
+  - **Nothing is persisted, and the Program is frozen.** The declaration never enters a
+    Program (there is nothing to roll back on error, panic or refusal),
+    `apply_operations_to_tiers_async` is never called (no library write, mutation, replay
+    record, retest or history entry) and the Program is never written back. The
+    program-changing builtins are ONE classification, `builtins/program_effects.rs` (also
+    used by the evaluator; its source-scan test fails for an unclassified
+    `get_shared_program_mut()` user), enforced twice:
+    a direct call is refused at admission, and the block's handle is frozen
+    (`CoroutineHandle::with_program_frozen`, `coroutine/program_freeze.rs`), so
+    `execute_await` refuses those builtins FIRST, before arguments, the Program wrapper,
+    a `+shared` slot, library hashes or any file are touched. The callee sees an ordinary
+    builtin error. The flag is a handle field: it travels with every clone (nested calls,
+    user awaits, `run_module_startups`) and through `IoRequest::Spawn { program_frozen }`
+    into spawned tasks; every IO loop must build task handles with
+    `CoroutineHandle::for_spawned_task`. NOT frozen, because the runtime gives them a
+    handle of their own: the nested conversation of `llm_takeover` (own authority), reply
+    callbacks started by `conversation_notify`, and timer/source handlers a called
+    function registers. Backstop: `run::same_program` (pointer identity of every
+    declaration) turns any difference into `success: false`. Runtime state changed through
+    called functions (`+shared`, routes, roadmap, mocks) persists exactly as under evaluate.
+  - Result cap `RUN_MAX_OUTPUT_CHARS` = 100,000 characters with
+    `…[truncated: N of M characters omitted]` and envelope `truncated`/`omitted_chars`.
+    There is no `returned` field: the evaluator's None is its "no value" marker, so a
+    block that returns it and a block without return are the same empty success.
+    Source/argument caps are the native 32,000/64,000 bytes. No test gate, no wall-clock
+    timeout (#131). Logging follows #88: result and errors only behind
+    `ADAPSIS_LOG_CONTENT=1`, the source is never logged; the training log records the
+    batch like any native tool.
+  - Still allowed from a block (owner decision, tracked in #132 and #129): `llm_set_model`
+    (the model name is the permission-profile key) and `file_read` of any file the service
+    user can read.
+  - Not fixed here: a function body may still await `mutate(...)` etc. without a
+    per-module Write check, and `evaluate` writes that back.
+  Tests: `cargo test --release block_tests` (frontend), `run_` (tool, freeze, turn,
+  takeover), `program_effects`, `program_freeze`.
 - **Native takeover turns (#85).** With the native protocol opted in (see above),
   `handle_llm_takeover`
   (Telegram DMs/groups) uses the native protocol when the speaker's pinned snapshot
