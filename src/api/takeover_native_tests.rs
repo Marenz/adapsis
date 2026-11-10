@@ -646,3 +646,36 @@ async fn native_takeover_memory_forget_foreign_and_absent_are_indistinguishable(
     assert!(!round.contains("does not exist"), "{round}");
     assert!(!round.contains("not yours"), "{round}");
 }
+
+/// #68: across real takeover turns the provider-visible history only appends:
+/// each request's messages before the runtime envelope are a byte prefix of the
+/// next request's, and the previous history end carries a cache breakpoint.
+#[tokio::test]
+async fn takeover_history_is_append_only_across_turns_with_turn_boundary_breakpoint() {
+    let harness = Harness::new(true);
+    let outputs: Vec<Value> = (0..4).flat_map(|i| vec![
+        tool(&format!("look{i}"), "inspect", json!({"kind":"symbols"})),
+        response(&format!("answer {i}"), vec![call(&format!("fin{i}"), "finish", json!({}))]),
+    ]).collect();
+    let provider = provider(outputs).await;
+    for i in 0..4 {
+        harness.turn(&provider, "telegram:group:-88068", ADMIN, &format!("question {i}")).await;
+    }
+    let requests = provider.requests.lock().unwrap().clone();
+    // First request of each turn: requests 0, 2, 4, 6.
+    let firsts: Vec<&Value> = requests.iter().step_by(2).collect();
+    assert_eq!(firsts.len(), 4);
+    let strip = |m: &Value| { let mut m = m.clone(); m.as_object_mut().unwrap().remove("cache_control"); m.to_string() };
+    for pair in firsts.windows(2) {
+        let (old, new) = (pair[0]["messages"].as_array().unwrap(), pair[1]["messages"].as_array().unwrap());
+        // Everything but the trailing runtime envelope must be an unchanged prefix.
+        let old_history = &old[..old.len() - 1];
+        for (a, b) in old_history.iter().zip(new.iter()) {
+            assert_eq!(strip(a), strip(b), "history changed between turns");
+        }
+        assert!(new.len() > old.len(), "history grew");
+        // The previous history end is a breakpoint in the next request.
+        let boundary = old_history.iter().rposition(|m| m.get("content").is_some_and(|c| !c.to_string().trim_matches('"').trim().is_empty())).unwrap();
+        assert!(new[boundary].get("cache_control").is_some(), "turn boundary breakpoint missing at {boundary}");
+    }
+}

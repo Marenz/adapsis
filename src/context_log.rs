@@ -26,6 +26,11 @@ pub struct ContextLog {
     history: Vec<ChatMessage>,
     tail: Vec<ChatMessage>,
     current: ChatMessage,
+    /// History length at the previous request of this epoch (#68): its last
+    /// cacheable message carried that request's breakpoint, so marking it again
+    /// guarantees a cache read even when a turn appended more blocks than the
+    /// provider's breakpoint lookback window.
+    turn_boundary: Option<usize>,
 }
 
 impl ContextLog {
@@ -61,7 +66,13 @@ impl ContextLog {
             history: messages,
             tail,
             current,
+            turn_boundary: None,
         }
+    }
+
+    /// Mark the previous request's history end (from [`Epoch::Continued`]).
+    pub fn set_turn_boundary(&mut self, previous_len: usize) {
+        self.turn_boundary = Some(previous_len);
     }
 
     /// Append volatile runtime text. It is always user-role so provider
@@ -94,18 +105,25 @@ impl ContextLog {
             .any(|message| matches!(message.content, ChatContent::Parts(_)))
     }
 
-    /// Consume the log into its provider-facing message order and mark the two
-    /// explicit cache boundaries supported by the gateway's Anthropic adapter.
+    /// Consume the log into its provider-facing message order and mark the
+    /// explicit cache boundaries supported by the gateway's Anthropic adapter:
+    /// the stable prefix, the previous request's history end (turn boundary) and
+    /// the current history end. At most three of the provider's four.
     pub fn into_messages(mut self) -> Vec<ChatMessage> {
         if has_cacheable_content(&self.stable) {
             self.stable = self.stable.with_cache_breakpoint();
         }
-        if let Some(last) = self
-            .history
-            .iter_mut()
-            .rfind(|message| has_cacheable_content(message))
-        {
-            *last = last.clone().with_cache_breakpoint();
+        let last_cacheable = |history: &[ChatMessage]| history.iter().rposition(has_cacheable_content);
+        let last = last_cacheable(&self.history);
+        let boundary = self
+            .turn_boundary
+            .filter(|&n| n < self.history.len())
+            .and_then(|n| last_cacheable(&self.history[..n]));
+        for index in [boundary, last].into_iter().flatten() {
+            let message = &mut self.history[index];
+            if message.cache_control.is_none() {
+                *message = message.clone().with_cache_breakpoint();
+            }
         }
 
         let mut messages = Vec::with_capacity(2 + self.history.len());
@@ -175,6 +193,14 @@ fn has_cacheable_content(message: &ChatMessage) -> bool {
     }
 }
 
+/// Whether `message` is the runtime envelope (tail + current speaker input) that
+/// `ContextLog::into_messages` appends for the current turn.
+pub fn is_runtime_envelope(message: &ChatMessage) -> bool {
+    message.role == ChatRole::User
+        && matches!(&message.content, ChatContent::Parts(parts)
+            if matches!(parts.first(), Some(ChatContentPart::Text { text }) if text == RUNTIME_ENVELOPE_HEADER))
+}
+
 fn is_omitted_history_notice(message: &ChatMessage) -> bool {
     matches!(
         &message.content,
@@ -188,7 +214,8 @@ fn is_omitted_history_notice(message: &ChatMessage) -> bool {
 /// Whether the request continues a cacheable history or starts a new epoch.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Epoch {
-    Continued,
+    /// Append-only continuation; `previous_len` is the prior history length.
+    Continued { previous_len: usize },
     Reset { reason: &'static str },
 }
 
@@ -213,7 +240,7 @@ impl EpochTracker {
         model: &str,
         stable: &str,
         history: &[ChatMessage],
-        compacted: bool,
+        checkpointed: bool,
     ) -> Epoch {
         let stable_hash = hash_bytes(stable.as_bytes());
         let history_hashes = history.iter().map(hash_message).collect::<Vec<_>>();
@@ -221,8 +248,8 @@ impl EpochTracker {
             None => Epoch::Reset {
                 reason: "first turn",
             },
-            Some(_) if compacted => Epoch::Reset {
-                reason: "conversation compacted",
+            Some(_) if checkpointed => Epoch::Reset {
+                reason: "history checkpoint (budget)",
             },
             Some(previous) if previous.model != model => Epoch::Reset {
                 reason: "model changed",
@@ -240,7 +267,7 @@ impl EpochTracker {
                 reason: "stable prefix changed without a declared key change",
             },
             Some(previous) if history_hashes.starts_with(&previous.history_hashes) => {
-                Epoch::Continued
+                Epoch::Continued { previous_len: previous.history_hashes.len() }
             }
             Some(_) => Epoch::Reset {
                 reason: "history checkpoint changed",
@@ -322,10 +349,10 @@ pub fn observe_epoch(
     model: &str,
     stable: &str,
     history: &[ChatMessage],
-    compacted: bool,
+    checkpointed: bool,
 ) -> Epoch {
     match tracker().lock() {
-        Ok(mut tracker) => tracker.observe(context, key, model, stable, history, compacted),
+        Ok(mut tracker) => tracker.observe(context, key, model, stable, history, checkpointed),
         Err(_) => Epoch::Reset {
             reason: "epoch tracker poisoned",
         },
@@ -465,7 +492,7 @@ mod tests {
         let appended = vec![ChatMessage::user("one"), ChatMessage::assistant("two")];
         assert_eq!(
             tracker.observe("ctx", &key(true, 1), "m1", "stable", &appended, false),
-            Epoch::Continued
+            Epoch::Continued { previous_len: 1 }
         );
         assert_eq!(
             tracker.observe("ctx", &key(false, 1), "m1", "stable", &appended, false),
@@ -482,7 +509,7 @@ mod tests {
         assert_eq!(
             tracker.observe("ctx", &key(false, 1), "m2", "stable", &appended, true),
             Epoch::Reset {
-                reason: "conversation compacted"
+                reason: "history checkpoint (budget)"
             }
         );
         assert_eq!(
@@ -517,6 +544,25 @@ mod tests {
                 reason: "history checkpoint changed"
             }
         );
+    }
+
+    #[test]
+    fn turn_boundary_breakpoint_marks_the_previous_history_end() {
+        let mut history = vec![ChatMessage::system("stable")];
+        for i in 0..40 {
+            history.push(ChatMessage::user(format!("block {i}")));
+        }
+        history.push(ChatMessage::user("current"));
+        let mut log = ContextLog::from_conversation(history);
+        log.set_turn_boundary(10);
+        let messages = log.into_messages();
+        let marked: Vec<usize> = messages.iter().enumerate()
+            .filter(|(_, m)| m.cache_control.is_some()).map(|(i, _)| i).collect();
+        // system, previous end (history[9] = messages[10]) and current end (messages[40]).
+        assert_eq!(marked, vec![0, 10, 40]);
+        let mut log = ContextLog::from_conversation(vec![ChatMessage::system("s"), ChatMessage::user("a"), ChatMessage::user("now")]);
+        log.set_turn_boundary(5);
+        assert_eq!(log.into_messages().iter().filter(|m| m.cache_control.is_some()).count(), 2, "out of range is ignored");
     }
 
     #[test]

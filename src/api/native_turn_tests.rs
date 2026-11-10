@@ -207,6 +207,10 @@ async fn lifecycle(streaming: bool, module: &str) {
     let requests = fixture.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
     assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 5);
+    // #68: the output limit is the generating model's configured limit, not 8192.
+    let expected = crate::model_limits::for_model(requests[0]["model"].as_str().unwrap()).output_tokens;
+    assert!(expected >= 32_000);
+    assert!(requests.iter().all(|r| r["max_tokens"] == expected), "{:?}", requests[0]["max_tokens"]);
     // Regression: an explicit temperature makes claude-opus-5 reject every
     // native turn (400 "temperature is deprecated"); omit it like legacy.
     assert!(

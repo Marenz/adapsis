@@ -11,6 +11,7 @@ mod client_sse;
 mod coroutine;
 mod eval;
 mod error_journal;
+mod model_limits;
 #[cfg(test)]
 mod watchdog_tests;
 mod events;
@@ -2588,20 +2589,16 @@ async fn main() -> Result<()> {
                     }
                     let llm = llm::LlmClient::new_with_model_and_key(&trigger_url, &trigger_model, trigger_key.clone());
 
-                    // Add event as tool message — AI decides whether to act
+                    // The event is a runtime notice in "main"; the request is the
+                    // bounded checkpointed view (#68). AI decides whether to act.
                     let messages = {
                         let mut meta = trigger_meta.lock().unwrap();
-                        let conv = meta.conversations.get_or_create("main");
-                        conv.messages.push(crate::session::ChatMessage {
-                            role: "tool".to_string(),
-                            content: event_message.clone(),
-                            attachments: vec![],
-                            ..Default::default()
-                        });
-                        conv.to_llm_messages()
+                        api::http_context::self_trigger_messages(&mut meta, &event_message, &trigger_model)
                     };
 
-                    match llm.generate(messages).await {
+                    let result = llm.generate(messages).await;
+                    api::http_context::after_llm_call(llm.take_recovered(), &result, &trigger_meta, "main");
+                    match result {
                         Ok(output) => {
                             let code = output.code.clone();
                             if crate::logging::content() {

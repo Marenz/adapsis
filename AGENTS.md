@@ -708,8 +708,8 @@ replaces that branch with one composer.
     are reported as an error and never executed, and the turn stays unconfirmed.
     The incomplete-turn note is reply-only for takeover (HTTP still persists it
     in `main`). Takeover batches go to the
-    context's own conversation without HTTP's `trim(101)`, relying on the bounded
-    view + compaction like legacy. Every non-empty assistant text is also written
+    context's own conversation; no conversation is trimmed any more (#68), the
+    checkpointed view + compaction bound what the model sees. Every non-empty assistant text is also written
     to Ladybug as `agent:kronk`. A Ladybug write failure aborts the turn (`Err`),
     as legacy does. `NativeLoop.generator` keeps the generating model separate
     from the pinned permission model.
@@ -1201,14 +1201,57 @@ schema since day one and was never set:
 - Compaction is non-destructive: raw messages remain forever. The active conversation
   model creates immutable `Episode` summaries and source-backed index `Memory` nodes.
   Failed compaction leaves raw history pending and uses prior episodes plus recent turns.
-- Checkpoint generation times out after 30 seconds and retries at most once per context every
-  15 minutes, so a slow provider cannot block every conversational turn.
-- The transient takeover view keeps up to 60k characters of recent conversation independently
-  of the mandatory system prompt. Subtracting the system-prompt size from this budget can omit
-  the newest user turn when the system prompt alone exceeds the limit.
-- Compaction defaults: 128k model context, 70% trigger, 32k output/tool reserve, and
-  120k-character checkpoint chunks. Override with `ADAPSIS_CONTEXT_TOKENS`,
-  `ADAPSIS_COMPACTION_PERCENT`, and `ADAPSIS_OUTPUT_RESERVE_TOKENS`.
+- **Per-model limits (#68), `src/model_limits.rs`:** context window, output limit, request
+  and chunk-gap timeouts per model, from `ADAPSIS_MODELS_FILE` /
+  `~/.config/adapsis/models.toml`, then sourced built-ins (exact ids; `provider/` prefixes
+  are supported): anthropic claude-opus-5 / opus-5-5 (output 128k MEASURED on opus-5; 1M
+  context from Anthropic /v1/models metadata + context-window docs), sonnet-5 / sonnet-5-5
+  (registry), openai/gpt-6-astra 1.05M/128k (registry). Every built-in needs a source comment (measured error with date,
+  provider metadata/docs or registry); never a guessed value. ChatGPT-route models have no entry
+  except chatgpt/gpt-6-astra, gpt-6-sol, gpt-6-luna and gpt-6.1-sol (872k: Codex metadata
+  max_context_window; 470,030 prompt tokens measured accepted on astra); others use the
+  unknown default `ADAPSIS_CONTEXT_TOKENS` (128k). Estimate: 4 chars/token.
+  Owner decision: the full window is used, no smaller per-context chat budget; costs are
+  controlled by task/turn budgets.
+- **Request body limit:** `max_request_bytes` per model (default `ADAPSIS_MAX_REQUEST_BYTES`
+  or 60 MiB, under the gateway's 64 MiB limit from llm-gateway 332a3b0, deployed
+  2026-11-10; the old gateway rejected bodies above 2 MiB). The view
+  checkpoints on bytes as well as tokens (image base64 counted; images limited to ~30% of
+  the route), recovered tail images are fitted to the remaining headroom, and
+  `OpenAiBackend::send_request` refuses an oversized body before sending
+  (`LlmError::RequestTooLarge`). A provider 413 is not retried and says so.
+- **Self-heal (#68):** a too-large refusal (pre-send, 413, or a provider context-length
+  400) is retried ONCE with `llm::shrink_request` (system prefix + current turn from the last
+  runtime envelope + the newest whole history units that fit half the size), and the caller
+  persists a forced view checkpoint (`http_context::after_llm_call`: only the newest turn
+  stays visible), so a context can never stay stuck. Known tail parts (runtime/authority
+  text, native tool schemas) are measured into the projection; 64 KiB covers the rest.
+- **Timeouts (#68):** streaming requests bound the wait for response headers by the
+  per-model chunk-gap timeout (120 s; `send_streaming_request`, not reqwest's per-request
+  timeout, which would also cut long streams), then the same gap between chunks, plus the
+  derived total; non-streaming requests (fallback, native `complete_turn`, which
+  native takeover uses) cap at 20 min; any timeout is retried at most once. Compaction
+  has its own 5-minute bound.
+- Secondary `system` messages (runtime notifications, agent results) are sent as user-role
+  `[Runtime notice …]` messages; providers hoist system messages ahead of history, which
+  broke the cached prefix. The `!watch` self-trigger stores its event the same way and sends
+  the checkpointed view of `main`, never the full history.
+- **Checkpointed view (#68), `session/conversation_view.rs`:** the model history is
+  append-only and byte-stable between checkpoints. `Conversation.view_start` moves only when
+  the projected request (system + 16k tail allowance + output reserve + history) exceeds
+  85% of the generating model's window, in ONE step down to 50%, preferring a user-turn
+  boundary, never splitting a native batch, never cutting the newest turn. Per-message cap
+  = 1/8 window (deterministic). Images: newest 3 / 20 MB from `image_start`, which jumps to
+  the newest image message on overflow (one break per ~3 images). The omission notice stays
+  in the volatile tail. Persisted history is never trimmed (the old `trim(51/101)` and the
+  64-message / 60k-char view caps are gone). `ContextLog` marks a third cache breakpoint
+  at the previous request's history end (from the epoch tracker), so long turns stay
+  within the provider's breakpoint lookback.
+- Compaction uses the same rule: it starts when uncompacted history passes 85% of the
+  window minus reserved output, folds the oldest part toward 50%, one episode of at most
+  1/8 window per turn, timed out at the model's request timeout, and retries at most once
+  per context every 15 minutes. Compaction changes only the volatile tail, so it is no
+  longer an epoch reset; only a view checkpoint is.
 - `memory_cypher(query)` exposes ACL-filtered, read-only Cypher anchored at
   `MATCH (memory:Memory {id: $memory_id})`. It deliberately rejects query shapes that can
   escape the authorized memory anchor. The principal is **bound to the turn**, not passed
