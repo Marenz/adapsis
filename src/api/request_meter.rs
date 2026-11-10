@@ -1,7 +1,12 @@
 //! Per-request accounting for one conversation (#68).
 //!
 //! A turn's view is built once (`turn_view`, the only place a cold start can
-//! happen); every request of the turn is then measured before it is sent
+//! happen), by a turn that holds the per-context turn lock (`/api/ask`,
+//! `/api/ask-stream` and `llm_takeover` all hold `takeover_context_lock` for the
+//! whole turn), so the per-conversation `TurnProbe` belongs to exactly one turn
+//! at a time. The `!watch` self-trigger holds no lock and is not a user turn: it
+//! builds a plain view and only calibrates bytes-per-token.
+//! Every request of the turn is then measured before it is sent
 //! (`SentRequest::measure`) and accounted when it is answered
 //! (`SentRequest::calibrate`): bytes-per-token, the real runtime tail, the pause
 //! since the previous request, and prompt-cache hit/miss evidence per route.
@@ -94,25 +99,7 @@ impl SentRequest {
         let Ok(mut meta) = meta.lock() else { return };
         let manager = &mut meta.conversations;
         let conv = manager.get_or_create(context);
-        let measured = (!recovered)
-            .then(|| {
-                crate::model_limits::TokenCalibration::measure(
-                    &self.model,
-                    self.text_bytes,
-                    self.images,
-                    usage.accounted_input_tokens(),
-                )
-            })
-            .flatten();
-        if let Some(measured) = measured {
-            eprintln!(
-                "[llm:{context}] token calibration: {} bytes / {} input tokens = {:.2} bytes/token",
-                measured.request_bytes,
-                measured.input_tokens,
-                measured.bytes_per_token()
-            );
-            conv.token_calibration = Some(measured);
-        }
+        self.calibrate_tokens(conv, context, recovered, usage);
         let ratio = conv.bytes_per_token(&self.model);
         let pause_secs = conv.last_request_ms.map(|last| self.started_ms.saturating_sub(last) / 1000);
         if !refused {
@@ -128,9 +115,8 @@ impl SentRequest {
                     .expected_prefix_bytes()
                     .map(|bytes| crate::model_limits::tokens_for_bytes(bytes, ratio));
                 if probe.requests == 0 {
-                    // Only a request built with explicit boundaries (ContextLog)
-                    // wrote the prefix the next turn would read; a `!watch`
-                    // self-trigger request has none and breaks the chain.
+                    // The request wrote the prefix the next turn would read, if
+                    // it was built with explicit boundaries (ContextLog).
                     probe.wrote_prefix = probe.turn_prefix_bytes.is_some();
                     conv.tail_bytes = Some(self.text_bytes.saturating_sub(probe.view_bytes) as u64);
                 }
@@ -147,6 +133,50 @@ impl SentRequest {
             self.started_ms,
         );
         log_cache_metric(context, pause_secs, expected_tokens, usage, outcome, lifetime);
+    }
+
+    /// Bytes-per-token only, for a request that is not part of a user turn (the
+    /// `!watch` self-trigger). Such a request holds no turn lock and carries no
+    /// cache boundaries, so it must not touch the turn accounting: it is not the
+    /// conversation's last request for the pause, measures no runtime tail and
+    /// is no cache evidence.
+    pub(crate) fn calibrate_tokens_only(
+        self,
+        meta: &crate::session::SharedMeta,
+        context: &str,
+        recovered: bool,
+        usage: &crate::llm::LlmUsage,
+    ) {
+        if let Ok(mut meta) = meta.lock() {
+            self.calibrate_tokens(meta.conversations.get_or_create(context), context, recovered, usage);
+        }
+    }
+
+    fn calibrate_tokens(
+        &self,
+        conv: &mut crate::session::Conversation,
+        context: &str,
+        recovered: bool,
+        usage: &crate::llm::LlmUsage,
+    ) {
+        if recovered {
+            return;
+        }
+        let Some(measured) = crate::model_limits::TokenCalibration::measure(
+            &self.model,
+            self.text_bytes,
+            self.images,
+            usage.accounted_input_tokens(),
+        ) else {
+            return;
+        };
+        eprintln!(
+            "[llm:{context}] token calibration: {} bytes / {} input tokens = {:.2} bytes/token",
+            measured.request_bytes,
+            measured.input_tokens,
+            measured.bytes_per_token()
+        );
+        conv.token_calibration = Some(measured);
     }
 }
 

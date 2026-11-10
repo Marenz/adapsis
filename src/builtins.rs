@@ -41,14 +41,14 @@ pub static BUILTINS: &[Builtin] = &[
         name: "char_at",
         aliases: &[],
         short: "get character at index i as String",
-        long: "Returns the character at a 0-based index as a single-character String. Takes (String, Int) and errors if the index is out of bounds.",
+        long: "Returns the character at a 0-based byte index as a single-character String (the same offsets as len and index_of). An index inside a multi-byte character returns that whole character. Takes (String, Int) and errors if the index is out of bounds.",
         category: BuiltinCategory::String,
     },
     Builtin {
         name: "substring",
         aliases: &["substr"],
         short: "get substring from start to end",
-        long: "Returns the slice of a String from start to end. Takes (String, Int, Int); end is capped to the string length, but invalid ranges still error.",
+        long: "Returns the slice of a String from start to end. Takes (String, Int, Int); the indices are byte offsets (the same as len and index_of). end is capped to the string length, but invalid ranges still error. An offset inside a multi-byte character moves down to the start of that character, so cutting text at any offset is safe and substring(s, 0, k) plus substring(s, k, len(s)) is always s.",
         category: BuiltinCategory::String,
     },
     Builtin {

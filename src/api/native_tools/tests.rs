@@ -38,6 +38,8 @@ mod python_input_name_tests;
 mod python_pseudo_field_tests;
 #[path = "python_scalar_tests.rs"]
 mod python_scalar_tests;
+#[path = "python_nesting_tests.rs"]
+mod python_nesting_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

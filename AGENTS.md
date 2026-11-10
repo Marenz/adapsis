@@ -506,6 +506,41 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
   daemon here runs on **3002**, and a bare reqwest failure reads as "this does not
   work" — so a connect/timeout failure now names the flag and the cause chain.
 
+## Untrusted input must not abort the process (#133, #134)
+
+- **Python nesting guard (`python_frontend/nesting.rs`).** `Context::parse` is the only
+  place Python source reaches the rustpython parser, and it runs `nesting::check` first.
+  Lowering, emission, the `.ax` reparse, validation and evaluation all recurse on nesting,
+  and a stack overflow aborts the process. MEASURED 2026-11-10 on a 2 MiB stack (tokio
+  worker / blocking thread): lowering overflows at ≈730 nested calls or blocks and ≈1,270
+  chained operators, evaluating an `elif` chain at ≈660 branches, dropping the parser's
+  tree at ≈15,000–31,000 levels. The guard is a linear lexical scan (no parse, no
+  recursion) that keeps an upper bound of the depth: open brackets + indentation levels +
+  `elif` branches of the open chains + depth-forming tokens since the last separator
+  (operators, `.`, `not and or if else in is for await yield from`; `lambda` is not reset
+  by commas; a closed bracket group counts 1 + the deepest point inside it). Limit
+  `MAX_NESTING` = 100 in total; f-string `{}` fields are bounded at 2,000 bytes per
+  literal (f-strings are never lowered; this protects the parser only). Refusals carry
+  line and column. Repository sources reach 13 levels; `tools/cad_prepare.py` (ordinary
+  Python) 49. Do NOT add a second parse entry point, and do not raise the limit without
+  re-measuring on a 2 MiB stack. Tests: `cargo test --release nesting`. The legacy `.ax`
+  parser has no such guard (it is being removed, DESIGN.md L1/L2). Native tool arguments
+  are capped anyway (`source` 32,000 bytes, arguments 64,000).
+- **String builtins use byte offsets and never split a character.** `substring` moves an
+  offset inside a multi-byte character DOWN to that character's start (both ends, so
+  `substring(s,0,k)` + `substring(s,k,len(s))` is always `s`); `char_at` returns the whole
+  character containing the byte. `eval/strings.rs::floor_char_boundary` is the helper; use
+  it in any new builtin that slices a String by an Int.
+- **Transport operations check their argument count** (`coroutine::transport_min_args`):
+  the arms of `execute_transport_op` index `args` directly. Add new arms to that table.
+- **A panic message never reaches the journal.** Rust slice/index panics quote the value
+  they failed on. `error_journal::panic_hook` (installed in `main`) journals `panic at
+  file:line:column (message of N bytes not recorded)` with one fingerprint per source
+  location; the message goes only to the content-gated diagnostic log. A panicked spawned
+  task is described by `error_journal::describe_join_error`: never format a tokio
+  `JoinError` with `{}` into the journal or the task registry (tokio ≥ 1.4x quotes the
+  panic message there).
+
 ## Runtime error journal & Watchdog
 
 - `src/error_journal.rs` is an in-process ring (500 entries) plus per-fingerprint
@@ -516,8 +551,8 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
   route handler errors and missing handlers (`adapsis_route_dispatch` via
   `record_route_error`: structural — request body (raw or escaped) replaced by
   `<request body>`, then route + first line only, so it does not rely on handler hygiene), spawned-task failures/panics, takeover/native/agent
-  provider errors, session save failures, startup errors, the panic hook (`record_panic`,
-  never blocks) and refusals (shell policy reason only, guest IO boundary). New failure
+  provider errors, session save failures, startup errors, the panic hook (`panic_hook` →
+  `record_panic(location, payload length)`, never blocks, never the message) and refusals (shell policy reason only, guest IO boundary). New failure
   points should call the same API rather than a new channel.
 - Messages are redacted on entry: URLs host-only (`coroutine::host_only`), Telegram tokens
   and long digit-bearing secret runs masked, 1 KiB cap. Never pass request bodies or chat
@@ -1289,6 +1324,13 @@ schema since day one and was never set:
   request `[llm:<ctx>] cache: pause_s=… expected_tokens=… cached_read=… outcome=…
   lifetime_s=… source=…` (metadata only). `checkpointed_view` must be called exactly once
   per turn, before the turn's first request.
+- **Turn accounting belongs to lock-holding turns.** `Conversation.turn_probe` is one per
+  conversation. `ask`, `ask_stream` and `llm_takeover` hold `takeover_context_lock(context)`
+  for the whole turn, so two turns never share it. The `!watch` self-trigger holds no lock
+  and is not a user turn: it builds a plain view (`self_trigger_messages`, no cold start)
+  and calls only `SentRequest::calibrate_tokens_only`. It is not the conversation's last
+  request for the pause, measures no tail and records no cache evidence. A new request
+  path that is not under the turn lock must do the same.
 - **Request body limit:** `max_request_bytes` per model (default `ADAPSIS_MAX_REQUEST_BYTES`
   or 60 MiB, under the gateway's 64 MiB limit from llm-gateway 332a3b0, deployed
   2026-11-10; the old gateway rejected bodies above 2 MiB). The view

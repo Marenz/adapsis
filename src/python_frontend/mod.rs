@@ -5,6 +5,7 @@ mod emit;
 mod ast_equality;
 mod expressions;
 mod lower;
+mod nesting;
 #[cfg(test)]
 mod parity;
 mod printer;
@@ -82,6 +83,8 @@ pub use lower::Preflight as NativePreflight;
 pub(crate) use references::COLLISION as CONSTRUCTOR_ROLE_ERROR;
 pub(crate) use call_sites::runtime_shadowed;
 pub use type_bindings::check_native_type_bindings;
+#[cfg(test)]
+pub(crate) use nesting::MAX_NESTING;
 pub use tests_lower::{lower_input, lower_tests};
 #[cfg(test)]
 pub(crate) use tests_lower::lower_tests_toplevel;
@@ -181,7 +184,11 @@ impl<'a> Context<'a> {
         self.error(u32::from(node.start()) as usize, message)
     }
 
+    /// The ONLY place Python source reaches the parser. The nesting guard runs
+    /// first: the parser's tree, lowering and everything behind it recurse on
+    /// nesting, and a stack overflow aborts the process (#133).
     fn parse(&self) -> Result<py::Suite, Diagnostic> {
+        nesting::check(self.source).map_err(|deep| self.error(deep.offset, deep.message))?;
         py::Suite::parse(self.source, self.module).map_err(|e| {
             self.error(
                 u32::from(e.offset) as usize,

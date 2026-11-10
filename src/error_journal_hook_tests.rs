@@ -69,11 +69,25 @@ fn identical_route_reregistration_at_startup_is_not_journaled() {
 async fn spawned_task_panic_is_journaled_as_task_failure() {
     let before = last_seq();
     let registry: crate::coroutine::TaskRegistry = Default::default();
-    let task = tokio::task::spawn_blocking(|| panic!("journal hook synthetic panic"));
-    crate::monitor_spawned_task(task, registry, 7, "JournalTask.boom".into()).await;
+    registry.lock().unwrap().insert(7, crate::coroutine::TaskInfo {
+        id: 7, function_name: "JournalTask.boom".into(), status: crate::coroutine::WaitReason::Running,
+        started_at: "0".into(),
+    });
+    // tokio's JoinError quotes the panic message; the journal and the task
+    // registry must not (#134).
+    let task = tokio::task::spawn_blocking(|| panic!("journal hook synthetic panic TASK_PANIC_SENTINEL"));
+    crate::monitor_spawned_task(task, registry.clone(), 7, "JournalTask.boom".into()).await;
     let entries = entries_since(before);
     let entry = find(&entries, "task", "JournalTask.boom").expect("task entry");
-    assert!(entry["message"].as_str().unwrap().contains("panicked"), "{entry}");
+    let message = entry["message"].as_str().unwrap();
+    assert_eq!(message, "panicked (message of 48 bytes not recorded; see the panic entry for the location)");
+    assert!(!serde_json::to_string(&entries).unwrap().contains("TASK_PANIC_SENTINEL"));
+    let crate::coroutine::WaitReason::Failed(stored) = registry.lock().unwrap().get(&7).unwrap().status.clone() else { panic!("failed") };
+    assert!(stored.contains("panicked") && !stored.contains("TASK_PANIC_SENTINEL"), "{stored}");
+    // A cancelled task is described without a payload too.
+    let cancelled = tokio::spawn(std::future::pending::<()>());
+    cancelled.abort();
+    assert_eq!(crate::error_journal::describe_join_error(cancelled.await.unwrap_err()), "was cancelled");
 }
 
 #[test]

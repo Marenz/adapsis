@@ -607,3 +607,40 @@ fn cold_start_simulation_paused_chat_versus_active_session() {
     let evidence = routes.evidence(OPUS).unwrap();
     assert!(evidence.hit_count > 400 && evidence.miss_count == 0, "{evidence:?}");
 }
+
+/// The `!watch` self-trigger is not a user turn (review follow-up): it holds no
+/// turn lock and writes no cache boundaries. It never cold-starts, is not the
+/// conversation's last request for the pause, and leaves the accounting of an
+/// `ask` turn in flight untouched; it still calibrates bytes-per-token.
+#[test]
+fn watch_self_trigger_never_touches_the_turn_accounting() {
+    let meta = new_meta();
+    fill(&meta, "main", 200, 6_000); // far over the cold-start size
+    // An `ask` turn on main is in flight: view built, first request answered.
+    let view = start_turn(&meta, "main", OPUS, T0);
+    answer(&meta, "main", OPUS, text_bytes(&view.messages) + 9_000, T0, &usage(10, Some(0), Some(480_000)));
+    let before = with_conv(&meta, "main", |conv| (conv.view_start, conv.last_request_ms, conv.tail_bytes, conv.turn_probe.clone()));
+    assert_eq!((before.1, before.2), (Some(T0), Some(9_000)));
+    assert!(before.3.as_ref().is_some_and(|probe| probe.requests == 1 && probe.wrote_prefix));
+    // A watch event fires three hours later (far past the one-hour lifetime).
+    let messages = crate::api::http_context::self_trigger_messages(&mut meta.lock().unwrap(), "Watcher 'W.f' triggered: 1 -> 2", OPUS);
+    let request = SentRequest { model: OPUS.into(), text_bytes: text_bytes(&messages), images: 0, started_ms: T0 + secs(3 * HOUR) };
+    request.calibrate_tokens_only(&meta, "main", false, &usage(250_000, Some(0), Some(0)));
+    let after = with_conv(&meta, "main", |conv| (conv.view_start, conv.last_request_ms, conv.tail_bytes, conv.turn_probe.clone()));
+    assert_eq!(after, before, "no cold start, not the last request, tail and probe untouched");
+    assert!(meta.lock().unwrap().conversations.cache_lifetimes.is_empty(), "no cache evidence from it");
+    // The bytes-per-token ratio is learned from it all the same.
+    let ratio = with_conv(&meta, "main", |conv| conv.bytes_per_token(OPUS));
+    assert!((ratio - text_bytes(&messages) as f32 / 250_000.0).abs() < 0.01, "{ratio}");
+    // The ask turn's next round is accounted against its own probe as before.
+    answer(&meta, "main", OPUS, text_bytes(&view.messages) + 12_000, T0 + secs(3 * HOUR + 5), &usage(10, Some(480_000), Some(100)));
+    assert_eq!(with_conv(&meta, "main", |conv| conv.turn_probe.clone().unwrap().requests), 2);
+    assert_eq!(with_conv(&meta, "main", |conv| conv.tail_bytes), Some(9_000), "only a turn's first request measures the tail");
+    // The next USER turn measures its pause from the last user-turn request.
+    with_conv(&meta, "main", |conv| conv.push_assistant("done"));
+    assert!(!start_turn(&meta, "main", OPUS, T0 + secs(3 * HOUR + 60)).checkpointed, "55 s after the turn's last request");
+    // A shrunk self-trigger request teaches nothing.
+    let stored = with_conv(&meta, "main", |conv| conv.token_calibration.clone());
+    SentRequest { model: OPUS.into(), text_bytes: 10, images: 0, started_ms: T0 }.calibrate_tokens_only(&meta, "main", true, &usage(900_000, None, None));
+    assert_eq!(with_conv(&meta, "main", |conv| conv.token_calibration.clone()), stored);
+}
