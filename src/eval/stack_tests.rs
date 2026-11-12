@@ -146,3 +146,48 @@ fn on_deep_stack_propagates_values_and_panics() {
     let _guard = runtime.enter();
     assert!(on_deep_stack(|| tokio::runtime::Handle::try_current().is_ok()).unwrap());
 }
+
+/// #96 on the evaluation thread: the JIT's "inside compile" flag, its panic location and
+/// the test seam are per thread, the cache is shared. A compile that panics on the
+/// 64 MiB thread is contained there, journaled once, and leaves the shared cache usable
+/// from the thread that started the evaluation.
+#[test]
+fn jit_compile_panic_on_the_evaluation_thread_is_contained_and_the_cache_stays_usable() {
+    let mut program = ast::Program::default();
+    for operation in parser::parse("+fn probe ()->Int\n  +return 11\n+end\n").unwrap() {
+        crate::validator::apply_and_validate(&mut program, &operation).unwrap();
+    }
+    program.rebuild_function_index();
+    let input = parser::parse_single_expr("{}").unwrap();
+    let cache = new_jit_cache();
+    let (attempts, journaled) = on_deep_stack(|| {
+        let _seam = jit_seam::hook(|| {
+            assert!(jit_contained_panic(Some(std::panic::Location::caller())));
+            panic!("injected JIT compile panic on the evaluation thread (test)")
+        });
+        for _ in 0..3 {
+            let actual = eval_compiled_or_interpreted_cached(&program, "probe", &input, Some(&cache), 1).unwrap();
+            assert_eq!(actual, ("11".into(), false));
+        }
+        assert!(!jit_contained_panic(None), "the flag is cleared after the contained compile");
+        (jit_seam::attempts(), jit_seam::journaled())
+    })
+    .unwrap();
+    assert_eq!((attempts, journaled), (1, 1), "one compile, one journal entry, then the remembered refusal");
+    assert!(!jit_contained_panic(None), "the caller's thread was never inside a compile");
+    assert!(!cache.is_poisoned());
+    // The refusal made on the evaluation thread holds on this one, the next revision is
+    // compiled here, and the evaluation thread then reuses that module.
+    let _seam = jit_seam::hook(|| {});
+    assert_eq!(eval_compiled_or_interpreted_cached(&program, "probe", &input, Some(&cache), 1).unwrap(), ("11".into(), false));
+    assert_eq!(jit_seam::attempts(), 0, "the refused revision was compiled again on another thread");
+    assert_eq!(eval_compiled_or_interpreted_cached(&program, "probe", &input, Some(&cache), 2).unwrap(), ("11".into(), true));
+    assert_eq!(jit_seam::attempts(), 1);
+    let reused = on_deep_stack(|| {
+        let _seam = jit_seam::hook(|| panic!("a cached module must not be compiled again"));
+        let actual = eval_compiled_or_interpreted_cached(&program, "probe", &input, Some(&cache), 2).unwrap();
+        (actual, jit_seam::attempts())
+    })
+    .unwrap();
+    assert_eq!(reused, (("11".into(), true), 0));
+}

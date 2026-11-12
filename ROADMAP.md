@@ -1,5 +1,16 @@
 # AdapsisOS Roadmap
 
+## Restricted run + JIT fix: merged and clean (2026-11-12)
+
+- `d819b0d` restricted `run` for guests and execute-only speakers (adversarial
+  review ACCEPT) and `f09de27` the #96 JIT fix (independent review ACCEPT) are
+  merged on `work/run-tool`. The merge had no conflicts.
+- Gate on the merged tree: 20 consecutive whole-binary runs, 0 `compiled_blob`
+  panics (baseline before the fix: 5 of 20); one full run 2380 passed, only the
+  documented strict Python-parity failure, integration 5/5/4.
+- Not deployed, not wired into the live node. The entry below is the earlier
+  checkpoint and is superseded where it says the #96 failure is outstanding.
+
 ## Recovery checkpoint — restricted native `run` accepted review, full gate pending (#129/#138, 2026-11-10)
 
 - Cumulative restricted-`run` candidate on `work/run-tool`, HEAD `44e66e8`, is

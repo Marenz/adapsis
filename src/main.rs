@@ -945,7 +945,11 @@ async fn main() -> Result<()> {
     // Ensure panics in any thread are logged to stderr
     std::panic::set_hook(Box::new(|info| {
         crate::logging::diagnostic("panic", info);
-        crate::error_journal::record_panic(info);
+        // A panic inside the JIT compiler is contained by the JIT dispatch,
+        // which journals it once without the panic's text (#96).
+        if !crate::eval::jit_contained_panic(info.location()) {
+            crate::error_journal::record_panic(info);
+        }
         let bt = std::backtrace::Backtrace::force_capture();
         eprintln!("{bt}");
     }));

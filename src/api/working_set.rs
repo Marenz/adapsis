@@ -4,14 +4,12 @@ use super::{AppConfig, WorkingSet};
 impl AppConfig {
     /// Build a temporary working snapshot from the live tiers.
     pub(super) async fn snapshot_working_set(&self) -> WorkingSet {
-        let program = self.program.read().await.clone();
-        WorkingSet {
-            base_program: Some(program.clone()),
-            program,
-            runtime: self.runtime.read().unwrap().clone(),
-            meta: self.meta.lock().unwrap().clone(),
-            sandbox: None,
-        }
+        working_set_snapshot(&self.program, &self.runtime, &self.meta).await
+    }
+
+    /// The live program together with the revision it has, for an evaluation.
+    pub(super) async fn program_at_revision(&self) -> (crate::ast::Program, usize) {
+        program_at_revision(&self.program, &self.meta).await
     }
 
     /// Merge only this operation's base→new delta, preserving concurrent edits
@@ -64,4 +62,34 @@ impl AppConfig {
             ws.runtime = runtime.clone();
         }
     }
+}
+
+/// A snapshot of the program and the session revision, taken under ONE
+/// program read (Tier 1, then briefly Tier 3) and released before anything is
+/// evaluated. Admission checks, the evaluation and its history entry must all
+/// use this one pair: reading the revision and the program separately lets a
+/// writer slip in between, and the JIT cache would then run code compiled for
+/// one program on behalf of another (#96 review).
+pub(super) async fn program_at_revision(
+    program: &tokio::sync::RwLock<crate::ast::Program>,
+    meta: &crate::session::SharedMeta,
+) -> (crate::ast::Program, usize) {
+    let live = program.read().await;
+    let revision = meta.lock().unwrap().revision;
+    (live.clone(), revision)
+}
+
+/// A working set of the live tiers. Program and metadata (with its revision)
+/// are read under ONE program read, so no writer can change the program
+/// between the two clones; see [`program_at_revision`].
+pub(super) async fn working_set_snapshot(
+    program: &tokio::sync::RwLock<crate::ast::Program>,
+    runtime: &crate::session::SharedRuntime,
+    meta: &crate::session::SharedMeta,
+) -> WorkingSet {
+    let live = program.read().await;
+    let meta = meta.lock().unwrap().clone();
+    let program = live.clone();
+    drop(live);
+    WorkingSet { base_program: Some(program.clone()), program, runtime: runtime.read().unwrap().clone(), meta, sandbox: None }
 }

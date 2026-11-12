@@ -45,6 +45,10 @@ fn check_roots<'a>(
                 {
                     bail!("{REFUSAL}");
                 }
+                // Separate safety rule, same walk: see `string_length_admission`.
+                if super::string_length_admission::consumes_unknown_string_length(function, program) {
+                    bail!("{}", super::string_length_admission::REFUSAL);
+                }
                 work.extend(function.body.iter().map(Work::Statement));
             }
             Work::Statement(statement) => {

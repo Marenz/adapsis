@@ -316,7 +316,61 @@ signatures/catch consumers must be audited separately before deployment.
      This JIT checkpoint does NOT itself repair Result invocation normalization. The
      subsequent scalar VM safety rules are below. Native Check traps are unreachable through
      supported compile paths; other JIT limitations (e.g. integer zero-divisor abort,
-     #92, and relocation #96) are not fixed by this admission rule.
+     #92) are not fixed by this admission rule.
+   - **Relocations (#96).** `cranelift-jit` 0.119 allocates every function and data
+     object as its own heap block and PANICS when a PC-relative relocation between two
+     blocks exceeds 2 GiB (`compiled_blob.rs:56`), which a process with a huge
+     address-space reservation reaches. `compiler/relocation.rs` therefore declares
+     every user callee (`far_call`) and string literal (`far_data`) non-colocated, so
+     only absolute `Abs8` relocations are emitted, and `relocation::check` refuses any
+     other kind with an ordinary error before `finalize_definitions`. New codegen that
+     references another function or data object MUST go through these helpers
+     (`declare_func_in_func`/`declare_data_in_func` alone are colocated). Calls are
+     indirect now (about 4% on a call-only benchmark).
+   - **Compiler panics are contained (#96).** `jit_dispatch` runs `compiler::compile`
+     under `catch_unwind`: a panic means "no JIT for this revision" (remembered in the
+     cache slot as `JitSlot::Refused`, journaled once as `panic`/`jit.compile` without
+     the payload) and the call continues on the VM/tree path. An ordinary compile
+     `Err` is not remembered (unchanged). A poisoned cache mutex is recovered with an
+     empty slot. Only `compile` is contained, never the execution of compiled code.
+     Callers must not hold a state lock across evaluation: `/api/eval` and the
+     `!watch` loop (`execute::watch_evaluate`) snapshot program and revision first.
+     Tests: `cargo test --release jit_` (relocation kinds of real machine code incl.
+     all compilable example roots; injected compile panic; lock-freedom of the watch
+     and `/api/eval` paths; `compiler/far_apart_tests.rs` arranges code and data more
+     than 2 GiB apart in a child process (glibc/x86-64) and requires both a correct
+     result with the current codegen and a contained genuine Cranelift panic with the
+     old colocated codegen).
+   - **A cache hit is proven by what was compiled, not by the revision (#96 review).**
+     `compiler/input.rs::CompileInput::of(program)` builds a program holding exactly
+     what `compile` and its admission passes can reach: ALL functions (top-level and of
+     every module at any depth, the same `Arc`s) and all type declarations, in the same
+     module structure. Module functions are never emitted but ARE read: a bare callee
+     such as `concat` resolves to a module function of that name, and admission follows
+     it (an input without them compiled a program the live admission refuses). The
+     dispatch compiles THAT program and keeps it in the slot; a hit needs the same
+     revision (cheap first test only) AND `CompileInput::matches(live)` (`Arc::ptr_eq`
+     per function at every depth, module names and order, types by value). An edit to
+     any module function therefore recompiles once. A remembered panic refusal is tied
+     to the same input. The lookup table at the top of `input.rs` lists every lookup
+     the passes make and what answers it. The revision alone is unsound: `write_back_working_set` updates program and
+     metadata non-atomically, several write-backs do not bump it, and a rewind reuses
+     numbers (tracked with #136). If `compile` must read another part of `Program`, add
+     it to `CompileInput` first (`jit_compiling_from_the_input_equals_compiling_from_the_program`
+     compares both compilations byte for byte). Readers still take program and revision
+     under ONE read (`working_set::program_at_revision`, `snapshot_working_set`) so
+     history records the evaluated revision.
+   - **Strings whose length the generator does not know (safety refusal, defect open).**
+     The code generator takes the length of every string operand from the last string
+     expression compiled (`_last_str_len`); only a literal, `concat(...)` and a call to
+     a String-returning user function set it. A variable, a struct field or any other
+     form leaves it stale: `concat("hello ", name)` read `name` with length 6,
+     `+return p.label` returned "". `compiler/string_length_admission.rs` (called from
+     the `failure_admission` walk, so also before a cache hit) refuses a function unless
+     every length-consuming operand is one of those three forms: the value returned by a
+     String function, each `concat` argument, both operands of a string `==`/`!=` (one
+     must be a literal, otherwise the generator compares pointers), and an argument for
+     a String parameter. Lift the refusal only together with real length tracking.
 2. **Bytecode VM** (`vm.rs`) — near-full language coverage.
    - Sync path: `eval_compiled_or_interpreted_cached` → `try_vm_execute` (eval/mod.rs).
    - Async path: `eval_async_function` (eval/mod.rs) — IO suspensions serviced
@@ -1173,7 +1227,7 @@ replaces that branch with one composer.
   as data to a caller that could continue effects. Result/capture graphs select the
   normalized interpreter path; lifting VM quarantine remains a separate acceptance gate.
   JIT Check/fallible graphs refuse before compilation rather than executing the historical
-  native trap. #96 JIT relocation remains open too.
+  native trap. #96 (JIT relocation panic) is fixed, see Execution Tiers.
   Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
   finite equality uses epsilon rather than IEEE equality. Ordered Float
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
