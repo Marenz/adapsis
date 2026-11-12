@@ -21,6 +21,10 @@ pub(crate) struct SentRequest {
     /// When the request was sent (unix ms). Providers count a cache lifetime
     /// from the start of the request that wrote or read the entry.
     pub(super) started_ms: u64,
+    /// False when the request was sent with another tool list than the turn's
+    /// first request (the final status round has none): the provider caches the
+    /// tools ahead of everything else, so no hit can be expected.
+    pub(super) same_tools: bool,
 }
 
 /// Serialized bytes of `messages` without image data, and the image count.
@@ -65,7 +69,15 @@ impl SentRequest {
             text_bytes: text + extra_bytes,
             images,
             started_ms: cache_lifetime::now_ms(),
+            same_tools: true,
         }
+    }
+
+    /// This request carries another tool list than the turn's first request: its
+    /// cache reads are neither a hit nor a miss. Sizes are still calibrated.
+    pub(crate) fn with_other_tools(mut self) -> Self {
+        self.same_tools = false;
+        self
     }
 
     /// Account this answered request with its conversation.
@@ -126,6 +138,7 @@ impl SentRequest {
             } else {
                 expected_tokens = probe
                     .expected_prefix_bytes()
+                    .filter(|_| self.same_tools)
                     .map(|bytes| crate::model_limits::tokens_for_bytes(bytes, ratio));
                 if probe.requests == 0 {
                     // Only a request built with explicit boundaries (ContextLog)

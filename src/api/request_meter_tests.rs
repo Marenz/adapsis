@@ -64,7 +64,7 @@ fn start_turn_with(meta: &SharedMeta, context: &str, model: &str, now_ms: u64, m
 }
 
 fn sent(model: &str, text_bytes: usize, now_ms: u64) -> SentRequest {
-    SentRequest { model: model.into(), text_bytes, images: 0, started_ms: now_ms }
+    SentRequest { model: model.into(), text_bytes, images: 0, started_ms: now_ms, same_tools: true }
 }
 
 /// Answer one request of the turn, sent to `model` at `now_ms`.
@@ -606,4 +606,33 @@ fn cold_start_simulation_paused_chat_versus_active_session() {
     let routes = &active.lock().unwrap().conversations.cache_lifetimes;
     let evidence = routes.evidence(OPUS).unwrap();
     assert!(evidence.hit_count > 400 && evidence.miss_count == 0, "{evidence:?}");
+}
+
+/// A request sent with another tool list than the turn's first request (the final
+/// status round sends none) cannot read the turn's cached prefix: its zero read is not
+/// a miss, its sizes still calibrate, and the turn's other requests stay evidence.
+#[test]
+fn a_request_with_another_tool_list_is_no_cache_evidence() {
+    let meta = new_meta();
+    let evidence = |meta: &SharedMeta| meta.lock().unwrap().conversations.cache_lifetimes.evidence(OPUS).cloned();
+    let history: Vec<ChatMessage> = (0..20)
+        .flat_map(|_| [ChatMessage::user("x".repeat(3_000)), ChatMessage::assistant("y".repeat(3_000))])
+        .collect();
+    {
+        let mut guard = meta.lock().unwrap();
+        guard.conversations.get_or_create("ctx").turn_probe = Some(TurnProbe::default());
+        expect_cached_prefix(&mut guard.conversations, "ctx", "s", &history, None);
+    }
+    // First request of the turn writes the prefix.
+    answer(&meta, "ctx", OPUS, 150_000, T0, &usage(10, Some(0), Some(60_000)));
+    // Ten minutes of tool work, then the status round without tools reads nothing.
+    let last = T0 + secs(600);
+    sent(OPUS, 140_000, last).with_other_tools().calibrate(&meta, "ctx", false, false, &usage(56_000, Some(0), None));
+    assert_eq!(evidence(&meta), None, "not a miss");
+    let calibration = with_conv(&meta, "ctx", |conv| conv.token_calibration.clone()).expect("sizes are still calibrated");
+    assert_eq!((calibration.request_bytes, calibration.input_tokens), (140_000, 56_000));
+    assert_eq!(with_conv(&meta, "ctx", |conv| conv.last_request_ms), Some(last), "it is the conversation's last request");
+    // The same request with the turn's tools would have been a miss.
+    answer(&meta, "ctx", OPUS, 140_000, last + secs(600), &usage(56_000, Some(0), None));
+    assert_eq!(evidence(&meta).map(|e| e.miss_count), Some(1));
 }

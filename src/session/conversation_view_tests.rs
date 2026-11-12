@@ -194,7 +194,7 @@ fn capped_message_states_the_omitted_character_count_and_storage_is_untouched() 
 #[test]
 fn conversation_view_thirty_turn_coding_simulation() {
     use crate::context_log::{Epoch, observe_epoch};
-    let key = crate::context_prompt::StablePrefixKey { context: "sim".into(), may_write: true, identity_hash: 1, mesh_hash: 1 };
+    let key = crate::context_prompt::StablePrefixKey { context: "sim".into(), may_write: true, identity_hash: 1, mesh_hash: 1, tools_hash: 0 };
     // Window-bound simulation: the route body limit is raised (gateway fix), so the
     // token budget decides. The 2 MB case is covered by the byte-limit test.
     let limits = crate::model_limits::ModelLimits {

@@ -825,3 +825,26 @@ async fn native_turn_calibrates_the_token_projection_from_provider_usage() {
         assert!((crate::model_limits::MIN_BYTES_PER_TOKEN..=crate::model_limits::MAX_BYTES_PER_TOKEN).contains(&ratio));
     }
 }
+
+/// The cache epoch of an HTTP native turn carries its tool list (`prepare` puts
+/// `tool_schema_hash` into the prefix key): the hash is stable for one class, differs
+/// between classes and is never the "no tools" value of a legacy turn. The `main` epoch
+/// tracker is process-global, so the reset itself is asserted on the tracker
+/// (`context_log`) and through the takeover loop (`takeover_cache_tests`).
+#[test]
+fn http_native_turns_key_their_cache_epoch_by_tool_list() {
+    let snapshot = |profile: Option<&str>| {
+        let mut config = test_config();
+        config.native_tools = true;
+        *config.llm_model.write().unwrap() = "native-fixture".into();
+        config.permission_config = Arc::new(toml::from_str("[model.listed]\nuser = \"execute\"\n[model.native-fixture]\nuser = \"write\"\n").unwrap());
+        config.meta.lock().unwrap().conversations.get_or_create("main").permission_model = profile.map(str::to_string);
+        super::super::native_turn::permission_snapshot(&config)
+    };
+    let hash = |profile| super::super::http_context::tool_schema_hash(&snapshot(profile));
+    let (writer, execute_only) = (hash(None), hash(Some("listed")));
+    assert_eq!(writer, hash(None));
+    assert_eq!(execute_only, hash(Some("listed")));
+    assert_ne!(writer, execute_only);
+    assert!(writer != 0 && execute_only != 0);
+}

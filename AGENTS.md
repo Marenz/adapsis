@@ -1687,6 +1687,14 @@ schema since day one and was never set:
   message of an assistant run with text or tool calls. `context_log::gateway_boundary_errors`
   (test-only) is the oracle for the gateway's rules; use it on recorded wire requests in
   any new request-building test. Do not mark user, tool or envelope messages.
+- **The tool list is part of the cache epoch.** Providers cache tool schemas ahead of the
+  system prompt, and since speaker classes two speakers with the same `may_write` and the
+  same prefix text can have different tools (two guest profiles, guest then execute-only,
+  in one group). `StablePrefixKey.tools_hash` (set by the request builder with
+  `http_context::tool_schema_hash`, 0 = no tools) makes that a reset ("tool list changed"),
+  so its unavoidable miss is not lifetime evidence. The final status round sends no tools:
+  it is accounted with `SentRequest::with_other_tools` (sizes calibrate, no hit or miss).
+  A new request path that changes the tool list between requests must do one of the two.
 - **Cache lifetime per route (`model_limits::BUILT_IN_CACHE`, `src/cache_lifetime.rs`).**
   Each route has a requested marker lifetime (`cache_ttl`: "5m"/"1h", sent as
   `cache_control.ttl` on EVERY boundary via `ContextLog::set_cache_ttl`, set in

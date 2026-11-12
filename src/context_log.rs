@@ -302,6 +302,9 @@ impl EpochTracker {
             Some(previous) if previous.key.mesh_hash != key.mesh_hash => Epoch::Reset {
                 reason: "mesh topology changed",
             },
+            Some(previous) if previous.key.tools_hash != key.tools_hash => Epoch::Reset {
+                reason: "tool list changed",
+            },
             Some(previous) if previous.stable_hash != stable_hash => Epoch::Reset {
                 reason: "stable prefix changed without a declared key change",
             },
@@ -484,6 +487,7 @@ mod tests {
             may_write,
             identity_hash,
             mesh_hash: 1,
+            tools_hash: 0,
         }
     }
 
@@ -632,6 +636,17 @@ mod tests {
             Epoch::Reset {
                 reason: "identity file edited"
             }
+        );
+        // Same authority class and prefix text, another tool list (speaker classes).
+        assert_eq!(
+            tracker.observe("ctx", &key(false, 2).with_tools(7), "m2", "stable-2", &appended, false),
+            Epoch::Reset {
+                reason: "tool list changed"
+            }
+        );
+        assert_eq!(
+            tracker.observe("ctx", &key(false, 2).with_tools(7), "m2", "stable-2", &appended, false),
+            Epoch::Continued { previous_len: 2 }
         );
     }
 

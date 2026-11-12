@@ -1441,6 +1441,8 @@ pub async fn handle_llm_takeover(
     } else {
         crate::context_prompt::stable_prefix_keyed(&prompt_inputs)
     };
+    // The tool list is part of what the provider caches (ahead of the prefix).
+    let prefix_key = prefix_key.with_tools(native_config.as_ref().map_or(0, super::http_context::tool_schema_hash));
     let authority_block = crate::context_prompt::volatile_suffix(&prompt_inputs);
 
     let messages = {

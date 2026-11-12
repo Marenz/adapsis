@@ -191,6 +191,7 @@ fn prepare(
     );
     let (stable, runtime, key, model) =
         super::http_context::context_prompts(config, &summary, req.caller.as_deref(), true);
+    let key = key.with_tools(super::http_context::tool_schema_hash(config));
     let messages = {
         let mut meta = config.meta.lock().unwrap();
         let conv = meta.conversations.get_or_create("main");
@@ -312,6 +313,8 @@ impl NativeLoop {
                 request.tools.iter().map(|tool| (tool.name.as_str(), tool.description.as_str(), &tool.parameters)),
             );
             let sent = super::http_context::SentRequest::measure(&model, &request.messages, schema_bytes);
+            // Without the turn's tools the provider cannot read the turn's cached prefix.
+            let sent = if final_round { sent.with_other_tools() } else { sent };
             let result = generate(&llm, request, tx, streaming).await;
             // `generate` flags shrunk retries and too-large failures on the client.
             // Persist the forced checkpoint now: the provider-error branch below

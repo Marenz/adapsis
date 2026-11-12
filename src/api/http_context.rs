@@ -191,6 +191,17 @@ pub(super) fn tool_schema_bytes(config: &AppConfig) -> usize {
     )
 }
 
+/// Hash of the native tool schemas this snapshot's requests carry, for the cache
+/// epoch (`StablePrefixKey::tools_hash`). Never 0, which means "no tools".
+pub(super) fn tool_schema_hash(config: &AppConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for tool in super::native_tools::tool_definitions(config) {
+        (tool.name.as_str(), tool.description.as_str(), tool.parameters.to_string()).hash(&mut hasher);
+    }
+    hasher.finish().max(1)
+}
+
 /// Serialized size of tool schemas given as `(name, description, parameters)`.
 pub(super) fn schema_bytes<'a>(tools: impl Iterator<Item = (&'a str, &'a str, &'a serde_json::Value)>) -> usize {
     tools
