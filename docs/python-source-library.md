@@ -100,8 +100,8 @@ It is checked against the Python serializer too; it is not an escape hatch for
 unsupported modules. Refused imports leave original bytes and the session cache
 intact, and cannot proceed to startup. This is temporary migration eligibility,
 not a permanent dual-source format. Changing formats requires an explicit
-manifest/file change and server restart. This slice does not automatically
-convert files, create a migration backup, or flip the default. With **no manifest**,
+manifest/file change and server restart. The binary does not convert files,
+create a migration backup, or flip the default by itself. With **no manifest**,
 legacy library behavior remains unchanged.
 
 An active manifest is a source whitelist, including when its module set is empty.
@@ -361,9 +361,21 @@ reconcile and restart before retrying. Source and session writes are not one tra
 source succeeds and session checkpointing fails, committed source stays
 authoritative and the log explicitly reports the failed recovery checkpoint.
 
-No live module migration is performed here. A deployment migration still needs
-an explicit complete inventory, external backup/rollback bundle, review, and
-isolated restart gates before replacing real files.
+The code performs no migration. A node is migrated by an operator procedure:
+complete inventory, reviewed conversion set, a rehearsal that is an enforced
+gate, a final backup taken after the stop, and a rollback that restores that
+bundle as one unit. The first node, here (Kronk), was switched on 2026-11-12
+(`AGENTS.md`, Development baseline; runbook and tools in
+`~/.local/share/adapsis/rehearsal-128/`). sleek and edox still run legacy `.ax`
+libraries without a manifest.
+
+**Observed after the switch, not changed:** the acknowledgement of a mutation
+("accepted in memory; authoritative source save is pending ... (not yet
+durable)") is produced before the debounced save runs. The save usually completes
+within a second or two, but nothing tells the model so. The bot therefore told
+its user that the file "may not have changed yet" after a save that had
+succeeded. How saving and its acknowledgement should work is an open owner
+decision.
 
 ## Focused checks
 

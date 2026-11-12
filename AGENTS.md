@@ -10,7 +10,35 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- Current here Telegram deployment (2026-11-02): runtime binary `88b4275`;
+- **Current here deployment (2026-11-12, switch #128): commit `b7bfa64` on
+  `work/python-source-library`**, binary sha256
+  `fa04e3677b4adf70aafc65196c7ff6facaece2c155f3f9b36de272359c7ce3e8`. The module
+  library on this node is manifest-managed Python: `~/.config/adapsis/modules/`
+  holds `library-sources.json` and `Chronica.py`, `Peer.py`, `TelegramBot.py`,
+  `TgFormat.py`, `Watchdog.py` (dependencies: `TelegramBot → [TgFormat]`, others
+  none; 275 stored cases, all re-run at start). There are no `.ax` files there any
+  more; modules are created and edited as Python, the writer saves them, and
+  `library_reload`, `!undo` and `/api/rewind` are refused (see "Issue #121 opt-in
+  source library" below and `docs/python-source-library.md`).
+  - Unit: `~/.config/systemd/user/adapsis.service.d/10-source-refusal.conf`
+    (`RestartPreventExitStatus=78`, `OnFailure=adapsis-start-failed.service`) and
+    the helper `~/.config/systemd/user/adapsis-start-failed.service`. A refused
+    start (source policy or unreadable session) exits 78 and is NOT restarted.
+  - Rollback bundle: `~/.local/share/adapsis/switch-128/pre-switch-bundle/`
+    (session at revision 244, the five `.ax`, old binary `11487f02…`, unit state);
+    old binary also at `~/.local/bin/adapsis.bak-11487f02`. Rollback restores the
+    bundle as ONE unit (`~/.local/share/adapsis/rehearsal-128/REPORT.md`, step 8):
+    the old binary cannot read a session that holds a Python mutation record.
+    Switch notes: `~/.local/share/adapsis/switch-128/notes/RESULT.txt`. The bundle
+    and older backups contain the bot token (`rehearsal-128/token-copies.paths`).
+  - The `telegram_token` default in `TelegramBot.py` is blank; the token comes
+    from the token file at startup and is no longer in the source or the session.
+  - **sleek and edox are unchanged**: older binaries, legacy `.ax` libraries, no
+    manifest. Nothing in this entry applies to them; a switch there needs its own
+    conversion set, review and rehearsal.
+  - Gate and tools for a repeat: `rehearsal-128/rehearse.sh`, `selftest.sh`,
+    `bin/preflight.py` (requests a save and proves the session file is final).
+- Historical (superseded 2026-11-12): here Telegram deployment (2026-11-02): runtime binary `88b4275`;
   TelegramBot/TgFormat are now production-Python-frontend-authored modules
   (48/18 functions, 221 stored cases), prepared with reviewed tooling `9ffd3fa`.
   Private provenance/rollback: `~/.local/share/adapsis/telegram-python-migration-20261102/`
@@ -27,7 +55,7 @@ narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
   `108e4dc` (G2/#114/G1/#112/#116). See ROADMAP.md's top release section for merge
   state, worker ownership and measured gates; historical branch guidance below
   does not authorize switching this release worktree or touching the main checkout.
-- Current here deployment (2026-11-02): manager installed release `e424fc9`;
+- Historical (superseded 2026-11-12): here deployment (2026-11-02): manager installed release `e424fc9`;
   `/proc` binary SHA-256 `7a91463243d68a2c12bdd40d0906e1c99dcaca5fd95cc51ebae4c241cca341f3`
   verified. Here's runtime and service default model are `chatgpt/gpt-6-astra`
   (no explicit reasoning-effort variant), replacing the previous deepseek alias
@@ -262,8 +290,20 @@ response has no Content-Disposition header.
   modules) are frozen to today's binding and logged; never add caller-module-first
   runtime lookup. Runtime-defined named types live in `builtins::RUNTIME_TYPES` (Attachment).
   Focused isolated gates: `cargo test --release managed_` and
-  `cargo test --release --test python_source_startup`. Default library format and
-  deployment remain unchanged; migration requires separate backup/review gates.
+  `cargo test --release --test python_source_startup`. Without a manifest the
+  legacy `.ax` behaviour is still the default of the binary. On here the manifest
+  is active since 2026-11-12 (Development baseline); sleek and edox have none. A
+  migration of another node requires its own conversion set, review and rehearsal.
+  **Pitfall, observed live 2026-11-12, not changed (the owner is deciding how
+  saving should work):** the mutation acknowledgement says "accepted in memory;
+  authoritative source save is pending ... (not yet durable)". The bot repeated
+  that to the user as "accepted in memory only, the file may not have changed
+  yet", although the writer had written the file within the same second. The
+  wording is true at the moment it is produced (the save is debounced and runs
+  after the turn's write-back) but there is no later message that the save
+  succeeded, so the model doubts a save that worked. Failures are reported
+  (`library_errors()`, journal); success is only in the `[save]` log lines and in
+  `?library` (no "Source save pending" line). Do not paper over this in a prompt.
 
 - #120 task-domain logic lives in Python-frontend Adapsis modules, initially
   `examples/tasks/domain.py`; the premature Rust foundation is removed from active

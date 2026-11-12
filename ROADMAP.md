@@ -1,6 +1,62 @@
 # AdapsisOS Roadmap
 
-## Current acceptance checkpoint — typed Python execution/replay (#121/#122)
+## Deployed 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
+
+- **Live on here:** commit `b7bfa64` (`work/python-source-library`: Result runtime,
+  typed execution/replay, manifest-managed `.py` library, run-time module
+  enrolment, one nesting limit, merged with the release line `6136115`). Binary
+  sha256 `fa04e3677b4adf70aafc65196c7ff6facaece2c155f3f9b36de272359c7ce3e8`,
+  replacing `11487f02b5cc97998e6a91b8b2f0e9fa3bb7615914dcf51cedec84fe1b8b4f08`.
+- **Library:** `~/.config/adapsis/modules/` now holds `library-sources.json` and
+  five reviewed Python modules (Chronica, Peer, TelegramBot, TgFormat, Watchdog;
+  function counts 24 / 9 / 48 / 18 / 12; 275 stored cases). The `.ax` files were
+  moved out. Module deltas shipped with the switch: Chronica `pull_page` returns
+  `Result[str]` and `writer` matches it; Peer `eval`/`mutate` renamed to
+  `remote_eval`/`remote_mutate`; the `telegram_token` default is blank and the
+  token was scrubbed from the session (2 occurrences).
+- **Unit:** drop-in `adapsis.service.d/10-source-refusal.conf`
+  (`RestartPreventExitStatus=78`, `OnFailure=adapsis-start-failed.service`) and the
+  helper unit `adapsis-start-failed.service`. Refused starts exit 78 and are not
+  restarted.
+- **Switch, executed by the manager per the runbook, no deviation:** preflight exit
+  0 through the journal (the saved file was 8 history entries behind; the
+  requested save closed it), start inhibitor proven, final bundle taken after the
+  stop, five stopped `.ax` verified against the reviewed hashes, install, start.
+  Verified: active, NRestarts 0, 275 of 275 stored cases re-run, 5 managed sources,
+  one webhook route, two permanent loops, no library errors, shared-variable check
+  as predicted, a Telegram round trip, a Python edit made through the bot (only
+  `TgFormat.py` changed) and its removal (reviewed bytes restored), a clean
+  restart at revision 246.
+- **Evidence before the switch:** full suite 2354 passed / 1 known strict-parity
+  failure (334 / 58 / 181) / 7 ignored; independent review of `a488baa` rejected
+  the switch for rollback and rehearsal defects; the correction `b7bfa64` and
+  the third revision of the operator bundle were accepted; rehearsal gate 192 of 192 checks, gate
+  self-test 9 of 9 wrong runs rejected.
+- **Rollback:** restore `~/.local/share/adapsis/switch-128/pre-switch-bundle/` as
+  one unit (session at revision 244, five `.ax`, old binary, unit state), after
+  archiving the candidate-era session and library. The old binary cannot read a
+  session that holds a Python mutation record. Old binary also at
+  `~/.local/bin/adapsis.bak-11487f02`. Runbook:
+  `~/.local/share/adapsis/rehearsal-128/REPORT.md` (step 8); notes:
+  `~/.local/share/adapsis/switch-128/notes/RESULT.txt`.
+- **Not changed:** sleek and edox (older binaries, legacy `.ax` libraries, no
+  manifest); the Ladybug database; permissions and context files.
+- **Open after the switch:**
+  - The mutation acknowledgement says the source save is pending; the bot repeated
+    that as "the file may not have changed yet" after a save that had succeeded
+    within the same second. Not changed; the owner is deciding how saving should work.
+  - Whole-module removal (#126), `!sandbox discard` after an enrolment, printer
+    parentheses (#140), session growth and the whole-metadata write-back (#136),
+    a read-only route for effective shared values, the non-atomic write of a
+    function move in both directions.
+  - The bundle and older backups still contain the bot token
+    (`rehearsal-128/token-copies.paths`); rotating the token would settle all of them.
+
+Everything below is history. Statements there that the library still persists
+`.ax`, that the default format is unchanged, or that no deployment has happened
+describe the state at their own date, not here after 2026-11-12.
+
+## Historical acceptance checkpoint — typed Python execution/replay (#121/#122)
 
 - Uncommitted candidate on manager-integrated baseline `8911fba`: typed operations
   share the existing executor/session application, while legacy string wrappers
@@ -72,7 +128,7 @@
   callers) is selected, but private migration needs separate authorization after frontend
   acceptance and persisted Python source support. No further live reads or migration here.
 
-## Current acceptance integration — `b0ffd8c` + `113f80f`
+## Historical acceptance integration — `b0ffd8c` + `113f80f`
 
 - This isolated worktree combines accepted Result C-core `113f80f` with release
   memory/privacy (#87/#88), Python grouped tests (#118), scalar admission (#83),
