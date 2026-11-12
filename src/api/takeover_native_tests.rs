@@ -11,6 +11,8 @@ mod restricted;
 mod cache;
 #[path = "takeover_workspace_tests.rs"]
 mod workspace;
+#[path = "takeover_image_tests.rs"]
+mod images;
 
 const ADMIN: &str = "telegram:user:100000001";
 
@@ -143,11 +145,23 @@ impl Harness {
         speaker: &str,
         text: &str,
     ) -> String {
+        self.turn_with_attachment(provider, io_tx, context, speaker, text, None).await
+    }
+
+    async fn turn_with_attachment(
+        &self,
+        provider: &Provider,
+        io_tx: tokio::sync::mpsc::Sender<crate::coroutine::IoRequest>,
+        context: &str,
+        speaker: &str,
+        text: &str,
+        attachment: Option<crate::attachment::Attachment>,
+    ) -> String {
         let metadata = json!({"speaker_id": speaker}).to_string();
         let future = super::super::handle_llm_takeover(
             context.into(),
             text.into(),
-            None,
+            attachment,
             Some(metadata),
             self.graph.clone(),
             Arc::new(crate::memory_graph::MemoryEmbedder::deterministic()),
