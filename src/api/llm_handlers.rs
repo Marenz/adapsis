@@ -36,14 +36,7 @@ struct CompactionMemory {
     confidence: f64,
 }
 
-fn takeover_context_lock(context: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    > = std::sync::OnceLock::new();
-    let locks = LOCKS.get_or_init(Default::default);
-    let mut locks = locks.lock().unwrap();
-    locks.entry(context.to_string()).or_default().clone()
-}
+use super::turn_lock::of as takeover_context_lock;
 
 fn compaction_attempt_due(context: &str) -> bool {
     static ATTEMPTS: std::sync::OnceLock<
@@ -1222,6 +1215,8 @@ pub async fn handle_llm_takeover(
     log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     // `--native-tools`: eligible write-capable turns use the native protocol (#85).
     native_tools: bool,
+    // Test injection of a workspace registry; production passes None (the registry file decides).
+    workspaces: Option<std::sync::Arc<super::native_tools::workspace::Site>>,
 ) -> anyhow::Result<String> {
     let context_lock = takeover_context_lock(&context);
     let _context_guard = context_lock.lock().await;
@@ -1397,11 +1392,12 @@ pub async fn handle_llm_takeover(
             may_write: authority.may_write,
             guest_tools: guest_tools.clone(),
         }),
+        workspaces, origin: None,
     };
 
     // Native protocol decision (#85) uses the same pinned, intersected
     // snapshot that will execute the turn; guests/non-write speakers stay legacy.
-    let native_config = super::takeover_native::native_snapshot(native_tools, &tmp_config, &context);
+    let native_config = super::takeover_native::native_snapshot(native_tools, &tmp_config, &context).await;
     if let Some(native) = &native_config {
         // The native protocol has no agent or !opencode tool; say so truthfully.
         authority.may_agent = false;
@@ -1441,6 +1437,7 @@ pub async fn handle_llm_takeover(
     } else {
         crate::context_prompt::stable_prefix_keyed(&prompt_inputs)
     };
+    let system = super::native_tools::workspace::with_prompt(system, native_config.as_ref());
     // The tool list is part of what the provider caches (ahead of the prefix).
     let prefix_key = prefix_key.with_tools(native_config.as_ref().map_or(0, super::http_context::tool_schema_hash));
     let authority_block = crate::context_prompt::volatile_suffix(&prompt_inputs);
@@ -1467,7 +1464,7 @@ pub async fn handle_llm_takeover(
         // #68: checkpointed view sized by the generating model's window, with the
         // measured authority block and native tool schemas counted.
         let schemas = native_config.as_ref().map_or(0, super::http_context::tool_schema_bytes);
-        checkpointed_view(&mut meta_guard.conversations, &context, llm_model, &system, super::http_context::tail_bytes(&[&authority_block]) + schemas)
+        super::http_context::checkpointed_view_for(&mut meta_guard.conversations, &context, llm_model, &system, super::http_context::tail_bytes(&[&authority_block]) + schemas, native_config.as_ref())
     }; // meta_guard dropped here
     let (messages, checkpointed) = (messages.messages, messages.checkpointed);
     let view_bytes = serde_json::to_vec(&messages).map_or(0, |bytes| bytes.len());
@@ -1487,6 +1484,9 @@ pub async fn handle_llm_takeover(
     //
     let mut context_log = crate::context_log::ContextLog::from_conversation(messages);
     context_log.push_runtime_text(authority_block);
+    if let Some(line) = super::native_tools::workspace::tail_line(native_config.as_ref()).await {
+        context_log.push_runtime_text(line);
+    }
 
     // Attachments aren't serialized in the session JSON. Recover authorized
     // reference images when this view has none (e.g. after a service restart).

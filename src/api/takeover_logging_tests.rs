@@ -128,3 +128,30 @@ async fn native_provider_error_feeds_the_runtime_error_journal() {
     // The provider's own error text is kept (redacted, 1 KiB): it is the diagnosis.
     assert!(entry["message"].as_str().unwrap().starts_with("provider error"));
 }
+
+/// Workspace tools: paths, patterns and file content are content. The default log has
+/// one metadata line per call (tool, success, workspace name, sizes) and none of them.
+#[tokio::test]
+async fn workspace_tool_calls_log_metadata_only() {
+    if captured("api::takeover_native::tests::logging::workspace_tool_calls_log_metadata_only",
+        "CANARY_WS_SECRET", "tool=read ok=true workspace=log-repo/logged result_bytes=") { return; }
+    let repo = crate::workspace::test_support::RepoFixture::new();
+    crate::workspace::test_support::write(&repo.repository.checkout, "CANARY_WS_SECRET.txt", "CANARY_WS_SECRET content\n");
+    crate::workspace::test_support::commit_all(&repo.repository.checkout, "canary");
+    let mut harness = Harness::new(true);
+    harness.workspaces = Some(repo.site("log-repo"));
+    let provider = provider(vec![
+        tool("open", "workspace_open", json!({"repo": "log-repo", "name": "logged"})),
+        response("", vec![
+            call("rd", "read", json!({"path": "CANARY_WS_SECRET.txt"})),
+            call("se", "search", json!({"pattern": "CANARY_WS_SECRET"})),
+            call("gl", "glob", json!({"pattern": "CANARY_WS_SECRET*"})),
+            call("miss", "read", json!({"path": "CANARY_WS_SECRET/absent"})),
+        ]),
+        response("Read.", vec![call("done", "finish", json!({}))]),
+    ]).await;
+    assert_eq!(harness.turn(&provider, "telegram:user:100000001", ADMIN, "read it").await, "Read.");
+    // The model did get the content.
+    let requests = provider.requests.lock().unwrap();
+    assert!(all_text(&requests[2]).contains("CANARY_WS_SECRET content"));
+}

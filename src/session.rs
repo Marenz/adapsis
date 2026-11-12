@@ -17,6 +17,7 @@ use crate::parser;
 use crate::validator;
 pub mod conversation_view;
 mod native_history;
+pub(crate) use native_history::migration_omissions;
 pub mod replay;
 mod stored_tests;
 mod retest;

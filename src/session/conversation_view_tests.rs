@@ -576,3 +576,93 @@ fn token_calibration_persists_with_the_conversation_and_old_sessions_load() {
     let restored: crate::session::ConversationManager = serde_json::from_str(&serde_json::to_string(&manager).unwrap()).unwrap();
     assert_eq!(restored.get("ctx").unwrap().bytes_per_token("m"), 3.0);
 }
+
+fn batch(conv: &mut Conversation, id: &str, name: &str, arguments: String, result: String) {
+    conv.push_native_batch(String::new(), vec![ToolCall { id: id.into(), name: name.into(), arguments }], vec![result]);
+}
+
+/// A tool RESULT over the per-message cap is cut in the view with the omission marker
+/// and its batch stays (after a switch to a model with a smaller window the earlier,
+/// larger results are still there). Only a batch whose CALL exceeds the cap is left out
+/// whole: tool-call arguments cannot be cut.
+#[test]
+fn an_oversized_tool_result_is_cut_in_the_view_and_its_batch_is_kept() {
+    let mut conv = Conversation::new();
+    conv.push_system("system");
+    conv.push_user("read it");
+    batch(&mut conv, "big-result", "read", r#"{"path":"a"}"#.into(), format!("HEAD {} TAIL", "r".repeat(50_000)));
+    batch(&mut conv, "big-call", "write", format!(r#"{{"content":"{}"}}"#, "c".repeat(50_000)), "written".into());
+    batch(&mut conv, "small", "read", r#"{"path":"b"}"#.into(), "small result".into());
+    conv.push_user("next");
+    let policy = ViewPolicy::tokens_only(1_000_000, 500_000, 0, 10_000);
+    let (first, second) = (build(&mut conv, &policy), build(&mut conv, &policy));
+    assert_eq!(json(&first), json(&second), "the cut is deterministic");
+    let view = &first.messages;
+    let result = view.iter().find(|message| message.tool_call_id.as_deref() == Some("big-result")).expect("the batch is kept");
+    let text = match &result.content {
+        crate::llm::ChatContent::Text(text) => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(text.len() <= 10_000 && text.starts_with("HEAD ") && text.ends_with(" TAIL"), "{}", text.len());
+    assert!(text.contains("characters omitted here by the runtime to fit the model context; the stored message is complete"));
+    let sent = json(&first);
+    assert!(sent.contains("\"id\":\"big-result\"") && sent.contains("\"id\":\"small\"") && sent.contains("small result"));
+    assert!(!sent.contains("big-call") && !sent.contains("written"), "a call that cannot be shown whole takes its batch with it");
+    assert!(conv.messages.iter().any(|message| message.content.len() > 50_000), "stored complete");
+    // Under a roomy cap nothing is cut.
+    assert!(json(&build(&mut conv, &roomy())).contains(&"r".repeat(50_000)));
+}
+
+/// `hidden_tools`: a complete batch with a call to a hidden tool is left out of the view,
+/// whatever else it calls; the view says how many, in the notice the request builders
+/// move to the volatile tail; the stored history and the checkpoint are untouched.
+#[test]
+fn batches_of_hidden_tools_are_left_out_whole_with_a_notice() {
+    fn hide(name: &str) -> bool {
+        matches!(name, "read" | "workspace_open")
+    }
+    let mut conv = Conversation::new();
+    conv.push_system("system");
+    conv.push_user("first question");
+    batch(&mut conv, "h1", "workspace_open", "{}".into(), "opened SECRET_PATH".into());
+    conv.push_native_batch(
+        "mixed".into(),
+        vec![ToolCall { id: "h2".into(), name: "inspect".into(), arguments: "{}".into() }, ToolCall { id: "h3".into(), name: "read".into(), arguments: "{}".into() }],
+        vec!["symbols".into(), "SECRET_CONTENT".into()],
+    );
+    batch(&mut conv, "v1", "inspect", "{}".into(), "visible symbols".into());
+    conv.push_assistant("first answer");
+    conv.push_user("second question");
+    let stored = conv.messages.clone();
+    let mut policy = roomy();
+    let open = json(&build(&mut conv, &policy));
+    assert!(open.contains("SECRET_CONTENT") && !open.contains("are not shown in this turn"));
+    policy.hidden_tools = Some(hide);
+    let view = build(&mut conv, &policy);
+    let hidden = json(&view);
+    for absent in ["SECRET_PATH", "SECRET_CONTENT", "workspace_open", "\"h1\"", "\"h2\"", "\"h3\"", "mixed"] {
+        assert!(!hidden.contains(absent), "`{absent}` is in the view");
+    }
+    assert!(hidden.contains("visible symbols") && hidden.contains("first answer") && hidden.contains("first question"));
+    assert!(!view.checkpointed && conv.view_start == 0, "hiding is not a checkpoint");
+    let notice = match &view.messages[1].content {
+        crate::llm::ChatContent::Text(text) => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(notice, "[System: 2 earlier tool exchange(s) of this conversation are not shown in this turn.]");
+    // The request builder recognises it and moves it out of the history.
+    let log = crate::context_log::ContextLog::from_conversation(view.messages.clone());
+    assert!(log.history().iter().all(|message| !serde_json::to_string(message).unwrap().contains("are not shown")));
+    assert!(serde_json::to_string(&log.into_messages()).unwrap().contains("2 earlier tool exchange(s)"));
+    assert_eq!(conv.messages.len(), stored.len());
+    // Together with a checkpoint: one notice with both numbers; batches before the
+    // checkpoint are counted as omitted, not as hidden.
+    conv.view_start = 4;
+    let both = build(&mut conv, &policy);
+    assert_eq!(
+        match &both.messages[1].content { crate::llm::ChatContent::Text(text) => text.clone(), other => panic!("{other:?}") },
+        "[System: 3 older message(s) are omitted from this model context; the raw history is retained. 1 earlier tool exchange(s) of this conversation are not shown in this turn.]"
+    );
+    let log = crate::context_log::ContextLog::from_conversation(both.messages);
+    assert!(log.history().iter().all(|message| !serde_json::to_string(message).unwrap().contains("[System:")));
+}

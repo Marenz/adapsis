@@ -92,4 +92,9 @@ pub struct NativeToolDefinition {
 pub enum NativeFinishReason {
     Stop,
     ToolCalls,
+    /// The provider cut the response off (its output limit for one response, or
+    /// the context window). The text is partial and the response carries NO
+    /// tool calls: a call that was being written may be incomplete, so none is
+    /// handed on and the caller must execute nothing.
+    Length,
 }

@@ -120,6 +120,8 @@ pub(super) enum LoopEnd {
     ProviderError(String),
     /// Two consecutive empty responses (takeover budget only).
     Empty(&'static str),
+    /// The provider cut off more consecutive responses than are corrected.
+    CutOff,
 }
 
 impl LoopEnd {
@@ -129,6 +131,7 @@ impl LoopEnd {
             Self::Exhausted => "exhausted",
             Self::ProviderError(_) => "provider-error",
             Self::Empty(_) => "empty-response",
+            Self::CutOff => "cut-off",
         }
     }
 }
@@ -158,7 +161,20 @@ pub(super) struct NativeLoop {
     /// Turn-bound tool calls of this turn (restricted speakers; unlimited for writers).
     /// Created from the pinned snapshot's class at the first tool call.
     tool_budget: Option<std::sync::Arc<super::native_tools::TurnBudget>>,
+    /// Workspace state of this turn, created at its first workspace tool call.
+    workspace: Option<super::native_tools::workspace::Turn>,
+    /// Consecutive responses the provider cut off (reset by any other response).
+    cut_offs: usize,
+    /// The visible prose (`prose`) is the fragment of a cut-off response.
+    pub(super) prose_cut_off: bool,
 }
+
+/// A cut-off response is corrected this many times in a row; the next one ends the
+/// turn. A model whose every answer is cut off would otherwise produce a full output
+/// limit of tokens per round up to the round ceiling.
+const MAX_CUT_OFF_CORRECTIONS: usize = 2;
+pub(super) const CUT_OFF_TURN_ERROR: &str = "The model's responses were cut off at its output limit three times in a row, so this turn was stopped. Nothing from the cut-off responses was carried out.";
+pub(super) const CUT_OFF_REPLY_MARKER: &str = "[cut off at the model's output limit]";
 
 pub(super) async fn run(
     config: &AppConfig,
@@ -167,9 +183,12 @@ pub(super) async fn run(
     streaming: bool,
 ) -> AskResponse {
     // Freeze model/permission identity as well as protocol for this entire turn.
-    let config = permission_snapshot(config);
+    let mut config = permission_snapshot(config);
+    // Once per turn: the tool list cannot change within it.
+    super::native_tools::workspace::attach(&mut config).await;
     let baseline = config.program.read().await.clone();
-    let messages = prepare(&config, req, &baseline);
+    let workspace_line = super::native_tools::workspace::tail_line(Some(&config)).await;
+    let messages = prepare(&config, req, &baseline, workspace_line);
     let mut turn = NativeLoop::new(messages, req.message.clone(), "main", true, None);
     let mut budget = RoundBudget::Fixed(config.max_iterations);
     turn.drive(&config, &baseline, &mut budget, tx, streaming).await;
@@ -181,6 +200,7 @@ fn prepare(
     config: &AppConfig,
     req: &AskRequest,
     baseline: &crate::ast::Program,
+    workspace_line: Option<String>,
 ) -> Vec<ChatMessage> {
     let model = config.llm_model.read().unwrap().clone();
     let summary = crate::validator::program_summary_for_model(
@@ -192,14 +212,18 @@ fn prepare(
     let (stable, runtime, key, model) =
         super::http_context::context_prompts(config, &summary, req.caller.as_deref(), true);
     let key = key.with_tools(super::http_context::tool_schema_hash(config));
+    let stable = super::native_tools::workspace::with_prompt(stable, Some(config));
     let messages = {
         let mut meta = config.meta.lock().unwrap();
         let conv = meta.conversations.get_or_create("main");
         conv.push_user(req.message.clone());
         let known = super::http_context::tail_bytes(&[&runtime]) + super::http_context::tool_schema_bytes(config);
-        let view = super::http_context::checkpointed_view(&mut meta.conversations, "main", &model, &stable, known);
+        let view = super::http_context::checkpointed_view_for(&mut meta.conversations, "main", &model, &stable, known, Some(config));
         let mut log = crate::context_log::ContextLog::from_conversation(view.messages);
         log.push_runtime_text(runtime);
+        if let Some(line) = workspace_line {
+            log.push_runtime_text(line);
+        }
         super::http_context::report_prompt_epoch(&mut meta.conversations, "main", &key, &model, &stable, &mut log, view.checkpointed);
         log.into_messages()
     };
@@ -264,6 +288,9 @@ impl NativeLoop {
             generator: None,
             fatal: None,
             tool_budget: None,
+            workspace: None,
+            cut_offs: 0,
+            prose_cut_off: false,
             response: AskResponse {
                 reply: String::new(),
                 code: String::new(),
@@ -308,6 +335,7 @@ impl NativeLoop {
                 .await;
             let started = std::time::Instant::now();
             let request = self.request(config, &model, !final_round);
+            let max_tokens = request.max_tokens;
             // The final round sends no schemas, so measure this request's own.
             let schema_bytes = super::http_context::schema_bytes(
                 request.tools.iter().map(|tool| (tool.name.as_str(), tool.description.as_str(), &tool.parameters)),
@@ -341,6 +369,14 @@ impl NativeLoop {
                 self.final_status(config, output, tx).await;
                 break;
             }
+            if output.finish_reason == crate::llm::NativeFinishReason::Length {
+                if !self.cut_off(config, budget, iteration, output, max_tokens, tx).await {
+                    break;
+                }
+                iteration += 1;
+                continue;
+            }
+            self.cut_offs = 0;
             if output.content.trim().is_empty() && output.tool_calls.is_empty() {
                 match budget.on_empty(iteration) {
                     EmptyStep::Ordinary => {}
@@ -367,6 +403,11 @@ impl NativeLoop {
 
     async fn final_status(&mut self, config: &AppConfig, output: NativeResponse, tx: &EventSender) {
         self.present(&output, tx).await;
+        if output.finish_reason == crate::llm::NativeFinishReason::Length {
+            // The final round has no correction budget: mark retained partial prose,
+            // without asking for another generation. `present` just reset the flag.
+            self.prose_cut_off |= !super::llm_handlers::visible_takeover_prose(&output.content).is_empty();
+        }
         if let Err(error) = self.persist_ladybug(&output.content).await {
             self.fatal = Some(error);
             return;
@@ -437,6 +478,44 @@ impl NativeLoop {
         true
     }
 
+    /// The provider cut the response off. Nothing of it is executed (the response
+    /// carries no tool calls); the partial text is kept as an ordinary assistant
+    /// message and the model is told what happened. Returns false when the loop must stop.
+    async fn cut_off(
+        &mut self,
+        config: &AppConfig,
+        budget: &mut RoundBudget,
+        iteration: usize,
+        output: NativeResponse,
+        max_tokens: u32,
+        tx: &EventSender,
+    ) -> bool {
+        self.present(&output, tx).await;
+        // If this fragment is what the person gets to read, it is marked as cut off.
+        self.prose_cut_off |= !super::llm_handlers::visible_takeover_prose(&output.content).is_empty();
+        if let Err(error) = self.persist_ladybug(&output.content).await {
+            self.fatal = Some(error);
+            return false;
+        }
+        self.error("Native response was cut off by the provider; nothing from it was executed.".into(), tx).await;
+        if !output.content.trim().is_empty() {
+            budget.on_non_empty(&output.content);
+            self.messages.push(ChatMessage::assistant(&output.content));
+            self.persist_assistant(config, output.content);
+        }
+        self.cut_offs += 1;
+        if self.cut_offs > MAX_CUT_OFF_CORRECTIONS {
+            self.error(CUT_OFF_TURN_ERROR.into(), tx).await;
+            self.end = LoopEnd::CutOff;
+            return false;
+        }
+        self.correct(&format!(
+            "Your previous response was cut off before it was complete: the provider stopped it at the limit of {max_tokens} output tokens for one response, or at the context window. Nothing from it was executed, including any tool call you were writing. Continue from the last completed result and send large content in smaller pieces, each well under that limit."
+        ));
+        budget.extend_for_correction(iteration);
+        true
+    }
+
     async fn conclude(&mut self, config: &AppConfig, tx: &EventSender) {
         if !self.finished && self.fatal.is_none() {
             self.error("Iteration limit or provider failure without successful finish; task completion is unconfirmed.".into(), tx).await;
@@ -490,6 +569,7 @@ impl NativeLoop {
         let prose = super::llm_handlers::visible_takeover_prose(&output.content);
         if !prose.is_empty() {
             self.prose = prose;
+            self.prose_cut_off = false;
         }
         if !output.content.is_empty() {
             if !self.response.reply.is_empty() {
@@ -522,6 +602,7 @@ impl NativeLoop {
         tx: &EventSender,
     ) {
         let mut results = Vec::new();
+        let mut successes = Vec::new();
         let test_start = self.response.test_results.len();
         let result_start = self.response.results.len();
         let validation = output.tool_calls.iter().find_map(|call| {
@@ -531,16 +612,27 @@ impl NativeLoop {
                 config,
             )
             .err()
+            .map(|error| (call, error))
         });
+        // A workspace preflight error is private content even when the same
+        // refusal is correlated to ordinary peer calls of this skipped batch.
+        // Without workspace tools these spellings are ordinary unknown names:
+        // preserve that turn's pre-workspace refusal policy.
+        let workspace_refusal = super::native_tools::workspace::available(config)
+            && validation.as_ref().is_some_and(|(call, _)| super::native_tools::workspace::is_workspace_name(&call.name));
         self.messages.push(ChatMessage::assistant_with_tool_calls(
             &output.content,
             output.tool_calls.clone(),
         ));
         for call in &output.tool_calls {
             self.seen.insert(call.id.clone());
-            let content = if let Some(error) = &validation {
+            let (result_before, test_before) = (self.response.results.len(), self.response.test_results.len());
+            let content = if let Some((_, error)) = &validation {
                 let message = format!("Batch skipped before execution: {error}");
-                self.error(message.clone(), tx).await;
+                let public = if workspace_refusal {
+                    "Native tool batch refused before execution; no calls were executed.".into()
+                } else { message.clone() };
+                self.error(public, tx).await;
                 serde_json::json!({"success":false,"error":message}).to_string()
             } else {
                 self.execute_call(config, baseline, call, tx).await
@@ -548,15 +640,29 @@ impl NativeLoop {
             self.messages
                 .push(ChatMessage::tool_result(&call.id, &content));
             results.push(content);
+            successes.push(validation.is_none()
+                && self.response.results[result_before..].iter().all(|result| result.success)
+                && self.response.test_results[test_before..].iter().all(|test| test.pass));
         }
         let model = config.llm_model.read().unwrap().clone();
+        // Workspace calls are recorded without argument values and result content.
+        use super::native_tools::workspace::{logged_call, logged_result};
+        let (logged_calls, logged_results): (Vec<ToolCall>, Vec<String>) = if workspace_refusal {
+            // Sanitize EVERY skipped call, including peer ids/args and feedback;
+            // its raw result carries the workspace-origin validation detail too.
+            let tools = super::native_tools::tool_definitions(config);
+            output.tool_calls.iter().zip(&results).map(|(call, result)| super::native_tools::workspace::logged_skipped(call, result, &tools)).unzip()
+        } else {
+            output.tool_calls.iter().zip(&results).zip(successes)
+                .map(|((call, result), success)| (logged_call(call), logged_result(call, result, success))).unzip()
+        };
         super::llm_handlers::log_training_data(
             &config.training_log,
             &model,
             &self.training_context,
             &output.reasoning,
-            &serde_json::to_string(&output.tool_calls).unwrap_or_default(),
-            &results,
+            &serde_json::to_string(&logged_calls).unwrap_or_default(),
+            &logged_results,
             self.response.results[result_start..]
                 .iter()
                 .any(|r| !r.success)
@@ -588,14 +694,22 @@ impl NativeLoop {
         call: &ToolCall,
         tx: &EventSender,
     ) -> String {
+        let class = super::native_tools::speaker_class(config);
+        let budget = self.tool_budget.get_or_insert_with(|| super::native_tools::turn_budget(&class)).clone();
+        // Workspace tools take their own path (no working-set snapshot, no write-back, no
+        // envelope). The branch comes AFTER the turn's tool budget exists and draws from
+        // it for a restricted class. Today only the writer class has these tools and its
+        // budget is unlimited, so the draw never refuses; it is here so that offering a
+        // workspace tool to another class later cannot bypass that class's budget.
+        if super::native_tools::workspace::is_tool(&call.name) && super::native_tools::workspace::available(config) {
+            if class.restricted() {
+                if let Err(refusal) = budget.take(&call.name) {
+                    return self.workspace_outcome(super::native_tools::workspace::Outcome::failed(&call.name, refusal), tx).await;
+                }
+            }
+            return self.workspace_call(config, call, tx).await;
+        }
         let mut session = config.snapshot_working_set().await;
-        let budget = self
-            .tool_budget
-            .get_or_insert_with(|| {
-                let class = super::native_tools::speaker_class(config);
-                super::native_tools::turn_budget(&class)
-            })
-            .clone();
         let result = super::native_tools::execute_native_tool_in_turn(
             &call.name,
             &call.arguments,
@@ -632,6 +746,35 @@ impl NativeLoop {
         self.response.results.extend(execution.mutation_results);
         self.response.test_results.extend(execution.test_results);
         result.content.to_string()
+    }
+}
+
+impl NativeLoop {
+    /// A workspace tool: no working-set snapshot and no write-back, because these
+    /// tools never touch the Program. The result is plain text; success is the
+    /// structural flag of the outcome, never read back out of the text.
+    async fn workspace_call(&mut self, config: &AppConfig, call: &ToolCall, tx: &EventSender) -> String {
+        use super::native_tools::workspace::{Outcome, Turn};
+        if self.workspace.is_none() {
+            let model = self.generator.clone().unwrap_or_else(|| config.llm_model.read().unwrap().clone());
+            self.workspace = Turn::start(config, &self.context, &model);
+        }
+        let outcome = match &mut self.workspace {
+            Some(turn) => turn.call(&call.name, &call.arguments).await,
+            // The caller checked `available`; kept so no path executes without the gate.
+            None => Outcome::failed(&call.name, "not available in this conversation"),
+        };
+        self.workspace_outcome(outcome, tx).await
+    }
+
+    /// Record a workspace call for the event stream and the response: the tool and
+    /// whether it worked, nothing of what it returned (`/api/events` has subscribers
+    /// that are not the owner). The text goes to the model only.
+    async fn workspace_outcome(&mut self, outcome: super::native_tools::workspace::Outcome, tx: &EventSender) -> String {
+        tx.send(serde_json::json!({"type":"result","message":outcome.label,"success":outcome.success})).await;
+        self.response.has_errors |= !outcome.success;
+        self.response.results.push(MutationResult { message: outcome.label, success: outcome.success });
+        outcome.text
     }
 }
 

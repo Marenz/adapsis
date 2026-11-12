@@ -44,6 +44,8 @@ mod python_nesting_tests;
 mod c_result_tests;
 #[path = "python_result_acceptance_tests.rs"]
 mod python_result_acceptance_tests;
+#[path = "workspace_tests.rs"]
+mod workspace_tests;
 #[path = "run_tests.rs"]
 mod run_tests;
 #[path = "run_authority_tests.rs"]
@@ -144,7 +146,7 @@ fn config_for(
         save_notify: None,
         access_level,
         permission_config: Arc::new(perm),
-        turn: None,
+        turn: None, workspaces: None, origin: None,
     }
 }
 

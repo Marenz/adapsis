@@ -92,7 +92,7 @@ pub fn state_root() -> PathBuf {
     }
     #[cfg(test)]
     {
-        std::env::temp_dir().join(format!("adapsis-test-workspace-state-{}", std::process::id()))
+        test_state_root()
     }
     #[cfg(not(test))]
     {
@@ -109,6 +109,24 @@ pub fn workspace_dir(root: &Path, workspace: &Workspace) -> Result<PathBuf> {
     validate_name("repository name", &workspace.repo)?;
     validate_name("workspace name", &workspace.name)?;
     Ok(root.join(&workspace.repo).join(&workspace.name))
+}
+
+/// The per-process state root of a test run, removed when the process exits
+/// (conversation bindings create it; nothing of a test run may stay in /tmp).
+#[cfg(test)]
+fn test_state_root() -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    extern "C" fn remove() {
+        if let Some(root) = ROOT.get() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+    ROOT.get_or_init(|| {
+        // SAFETY: registers a plain function that touches only this directory.
+        unsafe { libc::atexit(remove) };
+        std::env::temp_dir().join(format!("adapsis-test-workspace-state-{}", std::process::id()))
+    })
+    .clone()
 }
 
 /// A job id is `j` and a number: `j1`, `j27`.

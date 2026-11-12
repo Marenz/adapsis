@@ -11,7 +11,7 @@ use std::path::Path;
 
 use regex::bytes::{Regex, RegexBuilder};
 
-use super::error::{Error, Result};
+use super::error::{Error, Result, shown_name};
 use super::lifecycle::Workspace;
 use super::limits::{
     BINARY_SNIFF_BYTES, PATTERN_MAX_BYTES, REGEX_SIZE_LIMIT, SEARCH_DEFAULT_LIMIT, SEARCH_LINE_MAX_BYTES, SEARCH_LINE_SHOWN_CHARS,
@@ -48,6 +48,9 @@ pub struct SearchRequest {
     pub ignore_case: bool,
     /// Most matches (content) or files (files, count) returned.
     pub limit: usize,
+    /// Bytes of rendered output, clamped to
+    /// `RESULT_MIN_BYTES ..= SEARCH_MAX_OUTPUT_BYTES`.
+    pub max_output_bytes: usize,
 }
 
 impl SearchRequest {
@@ -60,6 +63,7 @@ impl SearchRequest {
             context: 0,
             ignore_case: false,
             limit: SEARCH_DEFAULT_LIMIT,
+            max_output_bytes: SEARCH_MAX_OUTPUT_BYTES,
         }
     }
 }
@@ -77,11 +81,20 @@ pub enum SearchLine {
 impl SearchLine {
     fn render(&self) -> String {
         match self {
-            SearchLine::Match { path, line, text } => format!("{path}:{line}: {text}"),
-            SearchLine::Context { path, line, text } => format!("{path}-{line}- {text}"),
+            SearchLine::Match { path, line, text } => format!("{}:{line}: {text}", shown_name(path)),
+            SearchLine::Context { path, line, text } => format!("{}-{line}- {text}", shown_name(path)),
             SearchLine::Separator => "--".to_string(),
-            SearchLine::File { path } => path.clone(),
-            SearchLine::Count { path, count } => format!("{path}: {count}"),
+            SearchLine::File { path } => shown_name(path),
+            SearchLine::Count { path, count } => format!("{}: {count}", shown_name(path)),
+        }
+    }
+
+    fn quoted(&self) -> bool {
+        match self {
+            SearchLine::Match { path, .. } | SearchLine::Context { path, .. } | SearchLine::File { path } | SearchLine::Count { path, .. } => {
+                super::error::is_quoted_name(&shown_name(path))
+            }
+            SearchLine::Separator => false,
         }
     }
 }
@@ -118,6 +131,7 @@ pub fn search(workspace: &Workspace, request: &SearchRequest) -> Result<SearchRe
         regex,
         context: request.context.min(SEARCH_MAX_CONTEXT),
         output_bytes: 0,
+        max_output_bytes: request.max_output_bytes.clamp(super::limits::RESULT_MIN_BYTES, SEARCH_MAX_OUTPUT_BYTES),
         budget: Budget::new(),
         result: SearchResult {
             scan_capped_files: 0,
@@ -173,6 +187,7 @@ struct Engine<'a> {
     regex: Regex,
     context: usize,
     output_bytes: usize,
+    max_output_bytes: usize,
     budget: Budget,
     result: SearchResult,
 }
@@ -261,7 +276,7 @@ impl Engine<'_> {
     /// Add a line if the output cap allows it.
     fn push(&mut self, line: SearchLine) -> bool {
         let cost = line.render().len() + 1;
-        if self.output_bytes + cost > SEARCH_MAX_OUTPUT_BYTES - TRAILER_RESERVE {
+        if self.output_bytes + cost > self.max_output_bytes - TRAILER_RESERVE {
             self.result.output_capped = true;
             return false;
         }
@@ -373,6 +388,9 @@ impl SearchResult {
         }
         if let Some(stop) = self.stopped {
             out.push(format!("[note: {}]", stop.describe()));
+        }
+        if self.lines.iter().any(SearchLine::quoted) {
+            out.push(format!("[note: {}]", super::error::QUOTED_NAME_NOTE));
         }
         if self.long_lines > 0 {
             out.push(format!(

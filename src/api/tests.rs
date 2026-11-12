@@ -52,7 +52,7 @@ fn test_config() -> AppConfig {
         save_notify: None,
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
-        turn: None,
+        turn: None, workspaces: None, origin: None,
     }
 }
 
@@ -770,7 +770,7 @@ fn test_config_with_io() -> (
         save_notify: None,
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
-        turn: None,
+        turn: None, workspaces: None, origin: None,
     };
     (config, io_rx)
 }

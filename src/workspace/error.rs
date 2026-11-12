@@ -74,6 +74,9 @@ pub enum Error {
     GitTimeout { action: String, millis: u128 },
     /// A lifecycle rule refused the operation (exists, limit, unknown name).
     Lifecycle(String),
+    /// git lists no worktree for this workspace: it is positively not open
+    /// (closed, or removed with git). Not used for failures to ask git.
+    NotOpen(String),
     /// `close` refused because the worktree has uncommitted changes.
     Dirty { workspace: String, files: Vec<String>, omitted: usize },
     /// A change to an existing file was refused because the file is not
@@ -90,6 +93,8 @@ pub enum Error {
     Systemd { action: String, detail: String },
     /// A background-job rule refused the operation (limit, unknown id).
     Job(String),
+    /// A conversation's workspace binding could not be read or stored.
+    Binding(String),
 }
 
 impl Error {
@@ -126,6 +131,46 @@ pub fn shown(text: &str) -> String {
     out
 }
 
+/// A file name as it is rendered in a tool result.
+///
+/// A name is data from the repository and can contain anything but `/` and
+/// NUL: a newline in it would add a line to the result (a fake `error:` line,
+/// a fake continuation note). A name with control characters, line or
+/// direction-changing characters, or one that starts with `"`, is therefore
+/// rendered as a JSON string literal in double quotes; every other name is
+/// rendered as it is. The rendering is injective: two names never look alike,
+/// and a quoted name decodes (as JSON) to the real one.
+pub fn shown_name(name: &str) -> String {
+    let unsafe_char =
+        |c: char| c.is_control() || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    if !name.starts_with('"') && !name.chars().any(unsafe_char) {
+        return name.to_string();
+    }
+    let mut out = String::with_capacity(name.len() + 8);
+    out.push('"');
+    for c in name.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if unsafe_char(c) => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The note a result carries when it shows a name in the quoted form.
+pub const QUOTED_NAME_NOTE: &str = "names in double quotes are JSON strings: the file name contains control characters or starts with a quote. To address such a file, pass the decoded name (the same escapes inside the JSON string of the path argument)";
+
+/// Whether `rendered` (from [`shown_name`]) is in the quoted form.
+pub fn is_quoted_name(rendered: &str) -> bool {
+    rendered.starts_with('"')
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -144,7 +189,7 @@ impl fmt::Display for Error {
             Error::GitTimeout { action, millis } => {
                 write!(f, "git {action} did not finish within {millis} ms and was stopped")
             }
-            Error::Lifecycle(text) => f.write_str(text),
+            Error::Lifecycle(text) | Error::NotOpen(text) => f.write_str(text),
             Error::NotFresh { path, state } => {
                 write!(f, "`{path}` was not changed: {}", state.refusal().unwrap_or("it could not be verified"))
             }
@@ -160,7 +205,7 @@ impl fmt::Display for Error {
             }
             Error::CommandRefused(reason) => write!(f, "command not run: {reason}"),
             Error::Systemd { action, detail } => write!(f, "systemd {action} failed: {detail}"),
-            Error::Job(text) => f.write_str(text),
+            Error::Job(text) | Error::Binding(text) => f.write_str(text),
             Error::Dirty { workspace, files, omitted } => {
                 write!(f, "workspace `{workspace}` has uncommitted changes and was not closed; commit or discard them first:")?;
                 for file in files {

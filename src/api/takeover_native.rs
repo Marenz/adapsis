@@ -15,11 +15,18 @@ use crate::llm::ChatMessage;
 /// the pinned snapshot (DESIGN L3): writers, execute-only speakers and guests each get
 /// their own. A guest's tool list is pinned into the snapshot's turn identity, so the
 /// tool schemas, the dispatcher and the IO boundary all read the same list.
-pub(super) fn native_snapshot(
+pub(super) async fn native_snapshot(
     native_tools: bool,
     config: &AppConfig,
     context: &str,
 ) -> Option<AppConfig> {
+    let mut snapshot = classified_snapshot(native_tools, config, context)?;
+    // Once per turn, after the class is known: the tool list cannot change within it.
+    super::native_tools::workspace::attach(&mut snapshot).await;
+    Some(snapshot)
+}
+
+fn classified_snapshot(native_tools: bool, config: &AppConfig, context: &str) -> Option<AppConfig> {
     use super::native_tools::{speaker_class, SpeakerClass};
     if !native_tools {
         return None;
@@ -127,7 +134,8 @@ pub(super) async fn run(turn: TakeoverRun<'_>) -> anyhow::Result<String> {
 /// The reply is always the model's visible prose, never tool JSON. When finish
 /// was not accepted, the person is told completion is unconfirmed.
 fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
-    let prose = native.prose.clone();
+    // A fragment of a cut-off response that ends up as the reply says so.
+    let prose = if native.prose_cut_off { format!("{} {}", native.prose, super::native_turn::CUT_OFF_REPLY_MARKER) } else { native.prose.clone() };
     let append = |note: &str| {
         if prose.is_empty() {
             note.to_string()
@@ -138,6 +146,7 @@ fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
     match &native.end {
         LoopEnd::Finished => prose,
         LoopEnd::Empty(error) => error.to_string(),
+        LoopEnd::CutOff => append(&format!("({})", super::native_turn::CUT_OFF_TURN_ERROR)),
         LoopEnd::ProviderError(_) => {
             append(&format!(
                 "Entschuldigung — ich habe gerade ein technisches Problem und konnte \

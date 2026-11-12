@@ -2,7 +2,8 @@
 //!
 //! Every native tool list is derived from the class of the pinned turn snapshot:
 //!
-//! * [`SpeakerClass::Writer`]: may change code. Unchanged tool list.
+//! * [`SpeakerClass::Writer`]: may change code. The code tools, and the workspace tools
+//!   (`workspace.rs`) when the node has a workspace registry.
 //! * [`SpeakerClass::ExecuteOnly`]: `inspect`, `evaluate`, restricted `run`, `finish`,
 //!   and the turn-bound memory tools when the turn has an identity.
 //! * [`SpeakerClass::Guest`]: one direct tool per profile entry, restricted `run`, `finish`.
@@ -92,7 +93,9 @@ pub(super) fn admit_tool(class: &SpeakerClass, name: &str) -> Result<(), String>
         || is_memory_tool(name)
         || crate::coroutine::scoped::GUEST_TOOLS.contains(&name);
     match class {
-        SpeakerClass::Writer => Ok(()), // unknown names are refused by the parser, as before
+        // Unknown names are refused by the parser, as before. Workspace tool names are
+        // deliberately not in `known`: for the other classes they are names that do not exist.
+        SpeakerClass::Writer => Ok(()),
         SpeakerClass::ExecuteOnly if EXECUTE_ONLY_TOOLS.contains(&name) || is_memory_tool(name) => Ok(()),
         SpeakerClass::Guest(tools) if matches!(name, "run" | "finish") || tools.iter().any(|tool| tool == name) => Ok(()),
         _ if !known => Err(format!("unknown native tool `{name}`")),
@@ -109,6 +112,9 @@ pub(super) fn admit_tool(class: &SpeakerClass, name: &str) -> Result<(), String>
 pub(super) fn definitions(config: &AppConfig, all: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     let class = speaker_class(config);
     match &class {
+        // Repository workspaces: this class only, and only where `workspace::available`
+        // says so (owner-private conversation, node with a registry; #129).
+        SpeakerClass::Writer if workspace::available(config) => all.into_iter().chain(workspace::definitions()).collect(),
         SpeakerClass::Writer => all,
         SpeakerClass::ExecuteOnly => all
             .into_iter()

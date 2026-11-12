@@ -42,11 +42,13 @@ pub mod llm_handlers;
 mod native_turn;
 mod takeover_budget;
 mod takeover_native;
+pub mod origin;
+mod turn_lock;
 pub mod native_tools;
 pub(crate) mod http_context;
 mod request_meter;
 mod working_set;
-pub use llm_handlers::{ask, ask_stream, handle_llm_takeover};
+pub use llm_handlers::handle_llm_takeover;
 use llm_handlers::EventSender;
 
 fn emit_event(state: &AppConfig, event_json: &str) {
@@ -169,6 +171,11 @@ pub struct AppConfig {
     /// handlers, route handlers and the autonomous loop; those builtins refuse
     /// there rather than guess.
     pub turn: Option<crate::coroutine::TurnIdentity>,
+    /// Workspace site of a turn, decided once by `native_tools::workspace::attach`;
+    /// `None`: no workspace tools. The process configuration carries none.
+    pub(crate) workspaces: Option<std::sync::Arc<native_tools::workspace::Site>>,
+    /// Origin of the HTTP request this turn serves (`origin.rs`); `None` when it serves none.
+    pub origin: Option<origin::Origin>,
 }
 
 impl AppConfig {
@@ -1581,8 +1588,8 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/eval", post(eval_fn))
         .route("/api/test", post(test_fn))
         .route("/api/query", post(query))
-        .route("/api/ask", post(ask))
-        .route("/api/ask-stream", post(ask_stream))
+        .route("/api/ask", post(origin::ask))
+        .route("/api/ask-stream", post(origin::ask_stream))
         .route("/api/inject", post(inject_message))
         .route("/api/drain-queue", post(drain_queue))
         .route("/api/opencode", post(opencode_task))

@@ -1,5 +1,31 @@
 # AdapsisOS Roadmap
 
+## Workspace tools W1: lifecycle and read-only tools in owner turns (#129, 2026-11-12)
+
+- On `work/workspace-tools` after the merges of the run-tool line (`f12c426`) and the
+  Python release line (`3d29a13`) and the cache-epoch fix (`17c566f`).
+- Wired for the writer class on a node with a workspace registry: `workspace_open`,
+  `workspace_use`, `workspace_status`, `workspace_close`, `read`, `search`, `glob`.
+  Binding and read ledger persist in the workspace state directory. Results are plain
+  text bounded by the generating model's per-message cap. A provider length stop is a
+  correction round now, not a provider error.
+- After the independent review (REJECT as first staged: workspace ownership, shared
+  history) one correction on top: workspace tools only in owner-private conversations
+  (administrator's DM; HTTP `main` from this node only), workspace batches hidden from
+  every other turn's view, atomic claim under the workspace reservation with the work
+  lock owned by the blocking call, fail-closed binding directory, names escaped, result
+  survives a model switch, training log and events without content.
+- Delta review closed the original ownership/cancellation/shared-history blockers.
+  Its remaining training-log blocker is corrected to structural metadata only (no
+  header/error/prose, no arbitrary JSON key or correlation id). Final-status length
+  stops retain the cutoff marker without an extra generation; migration exclusions
+  use complete batch positions so reused call ids cannot hide unrelated results; file
+  names escape the complete Unicode Bidi_Control set. Final delta review is pending.
+- Next: W2 (`edit`, `write`, `bash`, cancel, push guard), W3 (`job_*`, workspace turn
+  budget), then live acceptance on this node (#115 task). No registry file exists on any
+  node yet, so nothing changes for a running instance until the owner creates one.
+- Not deployed. AGENTS.md "Workspace tools in owner turns" has the invariants.
+
 ## Restricted run + JIT fix: merged and clean (2026-11-12)
 
 - `d819b0d` restricted `run` for guests and execute-only speakers (adversarial

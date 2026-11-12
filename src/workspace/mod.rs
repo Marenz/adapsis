@@ -1,9 +1,9 @@
 //! Workspace tools: reading, searching and listing a repository through a git
 //! worktree that belongs to one task (DESIGN L2, T4; issue #129).
 //!
-//! This is the library half. Nothing here is wired into the native tool list,
-//! a turn or a conversation yet; that is the next slice, and until it lands
-//! most of this module is reachable only from its tests.
+//! This is the library half. `api/native_tools/workspace.rs` wires the
+//! lifecycle and the read-only tools into owner turns; the write side, commands
+//! and jobs are wired by later slices and until then reachable only from tests.
 //!
 //! * `registry`: which repositories exist (`workspaces.toml`).
 //! * `lifecycle`: `open` / `find` / `status` / `close` of a workspace.
@@ -20,6 +20,7 @@
 //!   on disk.
 //! * `systemd`: the few things asked of the user manager.
 //! * `ledger`: what was read, so a later edit can require "read and unchanged".
+//! * `binding`: which workspace a conversation works in, with its ledger, on disk.
 //! * `limits`: every cap, as a named policy value.
 //!
 //! Scope of the safety rules (DESIGN N5): they keep the file tools inside the
@@ -32,6 +33,7 @@ mod contain;
 mod adapter;
 mod reservation;
 mod state_io;
+pub mod binding;
 pub mod edit;
 pub mod error;
 pub mod git;
@@ -55,7 +57,7 @@ mod walk;
 pub mod write;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod edit_tests;
@@ -83,17 +85,19 @@ mod search_tests;
 mod secure_write_tests;
 
 #[allow(unused_imports)]
+pub use binding::{Binding, BindingStore};
+#[allow(unused_imports)]
 pub use edit::{EditResult, edit};
 #[allow(unused_imports)]
 pub use error::{Error, Result, Rule};
 #[allow(unused_imports)]
-pub use glob::{GlobEntry, GlobResult, glob};
+pub use glob::{GlobEntry, GlobResult, glob, glob_within};
 #[allow(unused_imports)]
 pub use ledger::{Freshness, ReadLedger};
 #[allow(unused_imports)]
-pub use lifecycle::{Workspace, WorkspaceStatus, close, find, open, status};
+pub use lifecycle::{Workspace, WorkspaceStatus, close, find, list, open, status};
 #[allow(unused_imports)]
-pub use read::{FileFacts, ReadLine, ReadResult, read};
+pub use read::{FileFacts, ReadLine, ReadResult, read, read_within};
 #[allow(unused_imports)]
 pub use registry::{Registry, Repository};
 #[allow(unused_imports)]

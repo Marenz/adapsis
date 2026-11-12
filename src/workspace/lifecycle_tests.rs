@@ -2,7 +2,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 use super::error::Error;
-use super::lifecycle::{GitOptions, close, find, open, open_with, status, validate_base, validate_name};
+use super::lifecycle::{GitOptions, close, find, list, open, open_with, status, validate_base, validate_name};
 use super::limits::{DIRTY_LIST_MAX, MAX_WORKTREES_PER_REPO, NAME_MAX_LEN};
 use super::test_support::{RepoFixture, commit_all, git, write};
 
@@ -107,8 +107,10 @@ fn lifecycle_duplicate_name_is_refused() {
     let fixture = RepoFixture::new();
     let workspace = open(&fixture.repository, "twice", None).unwrap();
     let text = lifecycle_text(open(&fixture.repository, "twice", None).unwrap_err());
-    assert!(text.contains("branch `adapsis/twice` already exists") && text.contains("find"), "{text}");
+    assert!(text.contains("branch `adapsis/twice` already exists") && text.contains("use that workspace"), "{text}");
+    assert_eq!(list(&fixture.repository).unwrap(), ["twice"]);
     close(&workspace).unwrap();
+    assert!(list(&fixture.repository).unwrap().is_empty());
     let text = lifecycle_text(open(&fixture.repository, "twice", None).unwrap_err());
     assert!(text.contains("a closed workspace keeps its branch"), "{text}");
 }
@@ -176,10 +178,15 @@ fn lifecycle_base_is_validated_and_must_be_a_commit() {
 #[test]
 fn lifecycle_find_reports_unknown_workspaces() {
     let fixture = RepoFixture::new();
-    let text = lifecycle_text(find(&fixture.repository, "absent").unwrap_err());
+    // "git lists no such worktree" is its own error: only it proves a workspace is gone.
+    let not_open = |error: Error| match error {
+        Error::NotOpen(text) => text,
+        other => panic!("expected NotOpen, got {other:?}"),
+    };
+    let text = not_open(find(&fixture.repository, "absent").unwrap_err());
     assert!(text.contains("no workspace `absent`") && text.contains("none are open"), "{text}");
     open(&fixture.repository, "present", None).unwrap();
-    let text = lifecycle_text(find(&fixture.repository, "absent").unwrap_err());
+    let text = not_open(find(&fixture.repository, "absent").unwrap_err());
     assert!(text.contains("open: present"), "{text}");
     // The main checkout is never a workspace, whatever its directory is called.
     assert!(find(&fixture.repository, "checkout").is_err());

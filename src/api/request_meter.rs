@@ -191,6 +191,18 @@ fn log_cache_metric(
 /// leave) and grows append-only from there. An unknown lifetime or an unknown
 /// pause (no earlier request recorded) never cold-starts. The persisted history
 /// is untouched. Call under the metadata lock; never awaits.
+///
+/// `show_workspace`: whether this turn may see the conversation's workspace tool
+/// batches (file content of the owner's repositories). Only a turn that has the
+/// workspace tools itself does; for every other turn (another speaker class, a
+/// request from another node, a legacy turn, a `!watch` event) those batches are
+/// left out of the view whole, with a notice. The projection (checkpoint, cold
+/// start) is taken on the unfiltered history, which is the larger one. A turn
+/// that sees less than the previous one starts a new cache epoch by itself: its
+/// history is not an extension of the previous request's.
+/// NOT covered (#145): the owner's questions and the model's own prose in the
+/// same conversation stay visible; if the model wrote "the file says X", X is
+/// in the history.
 pub(super) fn turn_view(
     manager: &mut ConversationManager,
     context: &str,
@@ -198,11 +210,15 @@ pub(super) fn turn_view(
     system: &str,
     known_tail_bytes: usize,
     now_ms: u64,
+    show_workspace: bool,
 ) -> View {
     let limits = crate::model_limits::for_model(model);
     let lifetime = manager.cache_lifetimes.lifetime(model, &limits, now_ms);
     let conv = manager.get_or_create(context);
-    let policy = ViewPolicy::for_model(model, system, known_tail_bytes, conv.projection(model));
+    let mut policy = ViewPolicy::for_model(model, system, known_tail_bytes, conv.projection(model));
+    if !show_workspace {
+        policy.hidden_tools = Some(super::native_tools::workspace::is_workspace_name);
+    }
     let pause_secs = conv.last_request_ms.map(|last| now_ms.saturating_sub(last) / 1000);
     let mut cold = false;
     if let (Some(lifetime), Some(pause)) = (lifetime, pause_secs) {

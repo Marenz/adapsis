@@ -193,7 +193,7 @@ pub fn open_with(repo: &Repository, name: &str, base: Option<&str>, options: Git
     let branch = format!("{BRANCH_PREFIX}{name}");
     if state.branches.contains(&branch) {
         let hint = match state.worktree_of(repo, name) {
-            Some(_) => "its worktree still exists: bind to it with find instead",
+            Some(_) => "its worktree still exists: use that workspace instead of opening it again",
             None => "a closed workspace keeps its branch: choose another name, or delete the branch first",
         };
         return Err(Error::Lifecycle(format!(
@@ -272,7 +272,7 @@ pub fn find_with(repo: &Repository, name: &str, options: GitOptions) -> Result<W
     let Some(entry) = state.worktree_of(repo, name) else {
         let managed = state.managed(repo);
         let known = if managed.is_empty() { "none are open".to_string() } else { format!("open: {}", managed.join(", ")) };
-        return Err(Error::Lifecycle(format!("no workspace `{name}` in repository `{}` ({known}); open it first", repo.name)));
+        return Err(Error::NotOpen(format!("no workspace `{name}` in repository `{}` ({known}); open it first", repo.name)));
     };
     if !entry.path.is_dir() {
         return Err(Error::Lifecycle(format!(
@@ -286,6 +286,12 @@ pub fn find_with(repo: &Repository, name: &str, options: GitOptions) -> Result<W
         .filter(|base| validate_base(base).is_ok());
     let base = stored.unwrap_or_else(|| repo.base.clone());
     Workspace::at(repo, name, &entry.path, &base)
+}
+
+/// Names of the open workspaces of `repo` (the ones that count against the
+/// limit), in git's worktree order.
+pub fn list(repo: &Repository) -> Result<Vec<String>> {
+    Ok(RepoState::read(repo, GitOptions::default())?.managed(repo))
 }
 
 pub fn status(workspace: &Workspace) -> Result<WorkspaceStatus> {

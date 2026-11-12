@@ -246,7 +246,7 @@ fn is_omitted_history_notice(message: &ChatMessage) -> bool {
         ChatContent::Text(text)
             if message.role == ChatRole::User
                 && text.starts_with(OMITTED_HISTORY_PREFIX)
-                && text.contains("older message(s) are omitted")
+                && (text.contains("older message(s) are omitted") || text.ends_with(&format!("{}]", crate::session::conversation_view::HIDDEN_NOTICE)))
     )
 }
 

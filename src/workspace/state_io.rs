@@ -156,6 +156,16 @@ impl Dir {
         Ok(())
     }
 
+    /// Remove a file and make the removal durable (directory fsync). A missing
+    /// file is not an error; the directory is synced either way.
+    pub fn remove_file_synced(&self, name: &OsStr) -> io::Result<()> {
+        match self.unlink(name, false) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        File::from(self.fd.try_clone()?).sync_all()
+    }
+
     pub fn remove_tree(&self, name: &OsStr) -> io::Result<()> {
         let Some(meta) = self.metadata(name)? else { return Ok(()) };
         if !meta.is_dir() {

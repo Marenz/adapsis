@@ -140,6 +140,22 @@ pub(super) fn checkpointed_view(
     checkpointed_view_at(manager, context, model, system, known_tail_bytes, crate::cache_lifetime::now_ms())
 }
 
+/// [`checkpointed_view`] for a native turn: `config` is its pinned snapshot (`None`: a
+/// legacy turn). Workspace tool batches of the history are shown only to a turn that has
+/// the workspace tools itself (`request_meter::turn_view`).
+pub(super) fn checkpointed_view_for(
+    manager: &mut crate::session::ConversationManager,
+    context: &str,
+    model: &str,
+    system: &str,
+    known_tail_bytes: usize,
+    config: Option<&AppConfig>,
+) -> crate::session::conversation_view::View {
+    manager.get_or_create(context).set_primary_system(system.to_string());
+    let show = config.is_some_and(super::native_tools::workspace::available);
+    super::request_meter::turn_view(manager, context, model, system, known_tail_bytes, crate::cache_lifetime::now_ms(), show)
+}
+
 pub(super) fn checkpointed_view_at(
     manager: &mut crate::session::ConversationManager,
     context: &str,
@@ -149,7 +165,7 @@ pub(super) fn checkpointed_view_at(
     now_ms: u64,
 ) -> crate::session::conversation_view::View {
     manager.get_or_create(context).set_primary_system(system.to_string());
-    super::request_meter::turn_view(manager, context, model, system, known_tail_bytes, now_ms)
+    super::request_meter::turn_view(manager, context, model, system, known_tail_bytes, now_ms, false)
 }
 
 /// Self-trigger (`!watch`) request for the `main` conversation (#68): the event is
@@ -173,7 +189,7 @@ pub(crate) fn self_trigger_messages(
         .map(|message| message.content.clone())
         .unwrap_or_default();
     // A watch event starts a turn of its own, like a user message.
-    super::request_meter::turn_view(&mut meta.conversations, "main", model, &system, 0, crate::cache_lifetime::now_ms())
+    super::request_meter::turn_view(&mut meta.conversations, "main", model, &system, 0, crate::cache_lifetime::now_ms(), false)
         .messages
 }
 

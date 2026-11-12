@@ -25,6 +25,8 @@ const IMAGE_COUNT: usize = 3;
 const IMAGE_BYTES: usize = 20 * 1024 * 1024;
 use crate::model_limits::{IMAGE_TOKENS, tokens_for_bytes};
 const OMITTED_NOTICE: &str = "older message(s) are omitted from this model context; the raw history is retained.";
+/// Tool batches hidden from this turn (`ViewPolicy::hidden_tools`).
+pub const HIDDEN_NOTICE: &str = "earlier tool exchange(s) of this conversation are not shown in this turn.";
 
 /// Budget inputs for one request, all in estimated tokens.
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +47,10 @@ pub struct ViewPolicy {
     pub image_bytes: usize,
     /// Serialized text bytes per provider token for this conversation.
     pub bytes_per_token: f32,
+    /// Tool batches this turn must not be shown: a complete batch with a call to
+    /// a tool this predicate names is left out of the view (the stored history
+    /// keeps it). `None`: every batch is shown.
+    pub hidden_tools: Option<fn(&str) -> bool>,
 }
 
 /// What a conversation's previous requests measured, for projecting the next.
@@ -110,6 +116,7 @@ impl ViewPolicy {
             overhead_bytes: json_len(system) + Self::TAIL_ALLOWANCE_BYTES,
             // At most 30% of the route limit in base64: 3 typical photos fit.
             image_bytes: IMAGE_BYTES.min(max_bytes * 3 / 10 * 3 / 4),
+            hidden_tools: None,
         }
     }
 
@@ -122,6 +129,7 @@ impl ViewPolicy {
             trigger_bytes: usize::MAX / 4, target_bytes: usize::MAX / 4, overhead_bytes: 0,
             image_bytes: IMAGE_BYTES,
             bytes_per_token: crate::model_limits::DEFAULT_BYTES_PER_TOKEN,
+            hidden_tools: None,
         }
     }
 
@@ -199,6 +207,8 @@ struct Group {
     bytes: usize,
     user: bool,
     oversized_batch: bool,
+    /// A batch with a call to a tool the policy hides from this turn.
+    hidden: bool,
 }
 
 /// Per-message JSON framing estimate (role, keys, cache_control).
@@ -249,7 +259,13 @@ fn groups(conv: &Conversation, policy: &ViewPolicy) -> Vec<Group> {
         .map(|group| {
             let start = (group.as_ptr() as usize - base) / size;
             let batch = group.len() > 1;
-            let oversized_batch = batch && group.iter().any(|m| raw_bytes(m) > max_message_bytes);
+            // Tool RESULTS over the cap are cut in the view like any message. What
+            // cannot be cut is the assistant message of a batch: its tool-call
+            // arguments must stay valid, so a batch whose calls exceed the cap is
+            // left out whole.
+            let oversized_batch = batch && raw_bytes(&group[0]) > max_message_bytes;
+            let hidden = batch
+                && policy.hidden_tools.is_some_and(|hide| group[0].tool_calls.iter().flatten().any(|call| hide(&call.name)));
             // Serialized text bytes as sent; tokens follow from the calibrated ratio.
             let text_bytes: usize = group.iter().map(|m| message_bytes(m, max_message_bytes)).sum();
             // Exactly the images the view will send (newest 3 total), as base64.
@@ -262,6 +278,7 @@ fn groups(conv: &Conversation, policy: &ViewPolicy) -> Vec<Group> {
                 bytes: text_bytes + image_raw.iter().map(|&raw| image_part_bytes(raw)).sum::<usize>(),
                 user: !batch && group[0].role == "user",
                 oversized_batch,
+                hidden,
             }
         })
         .filter(|group| !(group.start == 0 && conv.messages[0].role == "system"))
@@ -450,13 +467,28 @@ pub(super) fn build(conv: &mut Conversation, policy: &ViewPolicy) -> View {
     if let Some(system) = system {
         result.push(system);
     }
-    if omitted > 0 {
-        result.push(ChatMessage { role: "user".into(), content: format!("[System: {omitted} {OMITTED_NOTICE}]"), ..Default::default() });
+    let hidden = all.iter().filter(|g| g.start >= conv.view_start && g.hidden).count();
+    // One notice for both kinds of omission; the request builders move it to the
+    // volatile tail (`context_log`), because its numbers change.
+    let notice = match (omitted, hidden) {
+        (0, 0) => None,
+        (omitted, 0) => Some(format!("[System: {omitted} {OMITTED_NOTICE}]")),
+        (0, hidden) => Some(format!("[System: {hidden} {HIDDEN_NOTICE}]")),
+        (omitted, hidden) => Some(format!("[System: {omitted} {OMITTED_NOTICE} {hidden} {HIDDEN_NOTICE}]")),
+    };
+    if let Some(content) = notice {
+        result.push(ChatMessage { role: "user".into(), content, ..Default::default() });
     }
-    for group in all.iter().filter(|g| g.start >= conv.view_start && !g.oversized_batch) {
+    for group in all.iter().filter(|g| g.start >= conv.view_start && !g.oversized_batch && !g.hidden) {
         let slice = &conv.messages[group.start..group.start + group.len];
         if group.len > 1 {
-            result.extend(slice.iter().cloned());
+            // The batch stays whole; an over-long result is cut with the marker
+            // (C4), deterministically, so the history stays byte-stable.
+            result.push(slice[0].clone());
+            result.extend(slice[1..].iter().map(|message| ChatMessage {
+                content: truncate_middle(&message.content, policy.max_message_bytes),
+                ..message.clone()
+            }));
             continue;
         }
         let message = &slice[0];

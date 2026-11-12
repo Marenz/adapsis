@@ -28,7 +28,7 @@ pub struct WriteResult {
 impl WriteResult {
     pub fn render(&self) -> String {
         let verb = if self.created { "created" } else { "replaced the content of" };
-        format!("{verb} {} ({} bytes, {} lines)", self.path, self.bytes, self.lines)
+        format!("{verb} {} ({} bytes, {} lines)", super::error::shown_name(&self.path), self.bytes, self.lines)
     }
 }
 

@@ -59,6 +59,7 @@ mod literals;
 mod run;
 mod scalar_entry;
 mod speaker;
+pub(crate) mod workspace;
 pub(in crate::api) use speaker::{speaker_class, SpeakerClass};
 pub(in crate::api) use crate::eval::meter::TurnBudget;
 
@@ -655,6 +656,11 @@ pub fn validate_native_tool_authorized(
     config: &AppConfig,
 ) -> Result<(), String> {
     let class = speaker_class(config);
+    // Only for a turn that has workspace tools. For every other turn these names take
+    // the path of any name that is not a tool, with the same refusal text.
+    if workspace::is_tool(name) && workspace::available(config) {
+        return workspace::preflight(name, arguments);
+    }
     let parsed = parse_for(&class, name, arguments)?;
     let model = model_name(config);
     check_authorization(&parsed, config, &model, &class)

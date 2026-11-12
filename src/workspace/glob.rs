@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::MetadataExt;
 
-use super::error::{Error, Result};
+use super::error::{Error, Result, shown_name};
 use super::lifecycle::Workspace;
 use super::limits::{GLOB_MAX_OUTPUT_BYTES, GLOB_MAX_RESULTS};
 use super::resolve::{Access, Kind, display_of, resolve};
@@ -25,11 +25,20 @@ pub struct GlobResult {
     pub total: u64,
     /// Set when a budget ended the walk; `total` is then a lower bound.
     pub stopped: Option<Stop>,
+    /// The output bound this listing was cut to.
+    pub max_bytes: usize,
 }
 
 /// List files (and symlinks, by name) under `path` that match `pattern`.
 /// Directories are not listed. `.gitignore` applies; symlinks are not followed.
 pub fn glob(workspace: &Workspace, pattern: &str, path: &str) -> Result<GlobResult> {
+    glob_within(workspace, pattern, path, GLOB_MAX_OUTPUT_BYTES)
+}
+
+/// [`glob`] with a smaller bound on the rendered output (clamped to
+/// `RESULT_MIN_BYTES ..= GLOB_MAX_OUTPUT_BYTES`).
+pub fn glob_within(workspace: &Workspace, pattern: &str, path: &str, max_bytes: usize) -> Result<GlobResult> {
+    let max_bytes = max_bytes.clamp(super::limits::RESULT_MIN_BYTES, GLOB_MAX_OUTPUT_BYTES);
     let start = resolve(workspace, if path.is_empty() { "." } else { path }, Access::Read)?;
     if start.kind != Kind::Directory {
         return Err(Error::WrongKind { path: start.supplied, expected: "a directory to list" });
@@ -60,12 +69,12 @@ pub fn glob(workspace: &Workspace, pattern: &str, path: &str) -> Result<GlobResu
     newest_first(&mut found);
     let mut bytes = 0;
     let fitting = found.iter().take_while(|entry| {
-        bytes += entry.path.len() + 1;
-        bytes <= GLOB_MAX_OUTPUT_BYTES - 512
+        bytes += shown_name(&entry.path).len() + 1;
+        bytes <= max_bytes - 512
     });
     let keep = fitting.count();
     found.truncate(keep);
-    Ok(GlobResult { entries: found, total, stopped: budget.stopped })
+    Ok(GlobResult { entries: found, total, stopped: budget.stopped, max_bytes })
 }
 
 /// Sort newest first and keep the cap; called repeatedly to bound memory.
@@ -77,17 +86,21 @@ fn newest_first(found: &mut Vec<GlobEntry>) {
 impl GlobResult {
     /// The text the model sees: one path per line, then what was left out.
     pub fn render(&self) -> String {
-        let mut out: Vec<String> = self.entries.iter().map(|entry| entry.path.clone()).collect();
+        let mut out: Vec<String> = self.entries.iter().map(|entry| shown_name(&entry.path)).collect();
+        let quoted = out.iter().any(|name| super::error::is_quoted_name(name));
         if self.entries.is_empty() {
             out.push("no paths match".to_string());
         }
         let hidden = self.total.saturating_sub(self.entries.len() as u64);
         if hidden > 0 {
             let bound = if self.stopped.is_some() { "at least " } else { "" };
-            out.push(format!("[{bound}{hidden} more paths not shown (newest first, limit {GLOB_MAX_RESULTS} paths or {GLOB_MAX_OUTPUT_BYTES} bytes); narrow the pattern or the path]"));
+            out.push(format!("[{bound}{hidden} more paths not shown (newest first, limit {GLOB_MAX_RESULTS} paths or {} bytes); narrow the pattern or the path]", self.max_bytes));
         }
         if let Some(stop) = self.stopped {
             out.push(format!("[note: {}]", stop.describe()));
+        }
+        if quoted {
+            out.push(format!("[note: {}]", super::error::QUOTED_NAME_NOTE));
         }
         out.join("\n")
     }

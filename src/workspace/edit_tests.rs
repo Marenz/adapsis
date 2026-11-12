@@ -409,3 +409,38 @@ fn write_refuses_by_size_kind_and_path_rule() {
     assert!(error.to_string().contains("the content is 2097153 bytes; one write accepts at most 2097152"), "{error}");
     assert!(!fixture.root.join("too-big.txt").exists());
 }
+
+/// A line longer than the read cap is never shown completely, so nothing on it is
+/// replaced, however the file was read; other lines of the same file stay editable.
+#[test]
+fn edit_refuses_text_on_a_line_read_cannot_show_completely() {
+    use super::limits::LINE_MAX_CHARS;
+    let fixture = Fixture::plain();
+    let long = format!("head {} tail", "x".repeat(LINE_MAX_CHARS));
+    let exact = "é".repeat(LINE_MAX_CHARS);
+    fixture.write("a.txt", format!("first\n{long}\nthird\n{exact}\r\nlast\n"));
+    let mut ledger = ReadLedger::default();
+    let shown = read(&fixture.workspace, "a.txt", None, None).unwrap();
+    assert!(shown.render().contains("1 line(s) are longer than 2000 characters and were cut. read cannot show the rest of such a line, and edit refuses"), "{}", shown.render());
+    ledger.note(&shown);
+    let before = std::fs::read(fixture.root.join("a.txt")).unwrap();
+    for (old, new) in [("head ", "HEAD "), (" tail", " TAIL"), ("first\nhead", "first\nHEAD"), ("tail\nthird", "tail\nTHIRD")] {
+        let error = edit(&fixture.workspace, &mut ledger, "a.txt", old, new, false).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "invalid argument: `a.txt` was not changed: the text to replace touches line 2, which is longer than 2000 characters. read shows only the beginning of such a line, so the rest of it is not known here; change that line with a command",
+        );
+    }
+    assert!(edit(&fixture.workspace, &mut ledger, "a.txt", "x", "y", true).unwrap_err().to_string().contains("touches line 2"));
+    assert_eq!(std::fs::read(fixture.root.join("a.txt")).unwrap(), before, "nothing was written");
+    // Lines around it, and a line of exactly the cap (CRLF not counted), are editable.
+    edit(&fixture.workspace, &mut ledger, "a.txt", "first\n", "FIRST\n", false).unwrap();
+    edit(&fixture.workspace, &mut ledger, "a.txt", "third", "THIRD", false).unwrap();
+    edit(&fixture.workspace, &mut ledger, "a.txt", "éé", "ee", false).unwrap_err();
+    edit(&fixture.workspace, &mut ledger, "a.txt", "last", "LAST", false).unwrap();
+    let after = std::fs::read_to_string(fixture.root.join("a.txt")).unwrap();
+    assert!(after.starts_with("FIRST\nhead x") && after.contains("\nTHIRD\n") && after.ends_with("\r\nLAST\n"), "{}", &after[after.len() - 20..]);
+    // The model matters, not the unit: replace_exact on the bytes.
+    assert_eq!(replace_exact(&format!("{}\n", "a".repeat(LINE_MAX_CHARS + 1)), "a\n", "b\n", false).unwrap_err(), Failure::CutLine { line: 1 });
+    assert!(replace_exact(&format!("{}\n", "a".repeat(LINE_MAX_CHARS)), "a\n", "b\n", false).is_ok());
+}

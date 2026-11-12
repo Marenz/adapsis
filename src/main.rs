@@ -333,7 +333,12 @@ fn migrate_conversations_to_memory(
     let mut imported = 0usize;
 
     for (context, conversation) in contexts {
+        // File content of the owner's repositories does not go into the memory graph.
+        let workspace_results = api::native_tools::workspace::result_positions(&conversation.messages);
         for (index, message) in conversation.messages.iter().enumerate() {
+            if workspace_results.contains(&index) {
+                continue;
+            }
             let graph_message_id = format!("legacy:{context}:{index}");
             if graph.has_message(&graph_message_id)? {
                 imported += 1;
@@ -1868,7 +1873,7 @@ async fn main() -> Result<()> {
                                     io_sender, task_registry, snap_registry,
                                     oc_lock, oc_git_dir, t_log,
                                     al, pc,
-                                    save_notify, ai_log, native_tools,
+                                    save_notify, ai_log, native_tools, None,
                                 ).await;
                                 let _ = reply.send(result);
                             });
@@ -2335,7 +2340,7 @@ async fn main() -> Result<()> {
                 save_notify: Some(save_tx),
                 access_level: access_level_for_config,
                 permission_config,
-                turn: None,
+                turn: None, workspaces: None, origin: None,
             };
 
             // Clone tier handles before config is moved into the router
@@ -2602,7 +2607,7 @@ async fn main() -> Result<()> {
                 .map(|(listener, h)| {
                     let app = app.clone();
                     async move {
-                        let result = axum::serve(listener, app).await;
+                        let result = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
                         if let Err(e) = &result {
                             eprintln!("[adapsis] server error on {h}:{port}: {e}");
                         }

@@ -120,6 +120,22 @@ impl RepoFixture {
         Self { temp, top, repository }
     }
 
+    /// A registry that declares this repository under `name`.
+    pub fn registry(&self, name: &str) -> super::registry::Registry {
+        super::registry::Registry::from_toml(&format!(
+            "[repo.{name}]\ncheckout = \"{}\"\nworktree_parent = \"{}\"\nbase = \"main\"\n",
+            self.repository.checkout.display(),
+            self.repository.worktree_parent.display()
+        ))
+        .expect("fixture registry")
+    }
+
+    /// A workspace site for this repository under `name`, with its own state
+    /// root inside the fixture, so tests do not share conversation bindings.
+    pub fn site(&self, name: &str) -> std::sync::Arc<crate::api::native_tools::workspace::Site> {
+        crate::api::native_tools::workspace::Site::for_test(self.registry(name), &self.top.join("state"))
+    }
+
     /// The checkout's local git configuration, sorted, one `key=value` per line.
     pub fn config(&self) -> Vec<String> {
         let mut lines: Vec<String> = git(&self.repository.checkout, &["config", "--local", "--list"]).lines().map(str::to_string).collect();

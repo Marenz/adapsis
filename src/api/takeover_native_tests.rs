@@ -9,6 +9,8 @@ mod logging;
 mod restricted;
 #[path = "takeover_cache_tests.rs"]
 mod cache;
+#[path = "takeover_workspace_tests.rs"]
+mod workspace;
 
 const ADMIN: &str = "telegram:user:100000001";
 
@@ -42,6 +44,8 @@ struct Harness {
     log_file: Option<Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// The generating model (its limits decide the requested cache lifetime).
     model: &'static str,
+    /// Workspace site of the node (`None`: no workspace tools).
+    workspaces: Option<Arc<crate::api::native_tools::workspace::Site>>,
 }
 
 struct Provider {
@@ -122,6 +126,7 @@ impl Harness {
             native_tools,
             log_file: None,
             model: "takeover-fixture",
+            workspaces: None,
         }
     }
 
@@ -165,6 +170,7 @@ impl Harness {
             None,
             self.log_file.clone(),
             self.native_tools,
+            self.workspaces.clone(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(30), future)
             .await

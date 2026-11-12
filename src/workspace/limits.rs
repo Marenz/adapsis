@@ -58,6 +58,9 @@ pub const ECHO_MAX_CHARS: usize = 200;
 pub const READ_MAX_LINES: usize = 2000;
 /// Bytes of line text per call.
 pub const READ_MAX_BYTES: usize = 100 * 1024;
+/// Smallest byte bound a caller may give `read`, `search` or `glob`; a smaller
+/// one is raised to it (room for one long line and the trailer).
+pub const RESULT_MIN_BYTES: usize = 2 * 1024;
 /// Characters of one line before it is cut with a marker.
 pub const LINE_MAX_CHARS: usize = 2000;
 /// A NUL byte within this prefix makes a file binary.
@@ -68,6 +71,19 @@ pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 pub const SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Files remembered by one read ledger; the oldest record is dropped.
 pub const LEDGER_MAX_ENTRIES: usize = 512;
+
+// --- conversation bindings -----------------------------------------------
+
+/// How long a workspace tool call waits for an earlier call of the same
+/// conversation that is still running (its turn was dropped, the blocking
+/// work was not). Above the longest library operation, `git worktree add`.
+pub const WORK_WAIT_MAX: Duration = Duration::from_secs(GIT_WORKTREE_TIMEOUT.as_secs() + 30);
+/// A wait longer than this is mentioned in the tool result.
+pub const WORK_WAIT_NOTED: Duration = Duration::from_secs(3);
+/// Largest binding file that is read (a full ledger is about 100 KB).
+pub const BINDING_MAX_BYTES: u64 = 1024 * 1024;
+/// Longest conversation key a binding is kept for, in bytes.
+pub const BINDING_CONTEXT_MAX_BYTES: usize = 512;
 
 // --- write and edit ------------------------------------------------------
 

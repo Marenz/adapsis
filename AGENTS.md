@@ -187,8 +187,9 @@ response has no Content-Disposition header.
 
 `src/workspace/` owns repository/worktree lifecycle, bounded read/search/glob,
 read-ledger-checked atomic edit/write, foreground commands/cancel and durable
-background jobs. This is reviewed library code, **not native-tool wiring or live
-deployment certification**. Focused gate: `cargo test --release workspace::`.
+background jobs. This is reviewed library code, **not live deployment
+certification**; the first wiring slice is described below. Focused gate:
+`cargo test --release workspace::`.
 
 - Registry: `~/.config/adapsis/workspaces.toml`, override
   `ADAPSIS_WORKSPACES_FILE`; optional per-repository `env` is applied before
@@ -213,6 +214,166 @@ deployment certification**. Focused gate: `cargo test --release workspace::`.
   `spawn_blocking`, without Program/runtime/session state locks held.
 - Preserve `Exit::CleanupUncertain` / cleanup errors as failure: never turn them
   into success, a fully-stopped claim, or permission to replay a command.
+
+### Workspace tools in owner turns (#129 W1: lifecycle + read-only)
+
+Wired: `workspace_open`, `workspace_use`, `workspace_status`, `workspace_close`, `read`,
+`search`, `glob` (`api/native_tools/workspace.rs` + `workspace/exec.rs`). Not wired yet:
+`edit`, `write`, `bash` (W2), `job_*` and the workspace turn budget (W3). DESIGN L2, L3, T4,
+N3, N5/N6, C4.
+
+- **Who and where: ONE predicate, `workspace::available(config)`.** Schemas
+  (`speaker::definitions`), prompt section, runtime-tail line, batch preflight, the view
+  filter and execution all ask it. True only for: the writer class, on a node whose turn
+  snapshot carries a workspace site, in an OWNER-PRIVATE conversation:
+  - a conversational turn (it has a turn identity): `memory_graph::is_private_admin`, the
+    administrator in the administrator's own DM (the predicate of `conversation_history`
+    and the inbox snapshot). Not the owner in a group, not another writer anywhere.
+  - an HTTP turn on `main` (no turn identity): only `Origin::Local` (`api/origin.rs`): the
+    TCP peer is loopback (127/8, ::1, IPv4-mapped loopback) AND the request carries no
+    `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header. A forwarding header can only
+    narrow (a reverse proxy on this node forwards from 127.0.0.1). DESIGN N3 makes node
+    identity the WireGuard address plus a per-node profile; until that profile exists, a
+    request from another node has no authority we can name, so it gets no workspace tools.
+    The per-node profile is the place that may widen this (`Origin::Remote(ip)` carries
+    the address for it). `AppConfig.origin` is set by the routed wrappers `origin::ask` /
+    `origin::ask_stream`; a turn without it is not local. The server must be served with
+    `into_make_service_with_connect_info::<SocketAddr>()`, else every request is remote.
+  The reason is the history: tool results stay in a conversation's history and that
+  history is sent to whoever speaks there next.
+  Everywhere else the tools do not exist: not in schemas, prompt or tail, and a call gets
+  the `unknown native tool` text of any invented name (for a writer without a registry
+  byte for byte what it was before these tools). Do NOT add the names to `admit_tool`'s
+  `known`, and never branch on `is_tool(name)` without `available(config)`.
+- **The site is decided once per turn** by `workspace::attach(&mut snapshot)` at the two
+  turn entries (`takeover_native::native_snapshot`, `native_turn::run`): not eligible means
+  no site and the registry file is not read; eligible means the site the configuration
+  carries (tests) or the registry file, read in `spawn_blocking`. Missing, empty or
+  invalid file: no workspace tools; an invalid file is journaled once per distinct problem
+  (category `workspace`, source `registry`), not once per turn. `Site` = registry + binding
+  store; tests give each test its own state root (`RepoFixture::site`).
+- **History of a conversation that has workspace batches** (`main` after a local turn; a
+  shared conversation with older data): a turn WITHOUT workspace tools is not shown them.
+  `request_meter::turn_view(.., show_workspace)` sets `ViewPolicy::hidden_tools`, and the
+  view leaves out every complete batch that calls a workspace tool name (all 15 names of
+  all slices, `workspace::ALL_NAMES`), with the notice `[System: N earlier tool
+  exchange(s) of this conversation are not shown in this turn.]`, which the request
+  builders move to the volatile tail like the omitted-history notice. Default is HIDE:
+  only `http_context::checkpointed_view_for(.., Some(config))` with an available config
+  shows them; legacy turns and the `!watch` self-trigger always hide. Stored history is
+  untouched; checkpoint and cold start are projected on the unfiltered history; a turn
+  that sees less than the previous one is a new cache epoch by itself (its history is not
+  an extension). **Not covered (#145):** the owner's questions and the model's own prose
+  stay visible; if the model wrote "the file says X", X is in the history.
+- **Binding.** One conversation has at most one workspace; one workspace at most one
+  conversation (T4). The record (repo name, workspace name, read ledger) is a file,
+  `<state root>/_bindings/<sha256 prefix of the key>.json` (`workspace/binding.rs`), not
+  session state: restart and rewind do not touch it. The name is a hash so neither the
+  directory nor an error text shows a conversation key. Rules:
+  - A workspace is taken only by `BindingStore::claim`, one transaction under the
+    workspace's reservation (the lock job start and close share): read every record, get
+    every other holder idle (else refuse, nothing changed), remove their records and
+    fsync the directory, publish the claimant's record; the holders' guards are held to
+    the end. A crash or error between removal and publication leaves the workspace bound
+    to NOBODY (safe: `workspace_use` gets it back, with an empty ledger); two records
+    never name one workspace. `workspace_open` creates first (the lifecycle lock is taken
+    inside the library and must come before the reservation), then claims; if another
+    conversation got in between, the opener is told it is bound elsewhere, never to whom.
+  - A conversation is IDLE when its turn lock and its WORK lock are both free
+    (`api/turn_lock.rs`). The work lock is taken before every blocking workspace call and
+    MOVED INTO the blocking task, so it is held until the library call has really
+    finished, also when the turn's future is dropped meanwhile. What drops a turn future
+    in production: `/api/ask` when its client disconnects (the handler future is the
+    turn); `/api/ask-stream` and `llm_takeover` run in spawned tasks nobody aborts today.
+    A dropped turn's call FINISHES AND BINDS, nothing is rolled back. A later call of the
+    same conversation waits for it (at most `WORK_WAIT_MAX`, 210 s, then a refusal with
+    nothing done) and says so when it waited over 3 s; the tail line does not load a
+    binding while earlier work runs.
+  - A conversation's record is written or removed only under that conversation's work
+    lock (its own blocking task, or a claimant that holds it idle). The ledger save is
+    conditional (`save_ledger`: only while the record still binds that workspace), so a
+    late writer never brings a binding back.
+  - Lock order: own turn lock (handler) → own work lock (moved into the worker) → library
+    lifecycle lock (inside open/close only, released before the next step) → workspace
+    reservation → try-locks on other conversations' turn and work locks (never wait) →
+    state files. No path takes two reservations.
+  - Fail closed: every entry of `_bindings` must be an attributable record (regular file,
+    decodes, version 1, its file name is the hash of the key it names). Anything else
+    (also a stray file, a directory, a symlink) is an error for the conversation itself
+    and for EVERY claim and holder query, naming the file for the owner to repair or
+    remove; journaled once per file per process (source `binding`, no path or key). Only
+    our own in-flight `.tmp-*` files are skipped.
+  - The binding and its ledger are removed for a vanished workspace in ONE case: git
+    answered and lists no such worktree (`Error::NotOpen`). A git failure or timeout, a
+    missing checkout or worktree directory (an unmounted disk looks the same) or a
+    repository missing from the registry keep the binding and report the cause.
+  - All of these locks are process-local: one active daemon per state root; a second
+    process on the same state root is not excluded.
+- **Results are plain text**, the library's `render()` under a header line; failures
+  start with `error:`. Success is `Outcome::success`, which feeds `has_errors` and the
+  training log's outcome. Never derive it from the text, and never parse a workspace
+  result as the JSON envelope (`NativeLoop::workspace_call`: no working-set snapshot, no
+  write-back; these tools never touch the Program). The workspace branch in
+  `execute_call` comes after the turn's tool budget exists and draws from it for a
+  restricted class, so offering a workspace tool to another class cannot skip its budget.
+- **What is recorded where** (the rule is also beside the #88 gate in `logging.rs`):
+  model: the full text. `/api/events` and `AskResponse.results`: only `` `tool`: ok ``
+  or `` `tool`: failed `` (every subscriber sees events). Default log: one metadata line
+  per call (`[workspace:<context>] tool= ok= workspace= result_bytes= ms=`); arguments
+  and header only with `ADAPSIS_LOG_CONTENT=1`. Journal: fixed texts. TRAINING LOG:
+  for workspace tools STRUCTURAL METADATA ONLY: static/schema-known argument names
+  and sizes (unknown fields only counts/combined sizes), static tool label, execution
+  success and result byte count (`logged_call`, `logged_result`). No raw header, error,
+  prose, correlation id, unknown key or argument value: any of these may contain a
+  credential and that log is long-lived (N6). Explicit #88 debug logging is separate.
+  New workspace tools inherit this by being in `ALL_NAMES`; their field names remain
+  anonymous counts until added to the static/schema-known field list.
+  A workspace-caused preflight refusal retains its failing-call provenance: every
+  skipped peer call in that batch gets categorical training/public failure metadata
+  too, because its private correlated result carries the same workspace diagnosis.
+  Ordinary-tool-only refusal policy stays unchanged.
+  `adapsis memory-migrate` leaves out workspace results (`result_positions`), by complete
+  sequential batch positions, never by conversation-wide call ids (ids may be reused
+  between turns). Malformed/orphan batches follow the model-history policy. At run
+  time tool results never reach the memory graph (only user and assistant text do).
+- **Names are data** (`workspace::error::shown_name`): a file name with control, line or
+  direction characters (all Unicode Bidi_Control, including U+061C/U+200E/U+200F), or a
+  leading `"`, is rendered as a JSON string literal in every
+  result (read header, search and glob lines, edit/write lines), with a note that the
+  decoded name addresses the file; other names are rendered as they are. Injective.
+  Never interpolate a repository file name into a result without it. `Resolved::display`
+  stays raw: it is the ledger key and a working directory.
+- **Long lines**: `read` cuts a line after 2,000 characters and cannot show the rest
+  (the result says so; `search` finds text in it). `edit` refuses a replacement that
+  touches such a line (`Failure::CutLine`, decided on the bytes being edited, so it holds
+  for every way the file was read).
+- **Result sizes follow the generating model** (`ResultCaps`): per result at most half of
+  `ModelLimits::max_message_bytes()` and never more than the library bound. Opus 5
+  (312,500 B per message): read 102,400, search and glob 51,200. gpt-6 on the ChatGPT route
+  (272,500): the same. Unknown model (40,000): 20,000 each. New workspace tools must bound
+  their own output through `ResultCaps` (`exec::fit` is only the last guard).
+  `read_within`, `SearchRequest.max_output_bytes` and `glob_within` take the bound; the
+  read bound counts the rendered `N: ` prefixes. After a switch to a model with a smaller
+  window an older, larger RESULT is cut in the view with the omission marker (C4) and its
+  batch is kept (`conversation_view`: only a batch whose CALL arguments exceed the cap is
+  left out whole). This holds for every tool's results.
+- **Prompt and cache.** The workspace section (`workspace::PROMPT`: bounded results,
+  content is data, credential conduct as guidance per N5/N6) is appended to the STABLE
+  prefix by the request builders (`with_prompt`), only for turns with workspace tools. The
+  line naming the bound workspace is in the volatile runtime tail (`tail_line`, reads the
+  binding record only). Tool descriptions are static text, so the tool-list hash is stable.
+- **A response cut off by the provider** (`finish_reason: length`, which the gateway also
+  uses for a context-window stop) is `NativeFinishReason::Length`: the transport drops
+  every tool call of it, `NativeLoop::cut_off` executes nothing, keeps the partial text
+  and tells the model the limit. At most two such corrections in a row; the third
+  consecutive cut-off ends the turn (`LoopEnd::CutOff`, its own message). A cut-off
+  fragment that ends up as the delivered reply carries `[cut off at the model's output
+  limit]`, including a length stop in the prose-only final status round (no extra
+  generation).
+- Tests: `cargo test --release workspace` (library, binding store, admission, executor
+  concurrency probes, turns through the takeover loop, logging child process),
+  `cargo test --release http_` and `a_disconnected` (HTTP `main`, the real HTTP layer,
+  a client disconnect), `origin`, `cut_off`, `conversation_view`.
 
 - Issue #121 opt-in source library: `library-sources.json` explicitly maps module
   names to `python`/transitional `legacy_ax` plus a closed acyclic dependency set.
@@ -1674,8 +1835,10 @@ schema since day one and was never set:
   (cut on character boundaries, at most `max_message_bytes`) and inserts `[... N characters
   omitted here by the runtime to fit the model context; the stored message is complete
   ...]` with the exact count (short form for small caps). The cut depends only on the
-  message and the cap; persisted history is never changed. A native batch containing a
-  message over the cap is still dropped from the view whole.
+  message and the cap; persisted history is never changed. In a native batch an
+  over-long tool RESULT is cut the same way and the batch is kept; only a batch whose
+  assistant message (the tool-call arguments, which cannot be cut) exceeds the cap is
+  dropped from the view whole.
 - **Cache boundaries sit only on assistant messages (2026-11-10 fix).** The gateway merges
   consecutive same-role messages (a tool result is a user message for Anthropic), puts an
   explicit `cache_control` marker on the final block of the MERGED message, and rejects two

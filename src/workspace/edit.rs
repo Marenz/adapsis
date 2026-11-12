@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use super::error::{Error, Result};
 use super::ledger::{Freshness, ReadLedger};
 use super::lifecycle::Workspace;
-use super::limits::{AMBIGUOUS_LINES_SHOWN, EDIT_MAX_FILE_BYTES};
+use super::limits::{AMBIGUOUS_LINES_SHOWN, EDIT_MAX_FILE_BYTES, LINE_MAX_CHARS};
 use super::read::FileFacts;
 use super::resolve::{Access, Kind, Resolved, resolve};
 use super::secure_write::{Replace, Stamp, Written};
@@ -50,7 +50,7 @@ impl EditResult {
         } else {
             format!("lines {}-{}", self.first_line, self.last_line)
         };
-        let mut out = format!("edited {}: {count}, {lines}", self.path);
+        let mut out = format!("edited {}: {count}, {lines}", super::error::shown_name(&self.path));
         if let Some(kept) = self.kept_final_newline {
             let state = if kept { "it still ends with a newline" } else { "it still ends without a newline" };
             out.push_str(&format!(
@@ -161,6 +161,8 @@ pub(super) enum Failure {
     Ambiguous { count: usize, lines: Vec<u64> },
     Unchanged,
     TooLarge,
+    /// The text to replace lies on a line `read` cannot show completely.
+    CutLine { line: u64 },
 }
 
 impl Failure {
@@ -178,6 +180,9 @@ impl Failure {
             Failure::Ambiguous { count, lines } => Error::Ambiguous { path, count, lines },
             Failure::Unchanged => Error::InvalidArgument(format!("`{path}` was not changed: the replacement would leave the file as it is")),
             Failure::TooLarge => Error::InvalidArgument(format!("`{path}` was not changed: prospective edit exceeds the 16 MiB result cap")),
+            Failure::CutLine { line } => Error::InvalidArgument(format!(
+                "`{path}` was not changed: the text to replace touches line {line}, which is longer than {LINE_MAX_CHARS} characters. read shows only the beginning of such a line, so the rest of it is not known here; change that line with a command"
+            )),
         }
     }
 }
@@ -204,6 +209,14 @@ pub(super) fn replace_bounded(text: &str, old: &str, new: &str, replace_all: boo
     let prospective = count.checked_mul(old.len()).and_then(|removed| text.len().checked_sub(removed))
         .and_then(|rest| count.checked_mul(new.len()).and_then(|added| rest.checked_add(added)))
         .and_then(|len| len.checked_add(2)).filter(|len| *len <= cap).ok_or(Failure::TooLarge)?;
+    // A line longer than the read cap was never shown completely, whatever
+    // range was read: nothing on it is replaced. Decided on the bytes being
+    // edited, so it holds for every way the file was read.
+    for (start, _) in text.match_indices(&old).take(if replace_all { usize::MAX } else { 1 }) {
+        if let Some(line) = cut_line_touched(text, start, old.len()) {
+            return Err(Failure::CutLine { line });
+        }
+    }
     let mut out = String::with_capacity(prospective);
     let (mut cursor, mut replacements, mut first_start, mut last_end) = (0usize, 0usize, 0usize, 0usize);
     for (start, _) in text.match_indices(&old) {
@@ -233,6 +246,24 @@ pub(super) fn replace_bounded(text: &str, old: &str, new: &str, replace_all: boo
         replacements,
         kept_final_newline,
     })
+}
+
+/// The first line touched by `text[start..start + len]` that `read` would cut
+/// (more than `LINE_MAX_CHARS` characters, a final `\r` not counted).
+fn cut_line_touched(text: &str, start: usize, len: usize) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let first = bytes[..start].iter().rposition(|byte| *byte == b'\n').map_or(0, |at| at + 1);
+    // Offsets may fall inside a character; newlines are found on the bytes.
+    let last_byte = (start + len).saturating_sub(1).max(start).min(bytes.len());
+    let end = bytes[last_byte..].iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |at| last_byte + at);
+    let mut number = line_of(text, first);
+    for line in text[first..end].split('\n') {
+        if line.strip_suffix('\r').unwrap_or(line).chars().nth(LINE_MAX_CHARS).is_some() {
+            return Some(number);
+        }
+        number += 1;
+    }
+    None
 }
 
 /// Every line break is CRLF (and there is at least one).

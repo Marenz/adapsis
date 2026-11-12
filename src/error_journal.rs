@@ -35,6 +35,8 @@ pub enum Category {
     Startup,
     /// A guard refused an operation (shell policy, destructive guard, permission).
     Refusal,
+    /// Workspace tools: registry, state directory, cleanup. Never a path or command.
+    Workspace,
 }
 
 impl Category {
@@ -48,6 +50,7 @@ impl Category {
             Self::Panic => "panic",
             Self::Startup => "startup",
             Self::Refusal => "refusal",
+            Self::Workspace => "workspace",
         }
     }
 }

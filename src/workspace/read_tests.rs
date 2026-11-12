@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use super::error::{Error, Rule};
 use super::ledger::{Freshness, ReadLedger};
 use super::limits::{BINARY_SNIFF_BYTES, LEDGER_MAX_ENTRIES, LINE_MAX_CHARS, READ_MAX_BYTES, READ_MAX_LINES, SCAN_MAX_BYTES};
-use super::read::{FileFacts, read};
+use super::read::{FileFacts, ReadResult, read, read_within};
 use super::resolve::{Access, resolve};
 use super::test_support::{Fixture, symlink, write};
 
@@ -70,13 +70,49 @@ fn read_caps_bytes_per_call() {
     let line = "x".repeat(1000);
     fixture.write("wide.txt", format!("{line}\n").repeat(500));
     let first = read(&fixture.workspace, "wide.txt", None, None).unwrap();
-    let bytes: usize = first.lines.iter().map(|line| line.text.len()).sum();
-    assert!(bytes <= READ_MAX_BYTES && bytes > READ_MAX_BYTES - 1000, "{bytes}");
-    assert_eq!(first.lines.len(), READ_MAX_BYTES / 1000);
+    // The cap bounds the lines as rendered (`\nN: text`), not only their text.
+    let rendered = |result: &ReadResult| result.render().len() - result.render().find('\n').unwrap();
+    let bytes = rendered(&first) - first.render().lines().last().unwrap().len() - 1;
+    assert!(bytes <= READ_MAX_BYTES && bytes > READ_MAX_BYTES - 1010, "{bytes}");
+    assert_eq!(first.lines.len(), READ_MAX_BYTES / 1005);
     assert_eq!((first.more, first.next_offset, first.total_lines), (true, Some(first.lines.len() as u64 + 1), Some(500)));
     // Continuing from next_offset loses nothing.
     let second = read(&fixture.workspace, "wide.txt", first.next_offset, None).unwrap();
     assert_eq!(second.lines[0].number, first.lines.len() as u64 + 1);
+}
+
+/// A caller with a smaller result budget (a model with a small context) gets
+/// whole lines within it, the same continuation, and the same file facts.
+#[test]
+fn read_within_a_smaller_byte_bound_cuts_at_a_line_and_continues() {
+    let fixture = Fixture::plain();
+    let content: String = (1..=3000).map(|n| format!("line {n} {}\n", "y".repeat(40))).collect();
+    fixture.write("src.txt", &content);
+    let whole = read(&fixture.workspace, "src.txt", None, None).unwrap();
+    let mut offset = None;
+    let mut seen = Vec::new();
+    for _ in 0..200 {
+        let part = read_within(&fixture.workspace, "src.txt", offset, None, 20_000).unwrap();
+        let text = part.render();
+        assert!(text.len() <= 20_000 + 200, "{}", text.len());
+        assert_eq!(part.facts, whole.facts);
+        seen.extend(part.lines.iter().map(|line| line.text.clone()));
+        if !part.more {
+            break;
+        }
+        assert!(text.ends_with(&format!("continue with offset={}]", part.next_offset.unwrap())), "{}", &text[text.len() - 80..]);
+        offset = part.next_offset;
+    }
+    assert_eq!(seen.join("\n") + "\n", content);
+    // The bound is clamped: never below one long line, never above the policy cap.
+    let tiny = read_within(&fixture.workspace, "src.txt", None, None, 1).unwrap();
+    assert!(tiny.lines.len() > 10 && tiny.render().len() <= super::limits::RESULT_MIN_BYTES + 200);
+    let huge = read_within(&fixture.workspace, "src.txt", None, None, usize::MAX).unwrap();
+    assert_eq!(huge.lines.len(), whole.lines.len());
+    // A line cut with its marker is counted with the marker.
+    fixture.write("long.txt", format!("{}\n", "z".repeat(50_000)).repeat(40));
+    let long = read_within(&fixture.workspace, "long.txt", None, None, 20_000).unwrap();
+    assert!(long.render().len() <= 20_000 + 200 && long.lines.len() >= 2, "{} {}", long.render().len(), long.lines.len());
 }
 
 #[test]
