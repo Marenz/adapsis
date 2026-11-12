@@ -78,3 +78,43 @@ mod tests {
         }
     }
 }
+
+/// #134: transport operations that index their arguments must refuse a call with
+/// too few arguments instead of panicking.
+#[cfg(test)]
+mod transport_arity_tests {
+    use super::super::{CoroutineHandle, IoRequest, Value};
+
+    #[test]
+    fn transport_ops_with_missing_arguments_return_errors_without_io() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<IoRequest>(4);
+        let handle = CoroutineHandle::new(sender);
+        let cases: &[(&str, Vec<Value>, usize)] = &[
+            ("tcp_listen", vec![], 1),
+            ("tcp_accept", vec![], 1),
+            ("tcp_read", vec![], 1),
+            ("tcp_close", vec![], 1),
+            ("tcp_write", vec![], 2),
+            ("tcp_write", vec![Value::Int(3)], 2),
+            ("tcp_connect", vec![Value::string("localhost")], 2),
+            ("print", vec![], 1),
+            ("println", vec![], 1),
+            ("sleep", vec![], 1),
+            ("file_read", vec![], 1),
+            ("read_file_binary", vec![], 1),
+            ("file_write", vec![Value::string("/tmp/x")], 2),
+            ("file_exists", vec![], 1),
+            ("list_dir", vec![], 1),
+            ("shell_exec", vec![], 1),
+        ];
+        for (op, args, required) in cases {
+            let error = handle.execute_await(op, args).expect_err(op).to_string();
+            let plural = if *required == 1 { "" } else { "s" };
+            assert_eq!(error, format!("{op} expects at least {required} argument{plural}, got {}", args.len()));
+        }
+        // Wrong types were and stay errors.
+        let error = handle.execute_await("tcp_listen", &[Value::string("80")]).unwrap_err().to_string();
+        assert_eq!(error, "tcp_listen expects Int port");
+        assert!(receiver.try_recv().is_err(), "nothing reached the IO loop");
+    }
+}

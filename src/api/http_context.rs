@@ -172,9 +172,10 @@ pub(crate) fn self_trigger_messages(
         .filter(|message| message.role == "system")
         .map(|message| message.content.clone())
         .unwrap_or_default();
-    // A watch event starts a turn of its own, like a user message.
-    super::request_meter::turn_view(&mut meta.conversations, "main", model, &system, 0, crate::cache_lifetime::now_ms())
-        .messages
+    // Not a user turn: no cold start and no turn accounting (it holds no turn
+    // lock, so it must not replace the probe of an `ask` turn in flight).
+    let policy = crate::session::conversation_view::ViewPolicy::for_model(model, &system, 0, conv.projection(model));
+    conv.model_view(&policy).messages
 }
 
 /// Measured serialized size of runtime-tail parts known before the view.

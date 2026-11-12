@@ -86,9 +86,18 @@ pub struct Journal {
 
 impl Journal {
     pub fn record_at(&mut self, now: u64, category: Category, source: &str, message: &str) -> u64 {
+        self.record_keyed(now, category, source, message, None)
+    }
+
+    /// `key`: fingerprint input that replaces the message (used where the message
+    /// differs only in numbers that matter, such as a panic's line).
+    fn record_keyed(&mut self, now: u64, category: Category, source: &str, message: &str, key: Option<&str>) -> u64 {
         let source = redact(source);
         let message = redact(message);
-        let fingerprint = fingerprint(category, &source, &message);
+        let fingerprint = match key {
+            Some(key) => exact_fingerprint(category, key),
+            None => fingerprint(category, &source, &message),
+        };
         self.next_seq += 1;
         let seq = self.next_seq;
         let counter = self.counters.entry(fingerprint.clone()).or_insert_with(|| Counter {
@@ -204,10 +213,50 @@ pub fn record_route_error(route: &str, handler: &str, error: &str, body: &str) -
     record(Category::Route, handler, format!("{route}: {kind}"))
 }
 
-/// Panic-hook variant: never waits for the lock (the panicking thread may hold it).
-pub fn record_panic(message: impl std::fmt::Display) {
+/// The process panic hook (#134). The panic MESSAGE is never journaled: Rust's
+/// slice and index panics quote the value (`byte index 1 is not a char boundary;
+/// it is inside 'ä' of `<user text>``), and the journal feeds `runtime_errors`,
+/// the Watchdog's triage prompt and the admin conversation. Only the source
+/// location and the payload's length are recorded. The message itself goes to
+/// the content-gated diagnostic log (`ADAPSIS_LOG_CONTENT=1`).
+pub fn panic_hook(info: &std::panic::PanicHookInfo<'_>) {
+    crate::logging::diagnostic("panic", info);
+    let payload = info.payload();
+    let payload_bytes = payload
+        .downcast_ref::<&str>()
+        .map(|text| text.len())
+        .or_else(|| payload.downcast_ref::<String>().map(String::len));
+    let location = info.location().map(|at| (at.file(), at.line(), at.column()));
+    record_panic(location, payload_bytes);
+    eprintln!("{}", std::backtrace::Backtrace::force_capture());
+}
+
+/// Journal a panic by location and payload length. Never waits for the lock (the
+/// panicking thread may hold it). One fingerprint per source line, so two panic
+/// sites in one file are two findings and one site with changing data is one.
+pub fn record_panic(location: Option<(&str, u32, u32)>, payload_bytes: Option<usize>) {
+    let place = location.map_or_else(|| "unknown location".to_string(), |(file, line, column)| format!("{file}:{line}:{column}"));
+    let payload = payload_bytes.map_or_else(|| "non-text payload".to_string(), |bytes| format!("message of {bytes} bytes not recorded"));
     if let Ok(mut guard) = journal().try_lock() {
-        guard.record_at(now(), Category::Panic, "panic", &message.to_string());
+        guard.record_keyed(now(), Category::Panic, "panic", &format!("panic at {place} ({payload})"), Some(&place));
+    }
+}
+
+/// A panic inside a spawned task, as text for the journal and the task registry.
+/// `JoinError`'s own Display quotes the panic message (tokio >= 1.4x: "task N
+/// panicked with message \"...\""), so it is never used for a panic.
+pub fn describe_join_error(error: tokio::task::JoinError) -> String {
+    if !error.is_panic() {
+        return "was cancelled".to_string();
+    }
+    let payload = error.into_panic();
+    let bytes = payload
+        .downcast_ref::<&str>()
+        .map(|text| text.len())
+        .or_else(|| payload.downcast_ref::<String>().map(String::len));
+    match bytes {
+        Some(bytes) => format!("panicked (message of {bytes} bytes not recorded; see the panic entry for the location)"),
+        None => "panicked (non-text payload)".to_string(),
     }
 }
 
@@ -227,6 +276,13 @@ pub fn fingerprint(category: Category, source: &str, message: &str) -> String {
     let normalize = |text: &str| numbers.replace_all(text, "#").into_owned();
     let raw = format!("{}|{}|{}", category.label(), normalize(source), normalize(message));
     use sha2::{Digest, Sha256};
+    format!("{}:{:x}", category.label(), Sha256::digest(raw.as_bytes()))[..category.label().len() + 17].to_string()
+}
+
+/// Fingerprint from an exact key (no number collapsing).
+fn exact_fingerprint(category: Category, key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let raw = format!("{}|exact|{key}", category.label());
     format!("{}:{:x}", category.label(), Sha256::digest(raw.as_bytes()))[..category.label().len() + 17].to_string()
 }
 

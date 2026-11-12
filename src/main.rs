@@ -177,15 +177,14 @@ async fn monitor_spawned_task(
     function_name: String,
 ) {
     if let Err(error) = task.await {
-        let detail = if error.is_panic() { "panicked" } else { "was cancelled" };
-        crate::logging::diagnostic("spawn-error", format_args!("{function_name} {detail}: {error}"));
-        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, format_args!("{detail}: {error}"));
+        // Never the JoinError's own text: for a panic it quotes the message (#134).
+        let detail = crate::error_journal::describe_join_error(error);
+        crate::logging::diagnostic("spawn-error", format_args!("{function_name} {detail}"));
+        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, &detail);
         if let Ok(mut tasks) = registry.lock()
             && let Some(info) = tasks.get_mut(&task_id)
         {
-            info.status = coroutine::WaitReason::Failed(format!(
-                "spawned function `{function_name}` {detail}: {error}"
-            ));
+            info.status = coroutine::WaitReason::Failed(format!("spawned function `{function_name}` {detail}"));
         }
     }
 }
@@ -938,12 +937,9 @@ fn native_protocol_enabled(native_tools: bool, legacy_tools: bool) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Ensure panics in any thread are logged to stderr
-    std::panic::set_hook(Box::new(|info| {
-        crate::logging::diagnostic("panic", info);
-        crate::error_journal::record_panic(info);
-        let bt = std::backtrace::Backtrace::force_capture();
-        eprintln!("{bt}");
-    }));
+    // The message goes to the content-gated log only; the journal gets the
+    // location and the payload length (#134).
+    std::panic::set_hook(Box::new(crate::error_journal::panic_hook));
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -2492,7 +2488,8 @@ async fn main() -> Result<()> {
                     api::http_context::after_llm_call(recovered, &result, &trigger_meta, "main");
                     match result {
                         Ok(output) => {
-                            sent.calibrate(&trigger_meta, "main", recovered, output.refused, &output.usage);
+                            // Not a user turn: bytes-per-token only (see request_meter).
+                            sent.calibrate_tokens_only(&trigger_meta, "main", recovered, &output.usage);
                             let code = output.code.clone();
                             if crate::logging::content() {
                                 eprintln!("[self-trigger:response] {}...", output.text.chars().take(100).collect::<String>());

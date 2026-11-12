@@ -20,6 +20,7 @@ pub use invocation::{eval_declared_function, eval_declared_function_unframed};
 pub(crate) mod result_contract;
 #[cfg(test)]
 mod jit_cache_tests;
+mod strings;
 
 /// Cache for JIT-compiled programs, keyed by session revision.
 /// When the revision matches, the compiled module is reused instead of recompiling.
@@ -2455,7 +2456,12 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                 (Value::String(s), Value::Int(i)) => {
                     let i = *i as usize;
                     if i < s.len() {
-                        Ok(Value::string(s[i..i + 1].to_string()))
+                        // Indices are byte offsets (like len and index_of). The whole
+                        // character containing byte `i` is returned; slicing one byte
+                        // out of a multi-byte character would panic (#134).
+                        let start = strings::floor_char_boundary(s, i);
+                        let end = start + s[start..].chars().next().map_or(1, char::len_utf8);
+                        Ok(Value::string(s[start..end].to_string()))
                     } else {
                         bail!("char_at: index {i} out of bounds (len {})", s.len())
                     }
@@ -2472,6 +2478,13 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                     let start = *start as usize;
                     let end = (*end as usize).min(s.len());
                     if start <= end && start <= s.len() {
+                        // Indices are byte offsets (like len and index_of). An offset
+                        // inside a multi-byte character moves DOWN to the start of
+                        // that character instead of panicking (#134). Both ends use
+                        // the same rule, so substring(s, 0, k) and substring(s, k, n)
+                        // still split `s` without losing or repeating a character.
+                        let start = strings::floor_char_boundary(s, start);
+                        let end = strings::floor_char_boundary(s, end);
                         Ok(Value::string(s[start..end].to_string()))
                     } else {
                         bail!(

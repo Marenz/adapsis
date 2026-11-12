@@ -42,6 +42,8 @@ mod python_scalar_tests;
 mod c_result_tests;
 #[path = "python_result_acceptance_tests.rs"]
 mod python_result_acceptance_tests;
+#[path = "python_nesting_tests.rs"]
+mod python_nesting_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

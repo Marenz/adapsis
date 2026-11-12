@@ -239,6 +239,11 @@ impl RouteLifetimes {
 /// What the current turn of a conversation needs to account its requests:
 /// set when the turn's view is built, read when a request is answered. In-memory
 /// only (a restart is a prefix reset for the epoch tracker anyway).
+///
+/// One per conversation, and never shared by two turns: only turns that hold the
+/// per-context turn lock for their whole duration create and update it (`ask`,
+/// `ask_stream`, `llm_takeover`). The `!watch` self-trigger, which can run while
+/// an `ask` turn on `main` is in flight, does not touch it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnProbe {
     /// Serialized text bytes of the view at turn start; the first request's bytes
