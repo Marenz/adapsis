@@ -89,6 +89,8 @@ pub enum Error {
     Ambiguous { path: String, count: usize, lines: Vec<u64> },
     /// `run`: the command was refused before anything was started.
     CommandRefused(String),
+    /// A command ran but did not complete successfully (output is private data).
+    CommandFailed(String),
     /// A systemd client call failed, or no user manager is reachable.
     Systemd { action: String, detail: String },
     /// A background-job rule refused the operation (limit, unknown id).
@@ -204,6 +206,7 @@ impl fmt::Display for Error {
                 )
             }
             Error::CommandRefused(reason) => write!(f, "command not run: {reason}"),
+            Error::CommandFailed(text) => f.write_str(text),
             Error::Systemd { action, detail } => write!(f, "systemd {action} failed: {detail}"),
             Error::Job(text) | Error::Binding(text) => f.write_str(text),
             Error::Dirty { workspace, files, omitted } => {

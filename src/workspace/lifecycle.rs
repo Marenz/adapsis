@@ -343,11 +343,15 @@ pub fn close(workspace: &Workspace) -> Result<()> {
 /// Remove the worktree if it has no uncommitted changes. The branch stays.
 /// Ignored files (build output) do not count as changes and are deleted.
 pub fn close_with(workspace: &Workspace, options: GitOptions) -> Result<()> {
+    close_with_store(workspace, options, &JobStore::standard())
+}
+
+/// The same close transaction for an explicitly configured private state root.
+pub fn close_with_store(workspace: &Workspace, options: GitOptions, jobs: &JobStore) -> Result<()> {
     let _guard = LIFECYCLE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if std::fs::canonicalize(&workspace.checkout).is_ok_and(|checkout| checkout == workspace.path) {
         return Err(Error::Lifecycle(format!("workspace `{}` is the registered checkout itself and is never removed", workspace.name)));
     }
-    let jobs = JobStore::standard();
     let reservation = super::reservation::for_workspace(workspace);
     let _workspace_guard = reservation.lock().unwrap_or_else(|p| p.into_inner());
     jobs.close_guard_locked(workspace)?;

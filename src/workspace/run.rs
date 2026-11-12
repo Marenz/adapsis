@@ -757,6 +757,23 @@ impl RunResult {
         }
         out
     }
+
+    /// Bound the DISPLAYED UTF-8 text as well as captured bytes. Lossy decoding
+    /// can turn one binary byte into three UTF-8 bytes. Keep output head/tail
+    /// AND the complete terminal/cleanup diagnosis; never cut off the verdict.
+    pub fn render_within(&self, max_bytes: usize) -> String {
+        let rendered = self.render();
+        if rendered.len() <= max_bytes { return rendered; }
+        let output = self.output.trim_end_matches('\n');
+        let suffix = &rendered[output.len()..];
+        let note = "\n[display text shortened by runtime; output head and tail kept]\n";
+        let budget = max_bytes.saturating_sub(suffix.len() + note.len());
+        let mut head = budget / 2;
+        while !output.is_char_boundary(head) { head -= 1; }
+        let mut tail = output.len().saturating_sub(budget - head);
+        while !output.is_char_boundary(tail) { tail += 1; }
+        format!("{}{note}{}{suffix}",&output[..head],&output[tail..])
+    }
 }
 
 fn signal_name(signal: i32) -> &'static str {

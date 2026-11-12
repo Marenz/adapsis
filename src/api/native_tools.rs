@@ -297,8 +297,12 @@ enum ParsedTool {
 }
 
 fn parse_args_object(arguments: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    if arguments.len() > MAX_ARGUMENTS_BYTES {
-        return Err(format!("arguments exceed {MAX_ARGUMENTS_BYTES} bytes"));
+    parse_args_object_with_cap(arguments, MAX_ARGUMENTS_BYTES)
+}
+
+fn parse_args_object_with_cap(arguments: &str, cap: usize) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    if arguments.len() > cap {
+        return Err(format!("arguments exceed {cap} bytes"));
     }
     let value: serde_json::Value = serde_json::from_str(arguments)
         .map_err(|e| format!("arguments are not valid JSON: {e}"))?;

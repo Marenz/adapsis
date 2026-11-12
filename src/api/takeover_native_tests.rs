@@ -48,6 +48,7 @@ struct Harness {
     model: &'static str,
     /// Workspace site of the node (`None`: no workspace tools).
     workspaces: Option<Arc<crate::api::native_tools::workspace::Site>>,
+    shell_policy: crate::coroutine::ShellPolicy,
 }
 
 struct Provider {
@@ -129,6 +130,7 @@ impl Harness {
             log_file: None,
             model: "takeover-fixture",
             workspaces: None,
+            shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
         }
     }
 
@@ -185,6 +187,7 @@ impl Harness {
             self.log_file.clone(),
             self.native_tools,
             self.workspaces.clone(),
+            self.shell_policy.clone(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(30), future)
             .await

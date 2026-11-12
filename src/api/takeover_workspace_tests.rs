@@ -14,6 +14,8 @@ use std::path::PathBuf;
 /// spelling no other test uses (another test writes an identity file for the other one,
 /// which would change the stable prefix between two turns here).
 const DM: &str = "telegram:user:100000001";
+#[path = "takeover_workspace_change_tests.rs"]
+mod changes;
 
 struct Repo {
     fixture: RepoFixture,

@@ -55,92 +55,9 @@ fn compaction_attempt_due(context: &str) -> bool {
     true
 }
 
-/// Strip the `[user:<id>]` / `[user:<id> <name>]` sender prefix that a group
-/// intake module prepends for the model's benefit.
-///
-/// Presentation only. The stripped text is what reaches Ladybug as message
-/// content and what is embedded as the recall query, so the prefix must not end
-/// up in either — but this function is deliberately NOT an identity source.
-pub(crate) fn strip_sender_prefix(message: &str) -> &str {
-    message
-        .strip_prefix("[user:")
-        .and_then(|rest| rest.split_once("] "))
-        .map_or(message, |(_, content)| content)
-}
-
-/// Resolve the Ladybug principal for a turn.
-///
-/// Identity comes from the structured `speaker_id` in `source_metadata`, never
-/// from the message text. It used to be parsed back out of the `[user:<id>] `
-/// prose prefix, which worked only for as long as that prefix held nothing but
-/// the id. Adding the display name (#38 item 4) turned `[user:100000103 Kata] `
-/// into the principal `telegram:user:100000103 Kata` — a second, silently created
-/// identity for the same person, splitting her messages across two `Principal`
-/// nodes and re-fragmenting on every Telegram display-name change. Prose is not
-/// an identity channel.
-pub(crate) fn takeover_principal(context: &str, source_metadata: Option<&str>) -> String {
-    source_metadata
-        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
-        .and_then(|metadata| {
-            metadata
-                .get("speaker_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .filter(|speaker| !speaker.is_empty())
-        .unwrap_or_else(|| context_principal(context))
-}
-
-/// Compact durable provenance for a binary attachment.
-///
-/// The graph schema predates Telegram video support and uses a `platform_ref`
-/// string rather than separate filename/duration/size columns. Store a JSON
-/// object there; ingestion creates one attachment occurrence node per message
-/// while retaining content-addressed bytes on disk, so repeated files keep the
-/// metadata supplied with each message.
-pub(crate) fn attachment_platform_ref(
-    source_metadata: Option<&str>,
-    attachment: &crate::attachment::Attachment,
-) -> String {
-    let metadata = source_metadata
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-        .unwrap_or_default();
-    let text = |key: &str| metadata.get(key).and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let name = match text("attachment_name") {
-        "" => attachment.name.as_str(),
-        value => value,
-    };
-    let mime = match text("attachment_mime") {
-        "" => attachment.mime_type.as_str(),
-        value => value,
-    };
-    let size = text("attachment_size_bytes").parse::<u64>()
-        .unwrap_or(attachment.len() as u64);
-    serde_json::json!({
-        "platform_ref": text("attachment_ref"),
-        "name": name,
-        "mime_type": mime,
-        "duration_seconds": text("attachment_duration_seconds"),
-        "size_bytes": size,
-    }).to_string()
-}
-
-/// Identity for a turn that carries no speaker metadata.
-///
-/// A group context has no single speaker, so it resolves to a group-kind
-/// principal rather than a fabricated user one: stripping `telegram:` off
-/// `telegram:group:-100…` used to yield the nonsense principal
-/// `telegram:user:group:-100…`.
-fn context_principal(context: &str) -> String {
-    if context.starts_with("telegram:group:") {
-        return context.to_string();
-    }
-    context
-        .strip_prefix("telegram:user:")
-        .or_else(|| context.strip_prefix("telegram:"))
-        .map_or_else(|| "user:unknown".to_string(), |id| format!("telegram:user:{id}"))
-}
+#[path = "takeover_input.rs"]
+mod input;
+pub(crate) use input::{strip_sender_prefix, takeover_principal, attachment_platform_ref};
 
 pub(super) async fn persist_takeover_message(
     memory_graph: &std::sync::Arc<crate::memory_graph::MemoryGraph>,
@@ -1243,6 +1160,7 @@ pub async fn handle_llm_takeover(
     native_tools: bool,
     // Test injection of a workspace registry; production passes None (the registry file decides).
     workspaces: Option<std::sync::Arc<super::native_tools::workspace::Site>>,
+    shell_policy: crate::coroutine::ShellPolicy,
 ) -> anyhow::Result<String> {
     let context_lock = takeover_context_lock(&context);
     let _context_guard = context_lock.lock().await;
@@ -1422,7 +1340,7 @@ pub async fn handle_llm_takeover(
             may_write: authority.may_write,
             guest_tools: guest_tools.clone(),
         }),
-        workspaces, origin: None,
+        workspaces, origin: None, shell_policy,
         // One takeover = one turn.
         turn_saves: Default::default(),
     };

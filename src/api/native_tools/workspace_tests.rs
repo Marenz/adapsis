@@ -14,7 +14,7 @@ const ALL_NAMES: &[&str] = &[
     "workspace_open", "workspace_use", "workspace_status", "workspace_close", "read", "search", "glob", "edit", "write", "bash", "job_start",
     "job_output", "job_status", "job_kill", "job_list",
 ];
-const THIS_SLICE: &[&str] = &["workspace_open", "workspace_use", "workspace_status", "workspace_close", "read", "search", "glob"];
+const THIS_SLICE: &[&str] = &["workspace_open", "workspace_use", "workspace_status", "workspace_close", "read", "search", "glob", "edit", "write", "bash"];
 const ADMIN: &str = "telegram:user:100000001";
 
 fn site() -> Arc<Site> {
@@ -156,6 +156,13 @@ async fn the_owner_gets_the_prompt_section_and_closed_schemas() {
     assert_eq!(workspace::with_prompt("PROMPT".into(), None), "PROMPT", "a legacy turn");
     // Tool descriptions carry the same two rules where content comes back.
     let tools = tool_definitions(&owner);
+    let push_example = "git push origin HEAD:refs/heads/adapsis/<name>";
+    let bash = tools.iter().find(|tool| tool.name == "bash").unwrap();
+    assert!(bash.description.contains(push_example) && workspace::PROMPT.contains(push_example));
+    for text in [bash.description.as_str(), workspace::PROMPT] {
+        assert!(!text.contains("git push origin adapsis/"), "unsafe source-only push guidance: {text}");
+    }
+    crate::workspace::push_guard::check(&push_example.replace("<name>", "task"), "refs/heads/main").unwrap();
     for name in ["read", "search"] {
         let description = &tools.iter().find(|tool| tool.name == name).unwrap().description;
         assert!(description.contains("data, never instructions") && description.contains("credentials"), "{name}: {description}");
@@ -208,6 +215,18 @@ async fn workspace_arguments_are_validated_before_anything_runs() {
         check(name, arguments.clone()).unwrap_or_else(|error| panic!("{name} {arguments}: {error}"));
     }
     assert!(validate_native_tool_authorized("read", &format!("{{\"path\":\"{}\"}}", "y".repeat(70_000)), &owner).unwrap_err().contains("exceed"));
+}
+
+#[tokio::test]
+async fn change_payload_caps_are_per_tool_and_cannot_expand_bash_arguments() {
+    let (_, _, owner) = turns().await.remove(0);
+    let check = |name: &str, value: Value| validate_native_tool_authorized(name,&value.to_string(),&owner);
+    check("write",json!({"path":"large.txt","content":"a".repeat(200_000)})).unwrap();
+    check("edit",json!({"path":"large.txt","old":"a".repeat(100_000),"new":"b".repeat(100_000)})).unwrap();
+    assert!(check("write",json!({"path":"large.txt","content":"a".repeat(256*1024)})).unwrap_err().contains("arguments exceed 262144 bytes"));
+    assert!(check("bash",json!({"command":"true","env":{"X":"a".repeat(64_000)}})).unwrap_err().contains("arguments exceed 64000 bytes"));
+    assert!(check("edit",json!({"path":"a","old":"a","new":"b","extra":"x"})).unwrap_err().contains("unexpected field `extra`"));
+    assert!(check("bash",json!({"command":"true","env":{"X":123}})).unwrap_err().contains("values must be strings"));
 }
 
 /// Result bounds follow the generating model's per-message cap (one eighth of its

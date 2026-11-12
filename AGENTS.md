@@ -276,8 +276,9 @@ certification**; the first wiring slice is described below. Focused gate:
 ### Workspace tools in owner turns (#129 W1: lifecycle + read-only)
 
 Wired: `workspace_open`, `workspace_use`, `workspace_status`, `workspace_close`, `read`,
-`search`, `glob` (`api/native_tools/workspace.rs` + `workspace/exec.rs`). Not wired yet:
-`edit`, `write`, `bash` (W2), `job_*` and the workspace turn budget (W3). DESIGN L2, L3, T4,
+`search`, `glob`, plus W2's `edit`, `write`, `bash` (`api/native_tools/workspace.rs`,
+`workspace/change_tools.rs`, `workspace/exec.rs`, `workspace/changes.rs`). Still pending:
+`job_*` and the workspace turn budget (W3). DESIGN L2, L3, T4,
 N3, N5/N6, C4.
 
 - **Who and where: ONE predicate, `workspace::available(config)`.** Schemas
@@ -432,6 +433,67 @@ N3, N5/N6, C4.
   concurrency probes, turns through the takeover loop, logging child process),
   `cargo test --release http_` and `a_disconnected` (HTTP `main`, the real HTTP layer,
   a client disconnect), `origin`, `cut_off`, `conversation_view`.
+
+### W2 repository changes and foreground commands (#129, candidate, not deployed)
+
+- `edit(path,old,new,replace_all?)` and `write(path,content)` share the existing
+  read-ledger/freshness, atomic-file, CRLF and cut-line rules. Their TOTAL JSON arguments
+  are at most 256 KiB; all other tools stay at 64,000 bytes. Model output/window and
+  transport limits still apply. After a change, ledger persistence is conditional on
+  still holding the workspace. If that save fails the error says the file ALREADY
+  changed and must not be edited again blindly. No Program/session source mutation.
+- `bash(command,cwd?,timeout_ms?,max_output_bytes?,env?)` uses `run_with` with the SAME
+  startup ShellPolicy value as the coroutine Runtime, cloned through AppConfig and
+  takeover entry (never an independent per-call environment read). Repository env then
+  request overrides; no SSH_AUTH_SOCK/credential injection. Success requires exit 0 AND
+  no cleanup uncertainty/errors. Default timeout 120 s, max 3600 s; bounded head/tail
+  output follows ResultCaps. `render_within` additionally bounds lossy UTF-8 display text
+  without losing the terminal/cleanup diagnosis. Never infer success from output text.
+- A foreground call registers an existing runtime entry in `api/workspace_cancel.rs`.
+  Its cancel-on-drop guard lives in the ASYNC CALL future; Active and the work guard
+  live in the BLOCKING worker through stop/reap/environment handoff. Dropping a client
+  or call future therefore cancels bash; open/read still finish as in W1. Registry
+  entries are removed only when the worker is really done. A cancellation ends the
+  model turn as unconfirmed and skips later calls, never replays or buys a generation.
+  The visible cancellation note claims cleanup confirmed only from a scope result
+  without cleanup uncertainty/errors; fallback or uncertain cleanup gets a warning,
+  never a fully-stopped claim derived from output text.
+- `POST /api/workspace/cancel {"context":"..."}` is an out-of-band operator escape
+  hatch for EXISTING foreground work: same Origin extractor, direct loopback ONLY,
+  forwarding headers narrow, missing/remote peer denied. Context names identify a
+  registry entry, never grant authority; absent work gives 404 without creating work.
+  202 means cancellation REQUESTED, not stopped/delivered. No cancellation IO builtin,
+  Telegram /stop or queued/started receipt implementation in W2 (#147/#138 follow-up).
+- Foreground unit prefix = process-kind prefix + the state-root digest already used
+  by jobs (`workspace/foreground.rs`). Bootstrap sweeps only exact `<prefix>-run-PID-N.scope`
+  units of THIS root, once per process/root; every turn must reuse the memoized result
+  rather than sweeping this daemon's current commands. Unexpected names/status or failed
+  stop verification return cleanup-uncertain failure, never broaden the sweep. Without
+  a user manager the existing foreground process-group fallback remains available and
+  explicitly reports the uninspected earlier-scope/setsid limitation. All of this still
+  assumes one active daemon per state root. Job services are untouched and unexposed.
+- `push_guard` is a mistake guard before launch, NOT a shell sandbox. Common quoted git
+  argv and `-C`/`-c` are recognised. Explicit remote plus NONEMPTY source and full
+  `refs/heads/<destination>` required for EVERY refspec (for example
+  `git push origin HEAD:refs/heads/adapsis/<name>`). Source-only refs can be remapped by
+  `remote.<name>.push` config, so bare/default/short/bulk/wildcard destinations refuse.
+  `+` refspecs and ANY plain `--force`/`-f` (also combined short flags) refuse even
+  alongside `--force-with-lease`: plain force overrides stale-lease checks. Protected
+  base/main/master/release branches are normalised (`origin/release/foo`, full refs,
+  `HEAD:refs/heads/main`). Explicit allowed full destinations support lease-ONLY
+  `--force-with-lease` (including explicit expected-value leases).
+  Arbitrary generated shell/aliases can bypass this; server branch protection remains
+  separate. Policy/push/cleanup journal texts are categorical, never command contents.
+- Training/events/private-error rules above cover every W2 path, including failed mixed
+  preflight and cancelled batches. Cancelled batch peers get categorical metadata too,
+  with true success only for calls completed before cancellation. Close uses the pinned
+  site's job store and refuses dirty, running or unverifiable work before removing it.
+- Measurement: real temp-repository owner turn with 50 reads, 51 durable binding writes
+  including its claim: 448.385 ms; offline equivalent read/hash plus ONE ledger flush:
+  1.558 ms (includes no git-open/provider overhead, so not an isolated fsync speedup).
+  Keep per-call durability: under half a second for this 50-file turn does not justify a
+  weaker batch-commit boundary. Manual regression is ignored in routine suites:
+  `cargo test --release --bin adapsis -- measure_fifty_read --ignored --nocapture`.
 
 - Issue #121 opt-in source library: `library-sources.json` explicitly maps module
   names to `python`/transitional `legacy_ax` plus a closed acyclic dependency set.

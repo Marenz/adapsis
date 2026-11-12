@@ -150,6 +150,8 @@ fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
         },
         LoopEnd::Empty(error) => error.to_string(),
         LoopEnd::CutOff => append(&format!("({})", super::native_turn::CUT_OFF_TURN_ERROR)),
+        LoopEnd::Cancelled { cleanup_confirmed: true } => append("(Foreground cancellation was requested; scope cleanup is confirmed. No later tools were executed.)"),
+        LoopEnd::Cancelled { cleanup_confirmed: false } => append("(Foreground cancellation was requested, but cleanup could not be fully confirmed; processes may still be running. No later tools were executed. Do not replay the command.)"),
         LoopEnd::ProviderError(_) => {
             append(&format!(
                 "Entschuldigung — ich habe gerade ein technisches Problem und konnte \

@@ -49,6 +49,7 @@ fn build_config(
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
         turn: None, workspaces: None, origin: None,
         turn_saves: Default::default(),
+        shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
     };
     config.runtime.write().unwrap().http_routes = program.pending_routes.clone();
     (config, io_rx)

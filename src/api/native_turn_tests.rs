@@ -10,6 +10,10 @@ mod native_repair_turn_tests;
 mod run_turn_tests;
 #[path = "source_save_tests.rs"]
 mod source_save_tests;
+#[path = "workspace_bash_cancel_tests.rs"]
+mod bash_cancel;
+#[path = "workspace_change_privacy_tests.rs"]
+mod change_privacy;
 
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}})
@@ -954,7 +958,7 @@ async fn http_main_has_workspace_tools_only_for_a_local_request_and_hides_their_
     let names = |request: &Value| -> Vec<String> { request["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap().to_string()).collect() };
     let result = |index: usize, id: &str| requests[index]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == id).unwrap()["content"].as_str().unwrap().to_string();
     // Local: the tools, the section, the tail line, plain-text results.
-    assert!(names(&requests[0]).iter().any(|name| name == "workspace_open") && names(&requests[0]).len() == 6 + 7, "{:?}", names(&requests[0]));
+    assert!(names(&requests[0]).iter().any(|name| name == "workspace_open") && names(&requests[0]).len() == 6 + 10, "{:?}", names(&requests[0]));
     assert!(requests[0]["messages"][0]["content"].as_str().unwrap().contains("## Workspace tools"));
     assert!(requests[0]["messages"].to_string().contains("Workspace of this conversation: none. Registered repositories: http-main."));
     assert!(result(1, "open").starts_with("opened workspace http-main/h1\npath: "), "{}", result(1, "open"));

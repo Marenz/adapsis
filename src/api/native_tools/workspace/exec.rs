@@ -31,6 +31,8 @@ use crate::workspace::error::shown;
 use crate::workspace::limits::{WORK_WAIT_MAX, WORK_WAIT_NOTED};
 use crate::workspace::{self, Binding, Error, SearchMode, Workspace};
 use std::sync::Arc;
+#[path = "changes.rs"]
+mod changes;
 
 /// What one workspace tool call produced.
 #[derive(Debug)]
@@ -85,6 +87,8 @@ struct Work {
     context: String,
     caps: ResultCaps,
     bound: Bound,
+    policy: crate::coroutine::ShellPolicy,
+    cleanup_confirmed: bool,
 }
 
 pub(in crate::api) struct Turn {
@@ -96,6 +100,9 @@ pub(in crate::api) struct Turn {
     /// How long a call waits for earlier work of this conversation (a policy
     /// value; tests shorten it).
     pub(in crate::api) wait: std::time::Duration,
+    policy: crate::coroutine::ShellPolicy,
+    pub(in crate::api) cancelled: bool,
+    pub(in crate::api) cleanup_confirmed: bool,
 }
 
 impl Turn {
@@ -106,7 +113,8 @@ impl Turn {
         if !super::available(config) || super::conversation(config) != context {
             return None;
         }
-        Some(Self { work: None, site: config.workspaces.clone()?, context: context.to_string(), caps: ResultCaps::for_model(model), wait: WORK_WAIT_MAX })
+        Some(Self { work: None, site: config.workspaces.clone()?, context: context.to_string(), caps: ResultCaps::for_model(model), wait: WORK_WAIT_MAX,
+            policy: config.shell_policy.clone(), cancelled: false, cleanup_confirmed: false })
     }
 
     /// Run one workspace tool. Never panics on any arguments; a panic inside
@@ -116,23 +124,11 @@ impl Turn {
             Ok(call) => call,
             Err(error) => return Outcome::failed(name, error),
         };
+        if self.cancelled { return Outcome::failed(name, "this turn's foreground operation was cancelled; no further calls were started"); }
         let started = std::time::Instant::now();
-        // The work lock: free unless a call of an earlier, dropped turn of this
-        // conversation is still running, or a claimant is unbinding us right now.
-        let (held, waited) = match turn_lock::work_now(self.site.bindings.root(), &self.context) {
-            Some(held) => (held, None),
-            None => match turn_lock::work(self.site.bindings.root(), &self.context, self.wait).await {
-                Some(held) => (held, Some(started.elapsed())),
-                None => {
-                    return Outcome::failed(
-                        name,
-                        format!(
-                            "an earlier workspace operation of this conversation is still running after {} s, so `{name}` was not started and nothing was changed. Try again later; workspace_status shows the state once it has finished",
-                            self.wait.as_secs()
-                        ),
-                    );
-                }
-            },
+        let (held, waited) = match self.acquire_work(name).await {
+            Ok(held) => held,
+            Err(refusal) => return refusal,
         };
         // Whatever ran meanwhile may have changed the binding: load it again.
         let mut work = self.work.take().filter(|_| waited.is_none()).unwrap_or_else(|| Work {
@@ -140,19 +136,40 @@ impl Turn {
             context: self.context.clone(),
             caps: self.caps,
             bound: Bound::Unknown,
+            policy: self.policy.clone(),
+            cleanup_confirmed: false,
         });
+        let active = if matches!(call, Call::Bash(_)) {
+            match crate::api::workspace_cancel::Active::register(self.site.bindings.root(), &self.context) {
+                Ok(active) => Some(active),
+                Err(error) => return Outcome::failed(name, error),
+            }
+        } else { None };
+        let cancel = active.as_ref().map(|active| active.cancel.clone());
+        let _cancel_on_drop = cancel.clone().map(crate::api::workspace_cancel::OnDrop);
         let cap = self.caps.message;
         let joined = tokio::task::spawn_blocking(move || {
             // Owned by this task: held until the library call has finished,
             // whatever happens to the future that started it.
             let _held = held;
-            let result = work.run(call);
+            let result = match call {
+                Call::Bash(request) => {
+                    work.cleanup_confirmed = false;
+                    work.bash(request, active.as_ref().map(|active| active.cancel.as_ref()))
+                }
+                other => work.run(other),
+            };
+            // `active` stays in the worker through stop/reap; the registry must
+            // still expose it when its requesting future has already dropped.
+            drop(active);
             (work, result)
         })
         .await;
+        self.cancelled = cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled());
         let (mut outcome, workspace) = match joined {
             Ok((work, result)) => {
                 let workspace = work.label();
+                self.cleanup_confirmed = work.cleanup_confirmed;
                 self.work = Some(work);
                 match result {
                     Ok(text) => (Outcome::new(name, true, text, cap), workspace),
@@ -183,6 +200,18 @@ impl Turn {
             eprintln!("[workspace:{}] {name} {arguments} -> {}", self.context, shown(outcome.text.lines().next().unwrap_or_default()));
         }
         outcome
+    }
+
+    /// Earlier dropped calls keep this same work lock through real cleanup.
+    async fn acquire_work(&self, name: &str) -> Result<(tokio::sync::OwnedMutexGuard<()>, Option<std::time::Duration>), Outcome> {
+        if let Some(held) = turn_lock::work_now(self.site.bindings.root(), &self.context) { return Ok((held, None)); }
+        let started = std::time::Instant::now();
+        match turn_lock::work(self.site.bindings.root(), &self.context, self.wait).await {
+            Some(held) => Ok((held, Some(started.elapsed()))),
+            None => Err(Outcome::failed(name, format!(
+                "an earlier workspace operation of this conversation is still running after {} s, so `{name}` was not started and nothing was changed. Try again later; workspace_status shows the state once it has finished", self.wait.as_secs()
+            ))),
+        }
     }
 }
 
@@ -242,6 +271,9 @@ impl Work {
             Call::Status => self.status(),
             Call::Close => self.close(),
             Call::Read { path, offset, limit } => self.read(&path, offset, limit),
+            Call::Edit { path, old, new, replace_all } => self.change(&path, Some((&old, &new, replace_all)), None),
+            Call::Write { path, content } => self.change(&path, None, Some(&content)),
+            Call::Bash(_) => Err(Error::InvalidArgument("foreground execution requires a cancellation lifetime".into())),
             Call::Search(mut request) => {
                 request.max_output_bytes = self.caps.search;
                 let (workspace, _) = self.bound()?;
@@ -418,7 +450,8 @@ impl Work {
         let (workspace, binding) = self.bound()?;
         let label = format!("{}/{}", binding.repo, binding.workspace);
         let workspace = workspace.clone();
-        workspace::close(&workspace)?;
+        let jobs = workspace::JobStore::at(self.site.bindings.root(), workspace::run::default_unit_prefix())?;
+        workspace::lifecycle::close_with_store(&workspace, Default::default(), &jobs)?;
         self.bound = Bound::None;
         self.site.bindings.release(&self.context, Some(&workspace))?;
         Ok(format!("closed workspace {label}; its directory is removed and branch {} is kept", workspace.branch))

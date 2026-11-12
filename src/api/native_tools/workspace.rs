@@ -28,10 +28,11 @@ use crate::workspace::{BindingStore, Registry, SearchMode, SearchRequest};
 use std::sync::Arc;
 
 mod exec;
+mod change_tools;
 pub(in crate::api) use exec::{tail_line, Outcome, Turn};
 
 /// The workspace tools of this slice. Editing, commands and jobs follow.
-const TOOLS: &[&str] = &["workspace_open", "workspace_use", "workspace_status", "workspace_close", "read", "search", "glob"];
+const TOOLS: &[&str] = &["workspace_open", "workspace_use", "workspace_status", "workspace_close", "read", "search", "glob", "edit", "write", "bash"];
 /// Every workspace tool name, this slice and the later ones. A stored tool
 /// batch that calls one of these is a workspace batch for the view filter and
 /// the training log, whatever the tool list of the day is.
@@ -164,6 +165,7 @@ pub(in crate::api) struct ResultCaps {
     pub read: usize,
     pub search: usize,
     pub glob: usize,
+    pub bash: usize,
 }
 
 impl ResultCaps {
@@ -178,6 +180,7 @@ impl ResultCaps {
             read: READ_MAX_BYTES.min(share),
             search: SEARCH_MAX_OUTPUT_BYTES.min(share),
             glob: GLOB_MAX_OUTPUT_BYTES.min(share),
+            bash: crate::workspace::limits::RUN_OUTPUT_MAX_BYTES.min(share),
         }
     }
 }
@@ -196,7 +199,7 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
     };
     let name = serde_json::json!({"type": "string", "description": "Workspace name: lowercase letters, digits and dashes."});
     let repo = serde_json::json!({"type": "string", "description": "A repository of the workspace registry (workspace_status lists them)."});
-    vec![
+    let mut tools = vec![
         tool(
             "workspace_open",
             "Create a workspace: a git worktree of a registered repository on its own new branch adapsis/<name>, and make it this conversation's workspace. The file tools act on the conversation's workspace. A conversation has one workspace at a time and a workspace belongs to one conversation.".into(),
@@ -254,7 +257,9 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
                 "path": {"type": "string", "description": "Directory to list, relative to the workspace root. Default: the whole workspace."},
             }),
         ),
-    ]
+    ];
+    tools.extend(change_tools::definitions());
+    tools
 }
 
 /// The part of the stable prompt that exists only for turns with workspace
@@ -279,7 +284,19 @@ Credentials: do not seek out, read or print credentials (.env files, token and
 key files, key stores, process environments). When a named capability exists
 for something, use it instead of handling a secret yourself. If you come across
 a secret anyway, do not repeat it in your reply, in tool arguments or in
-memory. This is conduct expected of you; the tools do not enforce it."#;
+memory. This is conduct expected of you; the tools do not enforce it.
+
+edit and write change repository files, not the live Adapsis Program. Read an
+existing file first; the ledger requires unchanged bytes. bash runs foreground
+commands (builds/tests/git) with the owner's authority, no filesystem sandbox.
+It has a per-command timeout and bounded head/tail output; dropping the request
+cancels it. No job tools exist yet. Do not replay a stopped or uncertain command.
+Push only with explicit remote and nonempty source:refs/heads/<destination>,
+for example git push origin HEAD:refs/heads/adapsis/<name>. Source-only refs
+can be remapped by repository push config and are refused. Use lease-only
+--force-with-lease when needed; never combine it with plain --force/-f, which
+overrides its checks. The push-mistake guard is not a security boundary.
+Never change credentials or seek them through bash."#;
 
 /// The stable prompt of a turn, with the workspace section when the turn has
 /// workspace tools. `config` is the turn's pinned native snapshot, if native.
@@ -301,6 +318,9 @@ pub(super) enum Call {
     /// `max_output_bytes` is set by the executor from the turn's caps.
     Search(SearchRequest),
     Glob { pattern: String, path: String },
+    Edit { path: String, old: String, new: String, replace_all: bool },
+    Write { path: String, content: String },
+    Bash(crate::workspace::RunRequest),
 }
 
 /// A non-negative integer argument. Larger than the tool's own maximum is
@@ -314,7 +334,10 @@ fn take_count(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Re
 
 /// Parse and validate the arguments of a workspace tool. Pure: no state is read.
 pub(super) fn parse(name: &str, arguments: &str) -> Result<Call, String> {
-    let map = parse_args_object(arguments)?;
+    let map = if matches!(name, "edit" | "write") {
+        super::parse_args_object_with_cap(arguments, change_tools::CHANGE_ARGUMENT_BYTES)?
+    } else { parse_args_object(arguments)? };
+    if matches!(name, "edit" | "write" | "bash") { return change_tools::parse(name, &map); }
     let text = |key: &str, required: bool, cap: usize| take_string(&map, key, required, cap);
     match name {
         "workspace_open" => {
@@ -424,6 +447,9 @@ fn logged_fields(name: &str) -> &'static [&'static str] {
         "read" => &["path", "offset", "limit"],
         "search" => &["pattern", "path", "glob", "mode", "context", "ignore_case", "limit"],
         "glob" => &["pattern", "path"],
+        "edit" => &["path", "old", "new", "replace_all"],
+        "write" => &["path", "content"],
+        "bash" => &["command", "cwd", "timeout_ms", "max_output_bytes", "env"],
         _ => &[],
     }
 }
@@ -445,11 +471,17 @@ pub(in crate::api) fn logged_result(call: &crate::llm::ToolCall, result: &str, s
 /// ids, property names and values can repeat that diagnosis). Labels come only
 /// from known schemas/static workspace names, never an invented tool name.
 pub(in crate::api) fn logged_skipped(call: &crate::llm::ToolCall, result: &str, tools: &[ToolDefinition]) -> (crate::llm::ToolCall, String) {
+    logged_categorical(call,result,false,tools)
+}
+
+/// Also used for a cancelled workspace batch, preserving actual success for
+/// calls that finished before cancellation and false for every skipped peer.
+pub(in crate::api) fn logged_categorical(call: &crate::llm::ToolCall, result: &str, success: bool, tools: &[ToolDefinition]) -> (crate::llm::ToolCall, String) {
     let label = ALL_NAMES.iter().copied().find(|name| *name == call.name)
         .or_else(|| tools.iter().find(|tool| tool.name == call.name).map(|tool| tool.name.as_str())).unwrap_or("unknown");
     let fields = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&call.arguments).ok().map(|map| map.len());
     let arguments = serde_json::json!({"argument_bytes": call.arguments.len(), "argument_fields": fields}).to_string();
     let logged = crate::llm::ToolCall { id: "skipped".into(), name: label.into(), arguments };
-    let feedback = serde_json::json!({"tool": label, "success": false, "result_bytes": result.len()}).to_string();
+    let feedback = serde_json::json!({"tool": label, "success": success, "result_bytes": result.len()}).to_string();
     (logged, feedback)
 }

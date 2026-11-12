@@ -31,7 +31,6 @@
 //! daemon. Missing Python/setup failures do not authorize replay.
 
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -307,10 +306,7 @@ impl JobStore {
     /// A short digest also separates stores of the same workspace under two
     /// state roots (tests and an operator's isolated instance).
     pub(super) fn unit_name(&self, workspace: &Workspace, id: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-        let digest = Sha256::digest(root.as_os_str().as_bytes());
-        let store: String = digest[..16].iter().map(|byte| format!("{byte:02x}")).collect();
+        let store = super::foreground::root_digest(&self.root);
         format!(
             "{}-job-{}-{}-{}-{}-{store}-{id}.service",
             self.unit_prefix,

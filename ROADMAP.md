@@ -1,9 +1,40 @@
 # AdapsisOS Roadmap
 
-## W1 integration with the exact live Python line (2026-11-12, pending review)
+## W2 repository edit/test turn (2026-11-12, candidate, not deployed)
+
+- Baseline `ce40048`: W1 accepted/committed as `aed5a2f`, exact live Python/save-outcome
+  integration accepted/committed as `5888268`, exact reviewed image hotfix `7201856`
+  merged as `ce40048` (focused image/takeover 65 passed). No #136 uncommitted work.
+- Adds owner-private edit/write/bash, foreground-drop cancellation and a direct-loopback
+  HTTP cancel escape hatch, push-mistake guard and digest-scoped startup cleanup.
+  No job tools, W3 turn budget, new cancellation builtin or Telegram /stop. The separate
+  ACK147 receipt worker is not duplicated here. Its live source/docs `c7a4927`/`1f19c3f`
+  still require integration AFTER this W2 freeze/commit, before any deployment.
+- Real mock-provider turn edits a repository file, writes a test script and executes it
+  successfully, preserving the live Program/revision. Other regressions cover freshness,
+  command failure, protected push before effects, dirty/running/unverifiable close,
+  actual HTTP cancellation/client disconnect, metadata/privacy and UTF-8 output bounds.
+- Read-ledger measurement: 50-read real owner turn448.385ms/51durable writes including
+  claim; offline read/hash+one-flush1.558ms (different overhead). Retain per-call durable
+  ledger writes; no batch-flush policy change. Evidence `/tmp/opencode/w2-read50-measurement.log`.
+- Combined focused gate: 618 passed, 0 failed, 1 manual-measurement test ignored;
+  production release build passes with no new warnings. The coordinated ONE full gate
+  and independent review are pending.
+  No live instance, registry, credentials or deployment changed.
+- Independent W2 review rejected ONLY two ordinary-Git push semantics: source-only
+  refspecs can follow a configured mapping to protected main; plain force overrides a
+  stale lease even when a lease flag is present. Minimal correction requires every
+  refspec to be nonempty `source:refs/heads/<destination>` and rejects plain force in
+  either flag order. Advertised command is now
+  `git push origin HEAD:refs/heads/adapsis/<name>`; lease-only remains supported.
+  Real local-bare regressions cover mapping, stale lease rejection and correct lease
+  success. Corrected focused push/workspace/native gate: 525 passed, 0 failed,
+  1 manual measurement ignored. Corrected full gate and push-only delta review pending.
+
+## W1 integration with the exact live Python line (2026-11-12, accepted)
 
 - Parents: workspace W1 `aed5a2f` and exact live-plus-docs checkpoint `b779d1b`.
-  Integration is staged without a commit. No #136 work-in-progress, W2 changes,
+  Manager committed/pushed the accepted integration as `5888268`. No #136 work-in-progress, W2 changes,
   registry file or deployment is included.
 - Approved semantic resolutions: `!watch` uses plain model view/token-only
   calibration (no active-turn accounting or cold start), with workspace batches
@@ -29,7 +60,9 @@
 - Gates: seven targeted interactions pass; combined focused gate 750 passed / 0 failed /
   4 ignored, plus 7 startup integration cases. Default-JSON/stored-nesting/submission/
   block gate: 31 passed. Logs `/tmp/opencode/w1-live-integration-{targeted,focused,json-nesting}.log`.
-  The coordinated ONE full run and independent integration-only review are pending.
+  ONE full run: 2779 passed / 1 known strict Python-parity failure / 9 ignored,
+  integration5/9/4 passed; integration-only review ACCEPT. Staged hash at acceptance
+  `0ea8868fe90d465f284026cf4799cd9b64bbd518a3e355a2c74be29386838d07`.
 
 ## Workspace tools W1: lifecycle and read-only tools in owner turns (#129, 2026-11-12)
 

@@ -42,6 +42,7 @@ mod native_turn;
 mod takeover_budget;
 mod takeover_native;
 pub mod origin;
+pub(crate) mod workspace_cancel;
 mod turn_lock;
 pub mod native_tools;
 pub(crate) mod http_context;
@@ -166,6 +167,8 @@ pub struct AppConfig {
     pub origin: Option<origin::Origin>,
     /// Per-turn save state (#146); fresh for every conversational turn.
     pub(crate) turn_saves: TurnSaves,
+    /// Same startup policy value as the coroutine Runtime (never re-read per tool).
+    pub shell_policy: crate::coroutine::ShellPolicy,
 }
 
 impl AppConfig {
@@ -1587,6 +1590,7 @@ pub fn router_with_llm(config: AppConfig) -> axum::Router {
         .route("/api/query", post(query))
         .route("/api/ask", post(origin::ask))
         .route("/api/ask-stream", post(origin::ask_stream))
+        .route("/api/workspace/cancel", post(workspace_cancel::cancel))
         .route("/api/inject", post(inject_message))
         .route("/api/drain-queue", post(drain_queue))
         .route("/api/opencode", post(opencode_task))

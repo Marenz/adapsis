@@ -7,11 +7,11 @@ use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 fn work(site: &Arc<Site>, context: &str) -> Work {
-    Work { site: site.clone(), context: context.into(), caps: ResultCaps::for_model("unknown/review"), bound: Bound::Unknown }
+    Work { site: site.clone(), context: context.into(), caps: ResultCaps::for_model("unknown/review"), bound: Bound::Unknown, policy: crate::coroutine::ShellPolicy::Unrestricted, cleanup_confirmed: false }
 }
 
 fn turn(site: &Arc<Site>, context: &str, wait: Duration) -> Turn {
-    Turn { work: None, site: site.clone(), context: context.into(), caps: ResultCaps::for_model("unknown/review"), wait }
+    Turn { work: None, site: site.clone(), context: context.into(), caps: ResultCaps::for_model("unknown/review"), wait, policy: crate::coroutine::ShellPolicy::Unrestricted, cancelled: false, cleanup_confirmed: false }
 }
 
 fn use_call(name: &str) -> Call {

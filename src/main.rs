@@ -1613,6 +1613,8 @@ async fn main() -> Result<()> {
 
             // Spawn IO event loop (including +spawn support)
             let rt = runtime.clone();
+            let shell_policy_for_config = runtime.shell_policy.clone();
+            let shell_policy_for_spawn = runtime.shell_policy.clone();
             let rt_for_id = runtime.clone();
             let task_registry_for_spawn = runtime.task_registry.clone();
             let snap_registry_for_spawn2 = runtime.snapshot_registry.clone();
@@ -1880,6 +1882,7 @@ async fn main() -> Result<()> {
                             let t_log = training_log_for_spawn.read().unwrap().clone();
                             let al = access_level_for_spawn;
                             let pc = perm_config_for_spawn.clone();
+                            let shell_policy = shell_policy_for_spawn.clone();
                             let save_notify = save_notify_for_spawn.read().unwrap().clone();
                             let ai_log = ai_log_for_spawn.read().unwrap().clone();
                             let memory_graph = memory_graph_for_spawn.clone();
@@ -1893,7 +1896,7 @@ async fn main() -> Result<()> {
                                     io_sender, task_registry, snap_registry,
                                     oc_lock, oc_git_dir, t_log,
                                     al, pc,
-                                    save_notify, ai_log, native_tools, None,
+                                    save_notify, ai_log, native_tools, None, shell_policy,
                                 ).await;
                                 let _ = reply.send(result);
                             });
@@ -2332,6 +2335,7 @@ async fn main() -> Result<()> {
             *save_notify_shared.write().unwrap() = Some(save_tx.clone());
 
             let permission_config = perm_config_for_config;
+            workspace::foreground::startup().await;
             let access_level_for_config = access_level_parsed;
 
             let config = api::AppConfig {
@@ -2362,6 +2366,7 @@ async fn main() -> Result<()> {
                 permission_config,
                 turn: None, workspaces: None, origin: None,
                 turn_saves: Default::default(),
+                shell_policy: shell_policy_for_config,
             };
 
             // Clone tier handles before config is moved into the router

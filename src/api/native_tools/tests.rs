@@ -148,6 +148,7 @@ fn config_for(
         permission_config: Arc::new(perm),
         turn: None, workspaces: None, origin: None,
         turn_saves: Default::default(),
+        shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
     }
 }
 

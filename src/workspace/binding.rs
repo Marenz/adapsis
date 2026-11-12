@@ -103,6 +103,8 @@ pub(crate) type Hook = std::sync::Arc<dyn Fn(Step) -> std::io::Result<()> + Send
 pub struct BindingStore {
     root: PathBuf,
     #[cfg(test)]
+    writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
     pub(crate) hook: Option<Hook>,
 }
 
@@ -121,6 +123,8 @@ impl BindingStore {
     pub fn at(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            #[cfg(test)]
+            writes: Default::default(),
             #[cfg(test)]
             hook: None,
         }
@@ -188,7 +192,10 @@ impl BindingStore {
             return Err(Error::Binding(format!("the workspace binding would exceed {BINDING_MAX_BYTES} bytes and was not stored")));
         }
         // Temporary file, fsync, rename, directory fsync.
-        directory.write(&file_name(context)?, &bytes).map_err(state_error)
+        directory.write(&file_name(context)?, &bytes).map_err(state_error)?;
+        #[cfg(test)]
+        self.writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// Every record of the directory with its file name. Fails closed: an
@@ -307,6 +314,11 @@ impl BindingStore {
     /// The state root: what scopes this store's conversations.
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    #[cfg(test)]
+    pub(crate) fn writes_for_tests(&self) -> usize {
+        self.writes.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

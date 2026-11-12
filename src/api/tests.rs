@@ -24,7 +24,7 @@ mod jit_containment_tests;
 mod storage_depth_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
-fn test_config() -> AppConfig {
+pub(super) fn test_config() -> AppConfig {
     let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
     AppConfig {
         program: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ast::Program::default())),
@@ -56,6 +56,7 @@ fn test_config() -> AppConfig {
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
         turn: None, workspaces: None, origin: None,
         turn_saves: Default::default(),
+        shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
     }
 }
 
@@ -775,6 +776,7 @@ fn test_config_with_io() -> (
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
         turn: None, workspaces: None, origin: None,
         turn_saves: Default::default(),
+        shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
     };
     (config, io_rx)
 }

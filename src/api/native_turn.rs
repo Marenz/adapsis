@@ -122,6 +122,7 @@ pub(super) enum LoopEnd {
     Empty(&'static str),
     /// The provider cut off more consecutive responses than are corrected.
     CutOff,
+    Cancelled { cleanup_confirmed: bool },
 }
 
 impl LoopEnd {
@@ -132,6 +133,7 @@ impl LoopEnd {
             Self::ProviderError(_) => "provider-error",
             Self::Empty(_) => "empty-response",
             Self::CutOff => "cut-off",
+            Self::Cancelled { .. } => "cancelled",
         }
     }
 }
@@ -479,6 +481,14 @@ impl NativeLoop {
             return true;
         }
         self.execute_batch(config, baseline, output, tx).await;
+        if self.workspace.as_ref().is_some_and(|turn| turn.cancelled) {
+            let cleanup_confirmed = self.workspace.as_ref().is_some_and(|turn| turn.cleanup_confirmed);
+            let notice = if cleanup_confirmed { "Foreground cancellation requested; scope cleanup confirmed. No later calls were executed." }
+                else { "Foreground cancellation requested, but cleanup could not be fully confirmed; processes may still be running. No later calls were executed. Do not replay the command." };
+            self.error(notice.into(), tx).await;
+            self.end = LoopEnd::Cancelled { cleanup_confirmed };
+            return false;
+        }
         if self.finished {
             self.end = LoopEnd::Finished;
             return false;
@@ -526,7 +536,10 @@ impl NativeLoop {
 
     async fn conclude(&mut self, config: &AppConfig, tx: &EventSender) {
         if !self.finished && self.fatal.is_none() {
-            self.error("Iteration limit or provider failure without successful finish; task completion is unconfirmed.".into(), tx).await;
+            let message = if matches!(self.end, LoopEnd::Cancelled { .. }) {
+                "Foreground cancellation requested; task completion is unconfirmed."
+            } else { "Iteration limit or provider failure without successful finish; task completion is unconfirmed." };
+            self.error(message.into(), tx).await;
             // HTTP records the outcome in `main`; takeover conversations only
             // tell the person in the reply, as the legacy takeover loop does.
             if self.persist_incomplete_note {
@@ -635,7 +648,9 @@ impl NativeLoop {
         for call in &output.tool_calls {
             self.seen.insert(call.id.clone());
             let (result_before, test_before) = (self.response.results.len(), self.response.test_results.len());
-            let content = if let Some((_, error)) = &validation {
+            let content = if self.workspace.as_ref().is_some_and(|turn| turn.cancelled) {
+                self.workspace_outcome(super::native_tools::workspace::Outcome::failed(&call.name, "earlier foreground operation cancelled; this call was not executed"), tx).await
+            } else if let Some((_, error)) = &validation {
                 let message = format!("Batch skipped before execution: {error}");
                 let public = if workspace_refusal {
                     "Native tool batch refused before execution; no calls were executed.".into()
@@ -655,11 +670,14 @@ impl NativeLoop {
         let model = config.llm_model.read().unwrap().clone();
         // Workspace calls are recorded without argument values and result content.
         use super::native_tools::workspace::{logged_call, logged_result};
-        let (logged_calls, logged_results): (Vec<ToolCall>, Vec<String>) = if workspace_refusal {
+        let (logged_calls, logged_results): (Vec<ToolCall>, Vec<String>) = if workspace_refusal || self.workspace.as_ref().is_some_and(|turn| turn.cancelled) {
             // Sanitize EVERY skipped call, including peer ids/args and feedback;
             // its raw result carries the workspace-origin validation detail too.
             let tools = super::native_tools::tool_definitions(config);
-            output.tool_calls.iter().zip(&results).map(|(call, result)| super::native_tools::workspace::logged_skipped(call, result, &tools)).unzip()
+            output.tool_calls.iter().zip(&results).zip(successes).map(|((call, result), success)| {
+                if workspace_refusal { super::native_tools::workspace::logged_skipped(call,result,&tools) }
+                else { super::native_tools::workspace::logged_categorical(call,result,success,&tools) }
+            }).unzip()
         } else {
             output.tool_calls.iter().zip(&results).zip(successes)
                 .map(|((call, result), success)| (logged_call(call), logged_result(call, result, success))).unzip()

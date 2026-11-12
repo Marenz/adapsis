@@ -2,8 +2,8 @@
 //! worktree that belongs to one task (DESIGN L2, T4; issue #129).
 //!
 //! This is the library half. `api/native_tools/workspace.rs` wires the
-//! lifecycle and the read-only tools into owner turns; the write side, commands
-//! and jobs are wired by later slices and until then reachable only from tests.
+//! lifecycle, file changes and foreground commands into private owner turns;
+//! background job tools and the extended turn budget follow in a later slice.
 //!
 //! * `registry`: which repositories exist (`workspaces.toml`).
 //! * `lifecycle`: `open` / `find` / `status` / `close` of a workspace.
@@ -26,7 +26,7 @@
 //! Scope of the safety rules (DESIGN N5): they keep the file tools inside the
 //! workspace against mistakes. They are not a sandbox.
 
-// Wired into the native tools by the next slice; until then only tests call in.
+// The background job API is not yet exposed as native tools.
 #![allow(dead_code)]
 
 mod contain;
@@ -48,6 +48,8 @@ pub mod read;
 pub mod registry;
 pub mod resolve;
 pub mod run;
+pub mod push_guard;
+pub mod foreground;
 mod scan;
 pub mod search;
 pub mod secure_open;
