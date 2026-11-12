@@ -124,7 +124,10 @@ fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
         }
     };
     match &native.end {
-        LoopEnd::Finished => prose,
+        LoopEnd::Finished => match &native.unsaved_notice {
+            Some(notice) => append(notice),
+            None => prose,
+        },
         LoopEnd::Empty(error) => error.to_string(),
         LoopEnd::ProviderError(_) => {
             append(&format!(

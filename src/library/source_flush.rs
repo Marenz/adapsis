@@ -27,13 +27,16 @@ pub struct SaveReceipt {
     pub enrolled: Vec<String>,
     /// Manifest dependency updates and leftover files moved aside (log only).
     pub notes: Vec<String>,
+    /// Live modules whose source is not saved after this flush, with the reason.
+    pub unsaved: std::collections::BTreeMap<String, super::Unsaved>,
 }
 
 pub async fn flush_live_sources(
     program: Arc<RwLock<ast::Program>>,
     state: Option<LibraryState>,
 ) -> Result<SaveReceipt> {
-    flush_live_sources_in(program, state, super::library_dir()).await
+    let dir = state.as_ref().and_then(LibraryState::source_dir).unwrap_or_else(super::library_dir);
+    flush_live_sources_in(program, state, dir).await
 }
 
 pub(super) async fn flush_live_sources_in(
@@ -56,9 +59,13 @@ fn flush_blocking(
     state: Option<&LibraryState>,
     dir: &std::path::Path,
 ) -> Result<SaveReceipt> {
+    if let Some(state) = state {
+        state.wait_at_flush_gate();
+    }
     // Never acquire this lock inside a source transaction. A queued request
     // acquires the *current* program, even if mutations ran since it was queued.
     let live = program.blocking_read();
+    let live_names: std::collections::BTreeSet<String> = live.modules.iter().map(|module| module.name.clone()).collect();
     let _transaction = state
         .map(|state| {
             state
@@ -72,6 +79,9 @@ fn flush_blocking(
     if let Some(state) = state {
         if let Err(error) = super::source_io::verify_live_policy(state, dir) {
             let message = format!("source policy unavailable; no source files saved and pending edits retained: {error}");
+            let mut cause = super::source_unsaved::classify(&error, super::UnsavedKind::Other);
+            cause.detail = message.clone();
+            state.settle_policy_failure(&live_names, &cause);
             state.record_error(message.clone());
             return Ok(SaveReceipt {
                 program_snapshot: live.clone(),
@@ -81,12 +91,21 @@ fn flush_blocking(
                 order_dependent: Vec::new(),
                 enrolled: Vec::new(),
                 notes: Vec::new(),
+                unsaved: state.unsaved_record(),
             });
         }
     }
     let governed = state.is_some_and(|state| state.has_source_manifest().unwrap_or(true));
     let super::source_save::Saved { round, enrolled, notes } = super::source_save::run(&live, state, dir, governed)?;
-    let super::source_save::Round { saved: mut saved_names, unresolved, unsaved, qualified_call_sites, order_dependent } = round;
+    let super::source_save::Round { saved: mut saved_names, unresolved, unsaved, qualified_call_sites, order_dependent, unsaved_modules } = round;
+    // The record is settled while the Program read guard is still held.
+    let unsaved_record = match state.filter(|_| governed) {
+        Some(state) => {
+            state.settle_saves(&live_names, &saved_names, unsaved_modules);
+            state.unsaved_record()
+        }
+        None => Default::default(),
+    };
     let mut failures = unresolved;
     failures.extend(unsaved);
     if let Some(state) = state {
@@ -131,6 +150,7 @@ fn flush_blocking(
         order_dependent,
         enrolled,
         notes,
+        unsaved: unsaved_record,
     })
 }
 

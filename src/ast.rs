@@ -158,6 +158,30 @@ impl Program {
         applied
     }
 
+    /// Names of the modules of `new` that differ from `base` (new modules
+    /// included, removed ones not): function identity as in the CoW merge, and
+    /// equality of everything else that is module source.
+    pub fn changed_module_names(base: &Program, new: &Program) -> std::collections::BTreeSet<String> {
+        let differs = |old: &Module, now: &Module| {
+            old.functions.len() != now.functions.len()
+                || old.functions.iter().zip(&now.functions).any(|(a, b)| !Arc::ptr_eq(a, b))
+                || old.types != now.types
+                || old.shared_vars != now.shared_vars
+                || old.routes != now.routes
+                || old.sources != now.sources
+                || old.event_decls != now.event_decls
+                || old.startup != now.startup
+                || old.shutdown != now.shutdown
+                || old.doc != now.doc
+                || old.modules != now.modules
+        };
+        new.modules
+            .iter()
+            .filter(|now| base.modules.iter().find(|old| old.name == now.name).map_or(true, |old| differs(old, now)))
+            .map(|module| module.name.clone())
+            .collect()
+    }
+
     /// Rebuild the set of all union variant names from type declarations.
     /// Called by `rebuild_function_index()` after every mutation.
     /// Uses interned IDs for O(1) integer-based lookups instead of string hashing.

@@ -1,5 +1,24 @@
 //! Short-lived execution snapshots and per-function CoW write-back.
-use super::{AppConfig, WorkingSet};
+use super::AppConfig;
+use crate::session::{RuntimeState, SandboxState, SessionMeta};
+
+/// Temporary mutable working state used by complex handlers.
+/// Live truth is still the three tiers in AppConfig; this is just a local bag.
+pub(crate) struct WorkingSet {
+    pub(super) program: crate::ast::Program,
+    pub(super) runtime: RuntimeState,
+    pub(super) meta: SessionMeta,
+    pub(super) sandbox: Option<SandboxState>,
+    /// Snapshot of the live program at the moment this working set was created.
+    /// Used by `write_back_working_set` to compute the per-function CoW delta
+    /// (issue #9), so a concurrent writer touching a different function is not
+    /// clobbered. `None` when the working set was built by hand (e.g. tests or
+    /// llm_takeover), in which case write-back falls back to a full overwrite.
+    pub(super) base_program: Option<crate::ast::Program>,
+    /// The program as of the last source save this working set reported
+    /// (`save_changed_sources`); `None`: nothing reported yet, compare with the base.
+    pub(super) source_checkpoint: Option<crate::ast::Program>,
+}
 
 impl AppConfig {
     /// Build a temporary working snapshot from the live tiers.
@@ -11,6 +30,7 @@ impl AppConfig {
             runtime: self.runtime.read().unwrap().clone(),
             meta: self.meta.lock().unwrap().clone(),
             sandbox: None,
+            source_checkpoint: None,
         }
     }
 

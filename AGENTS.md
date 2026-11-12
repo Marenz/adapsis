@@ -294,16 +294,38 @@ response has no Content-Disposition header.
   legacy `.ax` behaviour is still the default of the binary. On here the manifest
   is active since 2026-11-12 (Development baseline); sleek and edox have none. A
   migration of another node requires its own conversion set, review and rehearsal.
-  **Pitfall, observed live 2026-11-12, not changed (the owner is deciding how
-  saving should work):** the mutation acknowledgement says "accepted in memory;
-  authoritative source save is pending ... (not yet durable)". The bot repeated
-  that to the user as "accepted in memory only, the file may not have changed
-  yet", although the writer had written the file within the same second. The
-  wording is true at the moment it is produced (the save is debounced and runs
-  after the turn's write-back) but there is no later message that the save
-  succeeded, so the model doubts a save that worked. Failures are reported
-  (`library_errors()`, journal); success is only in the `[save]` log lines and in
-  `?library` (no "Source save pending" line). Do not paper over this in a prompt.
+  **Save outcome (#146), `api/source_save.rs`, `library/source_unsaved.rs`.**
+  Saving stays automatic. A mutation runs on a clone and is committed by the
+  write-back; the writer reads the live Program. So the acknowledgement inside
+  the mutation is neutral ("module `X` changed in memory") and the ENTRY POINT
+  reports the real outcome after its write-back: `saved to X.py`, or `module
+  `X` NOT saved: <reason> ... unless you <remedy>` (environment causes say "tell
+  the owner. Do not repeat the mutation" and never suggest a retry).
+  - One save per call that changed a module, at the end of
+    `execute_operations_with_baseline` (native `mutate`/`test`/`evaluate`, legacy
+    code blocks) and in `/api/mutate`; an agent branch at its merge. Nothing
+    changed (refused mutation, failing test, empty source) = no writer run.
+    Route handlers, `/api/eval` and the `!watch` self-trigger start the save and
+    do not wait. The wait is bounded (`SAVE_WAIT_MS`, 10 s; the writer is not
+    cancelled) and holds no Program, runtime or session-meta lock; only the
+    conversation's turn lock.
+  - **One unsaved record** per library state (`LibraryState::unsaved()`), written
+    only by the writer at the end of a flush, under its Program read guard:
+    cleared when a flush saves the module, when the module is no longer live, and
+    empty after a restart. The mutation result, the finish gate, `?library`,
+    `inspect library` and the runtime tail all read it. Do not keep a second copy.
+  - Writer refusals carry a kind (`UnsavedKind`, attached with
+    `source_unsaved::refusal` at the origin, read with `classify`): never derive
+    the kind from message text. `fixable()` decides what the model can repair.
+  - Finish gate (`unsaved_finish_gate`, native `finish` and legacy `!done`):
+    refused ONCE per turn, only if a module this turn changed (baseline identity,
+    like #66) is unsaved for a fixable reason; otherwise accepted, and the visible
+    reply gets `[Runtime: not saved to source: X (reason). ...]`. Unsaved modules
+    of earlier turns never refuse. The "once" is keyed on the baseline's address.
+  - Tail: `unsaved_tail` appends one line after the program summary (volatile
+    part), only for write-capable speakers and readable modules. Nothing unsaved =
+    the request is byte-identical (tested on the whole request).
+  - Tests: `cargo test --release source_save_tests`.
 
 - #120 task-domain logic lives in Python-frontend Adapsis modules, initially
   `examples/tasks/domain.py`; the premature Rust foundation is removed from active

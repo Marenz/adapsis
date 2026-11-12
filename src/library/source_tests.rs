@@ -667,7 +667,7 @@ fn managed_disjoint_mutations_queue_without_writing_and_flush_the_merged_live_pr
         let results = super::persist_affected_modules(snapshot, &affected, Some(&state));
         assert_eq!(results.len(), 1);
         assert!(results[0].1);
-        assert!(results[0].0.contains("not yet durable"));
+        assert_eq!(results[0].0, "module `A` changed in memory");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("A.py")).unwrap(),
             source

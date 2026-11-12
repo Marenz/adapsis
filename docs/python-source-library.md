@@ -128,9 +128,8 @@ Adapsis-source creation (a `+module` declaration of a new name, `!move` into a
 new module, the `module_create`, `mutate` and `move_symbols` builtins, an agent
 branch) is refused before any state change with "this library stores Python
 source; create the module with a Python mutation". Editing an existing managed
-module with Adapsis source is unchanged. A Python creation is acknowledged as
-"accepted in memory; it will be added to the source manifest with its first
-source save (pending, not yet durable)".
+module with Adapsis source is unchanged. A Python creation is acknowledged as "changed in memory (new module)", and
+the result of the call then reports the save (below).
 
 **Enrolment.** At each save `flush_live_sources` enrols every live module the
 manifest does not list, as `python`, and keeps every listed module's dependencies
@@ -320,7 +319,8 @@ The manifest is the durable format authority. `LibraryState` owns the runtime
 source-byte hashes and errors; no duplicate session format/hash metadata exists.
 The session contains an AST recovery cache, not another editable source authority.
 Managed mutation hooks enqueue names, not AST snapshots. Their acknowledgement
-means **accepted in memory / source save pending**, not a disk-durability receipt.
+("changed in memory") says nothing about the disk; the entry point reports the
+real save outcome afterwards (see "What a mutation is told about its save").
 Detached `persist_module` / `persist_program_module` writes refuse managed names.
 The single writer, `flush_live_sources`, obtains the **current live Program** on
 a blocking worker, then keeps its Program read guard through serialization,
@@ -369,13 +369,42 @@ bundle as one unit. The first node, here (Kronk), was switched on 2026-11-12
 `~/.local/share/adapsis/rehearsal-128/`). sleek and edox still run legacy `.ax`
 libraries without a manifest.
 
-**Observed after the switch, not changed:** the acknowledgement of a mutation
-("accepted in memory; authoritative source save is pending ... (not yet
-durable)") is produced before the debounced save runs. The save usually completes
-within a second or two, but nothing tells the model so. The bot therefore told
-its user that the file "may not have changed yet" after a save that had
-succeeded. How saving and its acknowledgement should work is an open owner
-decision.
+## What a mutation is told about its save (#146)
+
+Saving is automatic; nobody has to ask for it. The result of the call that
+changed a module says what happened to the source:
+
+- `saved to X.py` (a new module: `saved to X.py (new module, added to the
+  library)`), written before the result exists;
+- `module `X` NOT saved: <reason>. The edit is live in memory and will be lost at
+  the next restart unless you <remedy>`, with the remedy for that reason: split
+  the expression (printed form nested too deeply); change the member (cannot be
+  written as Python); save or fix module `Y` first; break the cycle between `X`
+  and `Y`. Causes the model cannot fix (the file or the manifest changed on disk,
+  a disk or permission error, a save that was not confirmed within 10 s) say so,
+  say to tell the owner, and never suggest repeating the mutation;
+- `Also saved now: Y.py` when this call unblocked another module, and `Other
+  modules still not saved: ...`.
+
+A mutation runs on a copy that is committed afterwards, and the writer reads the
+live Program, so the save runs in the entry point after the commit: one save per
+call that changed something (native `mutate`, `test`, an `evaluate` that mutated
+through a builtin, a legacy code block, `/api/mutate`; an agent branch when it is
+merged). A call that changed nothing runs no writer. Route handlers, `/api/eval`
+and the self-trigger start the save without waiting. The debounced autosave
+remains as the backstop and as the only writer of the session file.
+
+**Finishing with an unsaved edit.** `finish` (and legacy `!done`) is refused once
+per turn when a module that this turn changed is unsaved for a reason the model
+can fix; the refusal lists module, reason and remedy. A second `finish`, or a
+cause that is not the model's, is accepted, and the visible reply ends with one
+runtime line: `[Runtime: not saved to source: X (<reason>). The change is live
+only until the next restart.]`. Unsaved modules of earlier turns do not refuse.
+
+**Where it shows.** While something is unsaved, `?library`, `inspect library` and
+the runtime tail of write-capable speakers carry one line, `Source NOT saved
+(live in memory only, lost at the next restart): X (<reason>)`. When everything
+is saved there is no line and the request is byte-identical.
 
 ## Focused checks
 

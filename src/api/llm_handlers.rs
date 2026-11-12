@@ -586,7 +586,7 @@ pub async fn ask(
         let model = config.llm_model.read().unwrap().clone();
         crate::validator::program_summary_for_model(
             &program, &config.permission_config, config.access_level, &model,
-        )
+        ) + &config.unsaved_tail(&model)
     };
     let (system_prompt, runtime_prompt, prefix_key, request_model) =
         main_context_prompts(&config, &program_summary, req.caller.as_deref());
@@ -728,6 +728,10 @@ pub async fn ask(
         config.write_back_working_set(&session).await;
 
         if exec_result.done_accepted && !exec_result.has_errors {
+            if let Some(notice) = &exec_result.unsaved_notice {
+                if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
+                reply_text.push_str(notice);
+            }
             turn_finished = true;
             break;
         }
@@ -828,7 +832,7 @@ pub async fn ask_stream(
                 crate::validator::program_summary_for_model(
                     &program, &config_clone.permission_config, config_clone.access_level,
                     &model,
-                )
+                ) + &config_clone.unsaved_tail(&model)
             };
             let (system_prompt, runtime_prompt, prefix_key, request_model) = main_context_prompts(
                 &config_clone,
@@ -1011,6 +1015,9 @@ pub async fn ask_stream(
             let needs_opencode_restart = exec_result.needs_opencode_restart;
             if exec_result.done_accepted {
                 op_result.accepted_done = true;
+                if let Some(notice) = &exec_result.unsaved_notice {
+                    let _ = tx.send(serde_json::json!({"type": "text", "text": notice})).await;
+                }
             }
 
             // Write session mutations back to tiers after each iteration
@@ -1354,10 +1361,11 @@ pub async fn handle_llm_takeover(
         crate::coroutine::scoped::prompt(tools)
     } else {
         let prog = program.read().await;
+        let library = meta.lock().unwrap().library_state.clone();
         crate::validator::program_summary_for_model(
             &prog, &permission_config,
             access_level, &effective_model,
-        )
+        ) + &super::source_save::unsaved_tail(library.as_ref(), &permission_config, access_level, &effective_model)
     };
     // Build a temporary AppConfig so we can reuse execute_code()
     let (self_trigger_tx, _self_trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
@@ -1709,6 +1717,7 @@ pub async fn handle_llm_takeover(
                     runtime: runtime.read().unwrap().clone(),
                     meta: meta.lock().unwrap().clone(),
                     sandbox: None,
+                    source_checkpoint: None,
                 };
                 execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
                 // Write back mutations (per-function CoW merge, issue #9)
@@ -1732,6 +1741,7 @@ pub async fn handle_llm_takeover(
             runtime: runtime.read().unwrap().clone(),
             meta: meta.lock().unwrap().clone(),
             sandbox: None,
+            source_checkpoint: None,
         };
         let exec_result = execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
 
@@ -1746,6 +1756,9 @@ pub async fn handle_llm_takeover(
         tmp_config.notify_save();
 
         if exec_result.done_accepted && !exec_result.has_errors {
+            if let Some(notice) = &exec_result.unsaved_notice {
+                reply_text = if reply_text.is_empty() { notice.clone() } else { format!("{reply_text}\n\n{notice}") };
+            }
             final_summary_pending = false;
             break;
         }

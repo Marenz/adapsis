@@ -220,7 +220,10 @@ impl ManagedSources {
         let text = read_bounded(&dir.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)
             .context("source manifest unavailable; reconcile it and restart before saving")?;
         if super::source_hash(&text) != self.manifest_hash {
-            bail!("source manifest changed; no source was saved. Reconcile and restart the server");
+            return Err(super::source_unsaved::refusal(
+                super::UnsavedKind::ChangedOnDisk,
+                "source manifest changed; no source was saved. Reconcile and restart the server",
+            ));
         }
         self.check_files(dir)
     }
@@ -403,7 +406,10 @@ fn verify_source(path: &Path, expected: &str) -> Result<()> {
         "authoritative source unavailable; restore/reconcile it and restart before saving",
     )?;
     if super::source_hash(&bytes) != expected {
-        bail!("authoritative source changed externally; disk wins. Preserve recovery checkpoint, reconcile, and restart");
+        return Err(super::source_unsaved::refusal(
+            super::UnsavedKind::ChangedOnDisk,
+            "authoritative source changed externally; disk wins. Preserve recovery checkpoint, reconcile, and restart",
+        ));
     }
     Ok(())
 }

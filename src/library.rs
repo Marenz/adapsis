@@ -22,6 +22,8 @@ mod source_io;
 mod source_enrol;
 mod source_policy;
 mod source_save;
+mod source_unsaved;
+pub use source_unsaved::{fixable, unsaved_line, Unsaved, UnsavedKind};
 pub use source_policy::{refuse_module_creation, refuse_module_removal, refuse_unsupported_operations, EXIT_SOURCE_REFUSED};
 mod source_flush;
 mod source_verify;
@@ -62,6 +64,7 @@ pub struct LibraryState {
     pending_sources: Arc<Mutex<BTreeMap<String, u64>>>,
     /// Cached modules without source that startup removed (recovery file kept).
     dropped_at_startup: Arc<Mutex<BTreeSet<String>>>,
+    saves: source_unsaved::SaveStatus,
 }
 
 impl LibraryState {
@@ -76,6 +79,7 @@ impl LibraryState {
             source_transaction: Arc::new(Mutex::new(())),
             pending_sources: Arc::new(Mutex::new(BTreeMap::new())),
             dropped_at_startup: Arc::new(Mutex::new(BTreeSet::new())),
+            saves: Default::default(),
         }
     }
 
@@ -168,7 +172,7 @@ impl LibraryState {
             .unwrap_or_default()
     }
 
-    fn has_source_manifest(&self) -> Result<bool> {
+    pub(crate) fn has_source_manifest(&self) -> Result<bool> {
         self.managed_sources.lock().map(|sources| sources.is_some())
             .map_err(|_| anyhow::anyhow!("source policy state lock unavailable"))
     }
@@ -577,6 +581,7 @@ pub fn load_module_library(program: &mut ast::Program) -> LibraryState {
 }
 
 pub(crate) fn load_module_files(program: &mut ast::Program, dir: &Path, state: &mut LibraryState) {
+    state.set_source_dir(dir);
     // Inventory before publishing any candidate: inability to inspect the source
     // root is an operational failure, never evidence of absent authority policy.
     let entries = std::fs::read_dir(dir).and_then(|entries| {
@@ -1112,10 +1117,9 @@ pub fn persist_affected_modules(
     let mut results = Vec::new();
     for name in module_names {
         if let Some(state) = lib_state.filter(|state| state.managed_module_names().contains(name)) {
-            match (state.queue_source(name), source_enrol::cycle_notice(program, state, name)) {
-                (Err(error), _) => results.push((error.to_string(), false)),
-                (Ok(_), Some(cycle)) => results.push((source_policy::cycle_acknowledgement(name, &cycle), false)),
-                (Ok(_), None) => results.push((format!("module `{name}` accepted in memory; authoritative source save is pending live-program writeback/autosave (not yet durable)"), true)),
+            match state.queue_source(name) {
+                Err(error) => results.push((error.to_string(), false)),
+                Ok(_) => results.push((format!("module `{name}` changed in memory"), true)),
             }
             continue;
         }
@@ -1161,9 +1165,8 @@ pub fn query_library(program: &ast::Program, lib_state: Option<&LibraryState>) -
         let managed = state.managed_module_names();
         if !managed.is_empty() {
             out.push_str(&format!("Managed authoritative sources: {} module(s); library-sources.json selects format.\n", managed.len()));
-            let pending = state.pending_source_names();
-            if !pending.is_empty() {
-                out.push_str(&format!("Source save pending (not durable): {}\n", pending.into_iter().collect::<Vec<_>>().join(", ")));
+            if let Some(line) = unsaved_line(&state.unsaved(), |_| true) {
+                out.push_str(&format!("{line}\n"));
             }
         }
         if let Err(error) = state.check_source_available() {

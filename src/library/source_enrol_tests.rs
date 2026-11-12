@@ -79,7 +79,9 @@ fn managed_enrol_new_module_is_saved_listed_and_loads_after_restart() {
     let (mut program, state) = load(dir.path());
     add_python(&mut program, "B", B);
     let (notice, ok) = queue(&program, &state, "B");
-    assert!(ok && notice.contains("added to the source manifest") && notice.contains("not yet durable"), "{notice}");
+    // The acknowledgement inside the mutation is neutral: it cannot know the
+    // save outcome (the entry point reports that after its write-back).
+    assert!(ok && notice == "module `B` changed in memory (new module)", "{notice}");
     assert!(!dir.path().join("B.py").exists(), "a mutation never writes source itself");
     assert!(state.pending_source_names().contains("B"));
 
@@ -212,7 +214,7 @@ fn managed_enrol_waits_until_the_sources_it_uses_are_on_disk() {
         let _transaction = state.source_transaction.lock().unwrap();
         let first = super::source_enrol::grow(&program, &state, dir.path()).unwrap();
         assert!(first.enrolled.is_empty());
-        assert!(first.refused["B"].contains("does not load yet together with the module sources on disk"), "{:?}", first.refused);
+        assert!(first.refused["B"].detail.contains("does not load yet together with the module sources on disk"), "{:?}", first.refused);
     }
     assert_eq!(manifest_bytes(dir.path()), bytes);
     assert_eq!(names(dir.path()), ["A.py", MANIFEST_FILE], "nothing is written for a module that is not listed");
@@ -233,7 +235,6 @@ fn managed_dependency_direction_can_be_reversed_in_one_save() {
     let (mut program, state) = load(dir.path());
     apply_ax(&mut program, "+module B\n+fn twice (x:Int)->Int\n  +return x\n+end\n");
     apply_ax(&mut program, "+module A\n+fn back (x:Int)->Int\n  +return B.twice(x)\n+end\n");
-    assert!(queue(&program, &state, "A").1, "the code has no cycle");
     let receipt = flush(&program, &state, dir.path());
     assert!(receipt.failures.is_empty(), "{:?}", receipt.failures);
     let listed = manifest(dir.path());
@@ -252,17 +253,19 @@ fn managed_enrol_cycle_is_refused_and_the_notice_names_both_modules() {
     apply_ax(&mut program, "+module A\n+fn back (x:Int)->Int\n  +return B.twice(x)\n+end\n");
     let bytes = manifest_bytes(dir.path());
 
-    // The speaker learns it with the mutation's acknowledgement, for either side.
-    for name in ["A", "B"] {
-        let (notice, ok) = queue(&program, &state, name);
-        assert!(!ok, "{notice}");
-        assert!(notice.contains("`A`") && notice.contains("`B`"), "{notice}");
-        assert!(notice.contains("call each other") && notice.contains("Break the cycle"), "{notice}");
-        assert!(notice.contains("third module"), "{notice}");
-        assert!(notice.contains("the change is live"), "{notice}");
-    }
-
     let receipt = flush(&program, &state, dir.path());
+    // The speaker learns it from the save outcome of the mutation, for either
+    // side: the record names both modules and the result line says how to fix it.
+    for (name, partner) in [("A", "B"), ("B", "A")] {
+        let entry = &receipt.unsaved[name];
+        assert_eq!(entry.kind, super::UnsavedKind::Cycle(vec![partner.to_string()]), "{name}");
+        let line = entry.result_line(name);
+        assert!(line.starts_with(&format!("module `{name}` NOT saved: ")), "{line}");
+        assert!(line.contains("call each other") && line.contains("third module"), "{line}");
+        assert!(line.contains(&format!("unless you break the cycle between `{name}` and `{partner}`")), "{line}");
+        assert!(line.contains("live in memory and will be lost at the next restart"), "{line}");
+        assert!(super::fixable(&receipt.unsaved, name));
+    }
     assert!(receipt.enrolled.is_empty());
     let cycle: Vec<_> = receipt.failures.iter().filter(|failure| failure.contains("call each other")).collect();
     assert_eq!(cycle.len(), 2, "{:?}", receipt.failures);
@@ -275,12 +278,11 @@ fn managed_enrol_cycle_is_refused_and_the_notice_names_both_modules() {
 
     // Breaking the cycle makes the same pending work durable.
     apply_ax(&mut program, "!remove A.back");
-    let (notice, ok) = queue(&program, &state, "B");
-    assert!(ok, "{notice}");
     let receipt = flush(&program, &state, dir.path());
     assert!(receipt.failures.is_empty(), "{:?}", receipt.failures);
     assert_eq!(receipt.enrolled, vec!["B".to_string()]);
     assert!(state.pending_source_names().is_empty());
+    assert!(receipt.unsaved.is_empty() && state.unsaved().is_empty(), "the record is cleared by the flush that saves");
 }
 
 #[test]
@@ -658,7 +660,7 @@ fn managed_adapsis_source_module_creation_is_refused_before_any_change() {
 }
 
 #[test]
-fn managed_python_module_creation_is_accepted_with_the_pending_notice() {
+fn managed_python_module_creation_is_accepted_and_enrolled_by_the_next_save() {
     let dir = python_library();
     let mut session = managed_session(dir.path());
     let state = session.meta.library_state.clone().unwrap();
@@ -674,11 +676,7 @@ fn managed_python_module_creation_is_accepted_with_the_pending_notice() {
         ))
         .unwrap();
     assert!(results.iter().all(|(_, ok)| *ok), "{results:?}");
-    assert!(
-        results.iter().any(|(message, _)| message.contains("module `B` accepted in memory")
-            && message.contains("added to the source manifest with its first source save")),
-        "{results:?}"
-    );
+    assert!(results.iter().any(|(message, ok)| *ok && message == "module `B` changed in memory (new module)"), "{results:?}");
     assert!(session.program.get_function("B.twice").is_some());
     assert!(state.pending_source_names().contains("B"));
     let receipt = flush(&session.program, &state, dir.path());

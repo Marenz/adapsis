@@ -83,21 +83,16 @@ pub fn refuse_unsupported_operations(
     Ok(())
 }
 
-pub(super) fn cycle_acknowledgement(name: &str, cycle: &str) -> String {
-    format!(
-        "module `{name}` was changed in memory but its source will NOT be saved while this holds (the change is live; do not re-apply it): {cycle}"
-    )
-}
-
 /// A new module under a manifest: the managed writer enrols it with its first
-/// save. Scratch and reserved modules are never source and get no notice.
+/// save. Scratch and reserved modules are never source and get no notice. The
+/// acknowledgement is neutral: whether the source was saved is reported by the
+/// entry point after its write-back (`api/source_save.rs`), which knows.
 pub(super) fn queue_new_module(program: &ast::Program, state: &LibraryState, name: &str) -> Option<(String, bool)> {
     if !program.modules.iter().any(|m| m.name == name) || source::never_enrolled(name) {
         return None;
     }
-    Some(match (state.queue_source(name), super::source_enrol::cycle_notice(program, state, name)) {
-        (Err(error), _) => (error.to_string(), false),
-        (Ok(_), Some(cycle)) => (cycle_acknowledgement(name, &cycle), false),
-        (Ok(_), None) => (format!("module `{name}` accepted in memory; it will be added to the source manifest with its first source save (pending, not yet durable)"), true),
+    Some(match state.queue_source(name) {
+        Err(error) => (error.to_string(), false),
+        Ok(_) => (format!("module `{name}` changed in memory (new module)"), true),
     })
 }

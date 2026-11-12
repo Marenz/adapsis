@@ -2559,6 +2559,7 @@ async fn main() -> Result<()> {
                                 conv.push_assistant(format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()));
                                 // Per-function CoW merge (issue #9).
                                 trigger_program.write().await.merge_changed_from(&base_program, &program);
+                                crate::api::start_source_save(trigger_program.clone(), meta.library_state.clone(), &base_program, &program);
                                 if let Ok(mut rt) = trigger_runtime.write() {
                                     rt.shared_vars.replace_from(runtime.shared_vars.snapshot());
                                     rt.http_routes = runtime.http_routes.clone();

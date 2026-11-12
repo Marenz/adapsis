@@ -24,7 +24,8 @@ use anyhow::Result;
 
 use super::source::SourceManifest;
 use super::source_io::Prepared;
-use super::LibraryState;
+use super::source_unsaved::classify;
+use super::{LibraryState, Unsaved, UnsavedKind};
 use crate::ast;
 
 /// What one round of the writer left behind. Only the last round is reported.
@@ -37,6 +38,8 @@ pub(super) struct Round {
     pub(super) unsaved: Vec<String>,
     pub(super) qualified_call_sites: Vec<(String, usize)>,
     pub(super) order_dependent: Vec<(String, String)>,
+    /// The same failures per module, with their kind (the unsaved record).
+    pub(super) unsaved_modules: BTreeMap<String, Unsaved>,
 }
 
 pub(super) struct Saved {
@@ -76,14 +79,19 @@ pub(super) fn run(live: &ast::Program, state: Option<&LibraryState>, dir: &Path,
     let mut attempt = 0;
     let round = loop {
         let mut round = Round::default();
+        // A listed module's dependency failure explains why its save fails; it
+        // wins over the writer's own, less specific reason for that module.
+        let mut listed = Vec::new();
         if let Some(state) = state.filter(|_| governed) {
             match super::source_enrol::grow(live, state, dir) {
                 Ok(result) => {
-                    for (name, reason) in result.refused {
+                    for (name, unsaved) in result.refused {
                         state.queue_source(&name)?;
-                        round.unresolved.push(format!("module `{name}` is live but has NO source and was not added to the manifest; it will be dropped at the next restart unless this is fixed: {reason}"));
+                        round.unresolved.push(format!("module `{name}` is live but has NO source and was not added to the manifest; it will be dropped at the next restart unless this is fixed: {}", unsaved.detail));
+                        round.unsaved_modules.insert(name, unsaved);
                     }
-                    round.unresolved.extend(result.failures);
+                    round.unresolved.extend(result.failures.iter().map(|(_, unsaved)| unsaved.detail.clone()));
+                    listed = result.failures;
                     enrolled.extend(result.enrolled);
                     notes.extend(result.notes);
                 }
@@ -98,6 +106,19 @@ pub(super) fn run(live: &ast::Program, state: Option<&LibraryState>, dir: &Path,
             match super::source_enrol::shrink(live, state, dir, &saved) {
                 Ok(result) => notes.extend(result),
                 Err(error) => notes.push(format!("recorded dependencies were not reduced: {error:#}")),
+            }
+        }
+        for (name, unsaved) in listed {
+            // Only while the module's source really is not saved.
+            if !round.saved.contains(&name) {
+                round.unsaved_modules.insert(name, unsaved);
+            }
+        }
+        // A module waits only for modules that are themselves unsaved.
+        let unsaved_names: BTreeSet<String> = round.unsaved_modules.keys().cloned().collect();
+        for entry in round.unsaved_modules.values_mut() {
+            if let UnsavedKind::WaitsFor(names) = &mut entry.kind {
+                names.retain(|name| unsaved_names.contains(name));
             }
         }
         attempt += 1;
@@ -134,6 +155,7 @@ impl Saver<'_> {
                 Ok(None) => {}
                 Err(error) => {
                     self.round.unsaved.push(unsaved(&name, &error));
+                    self.round.unsaved_modules.insert(name.clone(), classify(&error, UnsavedKind::Other));
                     self.blocked.insert(name);
                 }
             }
@@ -155,6 +177,7 @@ impl Saver<'_> {
     /// tried again in this pass.
     fn write(&mut self, module: &Prepared) -> bool {
         if let Err(error) = super::source_io::commit_live(module, self.state, self.dir) {
+            self.round.unsaved_modules.insert(module.name.clone(), classify(&error, UnsavedKind::WriteFailed));
             self.round.unsaved.push(unsaved(&module.name, &error));
             self.blocked.insert(module.name.clone());
             return false;
@@ -233,7 +256,11 @@ impl Saver<'_> {
                 let module = &prepared[index];
                 match failed {
                     // Do not widen a half-written set: the rest waits.
-                    Some(blocker) => self.round.unsaved.push(unsaved(&module.name, &format!("it is written together with `{blocker}`, whose source write failed"))),
+                    Some(blocker) => {
+                        let reason = format!("it is written together with `{blocker}`, whose source write failed");
+                        self.round.unsaved_modules.insert(module.name.clone(), Unsaved::new(UnsavedKind::WaitsFor(vec![blocker.to_string()]), &reason));
+                        self.round.unsaved.push(unsaved(&module.name, &reason));
+                    }
                     None if self.write(module) => {}
                     None => failed = Some(&module.name),
                 }
@@ -245,14 +272,16 @@ impl Saver<'_> {
             let blockers: Vec<String> = self
                 .state
                 .managed_dependency_names(&module.name)
-                .iter()
-                .filter(|name| self.blocked.contains(*name) || names.contains(name))
-                .map(|name| format!("`{name}`"))
+                .into_iter()
+                .filter(|name| self.blocked.contains(name) || names.contains(name))
                 .collect();
             let mut reason = "with this file the module sources on disk would not load at the next start".to_string();
             if !blockers.is_empty() {
-                reason.push_str(&format!("; it waits for {}, whose source is not saved", blockers.join(", ")));
+                let shown: Vec<String> = blockers.iter().map(|name| format!("`{name}`")).collect();
+                reason.push_str(&format!("; it waits for {}, whose source is not saved", shown.join(", ")));
             }
+            let kind = if blockers.is_empty() { UnsavedKind::Other } else { UnsavedKind::WaitsFor(blockers) };
+            self.round.unsaved_modules.insert(module.name.clone(), Unsaved::new(kind, &reason));
             self.round.unsaved.push(unsaved(&module.name, &reason));
         }
     }

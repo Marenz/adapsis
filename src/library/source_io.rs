@@ -390,15 +390,17 @@ pub(super) fn checked_python(
     name: &str,
     format: SourceFormat,
 ) -> Result<(String, SaveLedger)> {
+    use super::source_unsaved::refusal;
+    use super::UnsavedKind::{Nesting, Unprintable};
     let (python, ledger) = python_frontend::print_python_module_with_ledger(catalog, name).map_err(|diagnostic| {
         if python_frontend::is_nesting_refusal(&diagnostic) {
             // The printer parenthesizes every binary operation, which roughly
             // doubles the depth of an operator chain (#140). Everything the
             // submission guard admits fits; this is reached by deeper `.ax` edits.
             let limit = python_frontend::MAX_STORED_NESTING;
-            anyhow::anyhow!("module `{name}` cannot be saved: the printed form of an expression near line {} exceeds the nesting limit of {limit} levels for stored source (printing adds parentheses, so about {} chained operators is the most that can be saved). Split the expression into typed local bindings or helper functions; source unchanged", diagnostic.line, (limit - 1) / 2)
+            refusal(Nesting, format!("module `{name}` cannot be saved: the printed form of an expression near line {} exceeds the nesting limit of {limit} levels for stored source (printing adds parentheses, so about {} chained operators is the most that can be saved). Split the expression into typed local bindings or helper functions; source unchanged", diagnostic.line, (limit - 1) / 2))
         } else {
-            anyhow::anyhow!("module `{name}` cannot be completely serialized as Python (line {}, column {}); source unchanged. Keep the session recovery checkpoint and repair unsupported members/tests before retrying", diagnostic.line, diagnostic.column)
+            refusal(Unprintable, format!("module `{name}` cannot be completely serialized as Python (line {}, column {}); source unchanged. Keep the session recovery checkpoint and repair unsupported members/tests before retrying", diagnostic.line, diagnostic.column))
         }
     })?;
     if format == SourceFormat::LegacyAx {
@@ -409,7 +411,7 @@ pub(super) fn checked_python(
         let own = module.functions.iter().find(|f| &f.name == callee);
         let resolved = program.get_function(callee);
         if !matches!((own, resolved), (Some(own), Some(resolved)) if std::ptr::eq(own.as_ref(), resolved)) {
-            bail!("module `{name}`: a bare local call resolves to another declaration in the live program; qualification would change runtime behaviour, source unchanged");
+            return Err(refusal(Unprintable, format!("module `{name}`: a bare local call resolves to another declaration in the live program; qualification would change runtime behaviour, source unchanged")));
         }
     }
     // Names several live modules declare: the save freezes today's binding.

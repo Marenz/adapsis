@@ -28,7 +28,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::source::{never_enrolled, ManagedSources, ModuleSource, SourceFormat, SourceManifest};
-use super::LibraryState;
+use super::source_unsaved::classify;
+use super::{LibraryState, Unsaved, UnsavedKind};
 use crate::{ast, python_frontend};
 
 const MAX_MODULES: usize = 128;
@@ -38,9 +39,9 @@ pub(super) struct Reconciled {
     /// Modules added to the manifest by this pass.
     pub(super) enrolled: Vec<String>,
     /// Unlisted live modules that were NOT enrolled, with the reason.
-    pub(super) refused: BTreeMap<String, String>,
+    pub(super) refused: BTreeMap<String, Unsaved>,
     /// Listed modules whose new dependencies could not be recorded.
-    pub(super) failures: Vec<String>,
+    pub(super) failures: Vec<(String, Unsaved)>,
     /// Categorical notes for the log (dependency updates, files moved aside).
     pub(super) notes: Vec<String>,
 }
@@ -151,17 +152,6 @@ fn code_cycles(
     on_cycles(&edges)
 }
 
-/// For the acknowledgement of a mutation: the explanation when `name` is on a
-/// cross-module cycle in `program`, i.e. when the writer will not save it.
-pub(super) fn cycle_notice(program: &ast::Program, state: &LibraryState, name: &str) -> Option<String> {
-    let managed = state.managed_sources.lock().ok()?.clone()?;
-    let current = &managed.manifest;
-    let mut candidates = candidates(program, current);
-    let (derived, undetermined) = derive(program, current, &candidates);
-    candidates.retain(|candidate| !undetermined.contains(candidate));
-    code_cycles(current, &candidates, &derived).get(name).map(|partners| cycle_text(name, partners))
-}
-
 /// The manifest the writer wants before the saves: candidates listed with the
 /// dependencies of their code, listed modules with their recorded dependencies
 /// PLUS what their code needs now. `frozen` listed modules keep their entry.
@@ -260,23 +250,24 @@ fn grow_as(program: &ast::Program, state: &LibraryState, dir: &Path, step: Step)
     let mut candidates = candidates(program, current);
     if current.modules.len() + candidates.len() > MAX_MODULES {
         for name in std::mem::take(&mut candidates) {
-            out.refused.insert(name, format!("the source manifest is limited to {MAX_MODULES} modules"));
+            out.refused.insert(name, Unsaved::new(UnsavedKind::Other, format!("the source manifest is limited to {MAX_MODULES} modules")));
         }
     }
     let (derived, undetermined) = derive(program, current, &candidates);
     for name in undetermined {
         candidates.remove(&name);
-        out.refused.insert(name, "its module dependencies could not be determined (ambiguous type owner)".into());
+        out.refused.insert(name, Unsaved::new(UnsavedKind::Other, "its module dependencies could not be determined (ambiguous type owner)"));
     }
     // Cycles in the code: a new module is not enrolled, a listed one keeps its
     // recorded dependencies. Both sides get the explanation.
     let mut frozen = BTreeSet::new();
     for (name, partners) in &code_cycles(current, &candidates, &derived) {
+        let kind = UnsavedKind::Cycle(partners.iter().cloned().collect());
         if candidates.remove(name) {
-            out.refused.insert(name.clone(), cycle_text(name, partners));
+            out.refused.insert(name.clone(), Unsaved::new(kind, cycle_text(name, partners)));
         } else {
             frozen.insert(name.clone());
-            out.failures.push(format!("{}; its recorded dependencies were left unchanged", cycle_text(name, partners)));
+            out.failures.push((name.clone(), Unsaved::new(kind, format!("{}; its recorded dependencies were left unchanged", cycle_text(name, partners)))));
         }
     }
     // Plan, then the checked print of every candidate against the manifest it
@@ -293,10 +284,10 @@ fn grow_as(program: &ast::Program, state: &LibraryState, dir: &Path, step: Step)
             for name in stale {
                 let reason = format!("its new dependencies wait for another module's source save (a dependency that module no longer needs is still recorded); {WAITS}");
                 if candidates.remove(&name) {
-                    out.refused.insert(name, reason);
+                    out.refused.insert(name, Unsaved::new(UnsavedKind::WaitsFor(Vec::new()), reason));
                 } else {
                     frozen.insert(name.clone());
-                    out.failures.push(format!("module `{name}`: {reason}"));
+                    out.failures.push((name.clone(), Unsaved::new(UnsavedKind::WaitsFor(Vec::new()), format!("module `{name}`: {reason}"))));
                 }
             }
             continue;
@@ -316,7 +307,7 @@ fn grow_as(program: &ast::Program, state: &LibraryState, dir: &Path, step: Step)
                     texts.insert(name.clone(), text);
                 }
                 Err(error) => {
-                    out.refused.insert(name.clone(), error.to_string());
+                    out.refused.insert(name.clone(), classify(&error, UnsavedKind::Unprintable));
                     dropped = true;
                 }
             }
@@ -348,10 +339,12 @@ fn commit_growth(
     let current = &managed.manifest;
     let (accepted, rejected) = loadable(dir, current, desired, texts)?;
     for name in rejected {
+        // What it waits for: the modules its new text depends on.
+        let needs = UnsavedKind::WaitsFor(desired.modules.get(&name).map(|source| source.dependencies.clone()).unwrap_or_default());
         if candidates.remove(&name) {
-            out.refused.insert(name, format!("its source does not load yet together with the module sources on disk (a module it uses has unsaved changes); {WAITS}"));
+            out.refused.insert(name, Unsaved::new(needs, format!("its source does not load yet together with the module sources on disk (a module it uses has unsaved changes); {WAITS}")));
         } else {
-            out.failures.push(format!("module `{name}`: its new dependencies could not be recorded because the module sources on disk would not load with them; {WAITS}"));
+            out.failures.push((name.clone(), Unsaved::new(needs, format!("module `{name}`: its new dependencies could not be recorded because the module sources on disk would not load with them; {WAITS}"))));
         }
     }
     if accepted.same_policy(current) {
@@ -452,7 +445,7 @@ pub(super) fn adopt_cached(program: &mut ast::Program, dir: &Path, state: &Libra
     let planned: BTreeSet<String> =
         grow_as(program, state, dir, Step::Plan).map(|plan| plan.enrolled.into_iter().collect()).unwrap_or_default();
     let mut kept = BTreeMap::new();
-    let mut keep = |program: &ast::Program, name: &String, kept: &mut BTreeMap<String, String>| -> Result<()> {
+    let keep = |program: &ast::Program, name: &String, kept: &mut BTreeMap<String, String>| -> Result<()> {
         if kept.contains_key(name) || never_enrolled(name) {
             return Ok(());
         }
@@ -471,7 +464,7 @@ pub(super) fn adopt_cached(program: &mut ast::Program, dir: &Path, state: &Libra
             for note in &result.notes {
                 eprintln!("[library] {note}");
             }
-            (result.enrolled.into_iter().collect(), result.refused)
+            (result.enrolled.into_iter().collect(), result.refused.into_iter().map(|(name, unsaved)| (name, unsaved.detail)).collect())
         }
         Err(error) => (BTreeSet::new(), unlisted.iter().map(|name| (name.clone(), format!("enrolment failed: {error:#}"))).collect()),
     };
