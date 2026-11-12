@@ -1,5 +1,5 @@
 mod native;
-pub use native::{native_takeover_mechanics, native_tool_prompt};
+pub use native::{native_restricted_prompt, native_takeover_mechanics, native_tool_prompt, NATIVE_GUEST_SUMMARY};
 
 /// System prompt for the Adapsis feedback loop.
 /// This teaches the model Adapsis's syntax and the interactive protocol.

@@ -11,19 +11,31 @@ use super::native_turn::{LoopEnd, NativeLoop, RoundBudget};
 use super::AppConfig;
 use crate::llm::ChatMessage;
 
-/// Native only when the process opted in and the pinned snapshot for this
-/// speaker/context is write-capable and non-guest. Guests and execute-only
-/// speakers keep the legacy scoped protocol unchanged.
+/// Native whenever the process opted in. The tool list comes from the speaker class of
+/// the pinned snapshot (DESIGN L3): writers, execute-only speakers and guests each get
+/// their own. A guest's tool list is pinned into the snapshot's turn identity, so the
+/// tool schemas, the dispatcher and the IO boundary all read the same list.
 pub(super) fn native_snapshot(
     native_tools: bool,
     config: &AppConfig,
     context: &str,
 ) -> Option<AppConfig> {
+    use super::native_tools::{speaker_class, SpeakerClass};
     if !native_tools {
         return None;
     }
-    let snapshot = super::native_turn::permission_snapshot_for(config, context);
-    super::native_tools::native_tools_eligible(&snapshot).then_some(snapshot)
+    let mut snapshot = super::native_turn::permission_snapshot_for(config, context);
+    if let SpeakerClass::Guest(tools) = speaker_class(&snapshot) {
+        // Guest tools are bound to a speaker; without a turn identity there is none.
+        let turn = snapshot.turn.as_mut()?;
+        turn.may_write = false;
+        turn.guest_tools = Some(tools.clone());
+        let model = snapshot.llm_model.read().unwrap().clone();
+        let mut permissions = snapshot.permission_config.as_ref().clone();
+        permissions.guest_profiles.insert(model, tools);
+        snapshot.permission_config = std::sync::Arc::new(permissions);
+    }
+    Some(snapshot)
 }
 
 /// Assistant-turn writer into Ladybug, mirroring the legacy takeover loop.

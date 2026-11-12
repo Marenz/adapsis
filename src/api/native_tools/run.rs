@@ -47,6 +47,69 @@ pub(super) fn definition(obj: impl Fn(&[&str], serde_json::Value) -> serde_json:
     }
 }
 
+/// The `run` schema of a restricted speaker: no `module`, and the description states the
+/// rule instead of offering what the dispatcher would refuse.
+pub(super) fn restricted_definition(class: &SpeakerClass) -> ToolDefinition {
+    let tools = class.guest_tools();
+    let callable = match class {
+        SpeakerClass::Guest(_) if tools.is_empty() => "pure builtins only (text, numbers, lists, maps, JSON, regex)".to_string(),
+        SpeakerClass::Guest(_) => format!("pure builtins (text, numbers, lists, maps, JSON, regex) and your tools as awaited calls: {}", tools.join(", ")),
+        _ => "pure builtins (text, numbers, lists, maps, JSON, regex) and functions of modules you may execute, as Module.function".to_string(),
+    };
+    let limits = class.limits();
+    ToolDefinition {
+        name: "run".into(),
+        description: format!(
+            "Execute a short typed Python block once, to combine several steps in one call. It may call {callable}. Nothing else: no files, shell, raw HTTP, code changes, shared variables or spawn. Limits per block: {} IO/tool calls, {} seconds, values up to {} MiB.",
+            limits.io_calls.unwrap_or_default(),
+            limits.wall_clock.map_or(0, |limit| limit.as_secs()),
+            limits.value_bytes / (1024 * 1024),
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Statements as inside an async function body: annotate every new binding (`hits: str = await web_search(\"...\")`), bind every await, and `return` the value you want back as text."},
+            },
+            "required": ["source"],
+            "additionalProperties": false,
+        }),
+    }
+}
+
+/// Helpers a restricted block may not use: they start tasks or register handlers that
+/// outlive the block.
+const RESTRICTED_HELPERS: &[&str] = &["spawn", "source_add", "source_remove", "source_replace", "source_list", "event_register", "event_emit"];
+
+/// The restricted call rule at admission (DESIGN L3): a block may call only what its
+/// speaker can already call. Program-free, so a batch is refused before anything runs.
+/// The interpreter enforces the same rule on the block's own frame (`eval/meter.rs`).
+pub(super) fn restricted_admission(
+    module: &str,
+    preflight: &crate::python_frontend::NativePreflight,
+    class: &SpeakerClass,
+) -> Result<(), String> {
+    let policy = crate::eval::meter::BlockPolicy {
+        tools: class.guest_tools().iter().cloned().collect(),
+        functions: Default::default(),
+    };
+    let refuse = |what: String| Err(crate::eval::meter::refusal(&what, &policy).to_string());
+    if module != RUN_SCOPE {
+        return refuse("a `module` scope".into());
+    }
+    if let Some(helper) = preflight.helper_calls.iter().find(|helper| RESTRICTED_HELPERS.contains(&helper.as_str())) {
+        return refuse(format!("`{helper}`"));
+    }
+    if let Some(name) = preflight.bare_calls.iter().find(|name| {
+        !crate::builtins::pure::allowed_in_restricted_block(name) && !policy.tools.contains(*name)
+    }) {
+        return refuse(format!("`{name}`"));
+    }
+    if let (SpeakerClass::Guest(_), Some(target)) = (class, preflight.references.first()) {
+        return refuse(format!("function `{target}`"));
+    }
+    Ok(())
+}
+
 /// Program-free parsing and structural preflight (closed object, caps, syntax subset,
 /// reference collection). No runtime signature is consulted here.
 pub(super) fn parse(map: &serde_json::Map<String, serde_json::Value>) -> Result<ParsedTool, String> {
@@ -81,6 +144,9 @@ pub(super) fn parse(map: &serde_json::Map<String, serde_json::Value>) -> Result<
              Use the mutate tool to declare, replace or remove code."
         ));
     }
+    if module == RUN_SCOPE {
+        unscoped_names(&preflight)?;
+    }
     Ok(ParsedTool::PythonRun {
         source,
         module,
@@ -97,8 +163,13 @@ pub(super) fn finalize(
     config: &AppConfig,
     program: &Program,
 ) -> Result<ParsedTool, String> {
-    if module == RUN_SCOPE {
-        unscoped(&preflight, program)?;
+    if module == RUN_SCOPE && program.modules.iter().any(|module| module.name == RUN_SCOPE) {
+        // The validator cannot create such a module, but a hand-edited session file could
+        // carry one; the reserved scope must never alias a real module.
+        return Err(format!(
+            "run without `module` is unavailable: a module named `{RUN_SCOPE}` exists although that \
+             name is reserved for ad-hoc blocks. Pass `module` explicitly, or remove that module."
+        ));
     }
     let function = function_name(program, &module);
     let admitted = frontend::admit_python(config, program, &module, &preflight, |signatures| {
@@ -116,16 +187,9 @@ pub(super) fn finalize(
 }
 
 /// Without `module` the block resolves no name bare. The shared admission refuses these
-/// shapes too; this states the fix in the tool's own terms. It also keeps the reserved
-/// scope from ever aliasing a real module (the validator cannot create one, but a
-/// hand-edited session file could carry one).
-fn unscoped(preflight: &crate::python_frontend::NativePreflight, program: &Program) -> Result<(), String> {
-    if program.modules.iter().any(|module| module.name == RUN_SCOPE) {
-        return Err(format!(
-            "run without `module` is unavailable: a module named `{RUN_SCOPE}` exists although that \
-             name is reserved for ad-hoc blocks. Pass `module` explicitly, or remove that module."
-        ));
-    }
+/// shapes too; this states the fix in the tool's own terms, program-free, so a batch
+/// preflight already catches it.
+fn unscoped_names(preflight: &crate::python_frontend::NativePreflight) -> Result<(), String> {
     if let Some(name) = preflight.local_calls.first() {
         return Err(format!(
             "run: `{name}(...)` is not a builtin. Call user functions as Module.function, or pass \
@@ -199,6 +263,8 @@ pub(super) async fn execute(
     block: Block,
     config: &AppConfig,
     session: &mut WorkingSet,
+    class: &SpeakerClass,
+    budget: &std::sync::Arc<TurnBudget>,
 ) -> NativeToolResult {
     let declaration = match detached(&block, &session.program) {
         Ok(declaration) => declaration,
@@ -209,12 +275,22 @@ pub(super) async fn execute(
     };
     let frame = format!("{}.{}", block.module, block.function);
     let body = declaration.body;
+    // Limits for every class; for restricted speakers also the call policy of the
+    // block's own frame: their tools and exactly the functions admission authorized.
+    let context = crate::eval::meter::RunContext {
+        limits: class.limits(),
+        policy: class.restricted().then(|| crate::eval::meter::BlockPolicy {
+            tools: class.guest_tools().iter().cloned().collect(),
+            functions: block.roles.functions.iter().cloned().collect(),
+        }),
+        turn: budget.clone(),
+    };
     let evaluation = io_eval::evaluate_with_io(
         config,
         &session.program,
         sender,
         io_eval::ProgramPolicy::Frozen,
-        move |program, handle| crate::eval::eval_detached_block(program, &frame, &body, handle),
+        move |program, handle| crate::eval::eval_detached_block(program, &frame, &body, handle, context),
     )
     .await;
     // Shared variables, routes, roadmap and mocks a called function changed are live

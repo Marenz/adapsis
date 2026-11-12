@@ -326,7 +326,7 @@ fn emit_scalar_call(
         let ty = operand_type(ctx, argument, Policy::Argument)?;
         values.push(emit_proven_operand(ctx, argument, &ty, Policy::Argument)?);
     }
-    let callee = ctx.module.declare_func_in_func(id, ctx.builder.func);
+    let callee = super::relocation::far_call(ctx.module, id, ctx.builder.func);
     let instruction = ctx.builder.ins().call(callee, &values);
     Ok(ctx.builder.inst_results(instruction)[0])
 }

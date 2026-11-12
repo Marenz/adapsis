@@ -11,8 +11,8 @@ fn arguments<'a>(args: &'a [Value], name: &str) -> Result<(Json, &'a str)> {
     let (Value::String(text), Value::String(path)) = (&args[0], &args[1]) else {
         bail!("{name} expects (String, String)");
     };
-    let parsed =
-        serde_json::from_str(text).map_err(|error| anyhow!("{name}: invalid JSON: {error}"))?;
+    let parsed = super::bounded::parse_json(text)?
+        .map_err(|error| anyhow!("{name}: invalid JSON: {error}"))?;
     Ok((parsed, path.as_str()))
 }
 
@@ -91,7 +91,7 @@ pub(super) fn valid(args: &[Value]) -> Result<Value> {
     let Value::String(text) = &args[0] else {
         bail!("json_valid expects (String)");
     };
-    Ok(Value::Bool(serde_json::from_str::<Json>(text).is_ok()))
+    Ok(Value::Bool(super::bounded::parse_json(text)?.is_ok()))
 }
 
 #[cfg(test)]

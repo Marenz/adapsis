@@ -26,11 +26,12 @@ async fn run_is_offered_exactly_where_mutate_is() {
     assert!(native_tools_eligible(&cfg));
 }
 
-/// Guests, execute-only speakers and non-write turns are not native-eligible, so the tool
-/// is never advertised to them; a forged call is refused by the same pinned snapshot that
-/// refuses a forged `mutate`, before any parsing of the block and before any IO.
+/// Speakers who cannot change code have `run` in its restricted form (DESIGN L3; the
+/// details are in `run_restricted_tests.rs`). `mutate` stays refused for them by the
+/// pinned snapshot, and a block that reaches for anything beyond pure builtins and the
+/// speaker's own tools is refused at admission, before any IO.
 #[tokio::test]
-async fn forged_run_calls_from_ineligible_turns_are_refused_like_mutate() {
+async fn restricted_speakers_cannot_mutate_and_their_blocks_cannot_reach_io() {
     let source = json!({"source": "text: str = await file_read(\"fixture://forged\")\nreturn text\n"}).to_string();
     let mutate = json!({"source": "+module NtRunForged\n+fn f ()->Int\n  +return 1\n+end\n"}).to_string();
     for (model, identity, reason) in [
@@ -43,12 +44,16 @@ async fn forged_run_calls_from_ineligible_turns_are_refused_like_mutate() {
         cfg.turn = identity;
         let log = memory_io(&mut cfg, "must not be read");
         assert!(!native_tools_eligible(&cfg), "{model}");
+        assert!(speaker_class(&cfg).restricted(), "{model}");
         let before = snapshot(&cfg, &ws);
-        for (tool, arguments) in [("run", &source), ("mutate", &mutate)] {
+        for (tool, arguments, fragment) in [
+            ("mutate", &mutate, reason),
+            ("run", &source, "`file_read` is not available in this conversation"),
+        ] {
             let preflight = validate_native_tool_authorized(tool, arguments, &cfg).unwrap_err();
-            assert!(preflight.contains(reason), "{model} {tool}: {preflight}");
+            assert!(preflight.contains(fragment), "{model} {tool}: {preflight}");
             let result = execute_native_tool(tool, arguments, &cfg, &mut ws, &baseline).await;
-            assert!(result.execution.has_errors && result.content.contains(reason), "{model} {tool}: {}", result.content);
+            assert!(result.execution.has_errors && result.content.contains(fragment), "{model} {tool}: {}", result.content);
         }
         assert!(log.lock().unwrap().is_empty(), "{model}: a refused turn performed IO");
         assert_nothing_persisted(&cfg, &ws, &baseline, &before).await;
@@ -248,7 +253,7 @@ async fn the_scoped_io_boundary_still_decides_for_the_turn_identity() {
         }));
         let (program, body) = (program.clone(), declaration.body.clone());
         let outcome = tokio::task::spawn_blocking(move || {
-            crate::eval::eval_detached_block(&program, &format!("{SCOPE}.run_block"), &body, handle)
+            crate::eval::eval_detached_block(&program, &format!("{SCOPE}.run_block"), &body, handle, crate::eval::meter::RunContext::owner())
         })
         .await
         .unwrap();

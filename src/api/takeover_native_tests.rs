@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 #[path = "takeover_logging_tests.rs"]
 mod logging;
+#[path = "takeover_restricted_tests.rs"]
+mod restricted;
 
 const ADMIN: &str = "telegram:user:100000001";
 
@@ -318,33 +320,15 @@ async fn native_takeover_double_empty_response_terminates_with_the_existing_erro
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
 }
 
+/// Without `--native-tools` nothing changes for guests and execute-only speakers: they
+/// keep the legacy `<code>` protocol. (With the flag they are native; see `restricted`.)
 #[tokio::test]
-async fn guest_and_non_write_takeover_turns_stay_on_the_legacy_protocol() {
-    let mut harness = Harness::new(true);
-    harness.permissions = Arc::new(
-        toml::from_str(
-            r#"
-        [principals]
-        "telegram:user:100000777" = "guest"
-        [guest_profiles]
-        guest = []
-        [model.guest]
-        user = "execute"
-        [model.viewer]
-        user = "execute"
-        [model.takeover-fixture]
-        user = "write"
-    "#,
-        )
-        .unwrap(),
-    );
-    // Guest principal (server-bound speaker mapping).
+async fn guest_and_non_write_takeover_turns_stay_legacy_without_the_native_flag() {
+    let mut harness = Harness::new(false);
+    harness.permissions = restricted::permissions();
     let guest = provider(vec![response("Hallo!\n<code>!done</code>", vec![])]).await;
-    let reply = harness
-        .turn(&guest, "telegram:user:100000777", "telegram:user:100000777", "Hi")
-        .await;
+    let reply = harness.turn(&guest, restricted::GUEST_DM, restricted::GUEST, "Hi").await;
     assert_eq!(reply, "Hallo!");
-    // Execute-only speaker selected by the intake module's permission_model.
     let context = "telegram:group:-100000086";
     harness.set_profile(context, Some("viewer"));
     let viewer = provider(vec![response("Nur Lesen.\n<code>!done</code>", vec![])]).await;

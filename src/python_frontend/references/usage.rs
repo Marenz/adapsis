@@ -9,6 +9,8 @@ pub(in crate::python_frontend) struct Usage {
     pub values: HashSet<String>,
     pub calls: HashSet<String>,
     pub namespaces: HashSet<String>,
+    /// Reserved frontend helpers that were called (`spawn`, `check`, `source_add`, ...).
+    pub helpers: HashSet<String>,
 }
 
 pub(in crate::python_frontend) fn collect(
@@ -129,10 +131,9 @@ impl Usage {
                         "Python callable variables/dynamic attributes are unsupported",
                     ));
                 }
-                if !name.contains('.')
-                    && c.keywords.is_empty()
-                    && !crate::python_frontend::reserved_helper_name(&name)
-                {
+                if crate::python_frontend::reserved_helper_name(&name) {
+                    self.helpers.insert(name);
+                } else if !name.contains('.') && c.keywords.is_empty() {
                     self.calls.insert(name);
                 }
                 for arg in &c.args {

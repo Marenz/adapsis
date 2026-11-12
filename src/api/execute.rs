@@ -266,6 +266,27 @@ pub struct AgentCompletionCallback {
 /// turns must call [`execute_code_with_baseline`] with the turn's frozen program so
 /// completion is judged against changed functions only (#66).
 #[allow(dead_code)]
+/// One evaluation of a watched function, as text.
+///
+/// The program and its revision are snapshotted together
+/// (`working_set::program_at_revision`) and both locks are released before
+/// the function runs: an evaluation must never hold a state lock. Holding the
+/// session-metadata mutex here used to mean that a panic during evaluation
+/// poisoned it for every later request (#96).
+pub(super) async fn watch_evaluate(
+    program: &tokio::sync::RwLock<crate::ast::Program>,
+    meta: &crate::session::SharedMeta,
+    jit_cache: &crate::eval::JitCache,
+    function_name: &str,
+    input: &crate::parser::Expr,
+) -> String {
+    let (program, revision) = super::working_set::program_at_revision(program, meta).await;
+    match crate::eval::eval_compiled_or_interpreted_cached(&program, function_name, input, Some(jit_cache), revision) {
+        Ok((result, _)) => result,
+        Err(error) => format!("error: {error}"),
+    }
+}
+
 pub async fn execute_code(
     code: &str,
     config: &AppConfig,
@@ -697,17 +718,7 @@ pub(super) async fn execute_operations_with_baseline(
                             let mut last_result = String::new();
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
-                                let result = {
-                                    let program = watch_program.read().await;
-                                    let meta = watch_meta.lock().unwrap();
-                                    match crate::eval::eval_compiled_or_interpreted_cached(
-                                        &program, &fn_name, &input_expr,
-                                        Some(&watch_jit_cache), meta.revision,
-                                    ) {
-                                        Ok((r, _)) => r,
-                                        Err(e) => format!("error: {e}"),
-                                    }
-                                };
+                                let result = watch_evaluate(&watch_program, &watch_meta, &watch_jit_cache, &fn_name, &input_expr).await;
                                 if result != last_result && !last_result.is_empty() {
                                     if crate::logging::content() {
                                         eprintln!("[execute_code:watch:trigger] {fn_name} changed: {last_result} → {result}");

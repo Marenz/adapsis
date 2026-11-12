@@ -1228,6 +1228,10 @@ impl CoroutineHandle {
     pub fn execute_await(&self, op: &str, args: &[Value]) -> Result<Value> {
         self.check_program_frozen(op)?;
         self.check_guest_tool(op, args).inspect_err(|e| { crate::error_journal::record(crate::error_journal::Category::Refusal, "guest_tool", e); })?;
+        // Inside a native `run` block: per-block IO, costly-tool and per-turn limits.
+        if crate::eval::meter::active() {
+            crate::eval::meter::io_call(op)?;
+        }
         if op != "mock_set" && op != "mock_clear" {
             if let Some(result) = self.try_mock_io(op, args, false)? {
                 return Ok(result);
@@ -2872,6 +2876,13 @@ impl CoroutineHandle {
                         "memory_remember expects (note:String[, scope:String]) — at most two \
                          arguments"
                     );
+                }
+                // A global canonical memory is injected into EVERY conversation, the
+                // owner's included, so only a write-capable speaker may assert one
+                // (the rule `memory_correct` already applies to global records).
+                // Guests are refused earlier, at the guest-tool check.
+                if matches!(scope, crate::memory_graph::MemoryScope::Global) && !turn.may_write {
+                    bail!("global memories require a write-capable speaker; memories from this conversation must use context scope");
                 }
                 let (tx, rx) = oneshot::channel();
                 let result = self.send_and_wait(

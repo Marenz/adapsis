@@ -96,9 +96,17 @@ fn stable_prefix_keyed_mode(
         Some(takeover) => {
             // Memory tools are advertised only for turns with a TurnIdentity
             // (takeover); HTTP native turns have none, so their prompt omits them.
-            let mut sections = vec![crate::prompt::native_tool_prompt(inputs.context, takeover)];
+            // Speakers who cannot change code get the restricted protocol text: it names
+            // no tool they do not have (DESIGN L3). The text is the same for guests and
+            // execute-only speakers, so `may_write` remains the whole prefix key.
+            let restricted = !inputs.authority.may_write;
+            let mut sections = vec![if restricted {
+                crate::prompt::native_restricted_prompt(inputs.context)
+            } else {
+                crate::prompt::native_tool_prompt(inputs.context, takeover)
+            }];
             if takeover {
-                sections.push(crate::prompt::native_takeover_mechanics());
+                sections.push(crate::prompt::native_takeover_mechanics(restricted));
             }
             sections.push(mesh.clone().unwrap_or_default());
             sections.push(identity.clone());

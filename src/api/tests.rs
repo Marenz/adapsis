@@ -18,6 +18,8 @@ mod rewind_managed_tests;
 mod reject_identity_tests;
 #[path = "error_journal_route_tests.rs"]
 mod error_journal_route_tests;
+#[path = "jit_containment_tests.rs"]
+mod jit_containment_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {

@@ -1,5 +1,47 @@
 # AdapsisOS Roadmap
 
+## Restricted run + JIT fix: merged and clean (2026-11-12)
+
+- `d819b0d` restricted `run` for guests and execute-only speakers (adversarial
+  review ACCEPT) and `f09de27` the #96 JIT fix (independent review ACCEPT) are
+  merged on `work/run-tool`. The merge had no conflicts.
+- Gate on the merged tree: 20 consecutive whole-binary runs, 0 `compiled_blob`
+  panics (baseline before the fix: 5 of 20); one full run 2380 passed, only the
+  documented strict Python-parity failure, integration 5/5/4.
+- Not deployed, not wired into the live node. The entry below is the earlier
+  checkpoint and is superseded where it says the #96 failure is outstanding.
+
+## Recovery checkpoint — restricted native `run` accepted review, full gate pending (#129/#138, 2026-11-10)
+
+- Cumulative restricted-`run` candidate on `work/run-tool`, HEAD `44e66e8`, is
+  **accepted by adversarial review**, including the final shared pre-search regex
+  capture/group/scratch/weighted-work admission for both regex builtins. Reviewer
+  verified the restored candidate unchanged. Source is frozen; this is a recovery
+  checkpoint, **not completion, a green full suite, a commit or a deployment**.
+- Reviewed candidate digest (source before this docs-only checkpoint):
+  `80ca561da0ca1a208174cde608909f90fccce2c096dac7b300cd217f7c473cf5`.
+  Algorithm: SHA-256 of `git diff HEAD --binary`, followed by each sorted untracked
+  file as NUL + `UNTRACKED` + NUL + path + NUL + file bytes. Tracked diff alone:
+  `9a0a9c970570f46dee5127ae40c528cf8737afc2da1760a08bcf012534cb38f6`.
+  Adding this documentation changes the whole-worktree digest, not the accepted source.
+- Final full release gate: **2345 passed / 2 failed / 6 ignored**, integration
+  targets **5 + 5 + 4 passed**. Failures explicitly remain outstanding:
+  expected strict `python_parity` (334 verified / 58 invalid / 181 unsupported),
+  and **#96**: `eval::tests::test_eval_func_name_still_works` panicked in
+  Cranelift `compiled_blob.rs:56` with `TryFromIntError`. Do not describe the suite
+  as green. Separate read-only #96 root-cause investigation is in progress;
+  no #96 fix is included in this candidate.
+- Logs: `/tmp/opencode/shared-regex-focused.log` (14 focused tests passed),
+  `/tmp/opencode/run-tool-full-shared-regex.log` (full gate); reviewer regression
+  seeds and logs: `/tmp/opencode/run-review/`.
+- Sessions: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; writer
+  `ses_e3ae0b257ffekvdCXKh6wtL44R`; adversarial reviewer
+  `ses_e3a974b00ffejrrcEK7TtvpUc9` (final minimal shared-regex **ACCEPT**).
+  Writer is pinned to OpenAI Sol; independently observed weekly quota was **93%**
+  before the last correction, with a **<=75% remaining pause threshold**.
+- Status: candidate **not committed and not deployed**. Hold all source edits,
+  tests and commits pending the manager's separate #96/full-gate decision.
+
 ## Workspace tools #129 — S3 recovery (2026-11-10)
 
 - **Current: final independent review ACCEPT.** Reviewer

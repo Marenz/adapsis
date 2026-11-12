@@ -63,19 +63,28 @@ where
         &program,
         program_mut.clone(),
     );
+    // The interpreter recurses on the native stack: evaluate on a thread whose stack
+    // holds the call-depth limit with margin (`eval/stack.rs`). The blocking task only
+    // waits for it, so the async side is unchanged.
     let joined = tokio::task::spawn_blocking(move || {
-        ctx.install();
-        let handle = CoroutineHandle::new(sender)
-            .with_turn(turn)
-            .with_program_frozen(policy == ProgramPolicy::Frozen);
-        evaluate(&program, handle)
+        crate::eval::on_deep_stack(move || {
+            ctx.install();
+            let handle = CoroutineHandle::new(sender)
+                .with_turn(turn)
+                .with_program_frozen(policy == ProgramPolicy::Frozen);
+            evaluate(&program, handle)
+        })
     })
     .await;
     let outcome = match joined {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(EvalFailure {
+        Ok(Ok(Ok(value))) => Ok(value),
+        Ok(Ok(Err(error))) => Err(EvalFailure {
             task: false,
             detail: error.to_string(),
+        }),
+        Ok(Err(error)) => Err(EvalFailure {
+            task: true,
+            detail: format!("could not start the evaluation thread: {error}"),
         }),
         Err(error) => Err(EvalFailure {
             task: true,

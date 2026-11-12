@@ -11,8 +11,15 @@ use crate::llm::{
 };
 use std::collections::HashSet;
 
+/// HTTP turns (`main`) have no turn identity, so guest tools cannot be bound to a
+/// speaker here: writers and execute-only speakers are native, guests stay legacy.
 pub(super) fn eligible(config: &AppConfig) -> bool {
-    config.native_tools && super::native_tools::native_tools_eligible(&permission_snapshot(config))
+    use super::native_tools::{speaker_class, SpeakerClass};
+    config.native_tools
+        && matches!(
+            speaker_class(&permission_snapshot(config)),
+            SpeakerClass::Writer | SpeakerClass::ExecuteOnly
+        )
 }
 
 /// Pin generation identity and intersect the context profile with the active
@@ -76,8 +83,17 @@ pub(super) fn permission_snapshot_for(config: &AppConfig, context: &str) -> AppC
                     .all(|profile| original.can_opencode(config.access_level, profile)),
         },
     );
-    // Either guest profile excludes this turn from the HTTP native protocol.
-    if let Some(tools) = profiles
+    // A named profile without a usable entry cannot be classified: pin the most
+    // restricted class (a guest with no tools) instead of falling through to the
+    // "unlisted model resolves to Execute" default.
+    let unclassifiable = profiles.iter().any(|profile| {
+        let listed = original.model.contains_key(profile) || original.model.contains_key("default");
+        !listed && (!original.model.is_empty() || original.guest_profiles.contains_key(profile))
+    });
+    // Either guest profile makes this a guest turn (excluded from HTTP native turns).
+    if unclassifiable {
+        permissions.guest_profiles.insert(model.clone(), Vec::new());
+    } else if let Some(tools) = profiles
         .iter()
         .find_map(|profile| original.guest_profiles.get(profile))
     {
@@ -139,6 +155,9 @@ pub(super) struct NativeLoop {
     pub(super) generator: Option<String>,
     /// Ladybug write failure; aborts the turn like the legacy takeover loop.
     pub(super) fatal: Option<anyhow::Error>,
+    /// Turn-bound tool calls of this turn (restricted speakers; unlimited for writers).
+    /// Created from the pinned snapshot's class at the first tool call.
+    tool_budget: Option<std::sync::Arc<super::native_tools::TurnBudget>>,
 }
 
 pub(super) async fn run(
@@ -245,6 +264,7 @@ impl NativeLoop {
             end: LoopEnd::Exhausted,
             generator: None,
             fatal: None,
+            tool_budget: None,
             response: AskResponse {
                 reply: String::new(),
                 code: String::new(),
@@ -556,12 +576,20 @@ impl NativeLoop {
         tx: &EventSender,
     ) -> String {
         let mut session = config.snapshot_working_set().await;
-        let result = super::native_tools::execute_native_tool(
+        let budget = self
+            .tool_budget
+            .get_or_insert_with(|| {
+                let class = super::native_tools::speaker_class(config);
+                super::native_tools::turn_budget(&class)
+            })
+            .clone();
+        let result = super::native_tools::execute_native_tool_in_turn(
             &call.name,
             &call.arguments,
             config,
             &mut session,
             baseline,
+            &budget,
         )
         .await;
         config.write_back_working_set(&session).await;

@@ -395,6 +395,8 @@ pub struct Preflight {
     pub declared_functions: Vec<String>,
     pub value_references: Vec<String>,
     pub bare_calls: Vec<String>,
+    /// Reserved frontend helpers the source calls (`spawn`, `propagate`, `source_add`, ...).
+    pub helper_calls: Vec<String>,
 }
 
 pub(super) fn preflight(source: &str, module: &str) -> Result<Preflight, Diagnostic> {
@@ -484,8 +486,10 @@ fn assemble_preflight(
     references.extend(usage.namespaces);
     let mut value_references: Vec<_> = usage.values.into_iter().collect();
     let mut bare_calls: Vec<_> = usage.calls.into_iter().collect();
+    let mut helper_calls: Vec<_> = usage.helpers.into_iter().collect();
     value_references.sort();
     bare_calls.sort();
+    helper_calls.sort();
     references.sort();
     references.dedup();
     type_references.sort();
@@ -498,6 +502,7 @@ fn assemble_preflight(
         declared_functions,
         value_references,
         bare_calls,
+        helper_calls,
     }
 }
 

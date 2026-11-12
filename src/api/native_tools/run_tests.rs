@@ -42,6 +42,18 @@ pub(super) const LIBRARY: &str = "\
 +fn recurse (x:Int)->Int
   +return NtRunLib.recurse(x)
 +end
++fn home ()->String
+  +return home_dir()
++end
++fn half_megabyte ()->String
+  +let s:String = \"0123456789abcdef\"
+  +let i:Int = 0
+  +while i < 15
+    +set s = concat(s, s)
+    +set i = i + 1
+  +end
+  +return s
++end
 +module NtRunSecret
 +fn token ()->String
   +return \"hidden-token\"
@@ -74,6 +86,19 @@ pub(super) fn permissions() -> PermissionConfig {
         lib = "execute"
         secret = "execute"
         user = "execute"
+
+        [model.viewer]
+        lib = "execute"
+        secret = "none"
+        user = "execute"
+
+        [model.visitor]
+        lib = "none"
+        secret = "none"
+        user = "none"
+
+        [guest_profiles]
+        visitor = ["web_search", "music_generate", "memory_inspect"]
         "#,
     )
     .unwrap()
@@ -152,6 +177,10 @@ pub(super) fn memory_io(cfg: &mut AppConfig, file: &str) -> IoLog {
                 MemoryInspect { context_id, principal_id, query, reply } => {
                     record(format!("memory_inspect context={context_id} principal={principal_id} query={query}"));
                     let _ = reply.send(Ok("inspected".into()));
+                }
+                Scoped { request, reply } => {
+                    record(format!("scoped {request:?}"));
+                    let _ = reply.send(Ok("scoped result".into()));
                 }
                 _ => record("UNEXPECTED".into()),
             }

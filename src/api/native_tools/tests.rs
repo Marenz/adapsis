@@ -38,6 +38,8 @@ mod python_input_name_tests;
 mod python_pseudo_field_tests;
 #[path = "python_scalar_tests.rs"]
 mod python_scalar_tests;
+#[path = "python_nesting_tests.rs"]
+mod python_nesting_tests;
 #[path = "c_result_tests.rs"]
 mod c_result_tests;
 #[path = "python_result_acceptance_tests.rs"]
@@ -48,6 +50,10 @@ mod run_tests;
 mod run_authority_tests;
 #[path = "run_freeze_tests.rs"]
 mod run_freeze_tests;
+#[path = "run_restricted_tests.rs"]
+mod run_restricted_tests;
+#[path = "run_hardening_tests.rs"]
+mod run_hardening_tests;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -245,8 +251,13 @@ async fn memory_tools_fail_closed_without_a_turn_identity() {
     }
 }
 
+/// An execute-only speaker has the memory tools as direct tools (the same turn-bound
+/// builtins, with their own rules, as `!eval memory_*` gave them on the legacy path). The
+/// call reaches the builtin's IO request with the turn's identity; nothing is decided by
+/// the tool layer. The builtin itself refuses a GLOBAL memory from a speaker who cannot
+/// change code.
 #[tokio::test]
-async fn memory_tools_denied_for_non_write_turn() {
+async fn memory_tools_reach_the_builtin_for_a_non_write_turn() {
     let mut cfg = config_for("writer", AccessLevel::Full, perm_config(), Program::default());
     cfg.turn = Some(TurnIdentity {
         context: "telegram:group:-1".into(),
@@ -254,10 +265,31 @@ async fn memory_tools_denied_for_non_write_turn() {
         may_write: false,
         guest_tools: None,
     });
+    assert_eq!(speaker_class(&cfg), SpeakerClass::ExecuteOnly);
+    let names: Vec<String> = tool_definitions(&cfg).iter().map(|d| d.name.clone()).collect();
+    assert_eq!(names, ["inspect", "evaluate", "run", "finish", "memory_inspect", "memory_remember", "memory_correct", "memory_forget"]);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    cfg.io_sender = Some(sender);
+    let responder = tokio::spawn(async move {
+        let mut requests = 0;
+        while let Some(request) = receiver.recv().await {
+            match request {
+                crate::coroutine::IoRequest::MemoryRemember { context_id, principal_id, scope, reply, .. } => {
+                    assert_eq!((context_id.as_str(), principal_id.as_str()), ("telegram:group:-1", "telegram:user:100000103"));
+                    assert!(matches!(scope, crate::memory_graph::MemoryScope::Context));
+                    requests += 1;
+                    let _ = reply.send(Ok("remembered".into()));
+                }
+                _ => panic!("unexpected IO"),
+            }
+        }
+        requests
+    });
     let mut session = cfg.snapshot_working_set().await;
     let baseline = cfg.program.read().await.clone();
-    // A non-write speaker cannot reach any native tool, including a global
-    // memory_remember — the surface gate refuses it before the builtin runs.
+    let res = execute_native_tool("memory_remember", r#"{"content":"note"}"#, &cfg, &mut session, &baseline).await;
+    assert!(!res.execution.has_errors, "{}", res.content);
+    assert!(res.content.contains("remembered"), "{}", res.content);
     let res = execute_native_tool(
         "memory_remember",
         r#"{"content":"note","scope":"global"}"#,
@@ -266,8 +298,13 @@ async fn memory_tools_denied_for_non_write_turn() {
         &baseline,
     )
     .await;
-    assert!(res.execution.has_errors);
+    assert!(res.execution.has_errors, "{}", res.content);
+    assert!(res.content.contains("global memories require a write-capable speaker"), "{}", res.content);
+    // Tools outside the class list stay refused.
+    let res = execute_native_tool("mutate", r#"{"source":"+module X"}"#, &cfg, &mut session, &baseline).await;
     assert!(res.content.contains("not write-capable"), "{}", res.content);
+    cfg.io_sender = None;
+    assert_eq!(responder.await.unwrap(), 1, "only the context-scoped note reached the store");
 }
 
 #[test]
@@ -425,38 +462,41 @@ fn eligibility_excludes_non_write_and_guest() {
     assert!(!native_tools_eligible(&guest));
 }
 
+/// Guests and execute-only speakers have their own native tool lists (DESIGN L3). A tool
+/// outside the list is refused before its arguments are parsed; `finish` is on every list.
 #[tokio::test]
-async fn guest_and_nonwrite_dispatch_denied() {
+async fn guest_and_nonwrite_dispatch_is_limited_to_the_class_tool_list() {
     let program = writer_program().await;
-    let mut guest = config_for(
-        "writer",
-        AccessLevel::Full,
-        perm_config(),
-        program.clone(),
-    );
+    let mutate = r#"{"source":"+module NtDenied\n+fn f ()->Int\n  +return 1\n+end\n"}"#;
+    let mut guest = config_for("writer", AccessLevel::Full, perm_config(), program.clone());
+    // The two guest signals disagree (a turn tool list, no profile): not classifiable,
+    // so the most restricted class applies.
     guest.turn = Some(TurnIdentity {
         context: "c".into(),
         principal: "p".into(),
         may_write: false,
-        guest_tools: Some(vec![]),
+        guest_tools: Some(vec!["web_search".into()]),
     });
-    let mut session = guest.snapshot_working_set().await;
-    let baseline = guest.program.read().await.clone();
-    let res = execute_native_tool("finish", "{}", &guest, &mut session, &baseline).await;
-    assert!(res.execution.has_errors);
-    assert!(res.content.contains("guest"));
-
-    let mut cfg = config_for(
-        "executor",
-        AccessLevel::Full,
-        perm_config(),
-        program.clone(),
-    );
-    let mut session = cfg.snapshot_working_set().await;
-    let baseline = cfg.program.read().await.clone();
-    let res = execute_native_tool("finish", "{}", &cfg, &mut session, &baseline).await;
-    assert!(res.execution.has_errors);
-    assert!(res.content.contains("not write-capable"));
+    assert_eq!(speaker_class(&guest), SpeakerClass::Guest(vec![]));
+    let executor = config_for("executor", AccessLevel::Full, perm_config(), program.clone());
+    assert_eq!(speaker_class(&executor), SpeakerClass::ExecuteOnly);
+    for (cfg, reason, denied) in [
+        (&guest, "guest turns are not eligible", vec!["mutate", "test", "evaluate", "inspect", "web_search", "memory_inspect"]),
+        (&executor, "not write-capable", vec!["mutate", "test", "web_search", "music_generate"]),
+    ] {
+        let mut session = cfg.snapshot_working_set().await;
+        let baseline = cfg.program.read().await.clone();
+        for tool in denied {
+            let res = execute_native_tool(tool, mutate, cfg, &mut session, &baseline).await;
+            assert!(res.execution.has_errors && res.content.contains(reason), "{tool}: {}", res.content);
+            assert!(validate_native_tool_authorized(tool, mutate, cfg).unwrap_err().contains(reason), "{tool}");
+        }
+        let unknown = execute_native_tool("nonsense", "{}", cfg, &mut session, &baseline).await;
+        assert!(unknown.content.contains("unknown native tool"), "{}", unknown.content);
+        let res = execute_native_tool("finish", "{}", cfg, &mut session, &baseline).await;
+        assert!(res.execution.done_accepted && !res.execution.has_errors, "{}", res.content);
+        assert_eq!(module_names(&session.program), module_names(&program));
+    }
 }
 
 // ── Inspection permissions + filtering ────────────────────────────────────
