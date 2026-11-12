@@ -36,6 +36,8 @@ struct CompactionMemory {
     confidence: f64,
 }
 
+// Progress, HTTP turns and workspace idle checks must all use THIS context
+// lock map. Receipt delivery never introduces a parallel conversation lock.
 use super::turn_lock::of as takeover_context_lock;
 
 fn compaction_attempt_due(context: &str) -> bool {
@@ -1163,7 +1165,10 @@ pub async fn handle_llm_takeover(
     shell_policy: crate::coroutine::ShellPolicy,
 ) -> anyhow::Result<String> {
     let context_lock = takeover_context_lock(&context);
-    let _context_guard = context_lock.lock().await;
+    let mut progress = super::takeover_progress::Progress::new(
+        reply_fn.clone(), reply_arg.clone(), io_sender.clone(), task_registry.clone(),
+    );
+    let _context_guard = progress.acquire(context_lock).await;
     let speaker_id = takeover_principal(&context, source_metadata.as_deref());
     let source_content = strip_sender_prefix(&message).to_string();
     let graph_message_id = persist_takeover_message(
@@ -1504,10 +1509,12 @@ pub async fn handle_llm_takeover(
         let _ = tx.try_send(());
     }
     if let Some(config) = native_config {
-        return super::takeover_native::run(super::takeover_native::TakeoverRun {
+        let result = super::takeover_native::run(super::takeover_native::TakeoverRun {
             config, context: &context, generator: llm_model, messages,
             training_context: message.clone(), memory_graph: memory_graph.clone(),
         }).await;
+        progress.finish().await;
+        return result;
     }
 
     // Build agent completion callback from conversation's reply info
@@ -1807,6 +1814,7 @@ pub async fn handle_llm_takeover(
         let _ = tx.try_send(());
     }
 
+    progress.finish().await;
     Ok(reply_text)
 }
 
@@ -1826,67 +1834,8 @@ pub(super) fn push_memory_prompt_blocks(
 }
 
 #[cfg(test)]
-mod prompt_block_tests {
-    use super::*;
-    use crate::llm::{ChatContent, ChatContentPart, ChatMessage, ChatRole};
-    use crate::memory_graph::{PromptMemorySelection, PromptSelectionStats, RecalledMemory};
-
-    fn selection(canonical: bool, content: &str) -> PromptMemorySelection {
-        PromptMemorySelection {
-            memories: vec![RecalledMemory {
-                id: format!("memory:{content}"),
-                content: content.into(),
-                memory_type: "fixture".into(),
-                canonical,
-                confidence: if canonical { 1.0 } else { 0.9 },
-                citation: if canonical {
-                    String::new()
-                } else {
-                    "ctx; speaker; 1; source".into()
-                },
-            }],
-            stats: PromptSelectionStats {
-                active_authorized_records: 1,
-                candidate_records_scanned: 1,
-                selected_representatives: 1,
-                selected_row_chars: 1,
-                max_count: 40,
-                max_row_chars: 8_000,
-                ..Default::default()
-            },
-        }
-    }
-
-    #[test]
-    fn memory_blocks_stay_in_the_runtime_envelope_before_the_newest_user_turn() {
-        let messages = vec![
-            ChatMessage::system("primary"),
-            ChatMessage::user("older"),
-            ChatMessage::user("newest"),
-        ];
-        let mut context_log = crate::context_log::ContextLog::from_conversation(messages);
-        push_memory_prompt_blocks(
-            &mut context_log,
-            &selection(false, "ranked"),
-            &selection(true, "canonical"),
-        );
-        let messages = context_log.into_messages();
-        assert_eq!(messages.last().unwrap().role, ChatRole::User);
-        let ChatContent::Parts(parts) = &messages.last().unwrap().content else {
-            panic!("runtime envelope must be multipart");
-        };
-        let text = parts
-            .iter()
-            .filter_map(|part| match part {
-                ChatContentPart::Text { text } => Some(text.as_str()),
-                ChatContentPart::ImageUrl { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(text[1].contains("canonical"));
-        assert!(text[2].contains("ranked"));
-        assert!(text.last().unwrap().ends_with("newest"));
-    }
-}
+#[path = "takeover_prompt_tests.rs"]
+mod prompt_block_tests;
 
 #[cfg(test)]
 #[path = "logging_gate_tests.rs"]

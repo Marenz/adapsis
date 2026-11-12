@@ -44,6 +44,7 @@ mod takeover_native;
 pub mod origin;
 pub(crate) mod workspace_cancel;
 mod turn_lock;
+mod takeover_progress;
 pub mod native_tools;
 pub(crate) mod http_context;
 mod request_meter;

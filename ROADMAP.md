@@ -1,6 +1,57 @@
 # AdapsisOS Roadmap
 
-## W2 repository edit/test turn (2026-11-12, candidate, not deployed)
+## Exact live ACK147 integration after W2 (2026-11-12, accepted, not deployed)
+
+- Parents: accepted W2 `355ff08` and EXACT live ACK source/docs `1f19c3f`
+  (source `c7a4927`; image fix `7201856` already common). No #136 uncommitted
+  source, W3 features, registry or deployment changes.
+- Approved semantic resolution: both final and progress delivery use ONE
+  `conversation_callback::request` builder, with explicit `program_frozen:false`
+  matching the former trusted platform-callback Spawn. Callbacks own their
+  trusted handle; this adds no model permission or freeze inheritance path.
+- Progress acquires the existing `turn_lock::of` context lock (no parallel
+  map), emits STARTED only after that lock, and drains at most five seconds
+  after work without tier locks. W2's work guard remains in the blocking
+  command worker through cancellation cleanup. Existing input identity,
+  supplied complete callback pairing, unsaved/cutoff reply notices, image
+  serialization and metadata/privacy paths remain.
+- Fixture-only adjustment: ACK's older guest test expected all opted-in guest
+  turns to remain legacy. It now pins current DESIGN L3's exact fail-closed
+  native `run`/`finish` schemas, plus a separate non-native legacy control;
+  Program/revision and callback arguments remain unchanged. Provider-only
+  fixtures retain absent callbacks, evaluated progress fixtures use supplied
+  complete pairs and Harness Site/ShellPolicy.
+- Interaction regressions: queued receipt before the shared lock, STARTED only
+  after the earlier actual bash command is locally cancelled/cleaned up;
+  callback failure does NOT cancel a held real command; notices absent from
+  provider/history/training/Ladybug; shared builder's false flag, argument
+  values and actual reply channel preserved. Targeted progress/builder11pass,
+  explicit workspace/callback interactions2pass. First combined gate651passed/
+  1 new fixture timeout/3ignored: unrelated fixtures contended for the same
+  real admin-DM key before that test's provider started (not a runtime failure).
+  The TWO new private-DM interactions now use the existing exact-test child
+  capture helper: per-child state/training, no attachments, no recursive runner,
+  bounded callback/turn/command waits. No fake context or production eligibility
+  change. Repeated combined focused gate652passed/0failed/3ignored.
+- Owner wind-down checkpoint: the already-approved ONE full gate completed with
+  2814 passed / 1 known strict Python-parity failure / 10 ignored; integration
+  5/9/4 passed. No other failure or timeout, no reruns, no compiled_blob panic.
+  Load11.97 before (23:58:57) /27.16 after (00:03:14), unit suite88.19s.
+  Log `/tmp/opencode/w2-ack-integration-full.log`.
+  Exact parents: HEAD `355ff08c0555cf94da206bc1b238cbb4539ddfce`, MERGE_HEAD
+  `1f19c3f696a9cddf009d336c5534d7c3ffd6777f`. Tested staged hash before/after gate:
+  `010d9c7c3390ca23fbf9fb4719880a7ba183564bd089aa23df43a1b4dd41a510`.
+  This recovery paragraph is a DOCS-ONLY update AFTER that test/hash; no source
+  changed after verification. Final independent semantic-integration-only review
+  ACCEPT (reviewer session `ses_e3e9595a2ffeksds1nSOBYRxZ2`, 13 focused passed;
+  full gate 2814 passed with only known strict parity failing). All reviewers are
+  idle; the accepted merge remains staged/uncommitted for manager closure only.
+  Live remains `c7a4927`; no registry, deployment, W3, feature or new correction
+  work is authorized during wind-down. Future deployment/registry/repository-task
+  acceptance is NOT started: the owner explicitly requested stop/no new tasks.
+  No leftover test units/state directories.
+
+## W2 repository edit/test turn (2026-11-12, accepted, not deployed)
 
 - Baseline `ce40048`: W1 accepted/committed as `aed5a2f`, exact live Python/save-outcome
   integration accepted/committed as `5888268`, exact reviewed image hotfix `7201856`
@@ -9,7 +60,7 @@
   HTTP cancel escape hatch, push-mistake guard and digest-scoped startup cleanup.
   No job tools, W3 turn budget, new cancellation builtin or Telegram /stop. The separate
   ACK147 receipt worker is not duplicated here. Its live source/docs `c7a4927`/`1f19c3f`
-  still require integration AFTER this W2 freeze/commit, before any deployment.
+  are being integrated from their exact commit above, after W2's accepted commit.
 - Real mock-provider turn edits a repository file, writes a test script and executes it
   successfully, preserving the live Program/revision. Other regressions cover freshness,
   command failure, protected push before effects, dirty/running/unverifiable close,
@@ -29,7 +80,10 @@
   `git push origin HEAD:refs/heads/adapsis/<name>`; lease-only remains supported.
   Real local-bare regressions cover mapping, stale lease rejection and correct lease
   success. Corrected focused push/workspace/native gate: 525 passed, 0 failed,
-  1 manual measurement ignored. Corrected full gate and push-only delta review pending.
+  1 manual measurement ignored. Corrected ONE full gate: 2801 passed / 1 known strict
+  parity failure / 10 ignored, integration5/9/4 passed; push-only review ACCEPT.
+  Manager committed/pushed `355ff08`, accepted staged hash
+  `6edba000bc12d5b4f776ba73ff8d8af0c377ef769a69ecde08d878978e9e4a48`.
 
 ## W1 integration with the exact live Python line (2026-11-12, accepted)
 
@@ -296,6 +350,48 @@ claim that a later manager integration remains uncommitted.
 - **Owner direction:** during this development phase prioritize fix-forward and
   minimal release ceremony, without new compatibility or rollback projects.
   Existing backups stay; review, tests and live verification remain required.
+
+## Deployed 2026-11-12 20:33 UTC — here receipt/start feedback (#147), `c7a4927`
+
+- Manager installed binary sha256
+  `218ba5bd6a1b60a247b35d01a5532a399255decf0fee20194792b99e00c9c21f`.
+  PID 2349670, NRestarts 0, 275/275 startup cases, six managed modules including
+  unchanged Buddy. The deployed #148 image serializer fix is retained.
+- **Real Telegram delivery evidence:** intake 549374 and automatic runtime
+  receipt/start notice 549375 both at 20:33:23 UTC; final `ACK147-OK` reply
+  549377 at 20:33:27 UTC. No provider error. This certifies that immediate
+  runtime notice was delivered; queued/start ordering is covered by offline
+  evaluated-callback tests, not a separate live queued-turn certification.
+- Independent source review accepted. Final corrected full gate: 2401 unit
+  passed, only known strict parity failed (334/58/181, zero AST mismatches or
+  non-idempotence), seven ignored; CLI 5/5, startup 9/9, Result CLI 4/4.
+  Original gate: 2399 passed / three failed / seven ignored. The new journal
+  fixture's concurrent 100-entry query-window race was corrected by test-only
+  child-process isolation. The other extra failure was the known live-baseline
+  #96 Cranelift relocation `TryFromIntError`; it passed the corrected run but is
+  **not fixed in this deployment**. Both gate results remain recorded.
+- Residuals: ASR/photo acquisition still precedes generic takeover receipt;
+  pending notices stop at turn end, but an already-running callback may arrive
+  late. #104 does not certify remote delivery from evaluator completion. #147
+  remains open for diagnosis/evidence quality and blocking delayed rechecks;
+  this deployment completes only its receipt/queued/start feedback slice.
+
+## Historical deployment 2026-11-12 — here captionless-image provider hotfix (#148), `7201856`
+
+- Manager installed binary sha256
+  `0b37c7ceb32e32db01ec6f340101f493753982cc4f0ba89eb930850773ee514e`.
+  Exactly-empty text blocks beside images are omitted at the shared serializer,
+  including old history; captions, images, trusted markers and native call IDs
+  are preserved. No history wipe or source-library replacement.
+- Independent source review accepted. One full release gate: 2391 unit passed,
+  only known strict parity failed (334 verified / 58 invalid / 181 unsupported,
+  zero AST mismatches/non-idempotence), seven ignored; CLI 5/5, startup 9/9 and
+  Result CLI 4/4. Negative-control historical-image replay failed before omission.
+- Live manager evidence: PID 2263168, NRestarts 0, 275/275 startup cases, six
+  managed modules; real Telegram reply 549322 (`IMAGE148-OK`) with prior photos
+  recovered and retained, HTTP 200, native finish after two generations.
+- #147 receipt/queued/start feedback is separate work; this deployment only
+  resolves the provider's empty text-block rejection.
 
 ## Historical deployment 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
 
