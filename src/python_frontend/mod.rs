@@ -42,6 +42,8 @@ mod module_source_tests;
 #[cfg(test)]
 mod qualification_tests;
 #[cfg(test)]
+mod stored_nesting_tests;
+#[cfg(test)]
 mod stored_test_data_tests;
 mod types;
 mod type_bindings;
@@ -89,7 +91,10 @@ pub use printer::print_function;
 #[cfg(test)]
 pub use printer::print_module;
 pub use printer::print_type;
-pub use module_source::{lower_python_module, print_python_module, print_python_module_with_ledger, LoweredPythonModule, QualificationLedger};
+pub use module_source::{
+    is_nesting_refusal, lower_python_module, module_dependencies, print_python_module,
+    print_python_module_with_ledger, LoweredPythonModule, QualificationLedger,
+};
 pub use runtime_arguments::validate_runtime_arguments;
 pub use runtime_arguments::validate_entry_await_contract;
 pub use references::{NativeReferences, resolve_native_references, retain_native_dependencies, check_constructor_environment};
@@ -99,6 +104,7 @@ pub(crate) use call_sites::runtime_shadowed;
 pub use type_bindings::check_native_type_bindings;
 #[cfg(test)]
 pub(crate) use nesting::MAX_NESTING;
+pub(crate) use nesting::MAX_STORED_NESTING;
 #[allow(unused_imports)] // Kept as the explicit legacy input export adapter.
 pub use tests_lower::lower_input;
 pub use tests_lower::{lower_input_expr, lower_tests};
@@ -174,6 +180,14 @@ pub fn lower_module(source: &str, module: &str) -> Result<LoweredSource, Diagnos
 /// authorized before a caller supplies any runtime signatures to final lowering.
 pub fn preflight_module(source: &str, module: &str) -> Result<lower::Preflight, Diagnostic> {
     lower::preflight(source, module)
+}
+
+/// `preflight_module` for text the checked printer produced a moment ago
+/// (source inspection). Stored source, never a submission: the printed form of
+/// an accepted function scans deeper than its submission did (#140).
+pub fn preflight_printed_module(printed: &str, module: &str) -> Result<lower::Preflight, Diagnostic> {
+    let _stored = nesting::StoredSource::enter();
+    lower::preflight(printed, module)
 }
 
 /// The caller must pass only authority-filtered runtime signatures. Native
@@ -333,4 +347,17 @@ fn docstring(stmt: &py::Stmt) -> Option<&str> {
         },
         _ => None,
     }
+}
+
+/// Test-only: what the lexical nesting scan says about the checked printer's
+/// text for `module` (evidence for `MAX_STORED_NESTING`).
+#[cfg(test)]
+pub(crate) fn printed_nesting_for_tests(program: &crate::ast::Program, module: &crate::ast::Module) -> Result<usize, String> {
+    printer::module_body_qualifying(program, module).map(|(text, _)| nesting::deepest_unbounded(&text))
+}
+
+/// Test-only: the nesting limit in force on this thread right now.
+#[cfg(test)]
+pub(crate) fn nesting_limit_for_tests() -> usize {
+    nesting::current_limit()
 }

@@ -172,6 +172,9 @@ pub fn lower_python_module(
         return Err(diag(module_name, "module name must be a simple identifier"));
     }
     validate_load_catalog(catalog, module_name)?;
+    // Whole-module source is STORED source: a managed file, or text the
+    // checked printer produced a moment ago. Never a submission.
+    let _stored = super::nesting::StoredSource::enter();
     let cx = super::Context {
         source,
         module: module_name,
@@ -445,6 +448,119 @@ fn check_stored_test_purity(
         }
     }
     Ok(())
+}
+
+/// Marker carried by a save refusal caused by the nesting guard on the PRINTED
+/// form (the printer parenthesizes every binary, which costs depth).
+pub fn is_nesting_refusal(diagnostic: &Diagnostic) -> bool {
+    diagnostic.message.contains("nesting too deep")
+}
+
+/// The other modules of `program` that `module_name` needs in its catalog:
+/// owners of its qualified callees, of foreign named types, of cross-module
+/// event sources, and of functions its stored-test data calls (resolved as the
+/// runtime resolves the spelling). Derived by the managed writer so manifest
+/// dependency sets follow the code; nothing here grants authority.
+pub fn module_dependencies(
+    program: &a::Program,
+    module_name: &str,
+) -> Result<std::collections::BTreeSet<String>, Diagnostic> {
+    let module = find_module(program, module_name)?;
+    let known: HashSet<&str> = program.modules.iter().map(|m| m.name.as_str()).collect();
+    let mut owners = std::collections::BTreeSet::new();
+    let mut add = |owner: &str| {
+        if owner != module_name && known.contains(owner) {
+            owners.insert(owner.to_string());
+        }
+    };
+    let refs = collect_module_refs(module);
+    for callee in &refs.callees {
+        if let Some((owner, _)) = callee.split_once('.') {
+            add(owner);
+        }
+    }
+    let types = super::types::catalog_from_program(program);
+    for name in &refs.types {
+        if let Some(key) = super::types::resolve_name(&types, module_name, name)
+            .map_err(|message| diag(module_name, message))?
+        {
+            if let Some((owner, _)) = key.rsplit_once('.') {
+                add(owner);
+            }
+        }
+    }
+    fn event_owners(body: &[a::Statement], out: &mut Vec<String>) {
+        for statement in body {
+            match &statement.kind {
+                a::StatementKind::Source(
+                    a::SourceOp::Add { source_type, .. } | a::SourceOp::Replace { source_type, .. },
+                ) => {
+                    if let a::SourceType::Event(owner, _) = source_type {
+                        out.push(owner.clone());
+                    }
+                }
+                a::StatementKind::Branch { then_body, else_body, .. } => {
+                    event_owners(then_body, out);
+                    event_owners(else_body, out);
+                }
+                a::StatementKind::While { body, .. } | a::StatementKind::Each { body, .. } => {
+                    event_owners(body, out)
+                }
+                a::StatementKind::Match { arms, .. } => {
+                    arms.iter().for_each(|arm| event_owners(&arm.body, out))
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut events = Vec::new();
+    for function in &module.functions {
+        event_owners(&function.body, &mut events);
+    }
+    for lifecycle in [&module.startup, &module.shutdown].into_iter().flatten() {
+        event_owners(&lifecycle.body, &mut events);
+    }
+    events.iter().for_each(|owner| add(owner));
+    fn data_calls(expr: &p::Expr, out: &mut Vec<String>) {
+        match expr {
+            p::Expr::Call { callee, args } => {
+                match callee.as_ref() {
+                    p::Expr::Ident(name) => out.push(name.clone()),
+                    p::Expr::FieldAccess { base, field } => {
+                        if let p::Expr::Ident(owner) = base.as_ref() {
+                            out.push(format!("{owner}.{field}"));
+                        }
+                    }
+                    _ => {}
+                }
+                args.iter().for_each(|arg| data_calls(arg, out));
+            }
+            p::Expr::StructLiteral(fields) => fields.iter().for_each(|f| data_calls(&f.value, out)),
+            p::Expr::Unary { expr, .. } | p::Expr::Cast { expr, .. } => data_calls(expr, out),
+            p::Expr::Binary { left, right, .. } => {
+                data_calls(left, out);
+                data_calls(right, out);
+            }
+            _ => {}
+        }
+    }
+    for group in stored_groups(module)? {
+        for case in &group.cases {
+            let mut names = Vec::new();
+            data_calls(&case.input, &mut names);
+            data_calls(&case.expected, &mut names);
+            for name in names {
+                if program.get_function(&name).is_none() {
+                    continue; // builtin, constructor or unknown: the purity check reports it
+                }
+                let qualified = program.qualify_function_name(&name);
+                if let Some((owner, _)) = qualified.split_once('.') {
+                    add(owner);
+                }
+            }
+        }
+    }
+    Ok(owners)
 }
 
 fn compare_test_groups(

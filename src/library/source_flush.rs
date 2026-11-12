@@ -23,6 +23,10 @@ pub struct SaveReceipt {
     /// (module, callee) qualifications whose name several live modules declare:
     /// the save froze today's order-dependent binding. Shown to the owner.
     pub order_dependent: Vec<(String, String)>,
+    /// Modules this save added to the source manifest (first source save).
+    pub enrolled: Vec<String>,
+    /// Manifest dependency updates and leftover files moved aside (log only).
+    pub notes: Vec<String>,
 }
 
 pub async fn flush_live_sources(
@@ -75,62 +79,35 @@ fn flush_blocking(
                 failures: vec![message],
                 qualified_call_sites: Vec::new(),
                 order_dependent: Vec::new(),
+                enrolled: Vec::new(),
+                notes: Vec::new(),
             });
+        }
+    }
+    let governed = state.is_some_and(|state| state.has_source_manifest().unwrap_or(true));
+    let super::source_save::Saved { round, enrolled, notes } = super::source_save::run(&live, state, dir, governed)?;
+    let super::source_save::Round { saved: mut saved_names, unresolved, unsaved, qualified_call_sites, order_dependent } = round;
+    let mut failures = unresolved;
+    failures.extend(unsaved);
+    if let Some(state) = state {
+        for message in &failures {
+            state.record_error(message.clone());
         }
     }
     let managed = state
         .map(LibraryState::managed_module_names)
         .unwrap_or_default();
-    let mut saved_names = Vec::new();
-    let mut failures = Vec::new();
-    let mut qualified_call_sites = Vec::new();
-    let mut order_dependent = Vec::new();
-    for name in managed.iter().cloned() {
-        let source_state = state.context("managed source state unavailable")?;
-        let pending_request = source_state.queue_source(&name)?;
-        let result = super::source_io::persist_live(&live, &name, source_state, dir);
-        match result {
-            Ok(qualified) => {
-                if let Some(ledger) = qualified {
-                    if ledger.call_sites > 0 {
-                        qualified_call_sites.push((name.clone(), ledger.call_sites));
-                    }
-                    order_dependent.extend(
-                        ledger
-                            .order_dependent
-                            .into_iter()
-                            .map(|callee| (name.clone(), callee)),
-                    );
-                }
-                let mut pending = source_state
-                    .pending_sources
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("source pending-state lock unavailable"))?;
-                // A mutation may enqueue before its CoW commit waits for
-                // our live read guard. Do not consume that later request.
-                if pending.get(&name) == Some(&pending_request) {
-                    pending.remove(&name);
-                }
-                saved_names.push(name);
-            }
-            Err(error) => {
-                let message = format!("module `{name}` remains live but source was NOT saved: {error}; preserve the session recovery checkpoint, reconcile, and restart if source changed externally");
-                if let Some(state) = state {
-                    state.record_error(message.clone());
-                }
-                failures.push(message);
-            }
-        }
-    }
     let program_snapshot = live.clone();
     drop(_transaction);
     drop(live);
     // Preserve the legacy snapshot writer, but do not hold the live Program
     // guard over unbounded legacy modules. Managed snapshot writes still refuse.
+    // Under a manifest there are no legacy files: unlisted modules were either
+    // enrolled above, reported above, or are runtime scratch.
     for module in program_snapshot
         .modules
         .iter()
-        .filter(|module| !managed.contains(&module.name))
+        .filter(|module| !governed && !managed.contains(&module.name))
     {
         match super::persist_program_module_to_dir(&program_snapshot, &module.name, state, dir) {
             Ok(()) => saved_names.push(module.name.clone()),
@@ -152,5 +129,17 @@ fn flush_blocking(
         failures,
         qualified_call_sites,
         order_dependent,
+        enrolled,
+        notes,
     })
+}
+
+/// Test-only: the single managed writer against a fixture library directory.
+#[cfg(test)]
+pub(crate) async fn flush_live_sources_to_dir_for_tests(
+    program: Arc<RwLock<ast::Program>>,
+    state: LibraryState,
+    dir: &std::path::Path,
+) -> SaveReceipt {
+    flush_live_sources_in(program, Some(state), dir.to_path_buf()).await.unwrap()
 }

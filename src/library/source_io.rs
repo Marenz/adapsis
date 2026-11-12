@@ -22,7 +22,14 @@ pub(super) fn load(
     state: &LibraryState,
 ) -> Result<BTreeSet<String>> {
     let _transaction = lock(&state.source_transaction)?;
-    let result = load_candidate(program, dir, state);
+    let result = load_candidate(program, dir, state).and_then(|mut names| {
+        // Modules that exist only in the session cache: enrol or drop (#128).
+        // Runs after the set is published and before anything can execute.
+        if lock(&state.managed_sources)?.is_some() {
+            names.extend(super::source_enrol::adopt_cached(program, dir, state)?);
+        }
+        Ok(names)
+    });
     if let Err(error) = &result {
         let message = error.to_string();
         *lock(&state.managed_error)? = Some(message.clone());
@@ -44,7 +51,7 @@ fn load_candidate(
         return Ok(BTreeSet::new());
     };
     let names: BTreeSet<_> = managed.manifest.modules.keys().cloned().collect();
-    refuse_unlisted_cache(program, &names)?;
+    refuse_unlisted_cache(program)?;
     if previous.as_ref().is_some_and(|old| {
         old.manifest
             .modules
@@ -53,32 +60,7 @@ fn load_candidate(
     }) {
         bail!("source manifest removed a managed module; restart with a reconciled recovery cache instead of hot reloading");
     }
-    let mut loaded = ast::Program::default();
-    let mut hashes = BTreeMap::new();
-    let mut stored_cases = BTreeMap::new();
-    for name in &managed.order {
-        let format = managed.manifest.modules[name].format;
-        let filename = format!("{name}.{}", format.extension());
-        let text = super::source::read_source(&dir.join(&filename))
-            .map_err(|_| anyhow::anyhow!("authoritative source `{filename}` could not be read"))?;
-        let mut catalog = dependency_catalog(&loaded, &managed, name)?;
-        let cases = decode(&mut catalog, name, &text, format).map_err(|error| {
-            let location = error.downcast_ref::<python_frontend::Diagnostic>()
-                .map(|diagnostic| format!(" at line {}, column {}", diagnostic.line, diagnostic.column))
-                .unwrap_or_default();
-            anyhow::anyhow!("authoritative source `{filename}` failed module/test validation{location}; repair it before restarting")
-        })?;
-        let module = catalog
-            .modules
-            .into_iter()
-            .find(|module| module.name == *name)
-            .context("source decoder did not produce its declared module")?;
-        loaded.modules.push(module);
-        loaded.pending_routes.extend(catalog.pending_routes);
-        loaded.rebuild_function_index();
-        hashes.insert(name.clone(), super::source_hash(&text));
-        stored_cases.insert(name.clone(), cases);
-    }
+    let DecodedSet { loaded, hashes, stored_cases } = decode_set(dir, &managed, &BTreeMap::new())?;
     managed.verify_manifest(dir)?;
     for (name, hash) in &hashes {
         let path = dir.join(format!(
@@ -114,13 +96,70 @@ fn load_candidate(
     Ok(names)
 }
 
+pub(super) struct DecodedSet {
+    pub(super) loaded: ast::Program,
+    hashes: BTreeMap<String, String>,
+    stored_cases: BTreeMap<String, Vec<parser::TestMutation>>,
+}
+
+/// Decodes every listed source in dependency order, each against its declared
+/// dependency closure only: exactly what a start does. `overlay` supplies the
+/// text of sources that are not on disk yet. Executes nothing.
+pub(super) fn decode_set(
+    dir: &Path,
+    managed: &ManagedSources,
+    overlay: &BTreeMap<String, String>,
+) -> Result<DecodedSet> {
+    let mut loaded = ast::Program::default();
+    let mut hashes = BTreeMap::new();
+    let mut stored_cases = BTreeMap::new();
+    for name in &managed.order {
+        let format = managed.manifest.modules[name].format;
+        let filename = format!("{name}.{}", format.extension());
+        let text = match overlay.get(name) {
+            Some(text) => text.clone(),
+            None => super::source::read_source(&dir.join(&filename))
+                .map_err(|_| anyhow::anyhow!("authoritative source `{filename}` could not be read"))?,
+        };
+        let mut catalog = dependency_catalog(&loaded, managed, name)?;
+        let cases = decode(&mut catalog, name, &text, format).map_err(|error| {
+            let location = error.downcast_ref::<python_frontend::Diagnostic>()
+                .map(|diagnostic| format!(" at line {}, column {}", diagnostic.line, diagnostic.column))
+                .unwrap_or_default();
+            anyhow::anyhow!("authoritative source `{filename}` failed module/test validation{location}; repair it before restarting")
+        })?;
+        let module = catalog
+            .modules
+            .into_iter()
+            .find(|module| module.name == *name)
+            .context("source decoder did not produce its declared module")?;
+        loaded.modules.push(module);
+        loaded.pending_routes.extend(catalog.pending_routes);
+        loaded.rebuild_function_index();
+        hashes.insert(name.clone(), super::source_hash(&text));
+        stored_cases.insert(name.clone(), cases);
+    }
+    Ok(DecodedSet { loaded, hashes, stored_cases })
+}
+
+/// Would a start succeed with `manifest` and the sources on disk (plus
+/// `overlay`)? Asked before every manifest commit of the writer.
+pub(super) fn would_load(
+    dir: &Path,
+    manifest: &super::source::SourceManifest,
+    overlay: &BTreeMap<String, String>,
+) -> Result<()> {
+    let trial = ManagedSources::trial(manifest.clone())?;
+    decode_set(dir, &trial, overlay).map(|_| ())
+}
+
 pub(super) fn managed_handler(handler: &str, names: &BTreeSet<String>) -> bool {
     handler
         .split_once('.')
         .is_some_and(|(owner, _)| names.contains(owner))
 }
 
-fn dependency_catalog(
+pub(super) fn dependency_catalog(
     program: &ast::Program,
     managed: &ManagedSources,
     name: &str,
@@ -140,22 +179,11 @@ fn dependency_catalog(
     Ok(catalog)
 }
 
-fn refuse_unlisted_cache(program: &ast::Program, names: &BTreeSet<String>) -> Result<()> {
-    let unlisted: Vec<_> = program
-        .modules
-        .iter()
-        .filter(|module| !names.contains(&module.name))
-        .map(|module| module.name.as_str())
-        .collect();
-    if !unlisted.is_empty() {
-        let shown = unlisted
-            .iter()
-            .take(20)
-            .map(|name| super::source::diagnostic_name(name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!("source manifest excludes {} cached module(s): {shown}; startup refused. Preserve the session recovery cache and add explicit source entries before restarting", unlisted.len());
-    }
+/// Cached top-level functions/types have no module to live in and OS mode
+/// cannot create them; a session that has them is refused (exit 78, no loop).
+/// Cached MODULES the manifest does not list are handled after the load by
+/// `source_enrol::adopt_cached`, never by a refusal.
+fn refuse_unlisted_cache(program: &ast::Program) -> Result<()> {
     if !program.functions.is_empty() || !program.types.is_empty() {
         bail!("manifest-managed startup refuses cached top-level functions/types; preserve the recovery cache and move them into explicit module sources");
     }
@@ -276,12 +304,26 @@ fn legacy_declarations(
     Ok((declarations, tests))
 }
 
-pub(super) fn persist_live(
+/// The checked text one managed module would be saved as, from the live Program.
+pub(super) struct Prepared {
+    pub(super) name: String,
+    pub(super) text: String,
+    pub(super) ledger: SaveLedger,
+    /// False when the file on disk already holds exactly this text.
+    pub(super) changed: bool,
+    filename: String,
+    loaded_hash: String,
+    managed: ManagedSources,
+}
+
+/// Prints and checks one managed module without writing anything. `None`: the
+/// name is not manifest-managed.
+pub(super) fn prepare_live(
     program: &ast::Program,
     name: &str,
     state: &LibraryState,
     dir: &Path,
-) -> Result<Option<SaveLedger>> {
+) -> Result<Option<Prepared>> {
     state.check_source_available()?;
     let Some(managed) = lock(&state.managed_sources)?.clone() else {
         if super::source::manifest_present(dir)? {
@@ -302,38 +344,9 @@ pub(super) fn persist_live(
     catalog.modules.push(module.clone());
     catalog.rebuild_function_index();
     check_catalog_budget(&catalog)?;
-    let (python, ledger) = python_frontend::print_python_module_with_ledger(&catalog, name)
-        .map_err(|diagnostic| anyhow::anyhow!("module `{name}` cannot be completely serialized as Python (line {}, column {}); source unchanged. Keep the session recovery checkpoint and repair unsupported members/tests before retrying", diagnostic.line, diagnostic.column))?;
-    let (text, save_ledger) = match spec.format {
-        SourceFormat::Python => {
-            // The printer proved each qualification against the closed catalog.
-            // The stored bare call ran against the WHOLE live program, so the
-            // proof must also hold there, or qualification could change which
-            // function runs.
-            for callee in &ledger.names {
-                let own = module.functions.iter().find(|f| &f.name == callee);
-                let resolved = program.get_function(callee);
-                if !matches!((own, resolved), (Some(own), Some(resolved)) if std::ptr::eq(own.as_ref(), resolved))
-                {
-                    bail!("module `{name}`: a bare local call resolves to another declaration in the live program; qualification would change runtime behaviour, source unchanged");
-                }
-            }
-            // Classify against the WHOLE live program (the catalog may hide
-            // modules that also declare a name): these freeze today's binding.
-            let order_dependent = ledger
-                .names
-                .iter()
-                .filter(|callee| python_frontend::declaration_count(program, callee) > 1)
-                .cloned()
-                .collect();
-            (
-                python,
-                SaveLedger {
-                    call_sites: ledger.call_sites,
-                    order_dependent,
-                },
-            )
-        }
+    let (python, python_ledger) = checked_python(program, &catalog, module, name, spec.format)?;
+    let (text, ledger) = match spec.format {
+        SourceFormat::Python => (python, python_ledger),
         // legacy_ax persists the reconstructed .ax, which keeps bare calls
         // verbatim: no qualification reaches disk, so nothing needs re-proof.
         SourceFormat::LegacyAx => {
@@ -342,13 +355,21 @@ pub(super) fn persist_live(
             (text, SaveLedger::default())
         }
     };
-    let hash = state.file_hash(name).context(
+    let loaded_hash = state.file_hash(name).context(
         "managed source was never successfully loaded; reconcile and restart before saving",
     )?;
     let filename = format!("{name}.{}", spec.format.extension());
-    super::source::write_checked(dir, &filename, &text, &hash, &managed)?;
-    state.record_file_hash(name, &text);
-    Ok(Some(save_ledger))
+    let changed = super::source_hash(&text) != loaded_hash;
+    Ok(Some(Prepared { name: name.to_string(), text, ledger, changed, filename, loaded_hash, managed }))
+}
+
+/// Writes a prepared module (temporary file, checks, rename, directory sync).
+/// Also run for unchanged text: it verifies that the file on disk is still the
+/// one this process loaded or wrote.
+pub(super) fn commit_live(prepared: &Prepared, state: &LibraryState, dir: &Path) -> Result<()> {
+    super::source::write_checked(dir, &prepared.filename, &prepared.text, &prepared.loaded_hash, &prepared.managed)?;
+    state.record_file_hash(&prepared.name, &prepared.text);
+    Ok(())
 }
 
 /// Proven-qualification facts of one managed save.
@@ -357,6 +378,48 @@ pub(super) struct SaveLedger {
     pub(super) call_sites: usize,
     /// Qualified callees declared by several live modules (binding frozen).
     pub(super) order_dependent: Vec<String>,
+}
+
+/// Checked Python for one module of the live Program: complete print, round
+/// trip, and the proof that every qualified bare call still binds to the same
+/// function in the WHOLE live Program (the catalog may omit modules).
+pub(super) fn checked_python(
+    program: &ast::Program,
+    catalog: &ast::Program,
+    module: &ast::Module,
+    name: &str,
+    format: SourceFormat,
+) -> Result<(String, SaveLedger)> {
+    let (python, ledger) = python_frontend::print_python_module_with_ledger(catalog, name).map_err(|diagnostic| {
+        if python_frontend::is_nesting_refusal(&diagnostic) {
+            // The printer parenthesizes every binary operation, which roughly
+            // doubles the depth of an operator chain (#140). Everything the
+            // submission guard admits fits; this is reached by deeper `.ax` edits.
+            let limit = python_frontend::MAX_STORED_NESTING;
+            anyhow::anyhow!("module `{name}` cannot be saved: the printed form of an expression near line {} exceeds the nesting limit of {limit} levels for stored source (printing adds parentheses, so about {} chained operators is the most that can be saved). Split the expression into typed local bindings or helper functions; source unchanged", diagnostic.line, (limit - 1) / 2)
+        } else {
+            anyhow::anyhow!("module `{name}` cannot be completely serialized as Python (line {}, column {}); source unchanged. Keep the session recovery checkpoint and repair unsupported members/tests before retrying", diagnostic.line, diagnostic.column)
+        }
+    })?;
+    if format == SourceFormat::LegacyAx {
+        // The reconstructed .ax keeps bare calls verbatim: nothing to re-prove.
+        return Ok((python, SaveLedger::default()));
+    }
+    for callee in &ledger.names {
+        let own = module.functions.iter().find(|f| &f.name == callee);
+        let resolved = program.get_function(callee);
+        if !matches!((own, resolved), (Some(own), Some(resolved)) if std::ptr::eq(own.as_ref(), resolved)) {
+            bail!("module `{name}`: a bare local call resolves to another declaration in the live program; qualification would change runtime behaviour, source unchanged");
+        }
+    }
+    // Names several live modules declare: the save freezes today's binding.
+    let order_dependent = ledger
+        .names
+        .iter()
+        .filter(|callee| python_frontend::declaration_count(program, callee) > 1)
+        .cloned()
+        .collect();
+    Ok((python, SaveLedger { call_sites: ledger.call_sites, order_dependent }))
 }
 
 pub(super) fn verify_live_policy(state: &LibraryState, dir: &Path) -> Result<()> {

@@ -19,11 +19,19 @@ use crate::validator;
 
 mod source;
 mod source_io;
+mod source_enrol;
+mod source_policy;
+mod source_save;
+pub use source_policy::{refuse_module_creation, refuse_module_removal, refuse_unsupported_operations, EXIT_SOURCE_REFUSED};
 mod source_flush;
 mod source_verify;
 pub use source_flush::{flush_live_sources, SaveReceipt};
 #[cfg(test)]
+pub(crate) use source_flush::flush_live_sources_to_dir_for_tests;
+#[cfg(test)]
 mod source_tests;
+#[cfg(test)]
+mod source_enrol_tests;
 
 /// A module load error — pairs the module/file name with the error message.
 #[derive(Debug, Clone)]
@@ -52,6 +60,8 @@ pub struct LibraryState {
     /// Lock order is live Program read guard -> this mutex -> source metadata.
     source_transaction: Arc<Mutex<()>>,
     pending_sources: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Cached modules without source that startup removed (recovery file kept).
+    dropped_at_startup: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl LibraryState {
@@ -65,6 +75,7 @@ impl LibraryState {
             managed_error: Arc::new(Mutex::new(None)),
             source_transaction: Arc::new(Mutex::new(())),
             pending_sources: Arc::new(Mutex::new(BTreeMap::new())),
+            dropped_at_startup: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -166,6 +177,12 @@ impl LibraryState {
         if let Ok(mut error) = self.managed_error.lock() { *error = Some(message.clone()); }
         self.record_load_error("source-library".to_string(), message.clone());
         self.record_error(message);
+    }
+
+    /// Cached modules startup dropped because they had no source and could not
+    /// be saved. Their cached routes must not be re-registered.
+    pub fn dropped_module_names(&self) -> BTreeSet<String> {
+        self.dropped_at_startup.lock().map(|names| names.clone()).unwrap_or_default()
     }
 
     pub fn pending_source_names(&self) -> BTreeSet<String> {
@@ -1095,10 +1112,15 @@ pub fn persist_affected_modules(
     let mut results = Vec::new();
     for name in module_names {
         if let Some(state) = lib_state.filter(|state| state.managed_module_names().contains(name)) {
-            match state.queue_source(name) {
-                Ok(_) => results.push((format!("module `{name}` accepted in memory; authoritative source save is pending live-program writeback/autosave (not yet durable)"), true)),
-                Err(error) => results.push((error.to_string(), false)),
+            match (state.queue_source(name), source_enrol::cycle_notice(program, state, name)) {
+                (Err(error), _) => results.push((error.to_string(), false)),
+                (Ok(_), Some(cycle)) => results.push((source_policy::cycle_acknowledgement(name, &cycle), false)),
+                (Ok(_), None) => results.push((format!("module `{name}` accepted in memory; authoritative source save is pending live-program writeback/autosave (not yet durable)"), true)),
             }
+            continue;
+        }
+        if let Some(state) = lib_state.filter(|state| state.has_source_manifest().unwrap_or(true)) {
+            results.extend(source_policy::queue_new_module(program, state, name));
             continue;
         }
         if let Some(module) = program.modules.iter().find(|m| &m.name == name) {

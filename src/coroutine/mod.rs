@@ -1790,6 +1790,7 @@ impl CoroutineHandle {
 
                 let operations = crate::parser::parse(&code)
                     .map_err(|e| anyhow::anyhow!("mutate: parse error: {e}"))?;
+                crate::library::refuse_unsupported_operations(library_policy_state().as_ref(), &program, &operations, false)?;
 
                 let mut applied = 0usize;
                 let mut messages = Vec::new();
@@ -1900,6 +1901,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("module_remove: could not acquire program write lock"))?;
 
                 if let Some(pos) = program.modules.iter().position(|m| m.name == name) {
+                    crate::library::refuse_module_removal(library_policy_state().as_ref(), &name)?;
                     program.modules.remove(pos);
                     program.rebuild_function_index();
                     crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
@@ -1940,6 +1942,9 @@ impl CoroutineHandle {
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("move_symbols: could not acquire program write lock"))?;
 
+                if !program.modules.iter().any(|m| m.name == target_module) {
+                    crate::library::refuse_module_creation(library_policy_state().as_ref(), &target_module)?;
+                }
                 let result = crate::validator::apply_move(&mut program, &names, &target_module)?;
                 // Update read-only snapshot
                 crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
@@ -2347,6 +2352,7 @@ impl CoroutineHandle {
                 if program.modules.iter().any(|m| m.name == name) {
                     return Ok(Some(Value::string(format!("module '{name}' already exists"))));
                 }
+                crate::library::refuse_module_creation(library_policy_state().as_ref(), &name)?;
                 // Create empty module
                 let code = format!("+module {name}");
                 let operations = crate::parser::parse(&code)
@@ -3039,3 +3045,10 @@ impl CoroutineHandle {
 
 #[cfg(test)]
 mod tests;
+
+/// The library policy state of the session this thread serves, if installed.
+/// Without one, `library::refuse_*` falls back to the library directory.
+fn library_policy_state() -> Option<crate::library::LibraryState> {
+    crate::shared_state::get_shared_meta()
+        .and_then(|meta| meta.lock().ok().and_then(|meta| meta.library_state.clone()))
+}

@@ -1499,7 +1499,16 @@ async fn main() -> Result<()> {
             let session_path = std::path::Path::new(&session);
             let mut sess = if session_path.exists() {
                 println!("Loading session from {session}...");
-                let s = session::Session::load(session_path)?;
+                let s = match session::Session::load(session_path) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        // A refused start like the source policy's: the same
+                        // file fails again, so the unit must not restart on it.
+                        eprintln!("Error: startup refused: session file {session} cannot be read: {error:#}");
+                        eprintln!("The file was not changed and nothing was started. Restore the last backup copy of this file (the runtime keeps none; see the operator's backup), or move the file aside to start with an empty session, then start the service again.");
+                        std::process::exit(library::EXIT_SOURCE_REFUSED);
+                    }
+                };
                 println!(
                     "Loaded: revision {}, {} mutations",
                     s.meta.revision,
@@ -1516,8 +1525,15 @@ async fn main() -> Result<()> {
 
             // Auto-load persistent module library (~/.config/adapsis/modules/)
             let lib_state = library::load_module_library(&mut sess.program);
-            lib_state.require_authoritative_sources()?;
-            let managed_names = lib_state.managed_module_names();
+            if let Err(error) = lib_state.require_authoritative_sources() {
+                // A refused start exits with a code the unit does not restart
+                // on: the same files would refuse again every 10 seconds.
+                eprintln!("Error: {error:?}");
+                std::process::exit(library::EXIT_SOURCE_REFUSED);
+            }
+            let mut managed_names = lib_state.managed_module_names();
+            // Cached modules startup dropped must not keep their cached routes.
+            managed_names.extend(lib_state.dropped_module_names());
             // The authoritative set has fully validated. Only now retire cached
             // managed routes before draining its new registration batch once.
             sess.runtime.http_routes.retain(|route| !route.handler_fn.split_once('.')
@@ -2437,6 +2453,10 @@ async fn main() -> Result<()> {
                             for (module, callee) in &receipt.order_dependent {
                                 eprintln!("[save] module `{module}`: bare `{callee}` is declared by several modules; save froze today's order-dependent binding to `{module}.{callee}`");
                             }
+                            for module in &receipt.enrolled {
+                                eprintln!("[save] module `{module}` added to the source manifest with its first source file");
+                            }
+                            for note in &receipt.notes { eprintln!("[save] {note}"); }
                             for message in receipt.failures { eprintln!("[save] {message}"); }
                         }
                         Err(error) => {

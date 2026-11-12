@@ -186,9 +186,44 @@ response has no Content-Disposition header.
 - Issue #121 opt-in source library: `library-sources.json` explicitly maps module
   names to `python`/transitional `legacy_ax` plus a closed acyclic dependency set.
   Active manifests whitelist source files: unlisted files are diagnosed without
-  reading/applying them, unlisted saves refuse, and unlisted cached modules or
+  reading/applying them, detached unlisted snapshot saves refuse, and cached
   top-level members refuse startup with recovery preserved. No-manifest legacy
   behavior is unchanged; unreadable policy is never treated as absent.
+  **Run-time modules (#128), `library/source_enrol.rs`:** the manifest follows the
+  live Program. `flush_live_sources` enrols every unlisted live module as `python`
+  and keeps every listed module's dependency set equal to what its code references
+  (`python_frontend::module_dependencies`); equal sets are never rewritten. Write
+  order: source, manifest (commit point), session. Every manifest commit must
+  load with the files on disk at that moment: dependencies are only ADDED before
+  a module's source save (`grow`) and only REMOVED after it (`shrink`), and
+  `source_io::would_load` decodes the on-disk sources against the new manifest
+  before each commit (a change that fails stays pending). One save runs
+  grow/save/shrink at most twice. Do not write the manifest from anywhere else.
+  The source files of one save are separate renames too: `source_flush::save_managed`
+  prints everything first, then writes a changed file only when the set on disk
+  with that one file replaced still loads (dependencies first, the rest retried
+  after every write). A module whose new text needs another module that could not
+  be saved stays pending and the message names it. Remaining gap: functions moved
+  between two modules in BOTH directions have no safe order; those files are
+  written anyway and logged (a crash between the renames refuses the next start,
+  exit 78). A save that changes no file decodes nothing. `RunToolScratch` and `__` names
+  are never enrolled. Unprintable modules and cross-module cycles are not enrolled
+  and are reported on every save (the cycle text names both modules and how to
+  break it, and the closing mutation's acknowledgement carries it as an error).
+  At startup a session-cached unlisted module is adopted if it prints, otherwise
+  dropped into `<library>/recovery/<Module>-<ms>.json` (one journal entry + one log
+  line each); leftover unlisted files are moved aside as `X.py.orphan-<ms>`, never
+  deleted. Under a manifest a module is created by a Python mutation only:
+  `library::refuse_unsupported_operations` (in `Session::apply_operations_async`,
+  `AgentBranch::apply_async`, and the `mutate`/`module_create`/`move_symbols`/
+  `module_remove` builtins) refuses Adapsis-source creation and whole-module
+  removal (#126) before any state change. A new mutation entry point that can
+  create or remove a module must call it. A refused start exits with code 78
+  (`library::EXIT_SOURCE_REFUSED`); the unit needs `RestartPreventExitStatus=78`.
+  An unreadable session file at `adapsis os` startup is refused the same way
+  (exit 78, file named and untouched), with or without a manifest.
+  Known residual: `!sandbox discard` after an enrolment leaves a listed module
+  that is not live (same state as #126).
   Retained manifest presence includes empty sets: deletion/dangling links never
   restore legacy reload/writes in-process. Source-root create/inspection/enumeration
   failures block startup before cached code or initialization can execute.
@@ -574,12 +609,41 @@ gateway resolves via `model_aliases` or `virtual_models`.
   preserving future history. Reads/evaluation/tests remain available. No branch
   lineage or future-history deletion is invented; #122 retains this residual.
 - Python replay source is capped at 1 MiB before copying it into a record. Typed
-  persistence work checks use 96 levels, 200,000 JSON-value nodes and 16 MiB text;
+  persistence work checks use 2048 JSON levels (`replay/limits.rs::MAX_JSON_DEPTH`),
+  200,000 JSON-value nodes and 16 MiB text;
   prospective mutation checks budget both old/candidate module states before
   application (retest may combine them). These are structural-work budgets after
   deserialization, not a cap on whole-session file allocation or hostile-file
-  hardening. Keep serde_json's default recursion limit enabled. Unknown versions,
+  hardening. Unknown versions,
   malformed payloads and scope mismatches fail closed without private payload text.
+- **One nesting limit (2026-11-12).** Whatever the submission guard accepts (100
+  source levels) must be storable, replayable, readable again and durable as
+  managed source; no layer behind the guard may have a lower limit of its own.
+  MEASURED: a declaration at 100 source levels is up to 408 JSON levels deep
+  (nested blocks and `elif` chains: 4 JSON levels per source level; operators 211,
+  calls 311) and its replay record 409. The old depth budget of 96 refused Python
+  mutations above 21 `elif` branches, and serde_json's default recursion limit
+  (127) made the SESSION FILE unreadable above 28 (written fine, next start
+  failed; also reachable through `.ax` edits and managed files).
+  - **Session reader, `session/deep_read.rs`:** `Session::load` (also used by
+    `memory-migrate`) scans the file's container depth with a loop, refuses more
+    than 4096 levels with a clean error, and deserializes with the recursion limit
+    disabled on a dedicated 64 MiB thread (MEASURED at most 619 bytes of stack per
+    JSON level; the cap needs about 2.5 MiB). Needs serde_json's `unbounded_depth`
+    feature. **Every other deserializer keeps serde_json's default recursion
+    limit** (`json_valid`, `json_get`, `json_kind`, `json_array_len`, HTTP bodies,
+    provider responses, typed payloads, the manifest): the default exists for
+    untrusted JSON, the session file is this process's own output. Do not call
+    `disable_recursion_limit` anywhere else, and do not read a session with plain
+    `serde_json::from_str`.
+  - Not changed: `Session::save` writes pretty JSON, whose indentation grows with
+    depth. One 98-branch `elif` function is 64 KB compact and 3.1 MB pretty, and
+    every Python replay checkpoint of that module repeats it (session-size issue).
+  - Tests: `cargo test --release storage_depth` (six shapes at the limit through
+    native mutate/test/evaluate/inspect, session save, read in a fresh process,
+    rewind, managed save, startup load; the deepest managed file per shape on
+    every evaluation path; all on 2 MiB stacks), `session_reader`,
+    `every_other_json_reader`, `typed_record_depth_budget`, `stored_source`.
 
 - Python test submissions group cases by exact lowered target (#118) before
   canonical emission. Targets execute in first-seen order (interleaved targets
@@ -664,7 +728,21 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
   literal (f-strings are never lowered; this protects the parser only). Refusals carry
   line and column. Repository sources reach 13 levels; `tools/cad_prepare.py` (ordinary
   Python) 49. Do NOT add a second parse entry point, and do not raise the limit without
-  re-measuring on a 2 MiB stack. Tests: `cargo test --release nesting`. The legacy `.ax`
+  re-measuring on a 2 MiB stack. Tests: `cargo test --release nesting`.
+  **Stored source has its own limit, `MAX_STORED_NESTING` = 250**, in force only
+  inside a `nesting::StoredSource` scope (thread-local, restored on drop and on
+  unwinding): the whole-module loader/printer round trip (`lower_python_module`:
+  managed files and the text the checked printer just produced) and the printers
+  behind source inspection. Reason: the printer parenthesizes every binary
+  operation and `not` operand and qualifies calls, so the printed form of a
+  function accepted at 100 scans at up to 199 (MEASURED); with one limit such a
+  function could not be saved or inspected. Every submission path keeps 100. A
+  start prints each module it loads, so a hand-edited managed file is accepted
+  only if its PRINTED form fits 250: blocks and `elif` chains up to real depth
+  250, expression shapes about 125. Those depths run on every evaluation path on
+  2 MiB stacks (`api/storage_depth_tests.rs`). Never enter the scope for text a
+  model or a client supplied. Bring the limit down when the printer emits minimal
+  parentheses (#140). The legacy `.ax`
   parser has no such guard (it is being removed, DESIGN.md L1/L2). Native tool arguments
   are capped anyway (`source` 32,000 bytes, arguments 64,000).
 - **String builtins use byte offsets and never split a character.** `substring` moves an
