@@ -51,6 +51,12 @@ impl Unsaved {
         Self { kind, detail }
     }
 
+    /// The writer returned an error instead of a receipt (it did not run to
+    /// the end; nothing "continues").
+    pub fn writer_failed() -> Self {
+        Self::new(UnsavedKind::Other, "the source writer failed before it could save anything")
+    }
+
     pub fn not_confirmed() -> Self {
         Self::new(UnsavedKind::NotConfirmed, format!("the save was not confirmed within {} s and continues in the background", SAVE_WAIT_MS / 1000))
     }
@@ -149,9 +155,6 @@ pub(super) fn classify(error: &anyhow::Error, default: UnsavedKind) -> Unsaved {
 pub struct SaveStatus {
     record: Arc<Mutex<BTreeMap<String, Unsaved>>>,
     dirty: Arc<Mutex<BTreeSet<String>>>,
-    /// Turns (by the address of their completion baseline) whose `finish` was
-    /// refused once for an unsaved edit. Bounded; an entry leaves on acceptance.
-    refused_turns: Arc<Mutex<Vec<usize>>>,
     wait_ms: Arc<AtomicU64>,
     /// The directory this library was loaded from (the writer saves there).
     dir: Arc<Mutex<Option<std::path::PathBuf>>>,
@@ -165,7 +168,6 @@ impl Default for SaveStatus {
         Self {
             record: Arc::default(),
             dirty: Arc::default(),
-            refused_turns: Arc::default(),
             wait_ms: Arc::new(AtomicU64::new(SAVE_WAIT_MS)),
             dir: Arc::default(),
             #[cfg(test)]
@@ -200,6 +202,11 @@ impl LibraryState {
 
     pub fn has_unconfirmed_saves(&self) -> bool {
         !guard(&self.saves.dirty).is_empty()
+    }
+
+    /// Is the save of one of `names` still unconfirmed?
+    pub fn has_unconfirmed(&self, names: &BTreeSet<String>) -> bool {
+        guard(&self.saves.dirty).iter().any(|name| names.contains(name))
     }
 
     pub fn save_wait(&self) -> std::time::Duration {
@@ -244,23 +251,6 @@ impl LibraryState {
             record.insert(name.clone(), cause.clone());
         }
         dirty.clear();
-    }
-
-    /// True the first time it is asked for this turn; false afterwards.
-    pub fn first_finish_refusal(&self, turn: usize) -> bool {
-        let mut turns = guard(&self.saves.refused_turns);
-        if turns.contains(&turn) {
-            return false;
-        }
-        if turns.len() >= 16 {
-            turns.remove(0);
-        }
-        turns.push(turn);
-        true
-    }
-
-    pub fn finish_accepted(&self, turn: usize) {
-        guard(&self.saves.refused_turns).retain(|known| *known != turn);
     }
 
     #[cfg(test)]

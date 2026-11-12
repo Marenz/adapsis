@@ -395,11 +395,21 @@ and the self-trigger start the save without waiting. The debounced autosave
 remains as the backstop and as the only writer of the session file.
 
 **Finishing with an unsaved edit.** `finish` (and legacy `!done`) is refused once
-per turn when a module that this turn changed is unsaved for a reason the model
-can fix; the refusal lists module, reason and remedy. A second `finish`, or a
-cause that is not the model's, is accepted, and the visible reply ends with one
-runtime line: `[Runtime: not saved to source: X (<reason>). The change is live
-only until the next restart.]`. Unsaved modules of earlier turns do not refuse.
+per turn when a module that this turn's own calls changed is unsaved for a reason
+the model can fix; the refusal lists module, reason and remedy. A second
+`finish`, or a cause that is not the model's, is accepted, and the visible reply
+ends with one runtime line: `[Runtime: not saved to source: X (<reason>). The
+change is live only until the next restart.]`. Unsaved modules of earlier turns
+or of other conversations do not refuse and are not mentioned; a speaker who
+cannot write is never refused; a module the speaker cannot read is never named.
+
+**The wait and other conversations.** The call commits its working set
+immediately before it waits for the writer and does not write it back again
+afterwards, so what other conversations write during the wait (a poll cursor, a
+message) is not overwritten by this call. An I/O failure (disk, permissions, a
+manifest changed on disk) is reported for exactly the affected modules as an
+environment cause, also when it happens while a new module is enrolled or a new
+dependency is recorded.
 
 **Where it shows.** While something is unsaved, `?library`, `inspect library` and
 the runtime tail of write-capable speakers carry one line, `Source NOT saved

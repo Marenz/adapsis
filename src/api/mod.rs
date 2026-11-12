@@ -48,6 +48,7 @@ mod working_set;
 pub(crate) use working_set::WorkingSet;
 mod source_save;
 pub(crate) use source_save::start_save as start_source_save;
+pub(crate) use source_save::TurnSaves;
 pub use llm_handlers::{ask, ask_stream, handle_llm_takeover};
 use llm_handlers::EventSender;
 
@@ -156,6 +157,8 @@ pub struct AppConfig {
     /// handlers, route handlers and the autonomous loop; those builtins refuse
     /// there rather than guess.
     pub turn: Option<crate::coroutine::TurnIdentity>,
+    /// Per-turn save state (#146); fresh for every conversational turn.
+    pub(crate) turn_saves: TurnSaves,
 }
 
 impl AppConfig {

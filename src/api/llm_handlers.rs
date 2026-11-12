@@ -387,17 +387,34 @@ async fn compact_context_if_needed(
 /// per-function copy-on-write merge (issue #9), falling back to a full
 /// overwrite if no base snapshot was captured. Holds the program write lock
 /// only for the brief merge.
-async fn write_back_takeover_program(
+/// Write one takeover block's working set back to the shared tiers (program:
+/// per-function CoW merge, issue #9). Skipped when the executor already
+/// committed it before waiting for a source save: this snapshot is then older
+/// than what other conversations wrote during the wait (#146).
+async fn write_back_takeover(
     program: &std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
-    session: &WorkingSet,
+    runtime: &crate::session::SharedRuntime,
+    meta: &crate::session::SharedMeta,
+    session: WorkingSet,
 ) {
-    let mut live = program.write().await;
-    match &session.base_program {
-        Some(base) => {
-            live.merge_changed_from(base, &session.program);
-        }
-        None => *live = session.program.clone(),
+    if session.take_committed() {
+        return;
     }
+    {
+        let mut live = program.write().await;
+        match &session.base_program {
+            Some(base) => {
+                live.merge_changed_from(base, &session.program);
+            }
+            None => *live = session.program.clone(),
+        }
+    }
+    if let Ok(mut rt) = runtime.write() {
+        rt.shared_vars.replace_from(session.runtime.shared_vars.snapshot());
+        rt.http_routes = session.runtime.http_routes.clone();
+        rt.failure_history = session.runtime.failure_history.clone();
+    }
+    *meta.lock().unwrap() = session.meta;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -558,6 +575,7 @@ pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
+    let config = config.for_new_turn();
     let context_lock = takeover_context_lock("main");
     let _context_guard = context_lock.lock().await;
     config.install_handler_locals();
@@ -804,6 +822,7 @@ pub async fn ask_stream(
 ) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
     use axum::response::sse::KeepAlive;
     use tokio::sync::mpsc;
+    let config = config.for_new_turn();
 
     let (raw_tx, mut rx) = mpsc::channel::<serde_json::Value>(100);
 
@@ -1408,6 +1427,8 @@ pub async fn handle_llm_takeover(
             may_write: authority.may_write,
             guest_tools: guest_tools.clone(),
         }),
+        // One takeover = one turn.
+        turn_saves: Default::default(),
     };
 
     // Native protocol decision (#85) uses the same pinned, intersected
@@ -1711,23 +1732,9 @@ pub async fn handle_llm_takeover(
             if has_agent {
                 eprintln!("[llm_takeover:{context}] !agent detected, spawning via execute_code and breaking");
                 let base_program = program.read().await.clone();
-                let mut session = WorkingSet {
-                    program: base_program.clone(),
-                    base_program: Some(base_program),
-                    runtime: runtime.read().unwrap().clone(),
-                    meta: meta.lock().unwrap().clone(),
-                    sandbox: None,
-                    source_checkpoint: None,
-                };
+                let mut session = WorkingSet::from_parts(base_program, runtime.read().unwrap().clone(), meta.lock().unwrap().clone());
                 execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
-                // Write back mutations (per-function CoW merge, issue #9)
-                write_back_takeover_program(&program, &session).await;
-                if let Ok(mut rt) = runtime.write() {
-                    rt.shared_vars.replace_from(session.runtime.shared_vars.snapshot());
-                    rt.http_routes = session.runtime.http_routes.clone();
-                    rt.failure_history = session.runtime.failure_history.clone();
-                }
-                *meta.lock().unwrap() = session.meta;
+                write_back_takeover(&program, &runtime, &meta, session).await;
                 tmp_config.notify_save();
                 break;
             }
@@ -1735,24 +1742,10 @@ pub async fn handle_llm_takeover(
 
         // Execute code inline
         let base_program = program.read().await.clone();
-        let mut session = WorkingSet {
-            program: base_program.clone(),
-            base_program: Some(base_program),
-            runtime: runtime.read().unwrap().clone(),
-            meta: meta.lock().unwrap().clone(),
-            sandbox: None,
-            source_checkpoint: None,
-        };
+        let mut session = WorkingSet::from_parts(base_program, runtime.read().unwrap().clone(), meta.lock().unwrap().clone());
         let exec_result = execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
 
-        // Write back mutations to shared state (per-function CoW merge, issue #9)
-        write_back_takeover_program(&program, &session).await;
-        if let Ok(mut rt) = runtime.write() {
-            rt.shared_vars.replace_from(session.runtime.shared_vars.snapshot());
-            rt.http_routes = session.runtime.http_routes.clone();
-            rt.failure_history = session.runtime.failure_history.clone();
-        }
-        *meta.lock().unwrap() = session.meta;
+        write_back_takeover(&program, &runtime, &meta, session).await;
         tmp_config.notify_save();
 
         if exec_result.done_accepted && !exec_result.has_errors {

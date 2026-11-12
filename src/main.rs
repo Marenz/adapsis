@@ -2348,6 +2348,7 @@ async fn main() -> Result<()> {
                 access_level: access_level_for_config,
                 permission_config,
                 turn: None,
+                turn_saves: Default::default(),
             };
 
             // Clone tier handles before config is moved into the router

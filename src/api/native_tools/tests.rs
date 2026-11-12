@@ -135,6 +135,7 @@ fn config_for(
         access_level,
         permission_config: Arc::new(perm),
         turn: None,
+        turn_saves: Default::default(),
     }
 }
 

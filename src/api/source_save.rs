@@ -12,6 +12,8 @@
 //! metadata). The conversation's turn lock is the caller's and stays held, as
 //! it is across model calls.
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::{AppConfig, WorkingSet};
 use crate::ast::Program;
@@ -21,11 +23,60 @@ use crate::permissions::PermissionLevel;
 /// (result line, is it good news).
 pub(super) type SaveLines = Vec<(String, bool)>;
 
+/// What ONE conversational turn did to module sources. A fresh value belongs
+/// to every turn (`AppConfig::for_new_turn`, and the takeover's own config); the
+/// clones a turn makes of its config share it.
+#[derive(Clone, Default)]
+pub struct TurnSaves(Arc<TurnSavesInner>);
+
+#[derive(Default)]
+struct TurnSavesInner {
+    /// Modules this turn's own calls changed. Never derived from the live
+    /// Program: other conversations change it while this turn runs.
+    changed: Mutex<BTreeSet<String>>,
+    /// `finish` was refused once for an unsaved edit. Never reset in a turn.
+    refused: AtomicBool,
+}
+
+impl TurnSaves {
+    fn record(&self, names: &BTreeSet<String>) {
+        self.0.changed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(names.iter().cloned());
+    }
+
+    fn changed(&self) -> BTreeSet<String> {
+        self.0.changed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// True exactly once per turn.
+    fn first_refusal(&self) -> bool {
+        !self.0.refused.swap(true, Ordering::SeqCst)
+    }
+}
+
+/// End of one executor call: its save lines, and for a requested finish the
+/// gate's decision.
+#[derive(Default)]
+pub(super) struct CallSave {
+    pub(super) lines: SaveLines,
+    /// Refuse this finish (at most once per turn).
+    pub(super) refusal: Option<String>,
+    /// Runtime line for the visible reply when finish is accepted although a
+    /// module this turn changed is not saved.
+    pub(super) notice: Option<String>,
+}
+
 fn governed(state: Option<&LibraryState>) -> Option<LibraryState> {
     state.filter(|state| state.has_source_manifest().unwrap_or(true)).cloned()
 }
 
 impl AppConfig {
+    /// Every conversational turn starts here (HTTP ask, streaming ask; the
+    /// takeover builds its own config). A turn must not share this state.
+    pub(super) fn for_new_turn(mut self) -> Self {
+        self.turn_saves = TurnSaves::default();
+        self
+    }
+
     /// The library state when a source manifest governs the library.
     pub(super) fn governed_library(&self) -> Option<LibraryState> {
         governed(self.meta.lock().unwrap().library_state.as_ref())
@@ -36,22 +87,71 @@ impl AppConfig {
         self.permission_config.resolve(self.access_level, &model, module) >= PermissionLevel::Read
     }
 
-    /// Commit the working set and save the modules it changed since the last
-    /// report. Returns nothing when no module changed (no flush happens then).
-    pub(super) async fn save_changed_sources(&self, ws: &mut WorkingSet) -> SaveLines {
+    fn speaker_may_write(&self) -> bool {
+        let model = self.llm_model.read().unwrap().clone();
+        self.permission_config.authority(self.access_level, &model).may_write
+            && self.turn.as_ref().is_none_or(|turn| turn.may_write && turn.guest_tools.is_none())
+    }
+
+    /// The single place where an executor call waits for a source save. The
+    /// working set is committed immediately BEFORE the wait and marked
+    /// (`commit_before_wait`, one function for both), so the
+    /// caller's write-back after the call is skipped: no snapshot taken before
+    /// the wait is written back after it. Nothing touches the working set
+    /// during the wait.
+    ///
+    /// Waits when this call changed a module, or when a finish is requested
+    /// while a save of one of THIS turn's modules is still unconfirmed. Another
+    /// conversation's unsaved or unconfirmed modules never make this turn wait.
+    pub(super) async fn save_and_gate(&self, ws: &mut WorkingSet, finish_requested: bool, conversational: bool) -> CallSave {
+        let mut out = CallSave::default();
         let Some(state) = governed(ws.meta.library_state.as_ref()) else {
-            return Vec::new();
+            return out;
         };
-        let Some(reference) = ws.source_checkpoint.as_ref().or(ws.base_program.as_ref()) else {
-            return Vec::new();
+        let changed = match ws.source_checkpoint.as_ref().or(ws.base_program.as_ref()) {
+            Some(reference) => Program::changed_module_names(reference, &ws.program),
+            None => BTreeSet::new(),
         };
-        let changed = Program::changed_module_names(reference, &ws.program);
-        if changed.is_empty() {
-            return Vec::new();
+        self.turn_saves.record(&changed);
+        let mine = self.turn_saves.changed();
+        if !changed.is_empty() || (finish_requested && state.has_unconfirmed(&mine)) {
+            self.commit_before_wait(ws).await;
+            ws.source_checkpoint = Some(ws.program.clone());
+            out.lines = self.save_modules(&state, changed).await;
         }
-        self.write_back_working_set(ws).await;
-        ws.source_checkpoint = Some(ws.program.clone());
-        self.save_modules(&state, changed).await
+        if finish_requested && conversational {
+            self.finish_gate(&state, &mine, &mut out);
+        }
+        out
+    }
+
+    /// Refused at most once per turn, only for a speaker who may write, and
+    /// only when a module this turn's own calls changed is unsaved for a reason
+    /// the model can fix. A cause that is not the model's (disk, external edit,
+    /// unconfirmed save) is never refused. Neither text names a module the
+    /// speaker cannot read.
+    fn finish_gate(&self, state: &LibraryState, mine: &BTreeSet<String>, out: &mut CallSave) {
+        let record = state.unsaved();
+        let unsaved: BTreeMap<&String, &Unsaved> = record.iter().filter(|(name, _)| mine.contains(*name)).collect();
+        if unsaved.is_empty() {
+            return;
+        }
+        let readable: BTreeMap<&String, &Unsaved> = unsaved.iter().filter(|(name, _)| self.may_read(name)).map(|(name, entry)| (*name, *entry)).collect();
+        if self.speaker_may_write() && readable.keys().any(|name| fixable(&record, name)) && self.turn_saves.first_refusal() {
+            let reasons: Vec<String> = readable.iter().map(|(name, unsaved)| unsaved.result_line(name)).collect();
+            out.refusal = Some(format!(
+                "Cannot accept finish yet: {} module(s) changed in this turn are NOT saved as source.\n{}\nFix or revert them, then finish. A second finish is accepted as it is, and the person is told what is not saved.",
+                readable.len(),
+                reasons.join("\n")
+            ));
+            return;
+        }
+        let items = if readable.is_empty() {
+            format!("{} module(s) changed in this turn", unsaved.len())
+        } else {
+            readable.iter().map(|(name, unsaved)| format!("{name} ({})", unsaved.reason())).collect::<Vec<_>>().join("; ")
+        };
+        out.notice = Some(format!("[Runtime: not saved to source: {items}. The change is live only until the next restart.]"));
     }
 
     /// Run the writer for modules that are already committed to the live
@@ -75,51 +175,6 @@ impl AppConfig {
     /// journal and the unsaved record.
     pub(crate) fn start_source_save(&self, base: &Program, new: &Program) {
         start_save(self.program.clone(), self.governed_library(), base, new);
-    }
-
-    /// The finish gate for unsaved edits. `Some(text)`: refuse this finish.
-    /// `None`: accept; `notice` then holds the runtime line for the visible
-    /// reply when something this turn changed is not saved.
-    ///
-    /// Refused at most once per turn, and only when a module this turn changed
-    /// is unsaved for a reason the model can fix. A cause that is not the
-    /// model's (disk, external edit, unconfirmed save) is never refused.
-    pub(super) async fn unsaved_finish_gate(
-        &self,
-        ws: &mut WorkingSet,
-        baseline: Option<&Program>,
-        notice: &mut Option<String>,
-    ) -> Option<String> {
-        let state = governed(ws.meta.library_state.as_ref())?;
-        // This call's own changes first (a legacy block can mutate and finish).
-        let _ = self.save_changed_sources(ws).await;
-        if state.has_unconfirmed_saves() {
-            let _ = self.save_modules(&state, BTreeSet::new()).await;
-        }
-        let baseline = baseline?;
-        let turn = baseline as *const Program as usize;
-        let record = state.unsaved();
-        let changed = Program::changed_module_names(baseline, &ws.program);
-        let mine: BTreeMap<&String, &Unsaved> = record.iter().filter(|(name, _)| changed.contains(*name)).collect();
-        if mine.is_empty() {
-            state.finish_accepted(turn);
-            return None;
-        }
-        if mine.keys().any(|name| fixable(&record, name)) && state.first_finish_refusal(turn) {
-            let reasons: Vec<String> = mine.iter().map(|(name, unsaved)| unsaved.result_line(name)).collect();
-            return Some(format!(
-                "Cannot accept finish yet: {} module(s) changed in this turn are NOT saved as source.\n{}\nFix or revert them, then finish. A second finish is accepted as it is, and the person is told what is not saved.",
-                mine.len(),
-                reasons.join("\n")
-            ));
-        }
-        state.finish_accepted(turn);
-        let items: Vec<String> = mine.iter().map(|(name, unsaved)| format!("{name} ({})", unsaved.reason())).collect();
-        *notice = Some(format!(
-            "[Runtime: not saved to source: {}. The change is live only until the next restart.]",
-            items.join("; ")
-        ));
-        None
     }
 
     /// See `unsaved_tail`.
@@ -174,6 +229,8 @@ pub(crate) fn governed_state(meta: &crate::session::SessionMeta) -> Option<Libra
     governed(meta.library_state.as_ref())
 }
 
+const HIDDEN_NOT_SAVED: &str = "a module this call changed was NOT saved as source (not named: no read permission). Tell the owner.";
+
 /// Run the writer for modules that are already committed to the live Program,
 /// wait for it (bounded by `LibraryState::save_wait`), and describe the outcome:
 /// one line per changed module, then what else was saved or is still unsaved
@@ -186,19 +243,22 @@ pub(crate) async fn save_committed(
 ) -> SaveLines {
     let before: BTreeSet<String> = state.unsaved_record().into_keys().collect();
     state.mark_dirty(&changed);
-    let flush = crate::library::flush_live_sources(program.clone(), Some(state.clone()));
+    let flush = crate::library::flush_live_sources(program, Some(state.clone()));
+    // Neither failure path below takes a lock: the writer may still hold its
+    // Program read guard, and a queued Program writer would block a reader.
+    let named = |unsaved: Unsaved| -> SaveLines {
+        changed
+            .iter()
+            .filter(|name| !name.starts_with("__") && *name != "RunToolScratch")
+            .map(|name| (if may_read(name) { unsaved.result_line(name) } else { HIDDEN_NOT_SAVED.to_string() }, false))
+            .collect()
+    };
     let receipt = match tokio::time::timeout(state.save_wait(), flush).await {
         Ok(Ok(receipt)) => receipt,
-        // Not confirmed in time (the writer goes on in the background), or the
-        // writer could not run at all.
-        Ok(Err(_)) | Err(_) => {
-            let live = program.read().await;
-            return changed
-                .iter()
-                .filter(|name| live.modules.iter().any(|module| &module.name == *name) && !name.starts_with("__") && *name != "RunToolScratch")
-                .map(|name| (Unsaved::not_confirmed().result_line(name), false))
-                .collect();
-        }
+        // The writer returned an error: it is not running any more.
+        Ok(Err(_)) => return named(Unsaved::writer_failed()),
+        // Not confirmed in time: the writer goes on in the background.
+        Err(_) => return named(Unsaved::not_confirmed()),
     };
     // The same log lines the autosave writes (names and counts only).
     for module in &receipt.enrolled {
@@ -209,7 +269,13 @@ pub(crate) async fn save_committed(
     }
     let mut lines = Vec::new();
     for name in &changed {
-        if let Some(unsaved) = receipt.unsaved.get(name) {
+        if !may_read(name) {
+            // A call can change a module its speaker cannot read (a function
+            // it may execute mutates through a builtin): no name, no reason.
+            if receipt.unsaved.contains_key(name) {
+                lines.push((HIDDEN_NOT_SAVED.to_string(), false));
+            }
+        } else if let Some(unsaved) = receipt.unsaved.get(name) {
             lines.push((unsaved.result_line(name), false));
         } else if receipt.saved_names.contains(name) {
             let file = state.source_file_name(name).unwrap_or_else(|| format!("{name}.py"));

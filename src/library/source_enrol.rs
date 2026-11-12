@@ -354,15 +354,39 @@ fn commit_growth(
         out.enrolled = candidates.into_iter().collect();
         return Ok(());
     }
-    for name in &candidates {
-        for aside in super::source::write_new_source(dir, name, &texts[name])
-            .with_context(|| format!("could not write the first source of module `{name}`"))?
-        {
-            out.notes.push(format!("unlisted leftover file moved aside: {aside}"));
+    // Writing can fail for reasons that are nobody's code (disk, permissions,
+    // a manifest changed on disk). That is an outcome PER MODULE with its real
+    // kind, never a silent nothing and never "your code cannot be printed".
+    let written = (|| -> Result<(ManagedSources, Vec<String>)> {
+        let mut aside_notes = Vec::new();
+        for name in &candidates {
+            for aside in super::source::write_new_source(dir, name, &texts[name])
+                .with_context(|| format!("could not write the first source of module `{name}`"))?
+            {
+                aside_notes.push(format!("unlisted leftover file moved aside: {aside}"));
+            }
         }
-    }
-    dependency_notes(current, &accepted, &mut out.notes);
-    let updated = managed.write_updated(dir, accepted).context("could not update the source manifest; it is unchanged")?;
+        let updated = managed.write_updated(dir, accepted.clone()).context("could not update the source manifest; it is unchanged")?;
+        Ok((updated, aside_notes))
+    })();
+    let (updated, aside_notes) = match written {
+        Ok(done) => done,
+        Err(error) => {
+            let cause = classify(&error, UnsavedKind::WriteFailed);
+            let text = format!("{error:#}");
+            for name in &candidates {
+                out.refused.insert(name.clone(), Unsaved::new(cause.kind.clone(), &text));
+            }
+            for (name, source) in &accepted.modules {
+                if current.modules.get(name).is_some_and(|old| old != source) {
+                    out.failures.push((name.clone(), Unsaved::new(cause.kind.clone(), format!("module `{name}`: its new dependencies could not be recorded: {text}"))));
+                }
+            }
+            return Ok(());
+        }
+    };
+    out.notes.extend(aside_notes);
+    dependency_notes(current, &updated.manifest, &mut out.notes);
     {
         let mut hashes = lock(&state.file_hashes)?;
         for name in &candidates {

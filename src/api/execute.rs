@@ -309,16 +309,28 @@ pub(super) async fn execute_operations_with_baseline(
     agent_callback: Option<AgentCompletionCallback>,
     completion_baseline: Option<&crate::ast::Program>,
 ) -> CodeExecutionResult {
+    // A flag left by an earlier call on this working set must not skip a
+    // write-back of this one.
+    session.take_committed();
     let mut result = execute_operations_unsaved(ops, submission, config, session, agent_callback, completion_baseline).await;
     // One source save per call that changed a module (mutation, stored tests,
-    // a mutation builtin inside an evaluation), and its real outcome (#146).
-    for (line, saved) in config.save_changed_sources(session).await {
+    // a mutation builtin inside an evaluation), its real outcome, and the
+    // finish gate (#146). `done_accepted` is provisional until here.
+    let outcome = config.save_and_gate(session, result.done_accepted, completion_baseline.is_some()).await;
+    for (line, saved) in outcome.lines {
         if saved {
             result.push_ok(line);
         } else {
             result.push_err(line);
         }
     }
+    if let Some(refusal) = outcome.refusal {
+        result.done_accepted = false;
+        result.push_err(refusal);
+    } else if result.done_accepted {
+        eprintln!("[execute_code:done] accepted");
+    }
+    result.unsaved_notice = outcome.notice;
     result
 }
 
@@ -1107,11 +1119,7 @@ async fn execute_operations_unsaved(
                                 continue;
                             }
                         }
-                        if let Some(refusal) = config.unsaved_finish_gate(session, completion_baseline, &mut result.unsaved_notice).await {
-                            result.push_err(refusal);
-                            continue;
-                        }
-                        eprintln!("[execute_code:done] accepted");
+                        // Provisional: the wrapper decides after the source save.
                         result.done_accepted = true;
                     }
                     crate::parser::Operation::Message { to, content } => {

@@ -301,14 +301,25 @@ response has no Content-Disposition header.
   reports the real outcome after its write-back: `saved to X.py`, or `module
   `X` NOT saved: <reason> ... unless you <remedy>` (environment causes say "tell
   the owner. Do not repeat the mutation" and never suggest a retry).
-  - One save per call that changed a module, at the end of
-    `execute_operations_with_baseline` (native `mutate`/`test`/`evaluate`, legacy
-    code blocks) and in `/api/mutate`; an agent branch at its merge. Nothing
-    changed (refused mutation, failing test, empty source) = no writer run.
-    Route handlers, `/api/eval` and the `!watch` self-trigger start the save and
-    do not wait. The wait is bounded (`SAVE_WAIT_MS`, 10 s; the writer is not
-    cancelled) and holds no Program, runtime or session-meta lock; only the
-    conversation's turn lock.
+  - One save per call that changed a module, in ONE place: `save_and_gate`, the
+    last step of `execute_operations_with_baseline` (native `mutate`/`test`/
+    `evaluate`, legacy code blocks). `/api/mutate` saves after its own commit; an
+    agent branch at its merge. Nothing changed (refused mutation, failing test,
+    empty source) = no writer run. Route handlers, `/api/eval` and the `!watch`
+    self-trigger start the save and do not wait. The wait is bounded
+    (`SAVE_WAIT_MS`, 10 s; the writer is not cancelled) and holds no Program,
+    runtime or session-meta lock; only the conversation's turn lock. Neither the
+    timeout path nor the writer-error path takes a lock (a queued Program writer
+    would block a reader behind the writer's read guard).
+  - **No snapshot from before the wait is written back after it.** `save_and_gate`
+    commits the working set immediately before the wait and marks it
+    (`WorkingSet::mark_committed`); the caller's write-back after the call
+    (`write_back_working_set`, the takeover's `write_back_takeover`) sees
+    `take_committed()` and skips. Nothing changes in the working set during the
+    wait. A new caller that writes a working set back after the executor MUST
+    honour `take_committed()`. This does not fix #136: the window in which a
+    whole-metadata write-back can overwrite another conversation is the
+    executor's own run time, as before #146.
   - **One unsaved record** per library state (`LibraryState::unsaved()`), written
     only by the writer at the end of a flush, under its Program read guard:
     cleared when a flush saves the module, when the module is no longer live, and
@@ -317,11 +328,24 @@ response has no Content-Disposition header.
   - Writer refusals carry a kind (`UnsavedKind`, attached with
     `source_unsaved::refusal` at the origin, read with `classify`): never derive
     the kind from message text. `fixable()` decides what the model can repair.
-  - Finish gate (`unsaved_finish_gate`, native `finish` and legacy `!done`):
-    refused ONCE per turn, only if a module this turn changed (baseline identity,
-    like #66) is unsaved for a fixable reason; otherwise accepted, and the visible
-    reply gets `[Runtime: not saved to source: X (reason). ...]`. Unsaved modules
-    of earlier turns never refuse. The "once" is keyed on the baseline's address.
+    A write failure while enrolling a module or recording a dependency
+    (`source_enrol::commit_growth`) is recorded PER affected module as
+    `WriteFailed` (or `ChangedOnDisk`), and for a listed module it replaces the
+    less specific reason its own save then fails with: an environment error must
+    never read as "your code cannot be written as Python".
+  - **Per-turn state: `TurnSaves`** (`AppConfig.turn_saves`): the modules this
+    turn's OWN calls changed and whether `finish` was refused. Fresh for every
+    turn: `AppConfig::for_new_turn()` at the top of `ask` and `ask_stream`, and
+    the takeover's `tmp_config`. A new turn entry point MUST do the same; clones
+    made within a turn share it. Never compute "changed in this turn" from the
+    live Program (other conversations change it meanwhile).
+  - Finish gate (`finish_gate`, native `finish` and legacy `!done`, decided in
+    `save_and_gate` after the save; `done_accepted` from the executor's `Done`
+    arm is provisional): refused ONCE per turn, only for a speaker who may write,
+    only if a module this turn's calls changed is unsaved for a fixable reason;
+    otherwise accepted, and the visible reply gets `[Runtime: not saved to
+    source: X (reason). ...]`. Neither text names a module the speaker cannot
+    read. It waits only for unconfirmed saves of this turn's own modules.
   - Tail: `unsaved_tail` appends one line after the program summary (volatile
     part), only for write-capable speakers and readable modules. Nothing unsaved =
     the request is byte-identical (tested on the whole request).

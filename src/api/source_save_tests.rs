@@ -607,3 +607,281 @@ async fn native_adapsis_mutate_cannot_create_a_module_and_runs_no_save() {
     assert!(!m.state.has_unconfirmed_saves() && m.state.unsaved().is_empty());
     assert_eq!(std::fs::read_dir(m.dir.path()).unwrap().count(), 3);
 }
+
+// ── Regressions from the release review of 1475885 (probes P1 to P7) ────────
+
+fn apply_live(program: &mut crate::ast::Program, source: &str) {
+    for operation in crate::parser::parse(source).unwrap() {
+        crate::validator::apply_and_validate(program, &operation).unwrap();
+    }
+}
+
+/// P1: "changed in this turn" means changed by this turn's OWN calls. A guest
+/// whose turn overlaps another conversation's unsaveable edit is not refused,
+/// is not told, and is never shown a module it cannot read.
+#[tokio::test]
+async fn another_conversations_unsaved_edit_neither_refuses_nor_reaches_a_guest() {
+    let m = Managed::new(vec![]).await;
+    let mut guest = m.fixture.config.clone().for_new_turn();
+    guest.native_tools = false;
+    guest.llm_model = std::sync::Arc::new(std::sync::RwLock::new("guest".to_string()));
+    guest.permission_config = std::sync::Arc::new(toml::from_str("[model.guest]\nuser = \"none\"\n").unwrap());
+    guest.turn = Some(crate::coroutine::TurnIdentity {
+        context: "telegram:user:42".into(),
+        principal: "telegram:user:42".into(),
+        may_write: false,
+        guest_tools: Some(vec![]),
+    });
+    assert_eq!(guest.unsaved_tail("guest"), "");
+    let baseline = guest.program.read().await.clone();
+    // Meanwhile the admin, in another conversation (its own turn), makes PyA unsaveable.
+    let admin = m.fixture.config.clone().for_new_turn();
+    apply_live(&mut *admin.program.write().await, &too_deep("PyA", "long"));
+    admin.save_modules(&m.state, std::collections::BTreeSet::from(["PyA".to_string()])).await;
+    assert!(crate::library::fixable(&m.state.unsaved(), "PyA"));
+    for _ in 0..2 {
+        let mut ws = guest.snapshot_working_set().await;
+        let result = execute::execute_code_with_baseline("!done", &guest, &mut ws, None, Some(&baseline)).await;
+        let text: Vec<&str> = result.mutation_results.iter().map(|r| r.message.as_str()).collect();
+        assert!(result.done_accepted && !result.has_errors, "{text:?}");
+        assert!(result.unsaved_notice.is_none(), "{:?}", result.unsaved_notice);
+        assert!(text.iter().all(|line| !line.contains("PyA")), "{text:?}");
+    }
+    // The same holds for a writer in another conversation: not its modules.
+    let other = m.fixture.config.clone().for_new_turn();
+    let baseline = other.program.read().await.clone();
+    let mut ws = other.snapshot_working_set().await;
+    let result = execute::execute_code_with_baseline("!done", &other, &mut ws, None, Some(&baseline)).await;
+    assert!(result.done_accepted && result.unsaved_notice.is_none());
+}
+
+/// A speaker who cannot write is never refused, and a module it cannot read is
+/// never named, even when its own call changed that module (a function it may
+/// execute mutates through a builtin).
+#[tokio::test]
+async fn execute_only_speaker_is_never_refused_and_never_shown_an_unreadable_module() {
+    let m = Managed::new(vec![]).await;
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<crate::coroutine::IoRequest>(8);
+    let mut config = m.fixture.config.clone().for_new_turn();
+    config.io_sender = Some(sender);
+    config.llm_model = std::sync::Arc::new(std::sync::RwLock::new("runner".to_string()));
+    config.permission_config = std::sync::Arc::new(toml::from_str("[model.runner]\nuser = \"execute\"\n").unwrap());
+    let baseline = config.program.read().await.clone();
+    let mut ws = config.snapshot_working_set().await;
+    let deep = too_deep("PyA", "long").replace('\n', "\\n");
+    let result = execute::execute_code_with_baseline(&format!("!eval mutate(\"{deep}\")"), &config, &mut ws, None, Some(&baseline)).await;
+    let text = result.mutation_results.iter().map(|r| r.message.clone()).collect::<Vec<_>>().join("\n");
+    assert!(m.state.unsaved().contains_key("PyA"), "the call changed PyA and it could not be saved: {text}");
+    assert!(text.contains("a module this call changed was NOT saved as source (not named: no read permission)"), "{text}");
+    assert!(!text.contains("module `PyA` NOT saved") && !text.contains("split the expression"), "{text}");
+    let mut ws = config.snapshot_working_set().await;
+    let result = execute::execute_code_with_baseline("!done", &config, &mut ws, None, Some(&baseline)).await;
+    assert!(result.done_accepted && !result.has_errors, "never refused");
+    let notice = result.unsaved_notice.expect("the person is told that something is not saved");
+    assert_eq!(notice, "[Runtime: not saved to source: 1 module(s) changed in this turn. The change is live only until the next restart.]");
+}
+
+/// P2 and P7: an I/O failure while enrolling a module or recording a new
+/// dependency is an environment cause for exactly the affected modules. The
+/// model is not told to change correct code, and finish is not refused.
+#[tokio::test]
+async fn disk_error_at_enrolment_or_dependency_update_is_an_environment_cause_per_module() {
+    use std::os::unix::fs::PermissionsExt;
+    for (case, module, source) in [
+        ("new module", "PyNew", "def one() -> int:\n    return 1\n"),
+        ("new dependency", "PyB", "def twice(x: int) -> int:\n    return PyA.value(x)\n"),
+    ] {
+        let m = Managed::new(vec![python("edit", module, source), finish("first"), finish("second")]).await;
+        std::fs::set_permissions(m.dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let response = m.fixture.run(false).await;
+        std::fs::set_permissions(m.dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let edit = m.tool_result("edit");
+        assert!(edit.contains(&format!("module `{module}` NOT saved: ")), "{case}: {edit}");
+        assert!(edit.contains("This is a disk or permission error: tell the owner. Do not repeat the mutation."), "{case}: {edit}");
+        assert!(!edit.contains("unless you") && !edit.contains("cannot be completely serialized") && !edit.contains("saved to"), "{case}: {edit}");
+        assert_eq!(m.state.unsaved()[module].kind, UnsavedKind::WriteFailed, "{case}");
+        assert!(!crate::library::fixable(&m.state.unsaved(), module), "{case}");
+        // Accepted at the first finish, and the person is told.
+        assert_eq!(response.completed, Some(true), "{case}");
+        assert!(!m.tool_result_exists("first"), "{case}: the first finish ended the turn");
+        assert!(response.reply.contains(&format!("[Runtime: not saved to source: {module} (disk or permission error)")), "{case}: {}", response.reply);
+        assert_eq!(m.file("library-sources.json"), MANIFEST, "{case}");
+        let listing = crate::library::query_library(&*m.fixture.config.program.read().await, Some(&m.state));
+        assert!(listing.contains(&format!("Source NOT saved (live in memory only, lost at the next restart): {module} (disk or permission error)")), "{case}: {listing}");
+        // Once the directory is writable again, the next save makes it durable.
+        let lines = m.fixture.config.save_modules(&m.state, std::collections::BTreeSet::from([module.to_string()])).await;
+        assert!(lines.iter().any(|(line, saved)| *saved && line.starts_with(&format!("saved to {module}.py"))), "{case}: {lines:?}");
+        assert!(m.state.unsaved().is_empty(), "{case}");
+    }
+}
+
+/// P3: nothing writes a snapshot taken before the save wait back after it.
+/// What other conversations write during the wait survives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_written_by_others_during_the_save_wait_is_not_reverted() {
+    for native in [true, false] {
+        let outputs = if native {
+            vec![python("edit", "PyA", "def three() -> int:\n    return 3\n"), finish("done")]
+        } else {
+            vec![response("<code>\n+module PyA\n+fn three ()->Int\n  +return 3\n+end\n!done\n</code>", vec![])]
+        };
+        let m = Managed::new(outputs).await;
+        m.fixture.config.runtime.write().unwrap().shared_vars.insert("TelegramBot.poll_offset".into(), crate::eval::Value::Int(100));
+        let release = m.state.hold_flushes_for_tests();
+        let mut config = m.fixture.config.clone();
+        config.native_tools = native;
+        let turn = tokio::spawn(async move {
+            llm_handlers::ask(State(config), Json(AskRequest { message: "edit".into(), caller: None })).await.0
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !m.state.has_unconfirmed_saves() {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // The poll loop advances its cursor; another chat stores a user message.
+        m.fixture.config.runtime.write().unwrap().shared_vars.insert("TelegramBot.poll_offset".into(), crate::eval::Value::Int(101));
+        m.fixture.config.meta.lock().unwrap().conversations.get_or_create("telegram:other").push_user("hello from another chat");
+        drop(release);
+        let response = turn.await.unwrap();
+        assert_eq!(response.completed, if native { Some(true) } else { None }, "native={native}: {:?}", lines(&response));
+        assert!(m.file("PyA.py").contains("def three"), "native={native}");
+        let offset = m.fixture.config.runtime.read().unwrap().shared_vars.get("TelegramBot.poll_offset");
+        assert!(matches!(offset, Some(crate::eval::Value::Int(101))), "native={native}: the cursor was reverted: {offset:?}");
+        let other = m.fixture.config.meta.lock().unwrap().conversations.get("telegram:other").map(|c| c.messages.len());
+        assert_eq!(other, Some(1), "native={native}: the other chat's message was reverted");
+        // The turn's own state is there too.
+        assert!(m.fixture.config.program.read().await.get_function("PyA.three").is_some());
+    }
+}
+
+/// P4: the wait bound holds while a Program writer is queued behind the
+/// writer's read guard; and a writer that FAILED is not said to continue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn save_wait_bound_holds_with_a_queued_program_writer() {
+    let m = Managed::new(vec![]).await;
+    m.state.set_save_wait_for_tests(std::time::Duration::from_millis(100));
+    let release = m.state.hold_flushes_for_tests();
+    let program = m.fixture.config.program.clone();
+    let held = program.clone().read_owned().await; // stand-in for the slow writer's read guard
+    let queued = program.clone();
+    let writer = tokio::spawn(async move {
+        let _guard = queued.write().await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let changed = std::collections::BTreeSet::from(["PyA".to_string()]);
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), m.fixture.config.save_modules(&m.state, changed)).await;
+    let lines = outcome.expect("the bounded wait returned although a Program writer is queued");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+    assert!(lines[0].0.contains("was not confirmed within 10 s and continues in the background"), "{lines:?}");
+    drop(held);
+    drop(release);
+    writer.await.unwrap();
+}
+
+#[test]
+fn a_failed_writer_is_not_reported_as_continuing() {
+    let line = crate::library::Unsaved::writer_failed().result_line("PyA");
+    assert!(line.contains("the source writer failed before it could save anything") && line.contains("Tell the owner. Do not repeat the mutation."), "{line}");
+    assert!(!line.contains("continues in the background") && !line.contains("unless you"), "{line}");
+}
+
+/// P5: one refusal per turn, whatever else the blocks contain.
+#[tokio::test]
+async fn legacy_done_with_a_failing_operation_does_not_bring_the_refusal_back() {
+    let code = |text: &str| response(&format!("<code>\n{text}\n</code>"), vec![]);
+    let m = Managed::new(vec![
+        code(&too_deep("PyA", "long")),
+        code("!done"),
+        code("!eval Nope.missing()\n!done"),
+        code("!done"),
+        code("!done"),
+    ])
+    .await;
+    let mut config = m.fixture.config.clone();
+    config.native_tools = false;
+    config.max_iterations = 5;
+    let response = llm_handlers::ask(State(config), Json(AskRequest { message: "edit".into(), caller: None })).await.0;
+    let all = lines(&response).join("\n");
+    assert_eq!(all.matches("Cannot accept finish yet").count(), 1, "{all}");
+    assert_eq!(m.fixture.requests.lock().unwrap().len(), 4, "refused once, a block with an error, then accepted");
+    assert!(response.reply.contains("[Runtime: not saved to source: PyA ("), "{}", response.reply);
+}
+
+/// P6: an edit and `!done` in ONE legacy block: the block's result says saved.
+#[tokio::test]
+async fn legacy_block_with_edit_and_done_reports_the_save() {
+    let m = Managed::new(vec![response("<code>\n+module PyB\n+fn three ()->Int\n  +return 3\n+end\n!done\n</code>", vec![])]).await;
+    let mut config = m.fixture.config.clone();
+    config.native_tools = false;
+    let response = llm_handlers::ask(State(config), Json(AskRequest { message: "edit".into(), caller: None })).await.0;
+    assert!(lines(&response).contains(&"saved to PyB.py".to_string()), "{:?}", lines(&response));
+    assert!(!response.has_errors && !response.reply.contains("[Runtime:"));
+    assert!(m.file("PyB.py").contains("def three"));
+    assert_eq!(m.fixture.requests.lock().unwrap().len(), 1, "the block finished the turn");
+}
+
+/// "Once per turn" is a real per-turn value: every turn has its own, so a
+/// second turn with its own unsaveable edit is refused once again, and a
+/// finish in one conversation does not wait for another one's unconfirmed save.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_turn_has_its_own_refusal_and_does_not_wait_for_another_turns_save() {
+    let m = Managed::new(vec![
+        adapsis("one", &too_deep("PyA", "long")),
+        finish("first"),
+        finish("second"),
+        adapsis("two", &too_deep("PyB", "longer")),
+        finish("third"),
+        finish("fourth"),
+    ])
+    .await;
+    m.fixture.run(false).await;
+    let response = m.fixture.run(false).await;
+    assert!(m.tool_result("first").contains("Cannot accept finish yet"));
+    let third = m.tool_result("third");
+    assert!(third.contains("Cannot accept finish yet: 1 module(s)") && third.contains("module `PyB` NOT saved"), "{third}");
+    assert!(!third.contains("module `PyA` NOT saved"), "the earlier turn's module is not this turn's debt: {third}");
+    assert_eq!(response.completed, Some(true));
+    assert!(response.reply.ends_with("[Runtime: not saved to source: PyB (the printed form of an expression is nested too deeply). The change is live only until the next restart.]"), "{}", response.reply);
+    // Another conversation's save is unconfirmed (its writer is held): a
+    // finish here returns at once.
+    let other = m.fixture.config.clone().for_new_turn();
+    let _hold = m.state.hold_flushes_for_tests();
+    m.state.mark_dirty(&std::collections::BTreeSet::from(["PyA".to_string()]));
+    let baseline = other.program.read().await.clone();
+    let mut ws = other.snapshot_working_set().await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), execute::execute_code_with_baseline("!done", &other, &mut ws, None, Some(&baseline)))
+        .await
+        .expect("finish did not wait for another conversation's save");
+    assert!(result.done_accepted && result.unsaved_notice.is_none());
+}
+
+/// The "committed" mark exists only together with the commit (one function,
+/// private field), is consumed by exactly one write-back, and a call that did
+/// not wait for a save leaves no mark behind.
+#[tokio::test]
+async fn committed_mark_is_set_only_by_the_commit_and_skips_exactly_one_write_back() {
+    let m = Managed::new(vec![]).await;
+    let config = m.fixture.config.clone().for_new_turn();
+    let mut ws = config.snapshot_working_set().await;
+    assert!(!ws.take_committed(), "a fresh working set is not committed");
+    ws.meta.plan.push(crate::session::PlanStep { description: "from the working set".into(), status: crate::session::PlanStatus::Pending });
+    config.commit_before_wait(&ws).await;
+    assert_eq!(config.meta.lock().unwrap().plan.len(), 1, "the commit happened before the mark");
+    // Someone else writes during the wait.
+    config.meta.lock().unwrap().plan.clear();
+    config.write_back_working_set(&ws).await;
+    assert!(config.meta.lock().unwrap().plan.is_empty(), "the marked write-back was skipped");
+    config.write_back_working_set(&ws).await;
+    assert_eq!(config.meta.lock().unwrap().plan.len(), 1, "the mark is consumed: the next write-back is an ordinary one");
+    // An executor call that changes no module waits for nothing and marks nothing.
+    let baseline = config.program.read().await.clone();
+    let mut ws = config.snapshot_working_set().await;
+    execute::execute_code_with_baseline("?symbols", &config, &mut ws, None, Some(&baseline)).await;
+    assert!(!ws.take_committed());
+    // A mark left over from an earlier call does not survive into the next one.
+    config.commit_before_wait(&ws).await;
+    execute::execute_code_with_baseline("?symbols", &config, &mut ws, None, Some(&baseline)).await;
+    assert!(!ws.take_committed(), "the executor clears a stale mark at its start");
+}
