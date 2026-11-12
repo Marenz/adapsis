@@ -240,6 +240,17 @@ fn dependency_notes(current: &SourceManifest, updated: &SourceManifest, notes: &
 /// code needs now. Must run inside the source transaction, with the Program the
 /// caller has a read guard on (or, at startup, the not yet shared Program).
 pub(super) fn grow(program: &ast::Program, state: &LibraryState, dir: &Path) -> Result<Reconciled> {
+    grow_as(program, state, dir, Step::Write)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    /// Decide everything, write nothing: `enrolled` is what `Write` would enrol.
+    Plan,
+    Write,
+}
+
+fn grow_as(program: &ast::Program, state: &LibraryState, dir: &Path, step: Step) -> Result<Reconciled> {
     let mut out = Reconciled::default();
     let Some(managed) = lock(&state.managed_sources)?.clone() else {
         return Ok(out);
@@ -318,7 +329,7 @@ pub(super) fn grow(program: &ast::Program, state: &LibraryState, dir: &Path) -> 
     if desired.same_policy(current) {
         return Ok(out);
     }
-    commit_growth(state, dir, &managed, &desired, candidates, &texts, &mut out)?;
+    commit_growth(state, dir, &managed, &desired, candidates, &texts, &mut out, step)?;
     Ok(out)
 }
 
@@ -332,6 +343,7 @@ fn commit_growth(
     mut candidates: BTreeSet<String>,
     texts: &BTreeMap<String, String>,
     out: &mut Reconciled,
+    step: Step,
 ) -> Result<()> {
     let current = &managed.manifest;
     let (accepted, rejected) = loadable(dir, current, desired, texts)?;
@@ -343,6 +355,10 @@ fn commit_growth(
         }
     }
     if accepted.same_policy(current) {
+        return Ok(());
+    }
+    if step == Step::Plan {
+        out.enrolled = candidates.into_iter().collect();
         return Ok(());
     }
     for name in &candidates {
@@ -418,6 +434,14 @@ pub(super) fn shrink(
 /// enrolled (the cache is the only copy of that work); anything else is
 /// removed from the Program before it can run, with its AST kept in a
 /// recovery file. Every adoption and every drop is logged and journaled.
+///
+/// Order: (1) plan without writing, (2) write the recovery file of every module
+/// the plan will not enrol, (3) only then commit the enrolment. A recovery file
+/// that cannot be written refuses the start in step (2), before any source or
+/// manifest write. An error after step (3) is possible only when the enrolment
+/// write itself failed AND the recovery file of a module it should have
+/// enrolled cannot be written either; an unlisted `.py` may then remain (a
+/// start ignores it).
 pub(super) fn adopt_cached(program: &mut ast::Program, dir: &Path, state: &LibraryState) -> Result<BTreeSet<String>> {
     let listed = state.managed_module_names();
     let unlisted: Vec<String> =
@@ -425,8 +449,24 @@ pub(super) fn adopt_cached(program: &mut ast::Program, dir: &Path, state: &Libra
     if unlisted.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let outcome = grow(program, state, dir);
-    let (enrolled, refused): (BTreeSet<String>, BTreeMap<String, String>) = match outcome {
+    let planned: BTreeSet<String> =
+        grow_as(program, state, dir, Step::Plan).map(|plan| plan.enrolled.into_iter().collect()).unwrap_or_default();
+    let mut kept = BTreeMap::new();
+    let mut keep = |program: &ast::Program, name: &String, kept: &mut BTreeMap<String, String>| -> Result<()> {
+        if kept.contains_key(name) || never_enrolled(name) {
+            return Ok(());
+        }
+        let module = program.modules.iter().find(|m| &m.name == name).context("unlisted module vanished")?;
+        let recovery = write_recovery(dir, module).with_context(|| {
+            format!("cached module `{}` has no source and its recovery file could not be written", super::source::diagnostic_name(name))
+        })?;
+        kept.insert(name.clone(), recovery);
+        Ok(())
+    };
+    for name in unlisted.iter().filter(|name| !planned.contains(*name)) {
+        keep(program, name, &mut kept)?;
+    }
+    let (enrolled, refused): (BTreeSet<String>, BTreeMap<String, String>) = match grow_as(program, state, dir, Step::Write) {
         Ok(result) => {
             for note in &result.notes {
                 eprintln!("[library] {note}");
@@ -435,6 +475,10 @@ pub(super) fn adopt_cached(program: &mut ast::Program, dir: &Path, state: &Libra
         }
         Err(error) => (BTreeSet::new(), unlisted.iter().map(|name| (name.clone(), format!("enrolment failed: {error:#}"))).collect()),
     };
+    // Only after a failed enrolment write: planned modules that were not enrolled.
+    for name in unlisted.iter().filter(|name| !enrolled.contains(*name)) {
+        keep(program, name, &mut kept)?;
+    }
     for name in &unlisted {
         let shown = super::source::diagnostic_name(name);
         if enrolled.contains(name) {
@@ -450,22 +494,20 @@ pub(super) fn adopt_cached(program: &mut ast::Program, dir: &Path, state: &Libra
             );
             continue;
         }
-        let position = program.modules.iter().position(|m| &m.name == name).context("unlisted module vanished")?;
-        if never_enrolled(name) {
-            program.modules.remove(position);
+        program.modules.retain(|module| &module.name != name);
+        let Some(recovery) = kept.get(name) else {
             eprintln!("[library] dropped cached scratch module `{shown}` (never part of the source library)");
             continue;
-        }
-        let recovery = write_recovery(dir, &program.modules[position])
-            .with_context(|| format!("cached module `{shown}` has no source and its recovery file could not be written"))?;
-        program.modules.remove(position);
+        };
         let reason = refused.get(name).cloned().unwrap_or_else(|| "it could not be enrolled".into());
         let reason: String = reason.chars().take(300).collect();
         eprintln!("[library] dropped cached module `{shown}`: it has no source and cannot be saved ({reason}); its definition was kept in {recovery}");
         let message = format!("cached module without source was dropped at startup and kept in {recovery}: {reason}");
         crate::error_journal::record(crate::error_journal::Category::Library, &shown, &message);
         state.push_error(format!("module `{shown}`: {message}"));
-        lock(&state.dropped_at_startup)?.insert(name.clone());
+        if let Ok(mut dropped) = state.dropped_at_startup.lock() {
+            dropped.insert(name.clone());
+        }
     }
     program.rebuild_function_index();
     Ok(enrolled)

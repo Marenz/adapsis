@@ -113,6 +113,63 @@ fn unreadable_session_file_refuses_the_start_with_exit_78() {
     }
 }
 
+fn start_with_session_path(dir: &std::path::Path, session: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_adapsis"))
+        .args(["os", "--session", session.to_str().unwrap(), "--port", "0", "--model", "offline-source-test", "--url", "http://127.0.0.1:9"])
+        .current_dir(dir)
+        .env("HOME", dir)
+        .env("ADAPSIS_MODULES_DIR", dir.join("modules"))
+        .env("ADAPSIS_MEMORY_DB", dir.join("memory.lbug"))
+        .env("ADAPSIS_CONTEXTS_DIR", dir.join("contexts"))
+        .env("ADAPSIS_MESH_FILE", dir.join("mesh.md"))
+        .output()
+        .unwrap()
+}
+
+/// A session path that exists as a name but cannot be read is not "no session
+/// yet": a dangling link, a link loop, a directory, a path below a regular file
+/// and a path in an unsearchable directory all refuse the start (review of
+/// a488baa: `Path::exists()` treated a dangling link as a new session).
+#[test]
+fn session_path_that_exists_but_cannot_be_read_refuses_the_start_with_exit_78() {
+    use std::os::unix::fs::PermissionsExt;
+    for kind in ["dangling link", "link loop", "directory", "below a file", "unsearchable directory"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = dir.path().join("session.json");
+        let mut locked = None;
+        match kind {
+            "dangling link" => std::os::unix::fs::symlink(dir.path().join("missing-session"), &session).unwrap(),
+            "link loop" => std::os::unix::fs::symlink(&session, &session).unwrap(),
+            "directory" => std::fs::create_dir(&session).unwrap(),
+            "below a file" => {
+                std::fs::write(dir.path().join("plain"), "x").unwrap();
+                session = dir.path().join("plain").join("session.json");
+            }
+            _ => {
+                let inner = dir.path().join("locked");
+                std::fs::create_dir(&inner).unwrap();
+                session = inner.join("session.json");
+                std::fs::write(&session, "{}").unwrap();
+                std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o000)).unwrap();
+                locked = Some(inner);
+            }
+        }
+        let output = start_with_session_path(dir.path(), &session);
+        if let Some(inner) = locked {
+            std::fs::set_permissions(inner, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.code(), Some(REFUSED), "{kind}: {stderr}");
+        assert!(stderr.contains("startup refused: session file") && stderr.contains(session.to_str().unwrap()), "{kind}: {stderr}");
+        assert!(!stdout.contains("New session"), "{kind}: {stdout}");
+        assert!(!dir.path().join("memory.lbug").exists() && !dir.path().join("modules").exists(), "{kind}: nothing was initialized");
+        if kind == "dangling link" {
+            assert!(std::fs::symlink_metadata(&session).unwrap().file_type().is_symlink(), "the link is untouched");
+            assert!(!dir.path().join("missing-session").exists(), "no session was written through the link");
+        }
+    }
+}
+
 fn assert_startup_refusal(fixture: Fixture) {
     let run = start(fixture);
     assert_eq!(run.code, Some(REFUSED), "refused starts exit with 78: {}", run.stderr);

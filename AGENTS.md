@@ -221,7 +221,12 @@ response has no Content-Disposition header.
   create or remove a module must call it. A refused start exits with code 78
   (`library::EXIT_SOURCE_REFUSED`); the unit needs `RestartPreventExitStatus=78`.
   An unreadable session file at `adapsis os` startup is refused the same way
-  (exit 78, file named and untouched), with or without a manifest.
+  (exit 78, file named and untouched), with or without a manifest. "No session
+  yet" requires `symlink_metadata` to answer NotFound: never use `Path::exists()`
+  for that decision (a dangling link would start an empty session).
+  `adopt_cached` order is plan (`grow_as(.., Step::Plan)`, no writes), recovery
+  files, commit: a recovery file that cannot be written refuses the start before
+  any source or manifest write. Keep fallible preparation ahead of the commit.
   Known residual: `!sandbox discard` after an enrolment leaves a listed module
   that is not live (same state as #126).
   Retained manifest presence includes empty sets: deletion/dangling links never

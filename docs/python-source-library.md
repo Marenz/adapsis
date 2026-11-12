@@ -221,7 +221,9 @@ read. Remove orphans by hand once inspected.
 
 **Startup adoption.** A module that exists only in the session cache (the process
 stopped before its first save) is handled before anything can run
-(`adopt_cached`): if it prints it is enrolled exactly as above; otherwise it is
+(`adopt_cached`), in three steps: plan without writing, write the recovery file
+of every module that will not be enrolled, then commit the enrolment. If it
+prints it is enrolled exactly as above; otherwise it is
 removed from the Program and its AST is kept in
 `<library>/recovery/<Module>-<unix ms>.json` (owner-only; subdirectories are never
 scanned for sources). Each adoption and each drop is one startup log line and one
@@ -262,7 +264,19 @@ service unit should carry `RestartPreventExitStatus=78`. A session file that
 cannot be read (truncated, corrupt, nested deeper than the reader's cap) is the
 same kind of refusal, with or without a manifest: exit 78, the file named and
 left untouched, nothing initialized. The runtime keeps no backup of the session
-file; restore the operator's last backup or move the file aside.
+file; restore the operator's last backup or move the file aside. "No session
+yet" must be proven: only a path for which the file system answers "not found"
+starts an empty session. A dangling link, a link loop, a directory, or a path
+that cannot be inspected is a refused start.
+
+**What a refused start may have written.** Never a listed source file, never the
+manifest, never the session. The one exception is startup adoption: recovery
+files are written BEFORE any enrolment (plan, recovery files, then source and
+manifest), so a recovery file that cannot be written refuses the start with
+source and manifest untouched, possibly leaving recovery files of other dropped
+modules behind. Only if an enrolment write itself fails halfway and the recovery
+file of a module it should have enrolled cannot be written either, an unlisted
+`.py` can remain (a start ignores it; the next enrolment reuses or moves it).
 
 
 The whole managed dependency set validates before replacing its in-memory

@@ -1497,7 +1497,19 @@ async fn main() -> Result<()> {
             }
 
             let session_path = std::path::Path::new(&session);
-            let mut sess = if session_path.exists() {
+            // "Absent" must be proven: `Path::exists()` is also false for a
+            // dangling link or a path that cannot be inspected, and starting an
+            // empty session over one of those would lose the session.
+            let session_present = match std::fs::symlink_metadata(session_path) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    eprintln!("Error: startup refused: session file {session} cannot be inspected: {error}");
+                    eprintln!("Nothing was changed and nothing was started. Make the path readable or restore it, then start the service again.");
+                    std::process::exit(library::EXIT_SOURCE_REFUSED);
+                }
+            };
+            let mut sess = if session_present {
                 println!("Loading session from {session}...");
                 let s = match session::Session::load(session_path) {
                     Ok(session) => session,

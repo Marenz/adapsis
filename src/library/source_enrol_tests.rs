@@ -438,6 +438,56 @@ fn managed_startup_drops_an_unprintable_cached_module_into_a_recovery_file() {
     assert_eq!(restarted_state.managed_module_names().len(), 1);
 }
 
+/// Review of a488baa: adoption enrolled the printable module (source and
+/// manifest written) and THEN failed on the recovery file of the unprintable
+/// one, so a refused start had changed source and manifest. The recovery file
+/// is now written before any enrolment commit.
+#[test]
+fn managed_startup_refused_for_an_unwritable_recovery_file_changes_no_source_and_no_manifest() {
+    let dir = directory();
+    let before = r#"{"version":1,"modules":{}}"#;
+    std::fs::write(dir.path().join(MANIFEST_FILE), before).unwrap();
+    std::fs::write(dir.path().join("recovery"), "a regular file prevents recovery writes").unwrap();
+    let mut cached = ast::Program::default();
+    apply_ax(&mut cached, "+module Good\n+fn one ()->Int\n  +return 1\n+end\n");
+    cached.modules.push(unprintable("Bad"));
+    cached.rebuild_function_index();
+    let recovery_cache = serde_json::to_string(&cached).unwrap();
+    let mut state = super::LibraryState::new();
+    super::load_module_files(&mut cached, dir.path(), &mut state);
+    let error = format!("{:#}", state.require_authoritative_sources().unwrap_err());
+    assert!(error.contains("startup refused") && error.contains("`Bad`") && error.contains("recovery file could not be written"), "{error}");
+    assert_eq!(std::fs::read_to_string(dir.path().join(MANIFEST_FILE)).unwrap(), before);
+    assert_eq!(names(dir.path()), [MANIFEST_FILE, "recovery"], "no source file was written");
+    assert_eq!(serde_json::to_string(&cached).unwrap(), recovery_cache, "the session cache is the recovery material");
+    // The same cache once the recovery folder is usable: Good is adopted, Bad is
+    // dropped into a recovery file, and the start goes on.
+    std::fs::remove_file(dir.path().join("recovery")).unwrap();
+    let mut state = super::LibraryState::new();
+    super::load_module_files(&mut cached, dir.path(), &mut state);
+    state.require_authoritative_sources().unwrap();
+    assert!(cached.get_function("Good.one").is_some() && cached.modules.iter().all(|module| module.name != "Bad"));
+    assert!(dir.path().join("Good.py").is_file());
+    assert_eq!(names(&dir.path().join("recovery")).len(), 1);
+    assert!(names(&dir.path().join("recovery"))[0].starts_with("Bad-"));
+}
+
+/// Adoption that needs no recovery file does not depend on the recovery folder.
+#[test]
+fn managed_startup_adopts_without_touching_the_recovery_folder_when_nothing_is_dropped() {
+    let dir = directory();
+    std::fs::write(dir.path().join(MANIFEST_FILE), r#"{"version":1,"modules":{}}"#).unwrap();
+    std::fs::write(dir.path().join("recovery"), "a regular file prevents recovery writes").unwrap();
+    let mut cached = ast::Program::default();
+    apply_ax(&mut cached, "+module Good\n+fn one ()->Int\n  +return 1\n+end\n");
+    let mut state = super::LibraryState::new();
+    super::load_module_files(&mut cached, dir.path(), &mut state);
+    state.require_authoritative_sources().unwrap();
+    assert!(dir.path().join("Good.py").is_file());
+    assert_eq!(manifest(dir.path())["modules"]["Good"]["format"], "python");
+    assert_eq!(std::fs::read_to_string(dir.path().join("recovery")).unwrap(), "a regular file prevents recovery writes");
+}
+
 #[test]
 fn managed_scratch_and_reserved_modules_are_never_enrolled() {
     let dir = python_library();
