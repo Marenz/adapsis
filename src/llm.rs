@@ -276,7 +276,9 @@ impl<'de> Deserialize<'de> for ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+mod content;
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ChatContent {
     Text(String),

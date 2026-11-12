@@ -1880,6 +1880,14 @@ schema since day one and was never set:
   restored conversation has no image parts, takeover reloads up to3 authorized
   references from the Ladybug attachment store (read ACL and exact context).
   Never infer "user supplied no photo" merely from empty text in session JSON.
+  **Captionless image wire format (#148):** `llm/content.rs` serializes multipart
+  content without exactly-empty text blocks when a nonempty image URL is present.
+  This shared boundary covers current input, historical replay (including old
+  deserialized parts) and recovered images. Never invent captions, trim nonempty
+  text (including whitespace), drop image-only history, or globally remove empty
+  assistant/tool messages: those carry native call/result correlation. Current
+  runtime/speaker authority markers stay intact. Focused gates: `cargo test
+  --release captionless_image` and `cargo test --release image_content`.
   Telegram may serve JPEGs as application/octet-stream. Attachment::image_mime
   centralizes MIME/extension/magic-header recognition for budgets, recovery and
   outbound LLM image parts; MIME-only filters silently discard real photos.
