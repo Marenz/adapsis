@@ -10,7 +10,32 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- **Current here deployment (2026-11-12, switch #128): commit `b7bfa64` on
+- **Current here deployment (2026-11-12, upgrade #146): commit `8b985cb` on
+  `work/python-source-library`**, binary sha256
+  `8c8e8a4d55990272ecd06d15927dbd213432cf710dbcda18600b054b99623046`.
+  The five manifest-managed Python modules remain as installed by switch #128
+  below (275 stored cases, all passing at startup). Mutation results now report
+  the real source-save outcome; finish names unsaved edits, with one refusal per
+  turn for fixable causes in modules that turn's own calls changed. Saving stays
+  automatic; the git-commit boundary for the module library is still pending
+  (#146). The earlier #136 whole-metadata concurrency window remains open.
+  - Manager verified after the owner-approved upgrade: fresh checkpoint,
+    inhibitor and install checks, NRestarts 0, five modules, one route, two loops,
+    no library errors and shared-variable probes unchanged. Telegram reply
+    `SAVE146-OK` delivered (message 549037); no provider error with the newly
+    deployed `prompt_cache_key`.
+  - Live acknowledgement proof: adding `Peer.upgrade_probe` through
+    `/api/mutate` returned `saved to Peer.py` with the file already changed;
+    `!remove Peer.upgrade_probe` returned saved again and restored the library
+    bytes. Revision after verification: 248.
+  - Pre-upgrade bundle:
+    `~/.local/share/adapsis/upgrade-146/pre-upgrade-bundle/`; previous binary also
+    at `~/.local/bin/adapsis.bak-fa04e367`. The previous binary can read the
+    candidate-written session and managed library (rehearsed). Operator notes
+    and rollback checks: `~/.local/share/adapsis/rehearsal-146/REPORT.md`.
+  - sleek and edox are unchanged. The exit-78 drop-in and helper installed at
+    switch #128 remain active.
+- **Historical here deployment (2026-11-12, switch #128): commit `b7bfa64` on
   `work/python-source-library`**, binary sha256
   `fa04e3677b4adf70aafc65196c7ff6facaece2c155f3f9b36de272359c7ce3e8`. The module
   library on this node is manifest-managed Python: `~/.config/adapsis/modules/`
@@ -38,6 +63,11 @@ narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
     conversion set, review and rehearsal.
   - Gate and tools for a repeat: `rehearsal-128/rehearse.sh`, `selftest.sh`,
     `bin/preflight.py` (requests a save and proves the session file is final).
+- **Owner direction for this development phase:** prioritize fix-forward and
+  minimal release ceremony. Do not start new compatibility or rollback projects;
+  retain the existing backups. Review, appropriate tests and live verification
+  are still required. The historical switch/rehearsal records below are evidence
+  of completed work, not a mandate to expand that machinery for each change.
 - Historical (superseded 2026-11-12): here Telegram deployment (2026-11-02): runtime binary `88b4275`;
   TelegramBot/TgFormat are now production-Python-frontend-authored modules
   (48/18 functions, 221 stored cases), prepared with reviewed tooling `9ffd3fa`.

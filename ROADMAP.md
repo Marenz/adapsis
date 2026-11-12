@@ -1,6 +1,40 @@
 # AdapsisOS Roadmap
 
-## Deployed 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
+## Deployed 2026-11-12 — here (Kronk), `8b985cb`, real source-save acknowledgements (#146)
+
+- **Live:** commit `8b985cb`, binary sha256
+  `8c8e8a4d55990272ecd06d15927dbd213432cf710dbcda18600b054b99623046`,
+  replacing `b7bfa64` / `fa04e367…`. The five manifest-managed Python modules
+  are unchanged; 275 of 275 stored tests passed at startup. sleek and edox are
+  unchanged.
+- **Owner-approved deployment, executed by the manager:** fresh checkpoint,
+  inhibitor and install checks passed; NRestarts 0; five modules, one route, two
+  permanent loops, no library errors; shared-variable probes unchanged.
+  Telegram `SAVE146-OK` delivered (message 549037), with no provider error from
+  the newly deployed stable `prompt_cache_key` (release-line `7dc69aa`).
+- **Live save-outcome proof:** `/api/mutate` adding `Peer.upgrade_probe` returned
+  `saved to Peer.py` and the file was already changed when the response arrived;
+  removal returned saved again and the library returned byte-identical.
+  Revision after verification: 248. The earlier acknowledgement pitfall is
+  resolved by runtime save outcomes; saving remains automatic.
+- **Acceptance evidence:** independent delta review accepted `8b985cb`; reviewer
+  probes passed. Full suite 2386 passed / 1 known strict-parity failure
+  (334 / 58 / 181, zero mismatches) / 7 ignored; upgrade rehearsal 216 of 216;
+  gate self-test 9 of 9 deliberately wrong runs rejected.
+- **Existing recovery material retained:**
+  `~/.local/share/adapsis/upgrade-146/pre-upgrade-bundle/`, previous binary
+  `~/.local/bin/adapsis.bak-fa04e367`; operator procedure in
+  `~/.local/share/adapsis/rehearsal-146/REPORT.md`. Rehearsal proved the previous
+  binary reads the new one's session and managed library, including a new module.
+- **Still pending:** #136 (the pre-existing whole-metadata write-back concurrency
+  window; this change avoids extending it across the save wait); #146's later
+  module-library git-commit boundary; trusted `/api/mutate` rendering can omit a
+  named successful-save line when the active model lacks Read permission.
+- **Owner direction:** during this development phase prioritize fix-forward and
+  minimal release ceremony, without new compatibility or rollback projects.
+  Existing backups stay; review, tests and live verification remain required.
+
+## Historical deployment 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
 
 - **Live on here:** commit `b7bfa64` (`work/python-source-library`: Result runtime,
   typed execution/replay, manifest-managed `.py` library, run-time module
