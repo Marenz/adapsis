@@ -12,11 +12,18 @@ const MAX_LLM_RETRIES: usize = 5;
 const MAX_SERVER_RETRY_DELAY: Duration = Duration::from_secs(15 * 60);
 
 mod native;
+mod recovery;
+#[cfg(test)]
+mod refusal_tests;
 mod tool_call;
 #[cfg(test)]
 #[path = "llm/logging_tests.rs"]
 mod logging_tests;
 
+pub use recovery::is_too_large;
+pub(crate) use recovery::RetryPolicy;
+#[cfg(test)]
+pub(crate) use recovery::test_too_large_error;
 #[allow(unused_imports)]
 pub use native::{NativeResponse, NativeStreamEvent, TurnRequest};
 #[allow(unused_imports)]
@@ -32,9 +39,14 @@ enum LlmError {
     Transport {
         message: String,
         retryable: bool,
+        /// The request hit its total timeout. Retried at most once per call (#68).
+        timeout: bool,
     },
     Streaming(String),
     Decode(String),
+    /// The serialized request exceeds the route's body limit (`max_request_bytes`).
+    /// Raised before sending; never retried.
+    RequestTooLarge { bytes: usize, limit: usize },
 }
 
 impl LlmError {
@@ -52,19 +64,40 @@ impl LlmError {
                     | StatusCode::GATEWAY_TIMEOUT
             ),
             Self::Transport { retryable, .. } => *retryable,
-            Self::Streaming(_) | Self::Decode(_) => false,
+            Self::Streaming(_) | Self::Decode(_) | Self::RequestTooLarge { .. } => false,
         }
     }
 
     fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::Api { retry_after, .. } => *retry_after,
-            Self::Transport { .. } | Self::Streaming(_) | Self::Decode(_) => None,
+            Self::Transport { .. } | Self::Streaming(_) | Self::Decode(_) | Self::RequestTooLarge { .. } => None,
         }
     }
 
     fn should_fallback_to_non_streaming(&self) -> bool {
         matches!(self, Self::Streaming(_))
+    }
+
+    fn is_timeout(&self) -> bool {
+        matches!(self, Self::Transport { timeout: true, .. })
+    }
+
+    /// The request was refused because it is too large for the route or model:
+    /// the pre-send limit, a 413, or a provider context-length error.
+    fn is_too_large(&self) -> bool {
+        match self {
+            Self::RequestTooLarge { .. } => true,
+            Self::Api { status, .. } if *status == StatusCode::PAYLOAD_TOO_LARGE => true,
+            Self::Api { status, body, .. } if *status == StatusCode::BAD_REQUEST => {
+                let body = body.to_ascii_lowercase();
+                ["context length", "context_length", "context window", "maximum context", "prompt is too long",
+                 "too many tokens", "length limit exceeded", "request too large"]
+                    .iter()
+                    .any(|needle| body.contains(needle))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -81,11 +114,20 @@ impl std::fmt::Display for LlmError {
                 retry_after,
             } => {
                 write!(f, "LLM API error {status} ({} byte body)", body.len())?;
+                if *status == StatusCode::PAYLOAD_TOO_LARGE {
+                    write!(f, ": request body exceeds the gateway/provider limit (not retried; \
+                        lower max_request_bytes for this model or raise the gateway body limit)")?;
+                }
                 if let Some(delay) = retry_after {
                     write!(f, " (retry after {}s)", delay.as_secs())?;
                 }
                 Ok(())
             }
+            Self::RequestTooLarge { bytes, limit } => write!(
+                f,
+                "LLM request too large: {bytes} bytes exceeds the route limit of {limit} bytes \
+                 (max_request_bytes); not sent, not retried"
+            ),
             Self::Transport { message, .. } => write!(f, "LLM transport error ({} detail bytes)", message.len()),
             Self::Streaming(message) => write!(f, "LLM streaming error ({} detail bytes)", message.len()),
             Self::Decode(message) => write!(f, "LLM decode error ({} detail bytes)", message.len()),
@@ -113,6 +155,7 @@ impl LlmError {
                 rendered
             }
             Self::Transport { message, .. } | Self::Streaming(message) | Self::Decode(message) => message.clone(),
+            Self::RequestTooLarge { .. } => self.to_string(),
         }
     }
 }
@@ -125,8 +168,8 @@ pub fn render_error(error: &anyhow::Error) -> String {
             return llm_error.with_body();
         }
     }
-    if let Some(LlmError::Api { status, body, .. }) = error.downcast_ref::<LlmError>() {
-        return format!("LLM API error {status} ({} byte body)", body.len());
+    if let Some(llm_error @ (LlmError::Api { .. } | LlmError::RequestTooLarge { .. })) = error.downcast_ref::<LlmError>() {
+        return llm_error.to_string();
     }
     // serde/regex/reqwest/anyhow messages are not safe metadata, even when the
     // raw response body was removed by their constructor.
@@ -297,8 +340,18 @@ impl ChatMessage {
     /// so a message only benefits from caching if it is itself marked or sits
     /// before a marked message. Used for the stable system prefix and the end of
     /// the append-only history; never for per-turn volatile content (issue #68).
-    pub fn with_cache_breakpoint(mut self) -> Self {
-        self.cache_control = Some(serde_json::json!({"type": "ephemeral"}));
+    #[cfg(test)]
+    pub fn with_cache_breakpoint(self) -> Self {
+        self.with_cache_marker(None)
+    }
+
+    /// A cache breakpoint that asks for the lifetime `ttl` ("5m" or "1h"); None
+    /// is the plain marker (the provider's default lifetime).
+    pub fn with_cache_marker(mut self, ttl: Option<&str>) -> Self {
+        self.cache_control = Some(match ttl {
+            Some(ttl) => serde_json::json!({"type": "ephemeral", "ttl": ttl}),
+            None => serde_json::json!({"type": "ephemeral"}),
+        });
         self
     }
 
@@ -374,6 +427,10 @@ pub struct LlmOutput {
     pub code: String,
     /// Token accounting from the API response, when the provider reports it.
     pub usage: LlmUsage,
+    /// The provider refused the turn (`finish_reason` content_filter/refusal).
+    /// MEASURED 2026-11-10: such a request reports a cache write that the next
+    /// identical request cannot read, so it is no evidence about the cache.
+    pub refused: bool,
 }
 
 /// Token accounting for one LLM call.
@@ -454,6 +511,11 @@ pub struct LlmRequest {
 
 pub trait LlmBackend {
     async fn generate(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput>;
+
+    /// Route body limit used to size the one too-large retry (#68).
+    fn max_request_bytes(&self) -> usize {
+        usize::MAX / 2
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +523,17 @@ pub struct OpenAiBackend {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    /// Streaming chunk-gap timeout (#68: per model, default 120 s).
+    chunk_timeout: Duration,
+    /// Route body limit; larger requests fail before sending (#68).
+    max_request_bytes: usize,
+    /// Total timeout for non-streaming requests, which have no chunk-gap check.
+    non_streaming_timeout: Duration,
 }
+
+/// Non-streaming requests cannot detect a stall early, so their total is capped
+/// (a live reply never waits longer than this per attempt; timeouts retry once).
+pub(crate) const NON_STREAMING_TIMEOUT_CAP: Duration = Duration::from_secs(20 * 60);
 
 #[allow(dead_code)]
 impl OpenAiBackend {
@@ -470,12 +542,27 @@ impl OpenAiBackend {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: "default".to_string(),
             api_key: None,
+            chunk_timeout: Duration::from_secs(120),
+            max_request_bytes: crate::model_limits::for_model("").max_request_bytes,
+            non_streaming_timeout: NON_STREAMING_TIMEOUT_CAP,
         }
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        let limits = crate::model_limits::for_model(&self.model);
+        self.chunk_timeout = limits.chunk_timeout;
+        self.max_request_bytes = limits.max_request_bytes;
+        self.non_streaming_timeout = limits.request_timeout.min(NON_STREAMING_TIMEOUT_CAP);
         self
+    }
+
+    pub(crate) fn non_streaming_timeout(&self) -> Duration {
+        self.non_streaming_timeout
+    }
+
+    pub(crate) fn chunk_timeout(&self) -> Duration {
+        self.chunk_timeout
     }
 
     pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
@@ -512,15 +599,54 @@ impl OpenAiBackend {
         }
     }
 
+    /// The single send path for every request shape (legacy, streaming, native).
+    /// Oversized bodies fail here before any network IO (#68).
     async fn send_request(&self, req: reqwest::RequestBuilder, context: &'static str) -> Result<Response> {
-        let response = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|error| anyhow!(LlmError::Transport {
-                message: format!("{context}: {error}"),
-                retryable: is_retryable_transport_error(&error),
-            }))?;
+        self.send_with_first_headers(req, context, None).await
+    }
+
+    /// Streaming send: the time until response headers arrive is bounded by the
+    /// chunk-gap timeout, so a gateway that accepts the socket but never answers
+    /// fails fast. The client's long total timeout still allows long streams.
+    /// (reqwest's per-request `timeout` would also cover the whole body read and
+    /// cut legitimate long streams, so it is deliberately not used here.)
+    async fn send_streaming_request(&self, req: reqwest::RequestBuilder, context: &'static str) -> Result<Response> {
+        self.send_with_first_headers(req, context, Some(self.chunk_timeout)).await
+    }
+
+    async fn send_with_first_headers(
+        &self,
+        req: reqwest::RequestBuilder,
+        context: &'static str,
+        first_headers: Option<Duration>,
+    ) -> Result<Response> {
+        let (client, request) = self.apply_auth(req).build_split();
+        let request = request.map_err(|error| anyhow!(LlmError::Transport {
+            message: format!("{context}: {error}"),
+            retryable: false,
+            timeout: false,
+        }))?;
+        if let Some(bytes) = request.body().and_then(|body| body.as_bytes()).map(<[u8]>::len)
+            && bytes > self.max_request_bytes
+        {
+            return Err(anyhow!(LlmError::RequestTooLarge { bytes, limit: self.max_request_bytes }));
+        }
+        let sent = client.execute(request);
+        let result = match first_headers {
+            Some(bound) => tokio::time::timeout(bound, sent).await.map_err(|_| {
+                anyhow!(LlmError::Transport {
+                    message: format!("{context}: no response headers within {}s", bound.as_secs()),
+                    retryable: true,
+                    timeout: true,
+                })
+            })?,
+            None => sent.await,
+        };
+        let response = result.map_err(|error| anyhow!(LlmError::Transport {
+            message: format!("{context}: {error}"),
+            retryable: is_retryable_transport_error(&error),
+            timeout: error.is_timeout(),
+        }))?;
         ensure_success(response).await
     }
 
@@ -542,15 +668,16 @@ impl OpenAiBackend {
         let req = http
             .post(self.endpoint())
             .json(&self.request_body(request, true));
-        let response = self.send_request(req, "failed to send streaming chat completion request").await?;
+        let response = self.send_streaming_request(req, "failed to send streaming chat completion request").await?;
 
         let mut parser = SseParser::new();
         let mut thinking_text = String::new();
         let mut content_text = String::new();
         let mut in_thinking = false;
         let mut usage: Option<TokenUsage> = None;
+        let mut refused = false;
 
-        let chunk_timeout = Duration::from_secs(120);
+        let chunk_timeout = self.chunk_timeout;
         let mut response = response;
         let mut chunk_count: u64 = 0;
         let stream_start = std::time::Instant::now();
@@ -560,7 +687,7 @@ impl OpenAiBackend {
                 Ok(Ok(Some(chunk))) => chunk,
                 Ok(Ok(None)) => break,
                 Ok(Err(error)) => return Err(anyhow!(LlmError::Streaming(format!("failed to read streaming response chunk: {error}")))),
-                Err(_) => return Err(anyhow!(LlmError::Streaming("streaming response stalled (no data for 120s)".to_string()))),
+                Err(_) => return Err(anyhow!(LlmError::Streaming(format!("streaming response stalled (no data for {}s)", chunk_timeout.as_secs())))),
             };
             chunk_count += 1;
 
@@ -570,7 +697,7 @@ impl OpenAiBackend {
                         let _ = sink.write_all(b"\n");
                     }
                     sink.flush().ok();
-                    let output = build_output_with_usage(thinking_text, content_text, usage);
+                    let output = build_output_with_usage(thinking_text, content_text, usage, refused);
                     if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
                         eprintln!("[llm:usage] {}", output.usage.summary());
                     }
@@ -584,6 +711,7 @@ impl OpenAiBackend {
                 }
 
                 for choice in chunk.choices {
+                    refused |= is_refusal(choice.finish_reason.as_deref());
                     if let Some(reasoning) = choice.delta.reasoning_content {
                         if !in_thinking {
                             in_thinking = true;
@@ -622,7 +750,7 @@ impl OpenAiBackend {
         }
         sink.flush().ok();
         eprintln!("[llm:done] {} chunks in {}ms, thinking={}chars content={}chars", chunk_count, stream_start.elapsed().as_millis(), thinking_text.len(), content_text.len());
-        let output = build_output_with_usage(thinking_text, content_text, usage);
+        let output = build_output_with_usage(thinking_text, content_text, usage, refused);
         if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
             eprintln!("[llm:usage] {}", output.usage.summary());
         }
@@ -643,14 +771,14 @@ impl OpenAiBackend {
         let req = http
             .post(self.endpoint())
             .json(&self.request_body(request, true));
-        let response = self.send_request(req, "failed to send streaming chat completion request").await?;
+        let response = self.send_streaming_request(req, "failed to send streaming chat completion request").await?;
 
         let mut parser = SseParser::new();
         let mut thinking_text = String::new();
         let mut content_text = String::new();
         let mut in_thinking = false;
 
-        let chunk_timeout = Duration::from_secs(120);
+        let chunk_timeout = self.chunk_timeout;
         let mut response = response;
         let mut chunk_count: u64 = 0;
         let stream_start = std::time::Instant::now();
@@ -664,9 +792,10 @@ impl OpenAiBackend {
                     ))));
                 }
                 Err(_) => {
-                    return Err(anyhow!(LlmError::Streaming(
-                        "streaming response stalled (no data for 120s)".to_string()
-                    )));
+                    return Err(anyhow!(LlmError::Streaming(format!(
+                        "streaming response stalled (no data for {}s)",
+                        chunk_timeout.as_secs()
+                    ))));
                 }
             };
             chunk_count += 1;
@@ -730,6 +859,7 @@ impl OpenAiBackend {
     async fn generate_non_streaming(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput> {
         let req = http
             .post(self.endpoint())
+            .timeout(self.non_streaming_timeout)
             .json(&self.request_body(request, false));
         let http_resp = self.send_request(req, "failed to send chat completion request").await?;
         let response: ChatCompletionResponse = http_resp
@@ -737,17 +867,18 @@ impl OpenAiBackend {
             .await
             .map_err(|error| anyhow!(LlmError::Decode(format!("failed to deserialize chat completion response: {error}"))))?;
 
-        let msg = response
+        let choice = response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("chat completion response contained no choices"))?
-            .message;
+            .ok_or_else(|| anyhow!("chat completion response contained no choices"))?;
+        let refused = is_refusal(choice.finish_reason.as_deref());
+        let msg = choice.message;
 
         let thinking = msg.reasoning_content.unwrap_or_default();
         let content = msg.content.unwrap_or_default();
 
-        let output = build_output_with_usage(thinking, content, response.usage);
+        let output = build_output_with_usage(thinking, content, response.usage, refused);
         if output.usage.has_cache_report() || output.usage.total_tokens > 0 {
             eprintln!("[llm:usage] {}", output.usage.summary());
         }
@@ -756,6 +887,10 @@ impl OpenAiBackend {
 }
 
 impl LlmBackend for OpenAiBackend {
+    fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
+    }
+
     async fn generate(&self, http: &Client, request: &LlmRequest) -> Result<LlmOutput> {
         match self.generate_streaming(http, request).await {
             Ok(output) => Ok(output),
@@ -780,7 +915,11 @@ pub struct LlmClient<B = OpenAiBackend> {
     backend: B,
     temperature: f32,
     max_tokens: u32,
+    /// Set when a too-large request was shrunk and retried (#68); callers
+    /// persist a forced view checkpoint via `take_recovered`.
+    recovered: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
+
 
 #[allow(dead_code)]
 impl LlmClient<OpenAiBackend> {
@@ -790,30 +929,26 @@ impl LlmClient<OpenAiBackend> {
             backend: OpenAiBackend::new(base_url),
             temperature: -1.0, // -1 = omit (max model compat; see request_body)
             max_tokens: 64000,
+            recovered: Default::default(),
         }
     }
 
     pub fn new_with_model(base_url: &str, model: &str) -> Self {
-        let max_tokens = if model.contains("opus") { 64000 } else { 32000 };
-        Self {
-            http: Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .build().unwrap_or_else(|_| Client::new()),
-            backend: OpenAiBackend::new(base_url).with_model(model),
-            temperature: -1.0, // -1 = omit (max model compat; see request_body)
-            max_tokens,
-        }
+        Self::new_with_model_and_key(base_url, model, None)
     }
 
+    /// Output limit and total-request timeout come from the per-model limits
+    /// (#68); the streaming chunk-gap timeout is set on the backend.
     pub fn new_with_model_and_key(base_url: &str, model: &str, api_key: Option<String>) -> Self {
-        let max_tokens = if model.contains("opus") { 64000 } else { 32000 };
+        let limits = crate::model_limits::for_model(model);
         Self {
             http: Client::builder()
-                .timeout(std::time::Duration::from_secs(300)) // 5 min per LLM request
+                .timeout(limits.request_timeout)
                 .build().unwrap_or_else(|_| Client::new()),
             backend: OpenAiBackend::new(base_url).with_model(model).with_api_key(api_key),
             temperature: -1.0, // -1 = omit (max model compat; see request_body)
-            max_tokens,
+            max_tokens: limits.output_tokens,
+            recovered: Default::default(),
         }
     }
 
@@ -842,7 +977,7 @@ impl LlmClient<OpenAiBackend> {
             self.max_tokens
         );
 
-        let request = LlmRequest {
+        let mut request = LlmRequest {
             messages,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
@@ -852,32 +987,29 @@ impl LlmClient<OpenAiBackend> {
         // with respect to the caller).  Once we have a connected response,
         // spawn the SSE reader task.
         let mut last_err = None;
+        let mut policy = RetryPolicy::new();
+        let mut shrunk = false;
         for attempt in 0..MAX_LLM_RETRIES {
             let req = self.http
                 .post(self.backend.endpoint())
                 .json(&self.backend.request_body(&request, true));
-            match self.backend.send_request(req, "failed to send streaming chat completion request").await {
+            match self.backend.send_streaming_request(req, "failed to send streaming chat completion request").await {
                 Ok(response) => {
                     // Connection established.  Spawn the SSE reader.
                     let (tx, rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
-                    tokio::spawn(stream_sse_to_channel(response, tx));
+                    tokio::spawn(stream_sse_to_channel(response, tx, self.backend.chunk_timeout()));
                     return Ok(rx);
                 }
                 Err(e) => {
-                    let Some(llm_error) = e.downcast_ref::<LlmError>() else {
-                        return Err(e);
-                    };
-                    if llm_error.is_retryable() && attempt + 1 < MAX_LLM_RETRIES {
-                        let delay = llm_error
-                            .retry_after()
-                            .unwrap_or_else(|| default_retry_delay(attempt, llm_error));
-                        warn!(
-                            "[llm:retry] attempt {}/{} in {}ms: {}",
-                            attempt + 2,
-                            MAX_LLM_RETRIES,
-                            delay.as_millis(),
-                            llm_error
-                        );
+                    if !shrunk {
+                        if let Some(messages) = self.shrink_after(&e, &request.messages, self.backend.max_request_bytes) {
+                            request.messages = messages;
+                            shrunk = true;
+                            continue;
+                        }
+                    }
+                    if let Some(delay) = policy.next_delay(&e, attempt) {
+                        warn!("[llm:retry] attempt {}/{} in {}ms: {}", attempt + 2, MAX_LLM_RETRIES, delay.as_millis(), e);
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
                         continue;
@@ -903,6 +1035,7 @@ where
             backend,
             temperature: -1.0, // -1 = omit (max model compat; see request_body)
             max_tokens: 128000,
+            recovered: Default::default(),
         }
     }
 
@@ -926,14 +1059,17 @@ where
             }
         }
 
-        let request = LlmRequest {
+        let mut request = LlmRequest {
             messages,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
         };
 
-        // Retry with exponential backoff on transient transport/server errors.
+        // Retry with exponential backoff on transient transport/server errors;
+        // a timeout at most once; a too-large request shrinks and retries once.
         let mut last_err = None;
+        let mut policy = RetryPolicy::new();
+        let mut shrunk = false;
         for attempt in 0..MAX_LLM_RETRIES {
             match self.backend.generate(&self.http, &request).await {
                 Ok(output) => {
@@ -953,30 +1089,25 @@ where
                     return Ok(output);
                 }
                 Err(e) => {
-                    let Some(llm_error) = e.downcast_ref::<LlmError>() else {
-                        return Err(e);
-                    };
-
-                    if llm_error.is_retryable() && attempt + 1 < MAX_LLM_RETRIES {
-                        let delay = llm_error
-                            .retry_after()
-                            .unwrap_or_else(|| default_retry_delay(attempt, llm_error));
+                    if !shrunk {
+                        if let Some(messages) = self.shrink_after(&e, &request.messages, self.backend.max_request_bytes()) {
+                            request.messages = messages;
+                            shrunk = true;
+                            continue;
+                        }
+                    }
+                    if let Some(delay) = policy.next_delay(&e, attempt) {
                         eprintln!(
                             "[llm:retry] attempt {}/{} in {}ms: {}",
                             attempt + 2,
                             MAX_LLM_RETRIES,
                             delay.as_millis(),
-                            if crate::logging::content() {
-                                llm_error.with_body()
-                            } else {
-                                llm_error.to_string()
-                            }
+                            render_error(&e)
                         );
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
                         continue;
                     }
-
                     return Err(e);
                 }
             }
@@ -990,14 +1121,15 @@ where
 async fn stream_sse_to_channel(
     mut response: Response,
     tx: tokio::sync::mpsc::Sender<StreamChunk>,
+    chunk_timeout: Duration,
 ) {
     let mut parser = SseParser::new();
     let mut thinking_text = String::new();
     let mut content_text = String::new();
     let mut in_thinking = false;
     let mut usage: Option<TokenUsage> = None;
+    let mut refused = false;
 
-    let chunk_timeout = Duration::from_secs(120);
     let stream_start = std::time::Instant::now();
     let mut chunk_count: u64 = 0;
 
@@ -1010,7 +1142,7 @@ async fn stream_sse_to_channel(
                 break;
             }
             Err(_) => {
-                warn!("streaming response stalled (no data for 120s)");
+                warn!("streaming response stalled (no data for {}s)", chunk_timeout.as_secs());
                 break;
             }
         };
@@ -1023,6 +1155,7 @@ async fn stream_sse_to_channel(
                     thinking_text.clone(),
                     content_text.clone(),
                     usage,
+                    refused,
                 );
                 let _ = tx.send(StreamChunk::Done(output)).await;
                 done = true;
@@ -1038,6 +1171,7 @@ async fn stream_sse_to_channel(
             }
 
             for choice in parsed.choices {
+                refused |= is_refusal(choice.finish_reason.as_deref());
                 if let Some(reasoning) = choice.delta.reasoning_content {
                     if !in_thinking {
                         in_thinking = true;
@@ -1077,7 +1211,7 @@ async fn stream_sse_to_channel(
         thinking_text.len(),
         content_text.len()
     );
-    let output = build_output_with_usage(thinking_text, content_text, usage);
+    let output = build_output_with_usage(thinking_text, content_text, usage, refused);
     let _ = tx.send(StreamChunk::Done(output)).await;
 }
 
@@ -1245,6 +1379,13 @@ struct ChatCompletionChunk {
 #[derive(Debug, Deserialize)]
 struct ChunkChoice {
     delta: ChunkDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+/// Whether a terminal `finish_reason` says the provider refused the turn.
+fn is_refusal(finish_reason: Option<&str>) -> bool {
+    matches!(finish_reason, Some("content_filter" | "refusal"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1295,6 +1436,8 @@ impl From<TokenUsage> for LlmUsage {
 #[derive(Debug, Deserialize)]
 struct ResponseChoice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1408,6 +1551,7 @@ fn build_output(thinking: String, content: String) -> LlmOutput {
         thinking,
         code,
         usage: LlmUsage::default(),
+        refused: false,
     }
 }
 
@@ -1416,9 +1560,11 @@ fn build_output_with_usage(
     thinking: String,
     content: String,
     usage: Option<TokenUsage>,
+    refused: bool,
 ) -> LlmOutput {
     let mut output = build_output(thinking, content);
     output.usage = usage.map(LlmUsage::from).unwrap_or_default();
+    output.refused = refused;
     output
 }
 
@@ -1465,6 +1611,19 @@ fn strip_tags(text: &str, tag: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn llm_client_output_limit_and_timeouts_come_from_model_limits() {
+        for model in ["anthropic/claude-opus-5", "chatgpt/gpt-6-astra", "dev-bot"] {
+            let limits = crate::model_limits::for_model(model);
+            let client = LlmClient::new_with_model_and_key("http://127.0.0.1:1", model, None);
+            assert_eq!(client.max_tokens, limits.output_tokens, "{model}");
+            assert_eq!(client.backend.chunk_timeout(), limits.chunk_timeout, "{model}");
+            assert!(limits.request_timeout >= std::time::Duration::from_secs(300));
+        }
+        assert_eq!(crate::model_limits::for_model("anthropic/claude-opus-5").output_tokens, 128_000);
+        assert_eq!(crate::model_limits::for_model("dev-bot").output_tokens, 32_000);
+    }
     use super::*;
 
     #[test]

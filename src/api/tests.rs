@@ -1527,22 +1527,18 @@ fn session_migrates_chat_messages_to_conversations() {
     assert_eq!(main_conv.messages[2].role, "assistant");
 }
 
-/// Conversation.trim() should preserve system prompt and keep last N-1 messages.
+/// #68: persisted HTTP history is never trimmed; `main` grows append-only.
 #[test]
-fn conversation_trim_preserves_system() {
-    let mut conv = crate::session::Conversation::new();
-    conv.push_system("system prompt");
-    for i in 0..10 {
-        conv.push_user(format!("msg {i}"));
+fn main_conversation_persistence_never_trims() {
+    let config = test_config();
+    for i in 0..60 {
+        config.meta.lock().unwrap().conversations.get_or_create("main").push_user(format!("msg {i}"));
+        super::http_context::persist_main_assistant(&config, format!("reply {i}"));
     }
-    assert_eq!(conv.messages.len(), 11); // 1 system + 10 user
-
-    conv.trim(5);
-    assert_eq!(conv.messages.len(), 5);
-    assert_eq!(conv.messages[0].role, "system");
-    assert_eq!(conv.messages[0].content, "system prompt");
-    // Last 4 messages should be the most recent user messages
-    assert_eq!(conv.messages[4].content, "msg 9");
+    let meta = config.meta.lock().unwrap();
+    let conv = meta.conversations.get("main").unwrap();
+    assert_eq!(conv.messages.len(), 120);
+    assert_eq!(conv.messages[0].content, "msg 0");
 }
 
 /// Conversation.to_llm_messages() should produce correct LLM message types.

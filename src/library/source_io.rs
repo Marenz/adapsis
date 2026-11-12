@@ -55,13 +55,14 @@ fn load_candidate(
     }
     let mut loaded = ast::Program::default();
     let mut hashes = BTreeMap::new();
+    let mut stored_cases = BTreeMap::new();
     for name in &managed.order {
         let format = managed.manifest.modules[name].format;
         let filename = format!("{name}.{}", format.extension());
         let text = super::source::read_source(&dir.join(&filename))
             .map_err(|_| anyhow::anyhow!("authoritative source `{filename}` could not be read"))?;
         let mut catalog = dependency_catalog(&loaded, &managed, name)?;
-        decode(&mut catalog, name, &text, format).map_err(|error| {
+        let cases = decode(&mut catalog, name, &text, format).map_err(|error| {
             let location = error.downcast_ref::<python_frontend::Diagnostic>()
                 .map(|diagnostic| format!(" at line {}, column {}", diagnostic.line, diagnostic.column))
                 .unwrap_or_default();
@@ -76,6 +77,7 @@ fn load_candidate(
         loaded.pending_routes.extend(catalog.pending_routes);
         loaded.rebuild_function_index();
         hashes.insert(name.clone(), super::source_hash(&text));
+        stored_cases.insert(name.clone(), cases);
     }
     managed.verify_manifest(dir)?;
     for (name, hash) in &hashes {
@@ -98,6 +100,9 @@ fn load_candidate(
         .retain(|route| !managed_handler(&route.handler_fn, &names));
     candidate.pending_routes.extend(loaded.pending_routes);
     candidate.rebuild_function_index();
+    // The set is valid. Earn the pass flags: mock-only re-run, no real IO.
+    let rerun = super::source_verify::rerun_stored_cases(&mut candidate, &stored_cases);
+    super::source_verify::report(&rerun);
     let mut state_hashes = lock(&state.file_hashes)?;
     let mut state_managed = lock(&state.managed_sources)?;
     let mut state_error = lock(&state.managed_error)?;
@@ -157,7 +162,14 @@ fn refuse_unlisted_cache(program: &ast::Program, names: &BTreeSet<String>) -> Re
     Ok(())
 }
 
-fn decode(catalog: &mut ast::Program, name: &str, text: &str, format: SourceFormat) -> Result<()> {
+/// Applies one source file to `catalog` and returns its stored cases (grouped
+/// per function, stored order) for the mock-only startup re-run.
+fn decode(
+    catalog: &mut ast::Program,
+    name: &str,
+    text: &str,
+    format: SourceFormat,
+) -> Result<Vec<parser::TestMutation>> {
     check_catalog_budget(catalog)?;
     let (declarations, tests) = match format {
         SourceFormat::Python => {
@@ -174,7 +186,7 @@ fn decode(catalog: &mut ast::Program, name: &str, text: &str, format: SourceForm
     }
     catalog.rebuild_function_index();
     let mut seen = BTreeSet::new();
-    for test in tests {
+    for test in &tests {
         if !test.function_name.starts_with(&format!("{name}."))
             || !seen.insert(test.function_name.clone())
             || catalog.get_function(&test.function_name).is_none()
@@ -183,7 +195,8 @@ fn decode(catalog: &mut ast::Program, name: &str, text: &str, format: SourceForm
         }
         // Verified Python source cases carry typed payloads; transitional
         // legacy_ax imports keep the legacy string adapter. Parsing alone is
-        // not a test run, so the pass flag is cleared below.
+        // not a test run, so the pass flag is cleared here; the mock-only
+        // startup re-run (source_verify) sets it for cases that really pass.
         let typed = format == SourceFormat::Python;
         crate::session::store_test_payload(catalog, &test.function_name, &test.cases, typed);
         if let Some(function) = catalog.get_function_mut(&test.function_name) {
@@ -202,7 +215,7 @@ fn decode(catalog: &mut ast::Program, name: &str, text: &str, format: SourceForm
     let registrations = std::mem::take(&mut catalog.pending_routes);
     python_frontend::print_python_module(catalog, name)?;
     catalog.pending_routes = registrations;
-    Ok(())
+    Ok(tests)
 }
 
 /// The ordinary validator merges declarations; a source snapshot must not use

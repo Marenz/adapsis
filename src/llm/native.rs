@@ -70,12 +70,13 @@ impl LlmClient<OpenAiBackend> {
             request.tools.len(),
             request.max_tokens
         );
-        let body = native_request_body(&self.backend, &request, false);
-
-        with_retries(move || {
-            let body = body.clone();
+        with_retries(self, request, false, move |body| {
             async move {
-                let req = self.http.post(self.backend.endpoint()).json(&body);
+                let req = self
+                    .http
+                    .post(self.backend.endpoint())
+                    .timeout(self.backend.non_streaming_timeout())
+                    .json(&body);
                 let response = self
                     .backend
                     .send_request(req, "failed to send native tool chat completion request")
@@ -103,21 +104,18 @@ impl LlmClient<OpenAiBackend> {
             request.messages.len(),
             request.tools.len()
         );
-        let body = native_request_body(&self.backend, &request, true);
-
-        with_retries(move || {
-            let body = body.clone();
+        with_retries(self, request, true, move |body| {
             async move {
                 let req = self.http.post(self.backend.endpoint()).json(&body);
                 let response = self
                     .backend
-                    .send_request(
+                    .send_streaming_request(
                         req,
                         "failed to send native streaming chat completion request",
                     )
                     .await?;
                 let (tx, rx) = tokio::sync::mpsc::channel::<NativeStreamEvent>(64);
-                tokio::spawn(native_stream_task(response, tx));
+                tokio::spawn(native_stream_task(response, tx, self.backend.chunk_timeout()));
                 Ok::<_, anyhow::Error>(rx)
             }
         })
@@ -263,32 +261,34 @@ fn provider_error_message(error: serde_json::Value) -> String {
     format!("provider error: {error}")
 }
 
-/// Retry a fallible request up to `MAX_LLM_RETRIES` times, reusing the legacy
-/// error classification and backoff helpers.
-async fn with_retries<T, F, Fut>(mut attempt: F) -> Result<T>
+/// Retry a native request with the shared policy (timeouts at most once) and one
+/// shrink-and-retry for a too-large request (#68).
+async fn with_retries<T, F, Fut>(
+    client: &LlmClient<OpenAiBackend>,
+    mut request: TurnRequest,
+    stream: bool,
+    mut attempt: F,
+) -> Result<T>
 where
-    F: FnMut() -> Fut,
+    F: FnMut(serde_json::Value) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
     let mut last_err = None;
+    let mut policy = super::RetryPolicy::new();
+    let mut shrunk = false;
     for attempt_index in 0..super::MAX_LLM_RETRIES {
-        match attempt().await {
+        match attempt(native_request_body(&client.backend, &request, stream)).await {
             Ok(value) => return Ok(value),
             Err(error) => {
-                let Some(llm_error) = error.downcast_ref::<LlmError>() else {
-                    return Err(error);
-                };
-                if llm_error.is_retryable() && attempt_index + 1 < super::MAX_LLM_RETRIES {
-                    let delay = llm_error
-                        .retry_after()
-                        .unwrap_or_else(|| super::default_retry_delay(attempt_index, llm_error));
-                    warn!(
-                        "[llm:retry] attempt {}/{} in {}ms: {}",
-                        attempt_index + 2,
-                        super::MAX_LLM_RETRIES,
-                        delay.as_millis(),
-                        llm_error
-                    );
+                if !shrunk {
+                    if let Some(messages) = client.shrink_after(&error, &request.messages, client.backend.max_request_bytes) {
+                        request.messages = messages;
+                        shrunk = true;
+                        continue;
+                    }
+                }
+                if let Some(delay) = policy.next_delay(&error, attempt_index) {
+                    warn!("[llm:retry] attempt {}/{} in {}ms: {}", attempt_index + 2, super::MAX_LLM_RETRIES, delay.as_millis(), error);
                     tokio::time::sleep(delay).await;
                     last_err = Some(error);
                     continue;
@@ -308,10 +308,10 @@ where
 async fn native_stream_task(
     mut response: Response,
     tx: tokio::sync::mpsc::Sender<NativeStreamEvent>,
+    chunk_timeout: Duration,
 ) {
     let mut parser = NativeSseParser::new();
     let mut state = StreamState::new();
-    let chunk_timeout = Duration::from_secs(120);
 
     loop {
         let chunk = match tokio::time::timeout(chunk_timeout, response.chunk()).await {
@@ -327,9 +327,10 @@ async fn native_stream_task(
             }
             Err(_) => {
                 let _ = tx
-                    .send(NativeStreamEvent::Error(
-                        "streaming response stalled (no data for 120s)".to_string(),
-                    ))
+                    .send(NativeStreamEvent::Error(format!(
+                        "streaming response stalled (no data for {}s)",
+                        chunk_timeout.as_secs()
+                    )))
                     .await;
                 return;
             }

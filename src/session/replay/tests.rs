@@ -326,3 +326,63 @@ async fn typed_stored_payload_present_invalid_never_falls_back_to_legacy_strings
         assert!(error.contains("invalid"));
     }
 }
+
+#[test]
+fn typed_submission_and_rewind_leave_conversation_view_and_cache_state_alone() {
+    // #68 anchors and cache evidence live on the conversation; program replay
+    // and rewind have no reason to touch them.
+    let mut session = Session::new();
+    {
+        let conversation = session.meta.conversations.get_or_create("telegram:anchor");
+        for index in 0..4 {
+            conversation.messages.push(crate::session::ChatMessage {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: format!("m{index}"),
+                ..Default::default()
+            });
+        }
+        conversation.view_start = 2;
+        conversation.image_start = 1;
+        conversation.tail_bytes = Some(4321);
+        conversation.last_request_ms = Some(1_700_000_000_000);
+    }
+    let anchors = |session: &Session| {
+        let c = session.meta.conversations.get("telegram:anchor").unwrap();
+        (
+            c.messages.len(),
+            c.view_start,
+            c.image_start,
+            c.tail_bytes,
+            c.last_request_ms,
+            serde_json::to_string(&c.token_calibration).unwrap(),
+            serde_json::to_string(&session.meta.conversations.cache_lifetimes).unwrap(),
+        )
+    };
+    let before = anchors(&session);
+    let source = "def twice(x: int) -> int:\n    return x * 2\n";
+    let lowered = crate::python_frontend::lower_module(source, "AnchorMod").unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let results = rt
+        .block_on(session.apply_operations_async(
+            &lowered.operations,
+            &Submission::python("AnchorMod", source),
+            None,
+        ))
+        .unwrap();
+    assert!(results.iter().all(|(_, ok)| *ok), "{results:?}");
+    assert_eq!(session.meta.revision, 1);
+    assert_eq!(anchors(&session), before, "typed submission changed conversation state");
+    rewind_to(
+        &mut session.program,
+        &mut session.runtime,
+        &mut session.meta,
+        &mut session.sandbox,
+        0,
+    )
+    .unwrap();
+    assert!(session.program.get_function("AnchorMod.twice").is_none());
+    assert_eq!(anchors(&session), before, "rewind changed conversation state");
+    // The fields survive a save/load of the session as well.
+    let restored: Session = serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+    assert_eq!(anchors(&restored), before);
+}

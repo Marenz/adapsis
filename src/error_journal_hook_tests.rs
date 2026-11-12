@@ -165,3 +165,33 @@ fn managed_python_load_failure_is_journaled_with_name_and_line_only() {
     assert!(message.contains("JournalPy.py") && message.contains("at line"), "{message}");
     assert!(entries.iter().all(|e| !e.to_string().contains(secret) && !e.to_string().contains("def bad")));
 }
+
+#[test]
+fn managed_startup_rerun_journals_one_entry_per_module_without_case_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "RERUN_CASE_CANARY_55";
+    std::fs::write(
+        dir.path().join("library-sources.json"),
+        r#"{"version":1,"modules":{"JournalRerun":{"format":"python","dependencies":[]}}}"#,
+    )
+    .unwrap();
+    // Three failing cases in two functions of one module.
+    std::fs::write(
+        dir.path().join("JournalRerun.py"),
+        format!("def a(x: str) -> str:\n    return x\n\ndef b(x: str) -> str:\n    return x\n\n@stored_test(\"JournalRerun.a\")\ndef test_case_1() -> None:\n    assert a(\"{secret}\") == \"no\"\n\n@stored_test(\"JournalRerun.a\")\ndef test_case_2() -> None:\n    assert a(\"x\") == \"no\"\n\n@stored_test(\"JournalRerun.b\")\ndef test_case_3() -> None:\n    assert b(\"x\") == \"no\"\n"),
+    )
+    .unwrap();
+    let before = last_seq();
+    let mut program = crate::ast::Program::default();
+    let mut state = crate::library::LibraryState::new();
+    crate::library::load_module_files(&mut program, dir.path(), &mut state);
+    state.require_authoritative_sources().unwrap();
+    let entries = entries_since(before);
+    let ours: Vec<_> = entries.iter().filter(|e| e.to_string().contains("JournalRerun")).collect();
+    assert_eq!(ours.len(), 1, "one entry per module, not per case: {ours:#?}");
+    assert_eq!(ours[0]["category"], "library");
+    assert_eq!(ours[0]["source"], "JournalRerun");
+    let message = ours[0]["message"].as_str().unwrap();
+    assert!(message.contains("stay untested"), "{message}");
+    assert!(entries.iter().all(|e| !e.to_string().contains(secret)));
+}
