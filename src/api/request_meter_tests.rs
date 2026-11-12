@@ -110,36 +110,43 @@ fn calibration_measures_sent_text_bytes_without_image_data() {
 fn calibration_from_provider_usage_drives_the_next_view() {
     let meta = new_meta();
     let ratio = |meta: &SharedMeta, model: &str| with_conv(meta, "ctx", |conv| conv.bytes_per_token(model));
-    let request = || sent(UNKNOWN_BIG, 1_460_000, T0);
-    assert_eq!(ratio(&meta, UNKNOWN_BIG), DEFAULT_BYTES_PER_TOKEN);
+    let request = || sent(CHATGPT, 1_460_000, T0);
+    assert_eq!(ratio(&meta, CHATGPT), DEFAULT_BYTES_PER_TOKEN);
     // Anthropic shape: the total processed input is prompt + read + created.
     request().calibrate(&meta, "ctx", false, false, &usage(3_447, Some(0), Some(590_000)));
-    assert!((ratio(&meta, UNKNOWN_BIG) - 2.46).abs() < 0.01, "{}", ratio(&meta, UNKNOWN_BIG));
+    assert!((ratio(&meta, CHATGPT) - 2.46).abs() < 0.01, "{}", ratio(&meta, CHATGPT));
     // ChatGPT shape: cache reads are inside prompt_tokens.
     request().calibrate(&meta, "ctx", false, false, &usage(365_000, Some(300_000), None));
-    assert_eq!(ratio(&meta, UNKNOWN_BIG), 4.0);
+    assert_eq!(ratio(&meta, CHATGPT), 4.0);
     // Missing/zero usage and a request the client shrank leave it unchanged.
     request().calibrate(&meta, "ctx", false, false, &LlmUsage::default());
     request().calibrate(&meta, "ctx", true, false, &usage(1_000_000, None, None));
-    assert_eq!(ratio(&meta, UNKNOWN_BIG), 4.0);
+    assert_eq!(ratio(&meta, CHATGPT), 4.0);
     // The ratio belongs to the model that counted it.
     assert_eq!(ratio(&meta, OPUS), DEFAULT_BYTES_PER_TOKEN);
     // Implausible reports are clamped.
     request().calibrate(&meta, "ctx", false, false, &usage(5_000_000, None, None));
-    assert_eq!(ratio(&meta, UNKNOWN_BIG), crate::model_limits::MIN_BYTES_PER_TOKEN);
+    assert_eq!(ratio(&meta, CHATGPT), crate::model_limits::MIN_BYTES_PER_TOKEN);
     // The stored ratio is the one the next view projects with: ≈1.2 MB is under
     // the trigger at the default ratio and far over it at 1.5 bytes/token.
     fill(&meta, "ctx", 200, 6_000);
     fill(&meta, "fresh", 200, 6_000);
-    assert!(!start_turn(&meta, "fresh", UNKNOWN_BIG, T0).checkpointed);
-    assert!(start_turn(&meta, "ctx", UNKNOWN_BIG, T0).checkpointed);
+    assert!(!start_turn(&meta, "fresh", CHATGPT, T0).checkpointed);
+    assert!(start_turn(&meta, "ctx", CHATGPT, T0).checkpointed);
     // Each context keeps its own measurement.
-    assert_eq!(with_conv(&meta, "other", |conv| conv.bytes_per_token(UNKNOWN_BIG)), DEFAULT_BYTES_PER_TOKEN);
+    assert_eq!(with_conv(&meta, "other", |conv| conv.bytes_per_token(CHATGPT)), DEFAULT_BYTES_PER_TOKEN);
 }
 
-/// A model with a large window and NO sourced cache lifetime (the ChatGPT route
-/// reports no cache use at all).
-const UNKNOWN_BIG: &str = "chatgpt/gpt-6-astra";
+/// The ChatGPT route: 872k window, lifetime 1800 s, probabilistic hits, cache
+/// reads reported inside prompt_tokens and no write counter.
+const CHATGPT: &str = "chatgpt/gpt-6-astra";
+/// A route with NO sourced cache lifetime (and the default 128k window).
+const UNKNOWN: &str = "deepinfra/unknown-lifetime";
+
+/// An answered request the size of the turn's view (no measurable tail).
+fn answer_view(meta: &SharedMeta, context: &str, model: &str, view: &View, now_ms: u64, usage: &LlmUsage) {
+    answer(meta, context, model, text_bytes(&view.messages), now_ms, usage);
+}
 
 /// The cold start: only at the start of a turn, only after a pause of at least
 /// the route's lifetime, and never between the rounds of a running turn.
@@ -202,16 +209,19 @@ fn cold_start_fires_only_at_a_turn_start_after_a_pause_over_the_lifetime() {
 fn cold_start_never_happens_with_an_unknown_lifetime_or_a_small_history() {
     let meta = new_meta();
     let week = secs(7 * 24 * HOUR);
-    fill(&meta, "ctx", 200, 6_000);
-    assert_eq!(lifetime(&meta, UNKNOWN_BIG), None);
-    start_turn(&meta, "ctx", UNKNOWN_BIG, T0);
-    answer(&meta, "ctx", UNKNOWN_BIG, 1_000_000, T0, &usage(400_000, None, None));
+    // ≈120 KB ≈ 48k tokens: under the 128k window's trigger, over what a cold
+    // start would keep there.
+    fill(&meta, "ctx", 20, 6_000);
+    assert_eq!(lifetime(&meta, UNKNOWN), None);
+    let view = start_turn(&meta, "ctx", UNKNOWN, T0);
+    answer_view(&meta, "ctx", UNKNOWN, &view, T0, &usage(48_000, None, None));
     // A week later, on a route with no default and nothing learned: as today.
-    assert!(!start_turn(&meta, "ctx", UNKNOWN_BIG, T0 + week).checkpointed);
+    assert!(!start_turn(&meta, "ctx", UNKNOWN, T0 + week).checkpointed);
     assert_eq!(view_start(&meta, "ctx"), 0);
     // Hits alone are only a lower bound: still unknown, still no cold start.
-    meta.lock().unwrap().conversations.cache_lifetimes.record(UNKNOWN_BIG, Outcome::Hit, 900, T0);
-    assert!(!start_turn(&meta, "ctx", UNKNOWN_BIG, T0 + 2 * week).checkpointed);
+    meta.lock().unwrap().conversations.cache_lifetimes.record(UNKNOWN, Outcome::Hit, 900, T0);
+    assert!(!start_turn(&meta, "ctx", UNKNOWN, T0 + 2 * week).checkpointed);
+    assert_eq!(view_start(&meta, "ctx"), 0);
     // A history already under the cold-start size is left alone on any route.
     fill(&meta, "small", 10, 6_000);
     start_turn(&meta, "small", OPUS, T0);
@@ -268,15 +278,17 @@ fn learned_lifetime_overrides_the_default_in_both_directions() {
     assert!(start_turn(&shorter, "ctx", OPUS, T0 + secs(2_000)).checkpointed, "2,000 s is under the default but past the learned lifetime");
     // Learned on a route without a default: two misses make it known.
     let unknown = new_meta();
-    fill(&unknown, "ctx", 200, 6_000);
-    start_turn(&unknown, "ctx", UNKNOWN_BIG, T0);
-    answer(&unknown, "ctx", UNKNOWN_BIG, 1_000_000, T0, &usage(400_000, Some(0), None));
+    fill(&unknown, "ctx", 20, 6_000);
+    let view = start_turn(&unknown, "ctx", UNKNOWN, T0);
+    answer_view(&unknown, "ctx", UNKNOWN, &view, T0, &usage(48_000, Some(0), None));
     for pause in [1_800, 2_000] {
-        unknown.lock().unwrap().conversations.cache_lifetimes.record(UNKNOWN_BIG, Outcome::Miss, pause, T0);
+        unknown.lock().unwrap().conversations.cache_lifetimes.record(UNKNOWN, Outcome::Miss, pause, T0);
     }
-    assert!(!start_turn(&unknown, "ctx", UNKNOWN_BIG, T0 + secs(1_900)).checkpointed);
-    answer(&unknown, "ctx", UNKNOWN_BIG, 1_000_000, T0 + secs(1_900), &usage(400_000, None, None));
-    assert!(start_turn(&unknown, "ctx", UNKNOWN_BIG, T0 + secs(1_900 + 2_100)).checkpointed);
+    assert_eq!(lifetime(&unknown, UNKNOWN), Some(Lifetime { secs: 2_000, source: Source::Learned }));
+    let view = start_turn(&unknown, "ctx", UNKNOWN, T0 + secs(1_900));
+    assert!(!view.checkpointed);
+    answer_view(&unknown, "ctx", UNKNOWN, &view, T0 + secs(1_900), &usage(48_000, None, None));
+    assert!(start_turn(&unknown, "ctx", UNKNOWN, T0 + secs(1_900 + 2_100)).checkpointed);
     // Cold starts switched off for a model (`cache_ttl_secs = 0`): never.
     let mut off = crate::model_limits::for_model(OPUS);
     off.cold_start = false;
@@ -368,10 +380,10 @@ fn cache_evidence_is_recorded_from_usage_only_when_a_hit_could_be_expected() {
     // A route that does not report cache reads is never learned.
     turn(&meta, "plain", true, Some(40));
     for step in 0..4 {
-        answer(&meta, "plain", UNKNOWN_BIG, 150_000, T0 + step * secs(2_000), &usage(60_000, None, None));
+        answer(&meta, "plain", UNKNOWN, 150_000, T0 + step * secs(2_000), &usage(60_000, None, None));
     }
-    assert_eq!(evidence(&meta, UNKNOWN_BIG), None);
-    assert_eq!(lifetime(&meta, UNKNOWN_BIG), None, "stays unknown");
+    assert_eq!(evidence(&meta, UNKNOWN), None);
+    assert_eq!(lifetime(&meta, UNKNOWN), None, "stays unknown");
     // The pause is measured per context, from request start to request start.
     assert_eq!(with_conv(&meta, "plain", |conv| conv.last_request_ms), Some(T0 + secs(6_000)));
 }
@@ -415,7 +427,7 @@ fn measured_runtime_tail_replaces_the_fixed_allowance() {
     // The next turn projects with it, and measures again.
     assert_eq!(with_conv(&meta, "ctx", |conv| conv.projection(OPUS).tail_bytes), Some(45_000));
     // The tail is a size in bytes, so it also holds for another model.
-    assert_eq!(with_conv(&meta, "ctx", |conv| conv.projection(UNKNOWN_BIG)), Projection { bytes_per_token: DEFAULT_BYTES_PER_TOKEN, tail_bytes: Some(45_000) });
+    assert_eq!(with_conv(&meta, "ctx", |conv| conv.projection(CHATGPT)), Projection { bytes_per_token: DEFAULT_BYTES_PER_TOKEN, tail_bytes: Some(45_000) });
     let next = start_turn(&meta, "ctx", OPUS, T0 + 2_000);
     answer(&meta, "ctx", OPUS, text_bytes(&next.messages) + 12_000, T0 + 2_000, &usage(40_000, Some(1), Some(1)));
     assert_eq!(with_conv(&meta, "ctx", |conv| conv.tail_bytes), Some(12_000));
@@ -635,4 +647,129 @@ fn a_request_with_another_tool_list_is_no_cache_evidence() {
     // The same request with the turn's tools would have been a miss.
     answer(&meta, "ctx", OPUS, 140_000, last + secs(600), &usage(56_000, Some(0), None));
     assert_eq!(evidence(&meta).map(|e| e.miss_count), Some(1));
+}
+
+/// The `!watch` self-trigger is not a user turn (review follow-up): it holds no
+/// turn lock and writes no cache boundaries. It never cold-starts, is not the
+/// conversation's last request for the pause, and leaves the accounting of an
+/// `ask` turn in flight untouched; it still calibrates bytes-per-token.
+#[test]
+fn watch_self_trigger_never_touches_the_turn_accounting() {
+    let meta = new_meta();
+    fill(&meta, "main", 200, 6_000); // far over the cold-start size
+    {
+        let mut guard = meta.lock().unwrap();
+        guard.conversations.get_or_create("main").push_native_batch(
+            String::new(),
+            vec![ToolCall { id: "watch-private".into(), name: "read".into(), arguments: r#"{"path":"PRIVATE_WATCH_PATH"}"#.into() }],
+            vec!["PRIVATE_WATCH_RESULT".into()],
+        );
+    }
+    // An `ask` turn on main is in flight: view built, first request answered.
+    let view = start_turn(&meta, "main", OPUS, T0);
+    answer(&meta, "main", OPUS, text_bytes(&view.messages) + 9_000, T0, &usage(10, Some(0), Some(480_000)));
+    let before = with_conv(&meta, "main", |conv| (conv.view_start, conv.last_request_ms, conv.tail_bytes, conv.turn_probe.clone()));
+    assert_eq!((before.1, before.2), (Some(T0), Some(9_000)));
+    assert!(before.3.as_ref().is_some_and(|probe| probe.requests == 1 && probe.wrote_prefix));
+    // A watch event fires three hours later (far past the one-hour lifetime).
+    let messages = crate::api::http_context::self_trigger_messages(&mut meta.lock().unwrap(), "Watcher 'W.f' triggered: 1 -> 2", OPUS);
+    let wire = serde_json::to_string(&messages).unwrap();
+    assert!(!wire.contains("PRIVATE_WATCH") && !wire.contains("watch-private"), "watch must hide workspace batches");
+    assert!(wire.contains("earlier tool exchange(s)"), "the omission is explicit");
+    assert!(meta.lock().unwrap().conversations.get("main").unwrap().messages.iter().any(|message| message.content == "PRIVATE_WATCH_RESULT"));
+    let request = SentRequest { model: OPUS.into(), text_bytes: text_bytes(&messages), images: 0, started_ms: T0 + secs(3 * HOUR), same_tools: true };
+    request.calibrate_tokens_only(&meta, "main", false, &usage(250_000, Some(0), Some(0)));
+    let after = with_conv(&meta, "main", |conv| (conv.view_start, conv.last_request_ms, conv.tail_bytes, conv.turn_probe.clone()));
+    assert_eq!(after, before, "no cold start, not the last request, tail and probe untouched");
+    assert!(meta.lock().unwrap().conversations.cache_lifetimes.is_empty(), "no cache evidence from it");
+    // The bytes-per-token ratio is learned from it all the same.
+    let ratio = with_conv(&meta, "main", |conv| conv.bytes_per_token(OPUS));
+    assert!((ratio - text_bytes(&messages) as f32 / 250_000.0).abs() < 0.01, "{ratio}");
+    // The ask turn's next round is accounted against its own probe as before.
+    answer(&meta, "main", OPUS, text_bytes(&view.messages) + 12_000, T0 + secs(3 * HOUR + 5), &usage(10, Some(480_000), Some(100)));
+    assert_eq!(with_conv(&meta, "main", |conv| conv.turn_probe.clone().unwrap().requests), 2);
+    assert_eq!(with_conv(&meta, "main", |conv| conv.tail_bytes), Some(9_000), "only a turn's first request measures the tail");
+    // The next USER turn measures its pause from the last user-turn request.
+    with_conv(&meta, "main", |conv| conv.push_assistant("done"));
+    assert!(!start_turn(&meta, "main", OPUS, T0 + secs(3 * HOUR + 60)).checkpointed, "55 s after the turn's last request");
+    // A shrunk self-trigger request teaches nothing.
+    let stored = with_conv(&meta, "main", |conv| conv.token_calibration.clone());
+    SentRequest { model: OPUS.into(), text_bytes: 10, images: 0, started_ms: T0, same_tools: true }.calibrate_tokens_only(&meta, "main", true, &usage(900_000, None, None));
+    assert_eq!(with_conv(&meta, "main", |conv| conv.token_calibration.clone()), stored);
+}
+
+/// The ChatGPT route (llm-gateway #4): cache hits are probabilistic, reads are
+/// reported inside prompt_tokens, there is no write counter. Uncached answers
+/// are not evidence and never shorten the lifetime; hits can lengthen it; the
+/// cold start follows the 1800 s default.
+#[test]
+fn chatgpt_route_cold_starts_after_its_lifetime_and_never_learns_from_misses() {
+    let limits = crate::model_limits::for_model(CHATGPT);
+    assert_eq!((limits.context_tokens, limits.cache_ttl_secs, limits.cache_ttl, limits.cache_probabilistic), (872_000, Some(1_800), None, true));
+    let meta = new_meta();
+    fill(&meta, "ctx", 200, 6_000); // ≈1.2 MB ≈ 490k tokens: under the 741k trigger
+    let evidence = |meta: &SharedMeta| meta.lock().unwrap().conversations.cache_lifetimes.evidence(CHATGPT).cloned();
+    // ChatGPT usage shape: prompt_tokens is the whole input, reads are inside it.
+    let reply = |tokens: u64, read: u64| usage(tokens, Some(read), None);
+    let mut now = T0;
+    let view = start_turn(&meta, "ctx", CHATGPT, now);
+    assert!(!view.checkpointed);
+    answer_view(&meta, "ctx", CHATGPT, &view, now, &reply(490_000, 0));
+    with_conv(&meta, "ctx", |conv| conv.push_assistant("ok"));
+    // Twelve turns a few minutes apart; the provider serves none from its cache
+    // (a 60% hit rate makes runs of misses ordinary).
+    for _ in 0..12 {
+        now += secs(240);
+        let view = start_turn(&meta, "ctx", CHATGPT, now);
+        assert!(!view.checkpointed, "an uncached answer does not make the conversation cold");
+        answer_view(&meta, "ctx", CHATGPT, &view, now, &reply(490_000, 0));
+        with_conv(&meta, "ctx", |conv| conv.push_assistant("ok"));
+    }
+    assert_eq!(evidence(&meta), None, "misses on a probabilistic route are never recorded");
+    assert_eq!(lifetime(&meta, CHATGPT), Some(Lifetime { secs: 1_800, source: Source::Default }), "and never lower the lifetime");
+    assert_eq!(view_start(&meta, "ctx"), 0);
+    // The same sequence on a deterministic route with that default is believed.
+    let mut routes = crate::cache_lifetime::RouteLifetimes::default();
+    for _ in 0..2 {
+        routes.record("openai/gpt-6-astra", crate::cache_lifetime::classify_for(Some(480_000), Some(0), false), 240, T0);
+    }
+    assert_eq!(routes.lifetime("openai/gpt-6-astra", &crate::model_limits::for_model("openai/gpt-6-astra"), T0).unwrap().secs, 240);
+    // A hit is evidence: read in multiples of 128, inside prompt_tokens.
+    now += secs(600);
+    let view = start_turn(&meta, "ctx", CHATGPT, now);
+    answer_view(&meta, "ctx", CHATGPT, &view, now, &reply(490_000, 3_750 * 128));
+    with_conv(&meta, "ctx", |conv| conv.push_assistant("ok"));
+    let recorded = evidence(&meta).expect("the hit is recorded");
+    assert_eq!((recorded.longest_hit_secs, recorded.hit_count, recorded.miss_count), (Some(600), 1, 0));
+    assert_eq!(lifetime(&meta, CHATGPT).unwrap().secs, 1_800, "a hit under the default changes nothing");
+    // A pause of 1,700 s: within the lifetime, no cold start.
+    now += secs(1_700);
+    let view = start_turn(&meta, "ctx", CHATGPT, now);
+    assert!(!view.checkpointed);
+    answer_view(&meta, "ctx", CHATGPT, &view, now, &reply(490_000, 0));
+    with_conv(&meta, "ctx", |conv| conv.push_assistant("ok"));
+    // A pause of 1,900 s: cold start to the cold-start size (100k tokens; the
+    // 872k window's checkpoint target leaves far more than that).
+    now += secs(1_900);
+    let cold = start_turn(&meta, "ctx", CHATGPT, now);
+    assert!(cold.checkpointed);
+    let kept = history_tokens(&cold, with_conv(&meta, "ctx", |conv| conv.bytes_per_token(CHATGPT)));
+    assert!(kept <= 100_000 && kept > 90_000, "{kept}");
+    answer_view(&meta, "ctx", CHATGPT, &cold, now, &reply(100_000, 0));
+    with_conv(&meta, "ctx", |conv| conv.push_assistant("ok"));
+    // A hit after 65 minutes (the measured case) raises the lifetime past the
+    // default; later uncached answers do not bring it back down.
+    now += secs(60);
+    let view = start_turn(&meta, "ctx", CHATGPT, now);
+    answer_view(&meta, "ctx", CHATGPT, &view, now, &reply(100_000, 0));
+    meta.lock().unwrap().conversations.cache_lifetimes.record(CHATGPT, crate::cache_lifetime::classify_for(Some(100_000), Some(92_160), true), 3_900, now);
+    assert_eq!(lifetime(&meta, CHATGPT), Some(Lifetime { secs: 3_901, source: Source::Learned }));
+    for step in 1..=6 {
+        with_conv(&meta, "ctx", |conv| conv.push_assistant("ok"));
+        let at = now + secs(300 * step);
+        let view = start_turn(&meta, "ctx", CHATGPT, at);
+        answer_view(&meta, "ctx", CHATGPT, &view, at, &reply(100_000, 0));
+    }
+    assert_eq!(lifetime(&meta, CHATGPT), Some(Lifetime { secs: 3_901, source: Source::Learned }));
+    assert_eq!(evidence(&meta).unwrap().miss_count, 0);
 }

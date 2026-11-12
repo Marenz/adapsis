@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use super::call_sites::runtime_shadowed as shadowed;
 
 pub fn print_function(program: &a::Program, target: &str) -> Result<String, Diagnostic> {
+    // The re-lowered text is the printer's own output: stored source (#140).
+    let _stored = super::nesting::StoredSource::enter();
     let error = |message: String| Diagnostic {
         module: target.into(),
         line: 1,
@@ -68,6 +70,8 @@ fn reconstruct_function(
 }
 
 pub fn print_type(program: &a::Program, target: &str) -> Result<String, Diagnostic> {
+    // The re-lowered text is the printer's own output: stored source (#140).
+    let _stored = super::nesting::StoredSource::enter();
     let error = |message: String| Diagnostic {
         module: target.into(),
         line: 1,
@@ -103,6 +107,8 @@ pub fn print_type(program: &a::Program, target: &str) -> Result<String, Diagnost
 
 #[cfg(test)]
 pub fn print_module(program: &a::Program, module_name: &str) -> Result<String, Diagnostic> {
+    // The re-lowered text is the printer's own output: stored source (#140).
+    let _stored = super::nesting::StoredSource::enter();
     let error = |message: String| Diagnostic {
         module: module_name.into(),
         line: 1,
@@ -206,6 +212,8 @@ fn find_type_in_module(modules: &[a::Module], name: &str) -> Option<a::TypeDecl>
 /// different declaration with a different owner and is never picked.
 #[cfg(test)]
 pub(crate) fn print_toplevel_type(program: &a::Program, name: &str) -> Result<String, Diagnostic> {
+    // The re-lowered text is the printer's own output: stored source (#140).
+    let _stored = super::nesting::StoredSource::enter();
     let error = |message: String| Diagnostic {
         module: "<top-level>".into(),
         line: 1,
@@ -248,6 +256,8 @@ pub(crate) fn print_toplevel_type(program: &a::Program, name: &str) -> Result<St
 /// non-builtin call must already be module-qualified.
 #[cfg(test)]
 pub(crate) fn print_toplevel_function(program: &a::Program, name: &str) -> Result<String, Diagnostic> {
+    // The re-lowered text is the printer's own output: stored source (#140).
+    let _stored = super::nesting::StoredSource::enter();
     let error = |message: String| Diagnostic {
         module: "<top-level>".into(),
         line: 1,

@@ -979,6 +979,21 @@ pub struct CoroutineHandle {
     program_frozen: bool,
 }
 
+/// Minimum argument count of the transport operations that read `args[n]`
+/// directly in `execute_transport_op`. Keep in step with those arms.
+fn transport_min_args(op: &str) -> Option<usize> {
+    Some(match op {
+        "tcp_listen" | "tcp_accept" | "tcp_read" | "tcp_close" => 1,
+        "tcp_write" | "tcp_connect" => 2,
+        // read_line takes an optional prompt and checks for itself.
+        "print" | "println" | "sleep" => 1,
+        "file_read" | "read_file" | "file_read_binary" | "read_file_binary" | "read_attachment" => 1,
+        "file_write" | "write_file" => 2,
+        "file_exists" | "list_dir" | "shell_exec" | "exec" => 1,
+        _ => return None,
+    })
+}
+
 impl CoroutineHandle {
     pub fn new(io_tx: mpsc::Sender<IoRequest>) -> Self {
         Self { io_tx, task_id: None, task_registry: None, snapshot_registry: None, mocks: None, stubs: None, turn: None, program_frozen: false }
@@ -1773,6 +1788,7 @@ impl CoroutineHandle {
 
                 let operations = crate::parser::parse(&code)
                     .map_err(|e| anyhow::anyhow!("mutate: parse error: {e}"))?;
+                crate::library::refuse_unsupported_operations(library_policy_state().as_ref(), &program, &operations, false)?;
 
                 let mut applied = 0usize;
                 let mut messages = Vec::new();
@@ -1883,6 +1899,7 @@ impl CoroutineHandle {
                     .map_err(|_| anyhow::anyhow!("module_remove: could not acquire program write lock"))?;
 
                 if let Some(pos) = program.modules.iter().position(|m| m.name == name) {
+                    crate::library::refuse_module_removal(library_policy_state().as_ref(), &name)?;
                     program.modules.remove(pos);
                     program.rebuild_function_index();
                     crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
@@ -1923,6 +1940,9 @@ impl CoroutineHandle {
                 let mut program = program_lock.write()
                     .map_err(|_| anyhow::anyhow!("move_symbols: could not acquire program write lock"))?;
 
+                if !program.modules.iter().any(|m| m.name == target_module) {
+                    crate::library::refuse_module_creation(library_policy_state().as_ref(), &target_module)?;
+                }
                 let result = crate::validator::apply_move(&mut program, &names, &target_module)?;
                 // Update read-only snapshot
                 crate::shared_state::set_shared_program(Some(std::sync::Arc::new(program.clone())));
@@ -2330,6 +2350,7 @@ impl CoroutineHandle {
                 if program.modules.iter().any(|m| m.name == name) {
                     return Ok(Some(Value::string(format!("module '{name}' already exists"))));
                 }
+                crate::library::refuse_module_creation(library_policy_state().as_ref(), &name)?;
                 // Create empty module
                 let code = format!("+module {name}");
                 let operations = crate::parser::parse(&code)
@@ -2435,6 +2456,17 @@ impl CoroutineHandle {
     /// Handles TCP, file, shell, HTTP, LLM, and other operations that require the
     /// tokio IO loop.
     fn execute_transport_op(&self, op: &str, args: &[Value]) -> Result<Value> {
+        // The arms below index `args` directly; a call with too few arguments
+        // must be an error, not an out-of-bounds panic (#134).
+        if let Some(required) = transport_min_args(op)
+            && args.len() < required
+        {
+            bail!(
+                "{op} expects at least {required} argument{}, got {}",
+                if required == 1 { "" } else { "s" },
+                args.len()
+            );
+        }
         let op = op.to_string();
         let args: Vec<Value> = args.to_vec();
 
@@ -3018,3 +3050,10 @@ impl CoroutineHandle {
 
 #[cfg(test)]
 mod tests;
+
+/// The library policy state of the session this thread serves, if installed.
+/// Without one, `library::refuse_*` falls back to the library directory.
+fn library_policy_state() -> Option<crate::library::LibraryState> {
+    crate::shared_state::get_shared_meta()
+        .and_then(|meta| meta.lock().ok().and_then(|meta| meta.library_state.clone()))
+}

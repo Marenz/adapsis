@@ -185,15 +185,14 @@ async fn monitor_spawned_task(
     function_name: String,
 ) {
     if let Err(error) = task.await {
-        let detail = if error.is_panic() { "panicked" } else { "was cancelled" };
-        crate::logging::diagnostic("spawn-error", format_args!("{function_name} {detail}: {error}"));
-        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, format_args!("{detail}: {error}"));
+        // Never the JoinError's own text: for a panic it quotes the message (#134).
+        let detail = crate::error_journal::describe_join_error(error);
+        crate::logging::diagnostic("spawn-error", format_args!("{function_name} {detail}"));
+        crate::error_journal::record(crate::error_journal::Category::Task, &function_name, &detail);
         if let Ok(mut tasks) = registry.lock()
             && let Some(info) = tasks.get_mut(&task_id)
         {
-            info.status = coroutine::WaitReason::Failed(format!(
-                "spawned function `{function_name}` {detail}: {error}"
-            ));
+            info.status = coroutine::WaitReason::Failed(format!("spawned function `{function_name}` {detail}"));
         }
     }
 }
@@ -951,16 +950,9 @@ fn native_protocol_enabled(native_tools: bool, legacy_tools: bool) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Ensure panics in any thread are logged to stderr
-    std::panic::set_hook(Box::new(|info| {
-        crate::logging::diagnostic("panic", info);
-        // A panic inside the JIT compiler is contained by the JIT dispatch,
-        // which journals it once without the panic's text (#96).
-        if !crate::eval::jit_contained_panic(info.location()) {
-            crate::error_journal::record_panic(info);
-        }
-        let bt = std::backtrace::Backtrace::force_capture();
-        eprintln!("{bt}");
-    }));
+    // The message goes to the content-gated log only; the journal gets the
+    // location and the payload length (#134).
+    std::panic::set_hook(Box::new(crate::error_journal::panic_hook));
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -1518,9 +1510,30 @@ async fn main() -> Result<()> {
             }
 
             let session_path = std::path::Path::new(&session);
-            let mut sess = if session_path.exists() {
+            // "Absent" must be proven: `Path::exists()` is also false for a
+            // dangling link or a path that cannot be inspected, and starting an
+            // empty session over one of those would lose the session.
+            let session_present = match std::fs::symlink_metadata(session_path) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    eprintln!("Error: startup refused: session file {session} cannot be inspected: {error}");
+                    eprintln!("Nothing was changed and nothing was started. Make the path readable or restore it, then start the service again.");
+                    std::process::exit(library::EXIT_SOURCE_REFUSED);
+                }
+            };
+            let mut sess = if session_present {
                 println!("Loading session from {session}...");
-                let s = session::Session::load(session_path)?;
+                let s = match session::Session::load(session_path) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        // A refused start like the source policy's: the same
+                        // file fails again, so the unit must not restart on it.
+                        eprintln!("Error: startup refused: session file {session} cannot be read: {error:#}");
+                        eprintln!("The file was not changed and nothing was started. Restore the last backup copy of this file (the runtime keeps none; see the operator's backup), or move the file aside to start with an empty session, then start the service again.");
+                        std::process::exit(library::EXIT_SOURCE_REFUSED);
+                    }
+                };
                 println!(
                     "Loaded: revision {}, {} mutations",
                     s.meta.revision,
@@ -1537,8 +1550,15 @@ async fn main() -> Result<()> {
 
             // Auto-load persistent module library (~/.config/adapsis/modules/)
             let lib_state = library::load_module_library(&mut sess.program);
-            lib_state.require_authoritative_sources()?;
-            let managed_names = lib_state.managed_module_names();
+            if let Err(error) = lib_state.require_authoritative_sources() {
+                // A refused start exits with a code the unit does not restart
+                // on: the same files would refuse again every 10 seconds.
+                eprintln!("Error: {error:?}");
+                std::process::exit(library::EXIT_SOURCE_REFUSED);
+            }
+            let mut managed_names = lib_state.managed_module_names();
+            // Cached modules startup dropped must not keep their cached routes.
+            managed_names.extend(lib_state.dropped_module_names());
             // The authoritative set has fully validated. Only now retire cached
             // managed routes before draining its new registration batch once.
             sess.runtime.http_routes.retain(|route| !route.handler_fn.split_once('.')
@@ -2341,6 +2361,7 @@ async fn main() -> Result<()> {
                 access_level: access_level_for_config,
                 permission_config,
                 turn: None, workspaces: None, origin: None,
+                turn_saves: Default::default(),
             };
 
             // Clone tier handles before config is moved into the router
@@ -2458,6 +2479,10 @@ async fn main() -> Result<()> {
                             for (module, callee) in &receipt.order_dependent {
                                 eprintln!("[save] module `{module}`: bare `{callee}` is declared by several modules; save froze today's order-dependent binding to `{module}.{callee}`");
                             }
+                            for module in &receipt.enrolled {
+                                eprintln!("[save] module `{module}` added to the source manifest with its first source file");
+                            }
+                            for note in &receipt.notes { eprintln!("[save] {note}"); }
                             for message in receipt.failures { eprintln!("[save] {message}"); }
                         }
                         Err(error) => {
@@ -2494,7 +2519,8 @@ async fn main() -> Result<()> {
                     if crate::logging::content() {
                         eprintln!("[self-trigger] {}", event_message.chars().take(80).collect::<String>());
                     }
-                    let llm = llm::LlmClient::new_with_model_and_key(&trigger_url, &trigger_model, trigger_key.clone());
+                    // The request is the `main` conversation's view: same cache key.
+                    let llm = api::http_context::conversation_client(&trigger_url, &trigger_model, trigger_key.clone(), "main");
 
                     // The event is a runtime notice in "main"; the request is the
                     // bounded checkpointed view (#68). AI decides whether to act.
@@ -2509,7 +2535,8 @@ async fn main() -> Result<()> {
                     api::http_context::after_llm_call(recovered, &result, &trigger_meta, "main");
                     match result {
                         Ok(output) => {
-                            sent.calibrate(&trigger_meta, "main", recovered, output.refused, &output.usage);
+                            // Not a user turn: bytes-per-token only (see request_meter).
+                            sent.calibrate_tokens_only(&trigger_meta, "main", recovered, &output.usage);
                             let code = output.code.clone();
                             if crate::logging::content() {
                                 eprintln!("[self-trigger:response] {}...", output.text.chars().take(100).collect::<String>());
@@ -2546,6 +2573,7 @@ async fn main() -> Result<()> {
                                 conv.push_assistant(format!("[auto-response] {}", output.text.chars().take(200).collect::<String>()));
                                 // Per-function CoW merge (issue #9).
                                 trigger_program.write().await.merge_changed_from(&base_program, &program);
+                                crate::api::start_source_save(trigger_program.clone(), meta.library_state.clone(), &base_program, &program);
                                 if let Ok(mut rt) = trigger_runtime.write() {
                                     rt.shared_vars.replace_from(runtime.shared_vars.snapshot());
                                     rt.http_routes = runtime.http_routes.clone();

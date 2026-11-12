@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["unbounded_depth"] }
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "charset", "http2"] }
 tokio = { version = "1", features = ["full"] }

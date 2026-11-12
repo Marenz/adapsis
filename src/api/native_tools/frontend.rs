@@ -201,7 +201,7 @@ pub(super) fn print_source(
             .map_err(|error| error.to_string())?;
         let module = module_of(target);
         let preflight =
-            crate::python_frontend::preflight_module(&source, module).map_err(|e| e.to_string())?;
+            crate::python_frontend::preflight_printed_module(&source, module).map_err(|e| e.to_string())?;
         crate::python_frontend::resolve_native_references(&preflight, module, &filtered, program)?;
         Ok(source)
     } else {

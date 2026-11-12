@@ -10,7 +10,65 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- Current here Telegram deployment (2026-11-02): runtime binary `88b4275`;
+- **Current here deployment (2026-11-12, upgrade #146): commit `8b985cb` on
+  `work/python-source-library`**, binary sha256
+  `8c8e8a4d55990272ecd06d15927dbd213432cf710dbcda18600b054b99623046`.
+  The five manifest-managed Python modules remain as installed by switch #128
+  below (275 stored cases, all passing at startup). Mutation results now report
+  the real source-save outcome; finish names unsaved edits, with one refusal per
+  turn for fixable causes in modules that turn's own calls changed. Saving stays
+  automatic; the git-commit boundary for the module library is still pending
+  (#146). The earlier #136 whole-metadata concurrency window remains open.
+  - Manager verified after the owner-approved upgrade: fresh checkpoint,
+    inhibitor and install checks, NRestarts 0, five modules, one route, two loops,
+    no library errors and shared-variable probes unchanged. Telegram reply
+    `SAVE146-OK` delivered (message 549037); no provider error with the newly
+    deployed `prompt_cache_key`.
+  - Live acknowledgement proof: adding `Peer.upgrade_probe` through
+    `/api/mutate` returned `saved to Peer.py` with the file already changed;
+    `!remove Peer.upgrade_probe` returned saved again and restored the library
+    bytes. Revision after verification: 248.
+  - Pre-upgrade bundle:
+    `~/.local/share/adapsis/upgrade-146/pre-upgrade-bundle/`; previous binary also
+    at `~/.local/bin/adapsis.bak-fa04e367`. The previous binary can read the
+    candidate-written session and managed library (rehearsed). Operator notes
+    and rollback checks: `~/.local/share/adapsis/rehearsal-146/REPORT.md`.
+  - sleek and edox are unchanged. The exit-78 drop-in and helper installed at
+    switch #128 remain active.
+- **Historical here deployment (2026-11-12, switch #128): commit `b7bfa64` on
+  `work/python-source-library`**, binary sha256
+  `fa04e3677b4adf70aafc65196c7ff6facaece2c155f3f9b36de272359c7ce3e8`. The module
+  library on this node is manifest-managed Python: `~/.config/adapsis/modules/`
+  holds `library-sources.json` and `Chronica.py`, `Peer.py`, `TelegramBot.py`,
+  `TgFormat.py`, `Watchdog.py` (dependencies: `TelegramBot → [TgFormat]`, others
+  none; 275 stored cases, all re-run at start). There are no `.ax` files there any
+  more; modules are created and edited as Python, the writer saves them, and
+  `library_reload`, `!undo` and `/api/rewind` are refused (see "Issue #121 opt-in
+  source library" below and `docs/python-source-library.md`).
+  - Unit: `~/.config/systemd/user/adapsis.service.d/10-source-refusal.conf`
+    (`RestartPreventExitStatus=78`, `OnFailure=adapsis-start-failed.service`) and
+    the helper `~/.config/systemd/user/adapsis-start-failed.service`. A refused
+    start (source policy or unreadable session) exits 78 and is NOT restarted.
+  - Rollback bundle: `~/.local/share/adapsis/switch-128/pre-switch-bundle/`
+    (session at revision 244, the five `.ax`, old binary `11487f02…`, unit state);
+    old binary also at `~/.local/bin/adapsis.bak-11487f02`. Rollback restores the
+    bundle as ONE unit (`~/.local/share/adapsis/rehearsal-128/REPORT.md`, step 8):
+    the old binary cannot read a session that holds a Python mutation record.
+    Switch notes: `~/.local/share/adapsis/switch-128/notes/RESULT.txt`. The bundle
+    and older backups contain the bot token (`rehearsal-128/token-copies.paths`).
+  - The `telegram_token` default in `TelegramBot.py` is blank; the token comes
+    from the token file at startup and is no longer in the source or the session.
+  - **sleek and edox are unchanged**: older binaries, legacy `.ax` libraries, no
+    manifest. Nothing in this entry applies to them; a switch there needs its own
+    conversion set, review and rehearsal.
+  - Gate and tools for a repeat: `rehearsal-128/rehearse.sh`, `selftest.sh`,
+    `bin/preflight.py` (requests a save and proves the session file is final).
+- **Owner direction for this development phase:** prioritize fix-forward and
+  minimal release ceremony. Do not start new compatibility or rollback projects;
+  retain the existing backups. Review, appropriate tests and live verification
+  are still required. The historical switch/rehearsal records below are evidence
+  of completed work, not a mandate to expand that machinery for each change.
+- Historical (superseded 2026-11-12): here Telegram deployment (2026-11-02): runtime binary `88b4275`;
   TelegramBot/TgFormat are now production-Python-frontend-authored modules
   (48/18 functions, 221 stored cases), prepared with reviewed tooling `9ffd3fa`.
   Private provenance/rollback: `~/.local/share/adapsis/telegram-python-migration-20261102/`
@@ -27,7 +85,7 @@ narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
   `108e4dc` (G2/#114/G1/#112/#116). See ROADMAP.md's top release section for merge
   state, worker ownership and measured gates; historical branch guidance below
   does not authorize switching this release worktree or touching the main checkout.
-- Current here deployment (2026-11-02): manager installed release `e424fc9`;
+- Historical (superseded 2026-11-12): here deployment (2026-11-02): manager installed release `e424fc9`;
   `/proc` binary SHA-256 `7a91463243d68a2c12bdd40d0906e1c99dcaca5fd95cc51ebae4c241cca341f3`
   verified. Here's runtime and service default model are `chatgpt/gpt-6-astra`
   (no explicit reasoning-effort variant), replacing the previous deepseek alias
@@ -378,9 +436,49 @@ N3, N5/N6, C4.
 - Issue #121 opt-in source library: `library-sources.json` explicitly maps module
   names to `python`/transitional `legacy_ax` plus a closed acyclic dependency set.
   Active manifests whitelist source files: unlisted files are diagnosed without
-  reading/applying them, unlisted saves refuse, and unlisted cached modules or
+  reading/applying them, detached unlisted snapshot saves refuse, and cached
   top-level members refuse startup with recovery preserved. No-manifest legacy
   behavior is unchanged; unreadable policy is never treated as absent.
+  **Run-time modules (#128), `library/source_enrol.rs`:** the manifest follows the
+  live Program. `flush_live_sources` enrols every unlisted live module as `python`
+  and keeps every listed module's dependency set equal to what its code references
+  (`python_frontend::module_dependencies`); equal sets are never rewritten. Write
+  order: source, manifest (commit point), session. Every manifest commit must
+  load with the files on disk at that moment: dependencies are only ADDED before
+  a module's source save (`grow`) and only REMOVED after it (`shrink`), and
+  `source_io::would_load` decodes the on-disk sources against the new manifest
+  before each commit (a change that fails stays pending). One save runs
+  grow/save/shrink at most twice. Do not write the manifest from anywhere else.
+  The source files of one save are separate renames too: `source_flush::save_managed`
+  prints everything first, then writes a changed file only when the set on disk
+  with that one file replaced still loads (dependencies first, the rest retried
+  after every write). A module whose new text needs another module that could not
+  be saved stays pending and the message names it. Remaining gap: functions moved
+  between two modules in BOTH directions have no safe order; those files are
+  written anyway and logged (a crash between the renames refuses the next start,
+  exit 78). A save that changes no file decodes nothing. `RunToolScratch` and `__` names
+  are never enrolled. Unprintable modules and cross-module cycles are not enrolled
+  and are reported on every save (the cycle text names both modules and how to
+  break it, and the closing mutation's acknowledgement carries it as an error).
+  At startup a session-cached unlisted module is adopted if it prints, otherwise
+  dropped into `<library>/recovery/<Module>-<ms>.json` (one journal entry + one log
+  line each); leftover unlisted files are moved aside as `X.py.orphan-<ms>`, never
+  deleted. Under a manifest a module is created by a Python mutation only:
+  `library::refuse_unsupported_operations` (in `Session::apply_operations_async`,
+  `AgentBranch::apply_async`, and the `mutate`/`module_create`/`move_symbols`/
+  `module_remove` builtins) refuses Adapsis-source creation and whole-module
+  removal (#126) before any state change. A new mutation entry point that can
+  create or remove a module must call it. A refused start exits with code 78
+  (`library::EXIT_SOURCE_REFUSED`); the unit needs `RestartPreventExitStatus=78`.
+  An unreadable session file at `adapsis os` startup is refused the same way
+  (exit 78, file named and untouched), with or without a manifest. "No session
+  yet" requires `symlink_metadata` to answer NotFound: never use `Path::exists()`
+  for that decision (a dangling link would start an empty session).
+  `adopt_cached` order is plan (`grow_as(.., Step::Plan)`, no writes), recovery
+  files, commit: a recovery file that cannot be written refuses the start before
+  any source or manifest write. Keep fallible preparation ahead of the commit.
+  Known residual: `!sandbox discard` after an enrolment leaves a listed module
+  that is not live (same state as #126).
   Retained manifest presence includes empty sets: deletion/dangling links never
   restore legacy reload/writes in-process. Source-root create/inspection/enumeration
   failures block startup before cached code or initialization can execute.
@@ -414,8 +512,66 @@ N3, N5/N6, C4.
   modules) are frozen to today's binding and logged; never add caller-module-first
   runtime lookup. Runtime-defined named types live in `builtins::RUNTIME_TYPES` (Attachment).
   Focused isolated gates: `cargo test --release managed_` and
-  `cargo test --release --test python_source_startup`. Default library format and
-  deployment remain unchanged; migration requires separate backup/review gates.
+  `cargo test --release --test python_source_startup`. Without a manifest the
+  legacy `.ax` behaviour is still the default of the binary. On here the manifest
+  is active since 2026-11-12 (Development baseline); sleek and edox have none. A
+  migration of another node requires its own conversion set, review and rehearsal.
+  **Save outcome (#146), `api/source_save.rs`, `library/source_unsaved.rs`.**
+  Saving stays automatic. A mutation runs on a clone and is committed by the
+  write-back; the writer reads the live Program. So the acknowledgement inside
+  the mutation is neutral ("module `X` changed in memory") and the ENTRY POINT
+  reports the real outcome after its write-back: `saved to X.py`, or `module
+  `X` NOT saved: <reason> ... unless you <remedy>` (environment causes say "tell
+  the owner. Do not repeat the mutation" and never suggest a retry).
+  - One save per call that changed a module, in ONE place: `save_and_gate`, the
+    last step of `execute_operations_with_baseline` (native `mutate`/`test`/
+    `evaluate`, legacy code blocks). `/api/mutate` saves after its own commit; an
+    agent branch at its merge. Nothing changed (refused mutation, failing test,
+    empty source) = no writer run. Route handlers, `/api/eval` and the `!watch`
+    self-trigger start the save and do not wait. The wait is bounded
+    (`SAVE_WAIT_MS`, 10 s; the writer is not cancelled) and holds no Program,
+    runtime or session-meta lock; only the conversation's turn lock. Neither the
+    timeout path nor the writer-error path takes a lock (a queued Program writer
+    would block a reader behind the writer's read guard).
+  - **No snapshot from before the wait is written back after it.** `save_and_gate`
+    commits the working set immediately before the wait and marks it
+    (`WorkingSet::mark_committed`); the caller's write-back after the call
+    (`write_back_working_set`, the takeover's `write_back_takeover`) sees
+    `take_committed()` and skips. Nothing changes in the working set during the
+    wait. A new caller that writes a working set back after the executor MUST
+    honour `take_committed()`. This does not fix #136: the window in which a
+    whole-metadata write-back can overwrite another conversation is the
+    executor's own run time, as before #146.
+  - **One unsaved record** per library state (`LibraryState::unsaved()`), written
+    only by the writer at the end of a flush, under its Program read guard:
+    cleared when a flush saves the module, when the module is no longer live, and
+    empty after a restart. The mutation result, the finish gate, `?library`,
+    `inspect library` and the runtime tail all read it. Do not keep a second copy.
+  - Writer refusals carry a kind (`UnsavedKind`, attached with
+    `source_unsaved::refusal` at the origin, read with `classify`): never derive
+    the kind from message text. `fixable()` decides what the model can repair.
+    A write failure while enrolling a module or recording a dependency
+    (`source_enrol::commit_growth`) is recorded PER affected module as
+    `WriteFailed` (or `ChangedOnDisk`), and for a listed module it replaces the
+    less specific reason its own save then fails with: an environment error must
+    never read as "your code cannot be written as Python".
+  - **Per-turn state: `TurnSaves`** (`AppConfig.turn_saves`): the modules this
+    turn's OWN calls changed and whether `finish` was refused. Fresh for every
+    turn: `AppConfig::for_new_turn()` at the top of `ask` and `ask_stream`, and
+    the takeover's `tmp_config`. A new turn entry point MUST do the same; clones
+    made within a turn share it. Never compute "changed in this turn" from the
+    live Program (other conversations change it meanwhile).
+  - Finish gate (`finish_gate`, native `finish` and legacy `!done`, decided in
+    `save_and_gate` after the save; `done_accepted` from the executor's `Done`
+    arm is provisional): refused ONCE per turn, only for a speaker who may write,
+    only if a module this turn's calls changed is unsaved for a fixable reason;
+    otherwise accepted, and the visible reply gets `[Runtime: not saved to
+    source: X (reason). ...]`. Neither text names a module the speaker cannot
+    read. It waits only for unconfirmed saves of this turn's own modules.
+  - Tail: `unsaved_tail` appends one line after the program summary (volatile
+    part), only for write-capable speakers and readable modules. Nothing unsaved =
+    the request is byte-identical (tested on the whole request).
+  - Tests: `cargo test --release source_save_tests`.
 
 - #120 task-domain logic lives in Python-frontend Adapsis modules, initially
   `examples/tasks/domain.py`; the premature Rust foundation is removed from active
@@ -820,12 +976,41 @@ gateway resolves via `model_aliases` or `virtual_models`.
   preserving future history. Reads/evaluation/tests remain available. No branch
   lineage or future-history deletion is invented; #122 retains this residual.
 - Python replay source is capped at 1 MiB before copying it into a record. Typed
-  persistence work checks use 96 levels, 200,000 JSON-value nodes and 16 MiB text;
+  persistence work checks use 2048 JSON levels (`replay/limits.rs::MAX_JSON_DEPTH`),
+  200,000 JSON-value nodes and 16 MiB text;
   prospective mutation checks budget both old/candidate module states before
   application (retest may combine them). These are structural-work budgets after
   deserialization, not a cap on whole-session file allocation or hostile-file
-  hardening. Keep serde_json's default recursion limit enabled. Unknown versions,
+  hardening. Unknown versions,
   malformed payloads and scope mismatches fail closed without private payload text.
+- **One nesting limit (2026-11-12).** Whatever the submission guard accepts (100
+  source levels) must be storable, replayable, readable again and durable as
+  managed source; no layer behind the guard may have a lower limit of its own.
+  MEASURED: a declaration at 100 source levels is up to 408 JSON levels deep
+  (nested blocks and `elif` chains: 4 JSON levels per source level; operators 211,
+  calls 311) and its replay record 409. The old depth budget of 96 refused Python
+  mutations above 21 `elif` branches, and serde_json's default recursion limit
+  (127) made the SESSION FILE unreadable above 28 (written fine, next start
+  failed; also reachable through `.ax` edits and managed files).
+  - **Session reader, `session/deep_read.rs`:** `Session::load` (also used by
+    `memory-migrate`) scans the file's container depth with a loop, refuses more
+    than 4096 levels with a clean error, and deserializes with the recursion limit
+    disabled on a dedicated 64 MiB thread (MEASURED at most 619 bytes of stack per
+    JSON level; the cap needs about 2.5 MiB). Needs serde_json's `unbounded_depth`
+    feature. **Every other deserializer keeps serde_json's default recursion
+    limit** (`json_valid`, `json_get`, `json_kind`, `json_array_len`, HTTP bodies,
+    provider responses, typed payloads, the manifest): the default exists for
+    untrusted JSON, the session file is this process's own output. Do not call
+    `disable_recursion_limit` anywhere else, and do not read a session with plain
+    `serde_json::from_str`.
+  - Not changed: `Session::save` writes pretty JSON, whose indentation grows with
+    depth. One 98-branch `elif` function is 64 KB compact and 3.1 MB pretty, and
+    every Python replay checkpoint of that module repeats it (session-size issue).
+  - Tests: `cargo test --release storage_depth` (six shapes at the limit through
+    native mutate/test/evaluate/inspect, session save, read in a fresh process,
+    rewind, managed save, startup load; the deepest managed file per shape on
+    every evaluation path; all on 2 MiB stacks), `session_reader`,
+    `every_other_json_reader`, `typed_record_depth_budget`, `stored_source`.
 
 - Python test submissions group cases by exact lowered target (#118) before
   canonical emission. Targets execute in first-seen order (interleaved targets
@@ -893,6 +1078,55 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
   daemon here runs on **3002**, and a bare reqwest failure reads as "this does not
   work" — so a connect/timeout failure now names the flag and the cause chain.
 
+## Untrusted input must not abort the process (#133, #134)
+
+- **Python nesting guard (`python_frontend/nesting.rs`).** `Context::parse` is the only
+  place Python source reaches the rustpython parser, and it runs `nesting::check` first.
+  Lowering, emission, the `.ax` reparse, validation and evaluation all recurse on nesting,
+  and a stack overflow aborts the process. MEASURED 2026-11-10 on a 2 MiB stack (tokio
+  worker / blocking thread): lowering overflows at ≈730 nested calls or blocks and ≈1,270
+  chained operators, evaluating an `elif` chain at ≈660 branches, dropping the parser's
+  tree at ≈15,000–31,000 levels. The guard is a linear lexical scan (no parse, no
+  recursion) that keeps an upper bound of the depth: open brackets + indentation levels +
+  `elif` branches of the open chains + depth-forming tokens since the last separator
+  (operators, `.`, `not and or if else in is for await yield from`; `lambda` is not reset
+  by commas; a closed bracket group counts 1 + the deepest point inside it). Limit
+  `MAX_NESTING` = 100 in total; f-string `{}` fields are bounded at 2,000 bytes per
+  literal (f-strings are never lowered; this protects the parser only). Refusals carry
+  line and column. Repository sources reach 13 levels; `tools/cad_prepare.py` (ordinary
+  Python) 49. Do NOT add a second parse entry point, and do not raise the limit without
+  re-measuring on a 2 MiB stack. Tests: `cargo test --release nesting`.
+  **Stored source has its own limit, `MAX_STORED_NESTING` = 250**, in force only
+  inside a `nesting::StoredSource` scope (thread-local, restored on drop and on
+  unwinding): the whole-module loader/printer round trip (`lower_python_module`:
+  managed files and the text the checked printer just produced) and the printers
+  behind source inspection. Reason: the printer parenthesizes every binary
+  operation and `not` operand and qualifies calls, so the printed form of a
+  function accepted at 100 scans at up to 199 (MEASURED); with one limit such a
+  function could not be saved or inspected. Every submission path keeps 100. A
+  start prints each module it loads, so a hand-edited managed file is accepted
+  only if its PRINTED form fits 250: blocks and `elif` chains up to real depth
+  250, expression shapes about 125. Those depths run on every evaluation path on
+  2 MiB stacks (`api/storage_depth_tests.rs`). Never enter the scope for text a
+  model or a client supplied. Bring the limit down when the printer emits minimal
+  parentheses (#140). The legacy `.ax`
+  parser has no such guard (it is being removed, DESIGN.md L1/L2). Native tool arguments
+  are capped anyway (`source` 32,000 bytes, arguments 64,000).
+- **String builtins use byte offsets and never split a character.** `substring` moves an
+  offset inside a multi-byte character DOWN to that character's start (both ends, so
+  `substring(s,0,k)` + `substring(s,k,len(s))` is always `s`); `char_at` returns the whole
+  character containing the byte. `eval/strings.rs::floor_char_boundary` is the helper; use
+  it in any new builtin that slices a String by an Int.
+- **Transport operations check their argument count** (`coroutine::transport_min_args`):
+  the arms of `execute_transport_op` index `args` directly. Add new arms to that table.
+- **A panic message never reaches the journal.** Rust slice/index panics quote the value
+  they failed on. `error_journal::panic_hook` (installed in `main`) journals `panic at
+  file:line:column (message of N bytes not recorded)` with one fingerprint per source
+  location; the message goes only to the content-gated diagnostic log. A panicked spawned
+  task is described by `error_journal::describe_join_error`: never format a tokio
+  `JoinError` with `{}` into the journal or the task registry (tokio ≥ 1.4x quotes the
+  panic message there).
+
 ## Runtime error journal & Watchdog
 
 - `src/error_journal.rs` is an in-process ring (500 entries) plus per-fingerprint
@@ -903,8 +1137,8 @@ adapsis eval --api http://127.0.0.1:3002 'Chronica.health'     # zero-arg, no pa
   route handler errors and missing handlers (`adapsis_route_dispatch` via
   `record_route_error`: structural — request body (raw or escaped) replaced by
   `<request body>`, then route + first line only, so it does not rely on handler hygiene), spawned-task failures/panics, takeover/native/agent
-  provider errors, session save failures, startup errors, the panic hook (`record_panic`,
-  never blocks) and refusals (shell policy reason only, guest IO boundary). New failure
+  provider errors, session save failures, startup errors, the panic hook (`panic_hook` →
+  `record_panic(location, payload length)`, never blocks, never the message) and refusals (shell policy reason only, guest IO boundary). New failure
   points should call the same API rather than a new channel.
 - Messages are redacted on entry: URLs host-only (`coroutine::host_only`), Telegram tokens
   and long digit-bearing secret runs masked, 1 KiB cap. Never pass request bodies or chat
@@ -1864,10 +2098,26 @@ schema since day one and was never set:
   `report_prompt_epoch`) and a default lifetime in seconds for the cold-start rule.
   Built-ins need a source comment (MEASURED / DOCS / UNVERIFIED; UNKNOWN is a valid entry):
   anthropic/* requests 1h = 3600 s (owner decision; DOCS + MEASURED), openai/* 1800 s
-  (DOCS), deepseek/* 3600 s (UNVERIFIED), moonshot/* 300 s (DOCS), chatgpt/* UNKNOWN (the
-  route reports zero cached tokens until llm-gateway #4), deepinfra/* and xiaomi-mimo/*
-  UNKNOWN. `models.toml`: `cache_ttl`, `cache_ttl_secs` (0 = never cold-start),
+  (DOCS), deepseek/* 3600 s (UNVERIFIED), moonshot/* 300 s (DOCS), chatgpt/* 1800 s (DOCS +
+  MEASURED, probabilistic, see below), deepinfra/* and xiaomi-mimo/* UNKNOWN. `models.toml`: `cache_ttl`, `cache_ttl_secs` (0 = never cold-start),
   `cold_start_tokens` (default 100,000, env `ADAPSIS_COLD_START_TOKENS`).
+- **`prompt_cache_key` (ChatGPT/OpenAI routes).** Every conversation request carries a
+  stable key, `cache_lifetime::prompt_cache_key("conv", context, model)` =
+  `adapsis-conv-<32 hex>` (hash of purpose, context id and model; never message content, so
+  it survives checkpoints and cold starts; the context id itself does not leave the host).
+  `http_context::conversation_client` builds the client for ask, ask_stream, legacy and
+  native takeover and the `!watch` self-trigger; compaction uses `"compact"`. `llm_call`,
+  agents, agent summaries and CLI commands send NO key (the gateway derives one from model,
+  instructions and first input item). The gateway (llm-gateway #4, c4f0d36) validates the
+  key (1–64 printable ASCII), sends it upstream on chatgpt (body + `session-id` header) and
+  openai, and drops it for every other route; older gateways ignore the unknown field.
+- **Probabilistic routes (`model_limits::PROBABILISTIC_CACHE`, `cache_probabilistic`).**
+  chatgpt/* has a lifetime of 1800 s (DOCS minimum; MEASURED readable at 3900 s) and
+  PROBABILISTIC hits (MEASURED ≈60% at every gap from 12 s to 65 min). On such a route a
+  miss is not evidence: `classify_for` reports `miss-not-evidence`, it is never recorded,
+  stored misses are ignored, and only hits can raise the lifetime. One uncached answer
+  never means "cold"; the cold start is decided by the pause alone. Its usage reports
+  reads inside `prompt_tokens` and no writes.
 - **Learned lifetime.** `ConversationManager.cache_lifetimes` (persisted with the session,
   per model id) records, for every answered request where a hit could be expected, the
   pause since the conversation's previous request (START to START: the provider counts the
@@ -1893,6 +2143,13 @@ schema since day one and was never set:
   request `[llm:<ctx>] cache: pause_s=… expected_tokens=… cached_read=… outcome=…
   lifetime_s=… source=…` (metadata only). `checkpointed_view` must be called exactly once
   per turn, before the turn's first request.
+- **Turn accounting belongs to lock-holding turns.** `Conversation.turn_probe` is one per
+  conversation. `ask`, `ask_stream` and `llm_takeover` hold `takeover_context_lock(context)`
+  for the whole turn, so two turns never share it. The `!watch` self-trigger holds no lock
+  and is not a user turn: it builds a plain view (`self_trigger_messages`, no cold start)
+  and calls only `SentRequest::calibrate_tokens_only`. It is not the conversation's last
+  request for the pause, measures no tail and records no cache evidence. A new request
+  path that is not under the turn lock must do the same.
 - **Request body limit:** `max_request_bytes` per model (default `ADAPSIS_MAX_REQUEST_BYTES`
   or 60 MiB, under the gateway's 64 MiB limit from llm-gateway 332a3b0, deployed
   2026-11-10; the old gateway rejected bodies above 2 MiB). The view

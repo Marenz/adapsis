@@ -1,5 +1,36 @@
 # AdapsisOS Roadmap
 
+## W1 integration with the exact live Python line (2026-11-12, pending review)
+
+- Parents: workspace W1 `aed5a2f` and exact live-plus-docs checkpoint `b779d1b`.
+  Integration is staged without a commit. No #136 work-in-progress, W2 changes,
+  registry file or deployment is included.
+- Approved semantic resolutions: `!watch` uses plain model view/token-only
+  calibration (no active-turn accounting or cold start), with workspace batches
+  hidden; coherent Program/meta snapshot helpers construct the new WorkingSet
+  save checkpoint/commit mark; source-save write-back consumes that mark once;
+  the shared panic hook keeps payload-free journaling and suppresses ONLY the
+  duplicate journal entry of a contained JIT compile panic; the incoming stored
+  nesting scope (250) and exact submission-limit (100) tests supersede the old
+  reduced-depth test adaptation. Both lines' remaining tests and guards stay.
+- Added interaction assertions: watch leaves an active turn's probe unchanged
+  and hides its workspace results; P3's concurrent shared-key/chat changes
+  survive a save wait followed by a workspace call; an accepted unsaved finish
+  preserves both its notice and a cutoff marker; unsaved and bound-workspace
+  runtime-tail lines leave the stable prefix unchanged; the real process panic
+  hook emits one contained-compile entry and still journals a later uncontained
+  panic on the same thread without its payload. The #136 general whole-metadata
+  write-back window remains open.
+- Fixture-only integration: incoming route/enrolment tests declared the now-reserved
+  RunToolScratch module. They now parse/validate an ordinary fixture name, then install
+  it explicitly as pre-existing/cached scratch state and rebuild indexes. Both assert
+  that ordinary scratch declarations remain refused and scratch is never persisted;
+  the real route still performs the mutation and starts its source save.
+- Gates: seven targeted interactions pass; combined focused gate 750 passed / 0 failed /
+  4 ignored, plus 7 startup integration cases. Default-JSON/stored-nesting/submission/
+  block gate: 31 passed. Logs `/tmp/opencode/w1-live-integration-{targeted,focused,json-nesting}.log`.
+  The coordinated ONE full run and independent integration-only review are pending.
+
 ## Workspace tools W1: lifecycle and read-only tools in owner turns (#129, 2026-11-12)
 
 - On `work/workspace-tools` after the merges of the run-tool line (`f12c426`) and the
@@ -199,7 +230,97 @@ claim that a later manager integration remains uncommitted.
   active avoidance has not been verified. Named capabilities and existing
   logging/redaction gates remain required. No secret scans were performed.
 
-## Current acceptance checkpoint — typed Python execution/replay (#121/#122)
+## Deployed 2026-11-12 — here (Kronk), `8b985cb`, real source-save acknowledgements (#146)
+
+- **Live:** commit `8b985cb`, binary sha256
+  `8c8e8a4d55990272ecd06d15927dbd213432cf710dbcda18600b054b99623046`,
+  replacing `b7bfa64` / `fa04e367…`. The five manifest-managed Python modules
+  are unchanged; 275 of 275 stored tests passed at startup. sleek and edox are
+  unchanged.
+- **Owner-approved deployment, executed by the manager:** fresh checkpoint,
+  inhibitor and install checks passed; NRestarts 0; five modules, one route, two
+  permanent loops, no library errors; shared-variable probes unchanged.
+  Telegram `SAVE146-OK` delivered (message 549037), with no provider error from
+  the newly deployed stable `prompt_cache_key` (release-line `7dc69aa`).
+- **Live save-outcome proof:** `/api/mutate` adding `Peer.upgrade_probe` returned
+  `saved to Peer.py` and the file was already changed when the response arrived;
+  removal returned saved again and the library returned byte-identical.
+  Revision after verification: 248. The earlier acknowledgement pitfall is
+  resolved by runtime save outcomes; saving remains automatic.
+- **Acceptance evidence:** independent delta review accepted `8b985cb`; reviewer
+  probes passed. Full suite 2386 passed / 1 known strict-parity failure
+  (334 / 58 / 181, zero mismatches) / 7 ignored; upgrade rehearsal 216 of 216;
+  gate self-test 9 of 9 deliberately wrong runs rejected.
+- **Existing recovery material retained:**
+  `~/.local/share/adapsis/upgrade-146/pre-upgrade-bundle/`, previous binary
+  `~/.local/bin/adapsis.bak-fa04e367`; operator procedure in
+  `~/.local/share/adapsis/rehearsal-146/REPORT.md`. Rehearsal proved the previous
+  binary reads the new one's session and managed library, including a new module.
+- **Still pending:** #136 (the pre-existing whole-metadata write-back concurrency
+  window; this change avoids extending it across the save wait); #146's later
+  module-library git-commit boundary; trusted `/api/mutate` rendering can omit a
+  named successful-save line when the active model lacks Read permission.
+- **Owner direction:** during this development phase prioritize fix-forward and
+  minimal release ceremony, without new compatibility or rollback projects.
+  Existing backups stay; review, tests and live verification remain required.
+
+## Historical deployment 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
+
+- **Live on here:** commit `b7bfa64` (`work/python-source-library`: Result runtime,
+  typed execution/replay, manifest-managed `.py` library, run-time module
+  enrolment, one nesting limit, merged with the release line `6136115`). Binary
+  sha256 `fa04e3677b4adf70aafc65196c7ff6facaece2c155f3f9b36de272359c7ce3e8`,
+  replacing `11487f02b5cc97998e6a91b8b2f0e9fa3bb7615914dcf51cedec84fe1b8b4f08`.
+- **Library:** `~/.config/adapsis/modules/` now holds `library-sources.json` and
+  five reviewed Python modules (Chronica, Peer, TelegramBot, TgFormat, Watchdog;
+  function counts 24 / 9 / 48 / 18 / 12; 275 stored cases). The `.ax` files were
+  moved out. Module deltas shipped with the switch: Chronica `pull_page` returns
+  `Result[str]` and `writer` matches it; Peer `eval`/`mutate` renamed to
+  `remote_eval`/`remote_mutate`; the `telegram_token` default is blank and the
+  token was scrubbed from the session (2 occurrences).
+- **Unit:** drop-in `adapsis.service.d/10-source-refusal.conf`
+  (`RestartPreventExitStatus=78`, `OnFailure=adapsis-start-failed.service`) and the
+  helper unit `adapsis-start-failed.service`. Refused starts exit 78 and are not
+  restarted.
+- **Switch, executed by the manager per the runbook, no deviation:** preflight exit
+  0 through the journal (the saved file was 8 history entries behind; the
+  requested save closed it), start inhibitor proven, final bundle taken after the
+  stop, five stopped `.ax` verified against the reviewed hashes, install, start.
+  Verified: active, NRestarts 0, 275 of 275 stored cases re-run, 5 managed sources,
+  one webhook route, two permanent loops, no library errors, shared-variable check
+  as predicted, a Telegram round trip, a Python edit made through the bot (only
+  `TgFormat.py` changed) and its removal (reviewed bytes restored), a clean
+  restart at revision 246.
+- **Evidence before the switch:** full suite 2354 passed / 1 known strict-parity
+  failure (334 / 58 / 181) / 7 ignored; independent review of `a488baa` rejected
+  the switch for rollback and rehearsal defects; the correction `b7bfa64` and
+  the third revision of the operator bundle were accepted; rehearsal gate 192 of 192 checks, gate
+  self-test 9 of 9 wrong runs rejected.
+- **Rollback:** restore `~/.local/share/adapsis/switch-128/pre-switch-bundle/` as
+  one unit (session at revision 244, five `.ax`, old binary, unit state), after
+  archiving the candidate-era session and library. The old binary cannot read a
+  session that holds a Python mutation record. Old binary also at
+  `~/.local/bin/adapsis.bak-11487f02`. Runbook:
+  `~/.local/share/adapsis/rehearsal-128/REPORT.md` (step 8); notes:
+  `~/.local/share/adapsis/switch-128/notes/RESULT.txt`.
+- **Not changed:** sleek and edox (older binaries, legacy `.ax` libraries, no
+  manifest); the Ladybug database; permissions and context files.
+- **Open after the switch:**
+  - The mutation acknowledgement says the source save is pending; the bot repeated
+    that as "the file may not have changed yet" after a save that had succeeded
+    within the same second. Not changed; the owner is deciding how saving should work.
+  - Whole-module removal (#126), `!sandbox discard` after an enrolment, printer
+    parentheses (#140), session growth and the whole-metadata write-back (#136),
+    a read-only route for effective shared values, the non-atomic write of a
+    function move in both directions.
+  - The bundle and older backups still contain the bot token
+    (`rehearsal-128/token-copies.paths`); rotating the token would settle all of them.
+
+Everything below is history. Statements there that the library still persists
+`.ax`, that the default format is unchanged, or that no deployment has happened
+describe the state at their own date, not here after 2026-11-12.
+
+## Historical acceptance checkpoint — typed Python execution/replay (#121/#122)
 
 - Uncommitted candidate on manager-integrated baseline `8911fba`: typed operations
   share the existing executor/session application, while legacy string wrappers
@@ -271,7 +392,7 @@ claim that a later manager integration remains uncommitted.
   callers) is selected, but private migration needs separate authorization after frontend
   acceptance and persisted Python source support. No further live reads or migration here.
 
-## Current acceptance integration — `b0ffd8c` + `113f80f`
+## Historical acceptance integration — `b0ffd8c` + `113f80f`
 
 - This isolated worktree combines accepted Result C-core `113f80f` with release
   memory/privacy (#87/#88), Python grouped tests (#118), scalar admission (#83),

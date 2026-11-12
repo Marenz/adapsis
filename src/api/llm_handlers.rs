@@ -380,17 +380,34 @@ async fn compact_context_if_needed(
 /// per-function copy-on-write merge (issue #9), falling back to a full
 /// overwrite if no base snapshot was captured. Holds the program write lock
 /// only for the brief merge.
-async fn write_back_takeover_program(
+/// Write one takeover block's working set back to the shared tiers (program:
+/// per-function CoW merge, issue #9). Skipped when the executor already
+/// committed it before waiting for a source save: this snapshot is then older
+/// than what other conversations wrote during the wait (#146).
+async fn write_back_takeover(
     program: &std::sync::Arc<tokio::sync::RwLock<crate::ast::Program>>,
-    session: &WorkingSet,
+    runtime: &crate::session::SharedRuntime,
+    meta: &crate::session::SharedMeta,
+    session: WorkingSet,
 ) {
-    let mut live = program.write().await;
-    match &session.base_program {
-        Some(base) => {
-            live.merge_changed_from(base, &session.program);
-        }
-        None => *live = session.program.clone(),
+    if session.take_committed() {
+        return;
     }
+    {
+        let mut live = program.write().await;
+        match &session.base_program {
+            Some(base) => {
+                live.merge_changed_from(base, &session.program);
+            }
+            None => *live = session.program.clone(),
+        }
+    }
+    if let Ok(mut rt) = runtime.write() {
+        rt.shared_vars.replace_from(session.runtime.shared_vars.snapshot());
+        rt.http_routes = session.runtime.http_routes.clone();
+        rt.failure_history = session.runtime.failure_history.clone();
+    }
+    *meta.lock().unwrap() = session.meta;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -551,6 +568,7 @@ pub async fn ask(
     State(config): State<AppConfig>,
     Json(req): Json<AskRequest>,
 ) -> Json<AskResponse> {
+    let config = config.for_new_turn();
     let context_lock = takeover_context_lock("main");
     let _context_guard = context_lock.lock().await;
     config.install_handler_locals();
@@ -562,8 +580,8 @@ pub async fn ask(
     if super::native_turn::eligible(&config) {
         return Json(super::native_turn::run(&config, &req, &tx, false).await);
     }
-    let llm = crate::llm::LlmClient::new_with_model_and_key(
-        &config.llm_url, &config.llm_model.read().unwrap(), config.llm_api_key.clone(),
+    let llm = super::http_context::conversation_client(
+        &config.llm_url, &config.llm_model.read().unwrap(), config.llm_api_key.clone(), "main",
     );
 
     let max_iterations = config.max_iterations;
@@ -579,7 +597,7 @@ pub async fn ask(
         let model = config.llm_model.read().unwrap().clone();
         crate::validator::program_summary_for_model(
             &program, &config.permission_config, config.access_level, &model,
-        )
+        ) + &config.unsaved_tail(&model)
     };
     let (system_prompt, runtime_prompt, prefix_key, request_model) =
         main_context_prompts(&config, &program_summary, req.caller.as_deref());
@@ -721,6 +739,10 @@ pub async fn ask(
         config.write_back_working_set(&session).await;
 
         if exec_result.done_accepted && !exec_result.has_errors {
+            if let Some(notice) = &exec_result.unsaved_notice {
+                if !reply_text.is_empty() { reply_text.push_str("\n\n"); }
+                reply_text.push_str(notice);
+            }
             turn_finished = true;
             break;
         }
@@ -793,6 +815,7 @@ pub async fn ask_stream(
 ) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
     use axum::response::sse::KeepAlive;
     use tokio::sync::mpsc;
+    let config = config.for_new_turn();
 
     let (raw_tx, mut rx) = mpsc::channel::<serde_json::Value>(100);
 
@@ -803,8 +826,8 @@ pub async fn ask_stream(
         let _context_guard = context_lock.lock().await;
         config_clone.install_handler_locals();
         let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone(), config_clone.log_file.clone());
-        let llm = crate::llm::LlmClient::new_with_model_and_key(
-            &config_clone.llm_url, &config_clone.llm_model.read().unwrap(), config_clone.llm_api_key.clone(),
+        let llm = super::http_context::conversation_client(
+            &config_clone.llm_url, &config_clone.llm_model.read().unwrap(), config_clone.llm_api_key.clone(), "main",
         );
 
         let _ = tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
@@ -821,7 +844,7 @@ pub async fn ask_stream(
                 crate::validator::program_summary_for_model(
                     &program, &config_clone.permission_config, config_clone.access_level,
                     &model,
-                )
+                ) + &config_clone.unsaved_tail(&model)
             };
             let (system_prompt, runtime_prompt, prefix_key, request_model) = main_context_prompts(
                 &config_clone,
@@ -1004,6 +1027,9 @@ pub async fn ask_stream(
             let needs_opencode_restart = exec_result.needs_opencode_restart;
             if exec_result.done_accepted {
                 op_result.accepted_done = true;
+                if let Some(notice) = &exec_result.unsaved_notice {
+                    let _ = tx.send(serde_json::json!({"type": "text", "text": notice})).await;
+                }
             }
 
             // Write session mutations back to tiers after each iteration
@@ -1241,8 +1267,11 @@ pub async fn handle_llm_takeover(
         .await
         .context("join Ladybug attachment write")??;
     }
-    let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
+    let llm = super::http_context::conversation_client(llm_url, llm_model, llm_key.clone(), &context);
     let compaction = if compaction_attempt_due(&context) {
+        // Compaction requests have their own prefix, so their own cache key.
+        let compaction_llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone())
+            .with_prompt_cache_key(crate::cache_lifetime::prompt_cache_key("compact", &context, llm_model));
         // The same calibrated estimate as the view checkpoint drives compaction.
         let bytes_per_token = meta
             .lock()
@@ -1254,7 +1283,7 @@ pub async fn handle_llm_takeover(
             compact_context_if_needed(
                 &memory_graph,
                 &memory_embedder,
-                &llm,
+                &compaction_llm,
                 llm_model,
                 &context,
                 bytes_per_token,
@@ -1346,10 +1375,11 @@ pub async fn handle_llm_takeover(
         crate::coroutine::scoped::prompt(tools)
     } else {
         let prog = program.read().await;
+        let library = meta.lock().unwrap().library_state.clone();
         crate::validator::program_summary_for_model(
             &prog, &permission_config,
             access_level, &effective_model,
-        )
+        ) + &super::source_save::unsaved_tail(library.as_ref(), &permission_config, access_level, &effective_model)
     };
     // Build a temporary AppConfig so we can reuse execute_code()
     let (self_trigger_tx, _self_trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
@@ -1393,6 +1423,8 @@ pub async fn handle_llm_takeover(
             guest_tools: guest_tools.clone(),
         }),
         workspaces, origin: None,
+        // One takeover = one turn.
+        turn_saves: Default::default(),
     };
 
     // Native protocol decision (#85) uses the same pinned, intersected
@@ -1714,14 +1746,7 @@ pub async fn handle_llm_takeover(
                 eprintln!("[llm_takeover:{context}] !agent detected, spawning via execute_code and breaking");
                 let mut session = super::working_set::working_set_snapshot(&program, &runtime, &meta).await;
                 execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
-                // Write back mutations (per-function CoW merge, issue #9)
-                write_back_takeover_program(&program, &session).await;
-                if let Ok(mut rt) = runtime.write() {
-                    rt.shared_vars.replace_from(session.runtime.shared_vars.snapshot());
-                    rt.http_routes = session.runtime.http_routes.clone();
-                    rt.failure_history = session.runtime.failure_history.clone();
-                }
-                *meta.lock().unwrap() = session.meta;
+                write_back_takeover(&program, &runtime, &meta, session).await;
                 tmp_config.notify_save();
                 break;
             }
@@ -1731,17 +1756,13 @@ pub async fn handle_llm_takeover(
         let mut session = super::working_set::working_set_snapshot(&program, &runtime, &meta).await;
         let exec_result = execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
 
-        // Write back mutations to shared state (per-function CoW merge, issue #9)
-        write_back_takeover_program(&program, &session).await;
-        if let Ok(mut rt) = runtime.write() {
-            rt.shared_vars.replace_from(session.runtime.shared_vars.snapshot());
-            rt.http_routes = session.runtime.http_routes.clone();
-            rt.failure_history = session.runtime.failure_history.clone();
-        }
-        *meta.lock().unwrap() = session.meta;
+        write_back_takeover(&program, &runtime, &meta, session).await;
         tmp_config.notify_save();
 
         if exec_result.done_accepted && !exec_result.has_errors {
+            if let Some(notice) = &exec_result.unsaved_notice {
+                reply_text = if reply_text.is_empty() { notice.clone() } else { format!("{reply_text}\n\n{notice}") };
+            }
             final_summary_pending = false;
             break;
         }

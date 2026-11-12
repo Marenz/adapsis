@@ -2,7 +2,7 @@
 use crate::{ast, parser, validator};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-mod limits;
+pub(crate) mod limits;
 #[cfg(test)]
 mod tests;
 

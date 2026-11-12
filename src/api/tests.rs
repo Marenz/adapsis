@@ -20,6 +20,8 @@ mod reject_identity_tests;
 mod error_journal_route_tests;
 #[path = "jit_containment_tests.rs"]
 mod jit_containment_tests;
+#[path = "storage_depth_tests.rs"]
+mod storage_depth_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
 fn test_config() -> AppConfig {
@@ -53,6 +55,7 @@ fn test_config() -> AppConfig {
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
         turn: None, workspaces: None, origin: None,
+        turn_saves: Default::default(),
     }
 }
 
@@ -771,6 +774,7 @@ fn test_config_with_io() -> (
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
         turn: None, workspaces: None, origin: None,
+        turn_saves: Default::default(),
     };
     (config, io_rx)
 }

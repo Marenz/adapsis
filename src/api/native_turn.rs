@@ -151,6 +151,9 @@ pub(super) struct NativeLoop {
     persist_incomplete_note: bool,
     /// Latest non-empty user-visible prose (takeover reply text).
     pub(super) prose: String,
+    /// Runtime line appended to the visible reply when finish was accepted
+    /// with an unsaved edit of this turn (#146).
+    pub(super) unsaved_notice: Option<String>,
     ladybug: Option<super::takeover_native::LadybugSink>,
     pub(super) end: LoopEnd,
     /// Model that generates, when it differs from the pinned permission model
@@ -208,7 +211,7 @@ fn prepare(
         &config.permission_config,
         config.access_level,
         &model,
-    );
+    ) + &config.unsaved_tail(&model);
     let (stable, runtime, key, model) =
         super::http_context::context_prompts(config, &summary, req.caller.as_deref(), true);
     let key = key.with_tools(super::http_context::tool_schema_hash(config));
@@ -283,6 +286,7 @@ impl NativeLoop {
             context: context.to_string(),
             persist_incomplete_note,
             prose: String::new(),
+            unsaved_notice: None,
             ladybug,
             end: LoopEnd::Exhausted,
             generator: None,
@@ -318,8 +322,12 @@ impl NativeLoop {
             .generator
             .clone()
             .unwrap_or_else(|| config.llm_model.read().unwrap().clone());
-        let llm =
-            LlmClient::new_with_model_and_key(&config.llm_url, &model, config.llm_api_key.clone());
+        let llm = super::http_context::conversation_client(
+            &config.llm_url,
+            &model,
+            config.llm_api_key.clone(),
+            &self.context,
+        );
         let mut iteration = 0;
         loop {
             let final_round = match budget.next(iteration) {
@@ -742,6 +750,16 @@ impl NativeLoop {
                 .await;
         }
         self.finished = execution.done_accepted && !execution.has_errors;
+        if self.finished {
+            if let Some(notice) = execution.unsaved_notice.take() {
+                if !self.response.reply.is_empty() {
+                    self.response.reply.push_str("\n\n");
+                }
+                self.response.reply.push_str(&notice);
+                tx.send(serde_json::json!({"type":"text", "text":notice})).await;
+                self.unsaved_notice = Some(notice);
+            }
+        }
         self.response.has_errors |= execution.has_errors;
         self.response.results.extend(execution.mutation_results);
         self.response.test_results.extend(execution.test_results);

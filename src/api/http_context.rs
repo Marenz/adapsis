@@ -89,6 +89,21 @@ pub(super) fn report_prompt_epoch(
 
 pub(crate) use super::request_meter::SentRequest;
 
+/// The LLM client for the turns of one conversation: every request carries the
+/// conversation's stable `prompt_cache_key` (context + model, not content), so
+/// routes that key their cache on it keep reading it across rounds, turns,
+/// checkpoints and cold starts. `llm_call`, agents and CLI requests send no key
+/// (the gateway derives one from model, instructions and first input item).
+pub(crate) fn conversation_client(
+    url: &str,
+    model: &str,
+    api_key: Option<String>,
+    context: &str,
+) -> crate::llm::LlmClient {
+    crate::llm::LlmClient::new_with_model_and_key(url, model, api_key)
+        .with_prompt_cache_key(crate::cache_lifetime::prompt_cache_key("conv", context, model))
+}
+
 /// Recovered reference images (sent in the runtime tail) must fit both the image
 /// budget and the route's remaining request headroom after the view and tail.
 /// Newest-first order from the graph is kept; images that don't fit are dropped.
@@ -188,9 +203,12 @@ pub(crate) fn self_trigger_messages(
         .filter(|message| message.role == "system")
         .map(|message| message.content.clone())
         .unwrap_or_default();
-    // A watch event starts a turn of its own, like a user message.
-    super::request_meter::turn_view(&mut meta.conversations, "main", model, &system, 0, crate::cache_lifetime::now_ms(), false)
-        .messages
+    // Not a user turn: no cold start and no turn accounting (it holds no turn
+    // lock, so it must not replace the probe of an `ask` turn in flight).
+    let mut policy = crate::session::conversation_view::ViewPolicy::for_model(model, &system, 0, conv.projection(model));
+    // Watch has no private-owner turn identity: never expose workspace batches.
+    policy.hidden_tools = Some(super::native_tools::workspace::is_workspace_name);
+    conv.model_view(&policy).messages
 }
 
 /// Measured serialized size of runtime-tail parts known before the view.

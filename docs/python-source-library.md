@@ -100,25 +100,183 @@ It is checked against the Python serializer too; it is not an escape hatch for
 unsupported modules. Refused imports leave original bytes and the session cache
 intact, and cannot proceed to startup. This is temporary migration eligibility,
 not a permanent dual-source format. Changing formats requires an explicit
-manifest/file change and server restart. This slice does not automatically
-convert files, create a migration backup, or flip the default. With **no manifest**,
+manifest/file change and server restart. The binary does not convert files,
+create a migration backup, or flip the default by itself. With **no manifest**,
 legacy library behavior remains unchanged.
 
 An active manifest is a source whitelist, including when its module set is empty.
 Unlisted `.ax` and `.py` files are not read or applied: diagnostics enumerate the
-unlisted names and require explicit entries/dependencies before restart. Unlisted
-writes refuse instead of implicitly creating legacy files. A cached module absent
-from the manifest also **refuses startup**, naming the excluded modules while
-preserving the recovery checkpoint. Cached top-level functions/types likewise
-refuse: this first slice requires explicit module ownership. Thus ignoring an
-unlisted file cannot accidentally leave its stale session version executable.
+unlisted names. Detached snapshot writes of unlisted modules refuse instead of
+implicitly creating legacy files. Cached top-level functions/types **refuse
+startup**, preserving the recovery checkpoint: every function needs a module to
+be saved in. A cached module absent from the manifest does not refuse startup; it
+is adopted or dropped (see "Modules created at run time"), so ignoring an unlisted
+file cannot leave its stale session version executable without source.
 An unreadable manifest (including a dangling symlink) never selects legacy fallback.
 Once loaded, manifest presence remains policy even for an **empty** module set.
 Deleting the file or replacing it with a dangling link cannot re-enable legacy
 reload or snapshot writes in that process. Entry guards combine retained policy
 with fallible `symlink_metadata` inspection; inspection errors never mean absent.
 
+## Modules created at run time (#128)
+
+The manifest follows the live Program; the writer is the only thing that changes
+it. Authorization happens where a module enters the live Program, never here.
+
+**Creation.** Under a manifest a module is created by a Python mutation only.
+Adapsis-source creation (a `+module` declaration of a new name, `!move` into a
+new module, the `module_create`, `mutate` and `move_symbols` builtins, an agent
+branch) is refused before any state change with "this library stores Python
+source; create the module with a Python mutation". Editing an existing managed
+module with Adapsis source is unchanged. A Python creation is acknowledged as "changed in memory (new module)", and
+the result of the call then reports the save (below).
+
+**Enrolment.** At each save `flush_live_sources` enrols every live module the
+manifest does not list, as `python`, and keeps every listed module's dependencies
+equal to what its code references: owners of qualified callees, of foreign named
+types, of event sources, and of calls in stored-test data
+(`library/source_enrol.rs`). Dependency sets are compared as sets; a manifest
+whose declared dependencies already equal the code is never rewritten (not even
+reformatted). `RunToolScratch` and names starting with `__` are never enrolled
+and never reported. Not enrolled, and reported on every save until fixed:
+
+- a module whose checked Python print fails (the module is live but has no
+  source and will be dropped at the next restart);
+- a module on a cross-module cycle. Cycles stay refused. Both modules are named
+  and the text says how to break the cycle (move what both sides need into a
+  third module). The mutation that closes the cycle gets the same text in its
+  acknowledgement, as an error: the change is live, its source is not saved. A
+  listed module on a cycle keeps its recorded dependencies and its old source.
+
+**Every manifest the writer commits loads with the files on disk at that
+moment.** The manifest and each source file are separate renames, so two rules
+hold:
+
+1. A dependency is only **added** before a module's source is saved (`grow`) and
+   only **removed** after it was saved (`shrink`). A recorded dependency the
+   source no longer needs is harmless; a missing one refuses the next start.
+2. Before each commit `source_io::would_load` decodes the listed sources as they
+   are on disk (plus the first text of modules being enrolled) against the new
+   manifest, exactly as a start does, executing nothing. A change that does not
+   pass is not committed; the module stays pending and is reported. When the
+   whole new manifest does not pass, each changed module is tried on its own,
+   dependencies first.
+
+One save is: `grow` (enrol + add dependencies), save every managed module,
+`shrink`. When that leaves something behind, the same save runs the three steps
+once more, because its own source saves may have unblocked it: a new module
+using a function another module gained in the same turn is listed only after
+that module's source is on disk, and a dependency whose direction was reversed
+is recorded only after the old direction was removed. Only what the last pass
+leaves behind is reported. A manifest commit costs one decode of all listed
+sources; a save that changes no dependency and enrols nothing commits nothing.
+
+**Write order** per enrolment: (1) the module's `.py` (owner-only, temporary
+file, rename, directory sync), (2) the manifest (the commit point; the loaded
+manifest must still be the one on disk), (3) the session, later, by the autosave.
+Nothing is written for a module that is not going to be listed.
+
+| Crash after | On disk | Next start |
+|---|---|---|
+| nothing written | old manifest, session with or without the module | cached module adopted (below), or absent |
+| (1) source | unlisted `.py`, old manifest | file ignored; if the session has the module it is adopted and the identical file reused |
+| (2) manifest | listed `.py` | module loads from source, whatever the session holds |
+| (3) session | all three agree | ordinary start |
+| a dependency was added, source not yet saved | old source, one recorded dependency more | loads (checked before the commit) |
+| source saved, dependency not yet removed | new source, one recorded dependency too many | loads; removed by the next save |
+
+**Several source files in one save.** The source files are separate renames as
+well, and a start decodes each module against the files of its dependencies.
+The writer therefore prints and checks every module first and writes nothing
+yet. Then a changed file is written only when the set on disk, with that one
+file replaced, still loads (the same decode a start does). Dependencies are
+tried first and the remaining files again after every write, so both usual
+orders are found:
+
+- a module gains a function, then its new caller is written;
+- a caller stops using a function, then the module that drops it is written.
+
+What cannot be written that way:
+
+- The complete new set does not load, because a module it needs could not be
+  printed or written. The dependent modules are not written either: they stay
+  pending, and the message says which module they wait for. The set on disk
+  still loads. (Before this rule the dependent was written alone and the next
+  start was refused until someone repaired the files by hand.)
+- **Remaining gap:** the complete new set loads, but no single file can go first
+  (functions moved between two modules in both directions). The files are
+  written one after another and the save log says so. A crash between those
+  renames leaves a set the next start refuses (exit 78, below); the session
+  cache still holds the complete Program.
+
+A save that changes no file decodes nothing. A save that changes k files costs
+at least k decodes of all listed sources (about 270 ms each on the five live
+modules), under the Program read guard, off the reactor.
+
+An unlisted leftover file with the name of a module being enrolled is reused
+when its bytes equal the new source; otherwise it is moved aside as
+`<Module>.py.orphan-<unix ms>` (also a leftover `.ax`), never deleted and never
+read. Remove orphans by hand once inspected.
+
+**Startup adoption.** A module that exists only in the session cache (the process
+stopped before its first save) is handled before anything can run
+(`adopt_cached`), in three steps: plan without writing, write the recovery file
+of every module that will not be enrolled, then commit the enrolment. If it
+prints it is enrolled exactly as above; otherwise it is
+removed from the Program and its AST is kept in
+`<library>/recovery/<Module>-<unix ms>.json` (owner-only; subdirectories are never
+scanned for sources). Each adoption and each drop is one startup log line and one
+journal entry (`library` category, module as source); a dropped module's cached
+routes are retired. Scratch modules leave the cache silently. Lifecycle blocks of
+an adopted module run with the ordinary startup, not earlier.
+
+**Removal.** Removing a function or type inside a managed module is an ordinary
+edit: the next save writes the module without it. Removing a whole managed module
+is refused before any state change, naming #126 (the source would stay and the
+module would return at the next start). A module that is not listed yet can still
+be removed.
+
+**Nesting.** The printer puts every binary operation and `not` operand in
+parentheses and qualifies local calls, so the printed form of a function scans
+up to twice as deep as its submission (measured: 199 for 100 chained operators
+or nested calls). Stored source, meaning the text the printer produces and the
+managed files read back, is therefore scanned with its own limit of 250
+(`MAX_STORED_NESTING`); submissions keep 100. Everything a submission can
+contain can be saved and loaded again. A save can still be refused for nesting
+after a deeper Adapsis-source edit (more than about 124 chained operators): the
+message says the printed form exceeds the limit and to split the expression,
+the module stays pending and its old source stays in place. A start prints
+every module it loads, so a hand-edited file is accepted only if its printed
+form fits the stored limit. The limit comes down again when the printer emits
+minimal parentheses (#140).
+
+**Residual.** `!sandbox discard` restores an older Program. A module created and
+enrolled inside the sandbox is then listed but not live: each save reports
+"managed module absent from current program" and the module returns at the next
+start, the same state as whole-module removal (#126).
+
 ## Startup, reload, and recovery
+
+A start refused by the source policy exits with **code 78** (`EX_CONFIG`,
+`library::EXIT_SOURCE_REFUSED`): the same files would refuse again, so the
+service unit should carry `RestartPreventExitStatus=78`. A session file that
+cannot be read (truncated, corrupt, nested deeper than the reader's cap) is the
+same kind of refusal, with or without a manifest: exit 78, the file named and
+left untouched, nothing initialized. The runtime keeps no backup of the session
+file; restore the operator's last backup or move the file aside. "No session
+yet" must be proven: only a path for which the file system answers "not found"
+starts an empty session. A dangling link, a link loop, a directory, or a path
+that cannot be inspected is a refused start.
+
+**What a refused start may have written.** Never a listed source file, never the
+manifest, never the session. The one exception is startup adoption: recovery
+files are written BEFORE any enrolment (plan, recovery files, then source and
+manifest), so a recovery file that cannot be written refuses the start with
+source and manifest untouched, possibly leaving recovery files of other dropped
+modules behind. Only if an enrolment write itself fails halfway and the recovery
+file of a module it should have enrolled cannot be written either, an unlisted
+`.py` can remain (a start ignores it; the next enrolment reuses or moves it).
+
 
 The whole managed dependency set validates before replacing its in-memory
 modules. Validation executes no lifecycle block; the only code it runs is the
@@ -161,7 +319,8 @@ The manifest is the durable format authority. `LibraryState` owns the runtime
 source-byte hashes and errors; no duplicate session format/hash metadata exists.
 The session contains an AST recovery cache, not another editable source authority.
 Managed mutation hooks enqueue names, not AST snapshots. Their acknowledgement
-means **accepted in memory / source save pending**, not a disk-durability receipt.
+("changed in memory") says nothing about the disk; the entry point reports the
+real save outcome afterwards (see "What a mutation is told about its save").
 Detached `persist_module` / `persist_program_module` writes refuse managed names.
 The single writer, `flush_live_sources`, obtains the **current live Program** on
 a blocking worker, then keeps its Program read guard through serialization,
@@ -202,9 +361,60 @@ reconcile and restart before retrying. Source and session writes are not one tra
 source succeeds and session checkpointing fails, committed source stays
 authoritative and the log explicitly reports the failed recovery checkpoint.
 
-No live module migration is performed here. A deployment migration still needs
-an explicit complete inventory, external backup/rollback bundle, review, and
-isolated restart gates before replacing real files.
+The code performs no migration. A node is migrated by an operator procedure:
+complete inventory, reviewed conversion set, a rehearsal that is an enforced
+gate, a final backup taken after the stop, and a rollback that restores that
+bundle as one unit. The first node, here (Kronk), was switched on 2026-11-12
+(`AGENTS.md`, Development baseline; runbook and tools in
+`~/.local/share/adapsis/rehearsal-128/`). sleek and edox still run legacy `.ax`
+libraries without a manifest.
+
+## What a mutation is told about its save (#146)
+
+Saving is automatic; nobody has to ask for it. The result of the call that
+changed a module says what happened to the source:
+
+- `saved to X.py` (a new module: `saved to X.py (new module, added to the
+  library)`), written before the result exists;
+- `module `X` NOT saved: <reason>. The edit is live in memory and will be lost at
+  the next restart unless you <remedy>`, with the remedy for that reason: split
+  the expression (printed form nested too deeply); change the member (cannot be
+  written as Python); save or fix module `Y` first; break the cycle between `X`
+  and `Y`. Causes the model cannot fix (the file or the manifest changed on disk,
+  a disk or permission error, a save that was not confirmed within 10 s) say so,
+  say to tell the owner, and never suggest repeating the mutation;
+- `Also saved now: Y.py` when this call unblocked another module, and `Other
+  modules still not saved: ...`.
+
+A mutation runs on a copy that is committed afterwards, and the writer reads the
+live Program, so the save runs in the entry point after the commit: one save per
+call that changed something (native `mutate`, `test`, an `evaluate` that mutated
+through a builtin, a legacy code block, `/api/mutate`; an agent branch when it is
+merged). A call that changed nothing runs no writer. Route handlers, `/api/eval`
+and the self-trigger start the save without waiting. The debounced autosave
+remains as the backstop and as the only writer of the session file.
+
+**Finishing with an unsaved edit.** `finish` (and legacy `!done`) is refused once
+per turn when a module that this turn's own calls changed is unsaved for a reason
+the model can fix; the refusal lists module, reason and remedy. A second
+`finish`, or a cause that is not the model's, is accepted, and the visible reply
+ends with one runtime line: `[Runtime: not saved to source: X (<reason>). The
+change is live only until the next restart.]`. Unsaved modules of earlier turns
+or of other conversations do not refuse and are not mentioned; a speaker who
+cannot write is never refused; a module the speaker cannot read is never named.
+
+**The wait and other conversations.** The call commits its working set
+immediately before it waits for the writer and does not write it back again
+afterwards, so what other conversations write during the wait (a poll cursor, a
+message) is not overwritten by this call. An I/O failure (disk, permissions, a
+manifest changed on disk) is reported for exactly the affected modules as an
+environment cause, also when it happens while a new module is enrolled or a new
+dependency is recorded.
+
+**Where it shows.** While something is unsaved, `?library`, `inspect library` and
+the runtime tail of write-capable speakers carry one line, `Source NOT saved
+(live in memory only, lost at the next restart): X (<reason>)`. When everything
+is saved there is no line and the request is byte-identical.
 
 ## Focused checks
 
@@ -218,5 +428,11 @@ They cover source load/validated mutation/save/reload, ordered cases without
 forged pass flags, dependency closure, external edits, manifest drift,
 unsupported-case refusal, all managed hot-reload refusal, delayed queued flushes,
 detached old-snapshot refusal, disjoint mutations and recovery cache preservation.
+`library/source_enrol_tests.rs` covers enrolment, dependency updates, cycles,
+leftover files, the crash windows, startup adoption/drop, the creation and
+removal refusals and the nesting notice; `api/python_turn_tests.rs` creates a
+module through a native Python `mutate` turn.
 The process test uses a private HOME/library/session and verifies that a broken
-Python source prevents a cached startup file-write effect and database creation.
+Python source prevents a cached startup file-write effect and database creation,
+that a refused start exits with code 78, and that a cached unlisted module is
+adopted or dropped without refusing the start.

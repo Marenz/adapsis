@@ -70,6 +70,27 @@ pub struct CacheEvidence {
     pub miss_count: u64,
 }
 
+/// A stable `prompt_cache_key` for the requests of one purpose in one
+/// conversation context on one model: `adapsis-<purpose>-<32 hex>`.
+///
+/// The ChatGPT route only reads its cache for requests that share a key (the
+/// gateway also sends it as the `session-id` header); the OpenAI API uses it to
+/// route requests with a common prefix to the same cache. The key is derived
+/// from the context id and the model, never from message content, so it stays
+/// the same across checkpoints and cold starts; different purposes (the
+/// conversation, its compaction) have different prefixes and get different keys.
+/// The context id is hashed: the key leaves the host and context ids contain
+/// platform user ids. Format accepted by the gateway: 1-64 printable ASCII.
+pub fn prompt_cache_key(purpose: &str, context: &str, model: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // Length-prefixed parts: no two (purpose, context, model) triples collide.
+    let digest = Sha256::digest(
+        format!("{}:{purpose}{}:{context}{}:{model}", purpose.len(), context.len(), model.len()).as_bytes(),
+    );
+    let purpose: String = purpose.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+    format!("adapsis-{purpose}-{}", &format!("{digest:x}")[..32])
+}
+
 /// Where an effective lifetime comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -102,6 +123,9 @@ pub enum Outcome {
     Miss,
     /// Some cache was read, but neither most nor almost none of the prefix.
     Ambiguous,
+    /// Nothing was read on a route whose cache hits are probabilistic: it says
+    /// nothing about the lifetime and is never recorded.
+    UnreliableMiss,
     /// The route does not report cache reads separately.
     Unobservable,
     /// No hit could be expected: first turn, after a checkpoint or prefix
@@ -115,6 +139,7 @@ impl Outcome {
             Self::Hit => "hit",
             Self::Miss => "miss",
             Self::Ambiguous => "ambiguous",
+            Self::UnreliableMiss => "miss-not-evidence",
             Self::Unobservable => "unobservable",
             Self::NotExpected => "not-expected",
         }
@@ -125,6 +150,15 @@ impl Outcome {
 /// request left behind (None when no hit can be expected), `cached_read` the
 /// provider's cache-read counter (None when the route does not report it).
 /// A hit reads at least half of the expected prefix, a miss at most a tenth.
+/// On a `probabilistic` route (hits happen only some of the time, at every
+/// pause) a miss is `UnreliableMiss`: only hits are evidence there.
+pub fn classify_for(expected_tokens: Option<usize>, cached_read: Option<u64>, probabilistic: bool) -> Outcome {
+    match classify(expected_tokens, cached_read) {
+        Outcome::Miss if probabilistic => Outcome::UnreliableMiss,
+        outcome => outcome,
+    }
+}
+
 pub fn classify(expected_tokens: Option<usize>, cached_read: Option<u64>) -> Outcome {
     let Some(expected) = expected_tokens.filter(|&tokens| tokens >= MIN_OBSERVABLE_TOKENS) else {
         return Outcome::NotExpected;
@@ -178,9 +212,11 @@ impl CacheEvidence {
 
     /// The lifetime to act on, given the route's sourced `default` (if any).
     /// None means unknown: there is no default and no confirmed expiry.
-    pub fn effective(&self, default: Option<u64>, now_ms: u64) -> Option<Lifetime> {
+    /// `use_misses` is false for a route with probabilistic hits: a miss there is
+    /// not evidence, so recorded misses (from before it was marked) are ignored.
+    pub fn effective(&self, default: Option<u64>, now_ms: u64, use_misses: bool) -> Option<Lifetime> {
         let learned = |secs: u64| Lifetime { secs: secs.clamp(MIN_LIFETIME_SECS, MAX_LIFETIME_SECS), source: Source::Learned };
-        let upper = self.fresh_misses(now_ms).nth(1).map(|miss| miss.pause_secs);
+        let upper = self.fresh_misses(now_ms).nth(1).map(|miss| miss.pause_secs).filter(|_| use_misses);
         let Some(default) = default else {
             // Hits alone are only a lower bound: nothing shows the cache expires.
             return upper.map(learned);
@@ -230,7 +266,7 @@ impl RouteLifetimes {
             return None;
         }
         match self.routes.get(model) {
-            Some(evidence) => evidence.effective(limits.cache_ttl_secs, now_ms),
+            Some(evidence) => evidence.effective(limits.cache_ttl_secs, now_ms, !limits.cache_probabilistic),
             None => limits.cache_ttl_secs.map(|secs| Lifetime { secs, source: Source::Default }),
         }
     }
@@ -239,6 +275,11 @@ impl RouteLifetimes {
 /// What the current turn of a conversation needs to account its requests:
 /// set when the turn's view is built, read when a request is answered. In-memory
 /// only (a restart is a prefix reset for the epoch tracker anyway).
+///
+/// One per conversation, and never shared by two turns: only turns that hold the
+/// per-context turn lock for their whole duration create and update it (`ask`,
+/// `ask_stream`, `llm_takeover`). The `!watch` self-trigger, which can run while
+/// an `ask` turn on `main` is in flight, does not touch it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnProbe {
     /// Serialized text bytes of the view at turn start; the first request's bytes
@@ -283,7 +324,75 @@ mod tests {
         let mut limits = crate::model_limits::for_model("unknown/cache-test");
         limits.cache_ttl_secs = ttl;
         limits.cold_start = cold_start;
+        limits.cache_probabilistic = false;
         limits
+    }
+
+    /// A route whose hits are probabilistic (the ChatGPT route: about 60% at every
+    /// pause from 12 s to 65 min, MEASURED 2026-11-10): misses never lower the
+    /// lifetime, hits still raise it.
+    #[test]
+    fn cache_lifetime_probabilistic_route_ignores_misses_and_learns_from_hits() {
+        assert_eq!(classify_for(Some(100_000), Some(0), true), Outcome::UnreliableMiss);
+        assert_eq!(classify_for(Some(100_000), Some(0), false), Outcome::Miss);
+        assert_eq!(classify_for(Some(100_000), Some(92_000), true), Outcome::Hit);
+        assert_eq!(classify_for(Some(100_000), None, true), Outcome::Unobservable);
+        assert_eq!(classify_for(None, Some(0), true), Outcome::NotExpected);
+        assert_eq!(Outcome::UnreliableMiss.label(), "miss-not-evidence");
+        let mut routes = RouteLifetimes::default();
+        let mut chatgpt = limits(Some(1_800), true);
+        chatgpt.cache_probabilistic = true;
+        // Uncached answers at short pauses, again and again: never recorded.
+        for pause in [12, 60, 120, 300, 600, 900] {
+            for _ in 0..5 {
+                assert!(!routes.record("chatgpt/x", classify_for(Some(100_000), Some(0), true), pause, 0));
+            }
+        }
+        assert!(routes.is_empty());
+        assert_eq!(routes.lifetime("chatgpt/x", &chatgpt, 0).unwrap(), Lifetime { secs: 1_800, source: Source::Default });
+        // Misses stored before the route was marked probabilistic do not count.
+        routes.record("chatgpt/x", Outcome::Miss, 120, 0);
+        routes.record("chatgpt/x", Outcome::Miss, 200, 0);
+        assert_eq!(routes.lifetime("chatgpt/x", &limits(Some(1_800), true), 0).unwrap(), Lifetime { secs: 200, source: Source::Learned }, "a deterministic route would believe them");
+        assert_eq!(routes.lifetime("chatgpt/x", &chatgpt, 0).unwrap(), Lifetime { secs: 1_800, source: Source::Default });
+        // A hit past the default raises the lifetime (readable at 3900 s was measured).
+        routes.record("chatgpt/x", classify_for(Some(100_000), Some(92_160), true), 3_900, 0);
+        assert_eq!(routes.lifetime("chatgpt/x", &chatgpt, 0).unwrap(), Lifetime { secs: 3_901, source: Source::Learned });
+        // And later uncached answers below it change nothing.
+        for _ in 0..10 {
+            routes.record("chatgpt/x", classify_for(Some(100_000), Some(0), true), 600, 0);
+        }
+        assert_eq!(routes.lifetime("chatgpt/x", &chatgpt, 0).unwrap().secs, 3_901);
+        // Without a default a probabilistic route stays unknown whatever misses say.
+        let mut unknown = limits(None, true);
+        unknown.cache_probabilistic = true;
+        assert_eq!(routes.lifetime("chatgpt/x", &unknown, 0), None);
+    }
+
+    #[test]
+    fn prompt_cache_key_is_stable_per_context_model_and_purpose() {
+        let key = prompt_cache_key("conv", "telegram:group:-100123", "chatgpt/gpt-6-astra");
+        assert_eq!(key, prompt_cache_key("conv", "telegram:group:-100123", "chatgpt/gpt-6-astra"));
+        assert!(key.starts_with("adapsis-conv-") && key.len() == 13 + 32, "{key}");
+        // The gateway's rule: 1-64 printable ASCII, no surrounding whitespace.
+        assert!(key.len() <= 64 && key.bytes().all(|b| b.is_ascii_graphic()));
+        // The context id (which contains platform ids) does not leave the host.
+        assert!(!key.contains("100123") && !key.contains("telegram"));
+        // Different context, model or purpose: different key.
+        let others = [
+            prompt_cache_key("conv", "telegram:group:-100124", "chatgpt/gpt-6-astra"),
+            prompt_cache_key("conv", "telegram:group:-100123", "chatgpt/gpt-6-sol"),
+            prompt_cache_key("compact", "telegram:group:-100123", "chatgpt/gpt-6-astra"),
+            prompt_cache_key("conv", "main", "chatgpt/gpt-6-astra"),
+        ];
+        let mut all: Vec<&String> = others.iter().chain([&key]).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 5);
+        // No ambiguity between the parts, and odd input still yields a valid key.
+        assert_ne!(prompt_cache_key("conv", "a\0b", "c"), prompt_cache_key("conv", "a", "b\0c"));
+        let odd = prompt_cache_key("weird purpose/ä\n", "ctx with spaces\nand ümlauts", "m");
+        assert!(odd.len() <= 64 && odd.bytes().all(|b| b.is_ascii_graphic()), "{odd}");
     }
 
     #[test]
@@ -305,17 +414,17 @@ mod tests {
     #[test]
     fn cache_lifetime_unknown_without_default_or_confirmed_expiry() {
         let mut evidence = CacheEvidence::default();
-        assert_eq!(evidence.effective(None, 0), None);
-        assert_eq!(evidence.effective(Some(300), 0), Some(Lifetime { secs: 300, source: Source::Default }));
+        assert_eq!(evidence.effective(None, 0, true), None);
+        assert_eq!(evidence.effective(Some(300), 0, true), Some(Lifetime { secs: 300, source: Source::Default }));
         // Hits alone are a lower bound, not a lifetime.
         evidence.record(Outcome::Hit, 900, 0);
-        assert_eq!(evidence.effective(None, 0), None);
+        assert_eq!(evidence.effective(None, 0, true), None);
         // One miss is not confirmed.
         evidence.record(Outcome::Miss, 4_000, 0);
-        assert_eq!(evidence.effective(None, 0), None);
+        assert_eq!(evidence.effective(None, 0, true), None);
         // A second miss confirms an upper bound even without a default.
         evidence.record(Outcome::Miss, 5_000, 0);
-        assert_eq!(evidence.effective(None, 0), Some(Lifetime { secs: 5_000, source: Source::Learned }));
+        assert_eq!(evidence.effective(None, 0, true), Some(Lifetime { secs: 5_000, source: Source::Learned }));
     }
 
     #[test]
@@ -323,10 +432,10 @@ mod tests {
         let mut evidence = CacheEvidence::default();
         // A hit below the default changes nothing.
         evidence.record(Outcome::Hit, 120, 0);
-        assert_eq!(evidence.effective(Some(300), 0).unwrap(), Lifetime { secs: 300, source: Source::Default });
+        assert_eq!(evidence.effective(Some(300), 0, true).unwrap(), Lifetime { secs: 300, source: Source::Default });
         // A hit after 50 minutes proves the cache outlives the 300 s default.
         evidence.record(Outcome::Hit, 3_000, 0);
-        assert_eq!(evidence.effective(Some(300), 0).unwrap(), Lifetime { secs: 3_001, source: Source::Learned });
+        assert_eq!(evidence.effective(Some(300), 0, true).unwrap(), Lifetime { secs: 3_001, source: Source::Learned });
         // A shorter hit never lowers it.
         evidence.record(Outcome::Hit, 400, 0);
         assert_eq!(evidence.longest_hit_secs, Some(3_000));
@@ -338,21 +447,21 @@ mod tests {
         let mut evidence = CacheEvidence::default();
         // One early miss (provider eviction, another backend) is not believed.
         assert!(evidence.record(Outcome::Miss, 200, 0));
-        assert_eq!(evidence.effective(Some(3_600), 0).unwrap(), Lifetime { secs: 3_600, source: Source::Default });
+        assert_eq!(evidence.effective(Some(3_600), 0, true).unwrap(), Lifetime { secs: 3_600, source: Source::Default });
         // The second miss confirms: the second shortest pause is the bound.
         evidence.record(Outcome::Miss, 260, 0);
-        assert_eq!(evidence.effective(Some(3_600), 0).unwrap(), Lifetime { secs: 260, source: Source::Learned });
+        assert_eq!(evidence.effective(Some(3_600), 0, true).unwrap(), Lifetime { secs: 260, source: Source::Learned });
         // It tightens from above as more misses arrive; only two are kept.
         evidence.record(Outcome::Miss, 230, 0);
         assert_eq!(evidence.misses.iter().map(|m| m.pause_secs).collect::<Vec<_>>(), vec![200, 230]);
-        assert_eq!(evidence.effective(Some(3_600), 0).unwrap().secs, 230);
+        assert_eq!(evidence.effective(Some(3_600), 0, true).unwrap().secs, 230);
         // Pauses under a minute say nothing about the lifetime.
         assert!(!evidence.record(Outcome::Miss, 20, 0));
-        assert_eq!(evidence.effective(Some(3_600), 0).unwrap().secs, 230);
+        assert_eq!(evidence.effective(Some(3_600), 0, true).unwrap().secs, 230);
         // Clamped to the sane range.
         let mut long = CacheEvidence::default();
         long.record(Outcome::Hit, 30 * 24 * 3600, 0);
-        assert_eq!(long.effective(Some(300), 0).unwrap().secs, MAX_LIFETIME_SECS);
+        assert_eq!(long.effective(Some(300), 0, true).unwrap().secs, MAX_LIFETIME_SECS);
     }
 
     #[test]
@@ -360,28 +469,28 @@ mod tests {
         let mut evidence = CacheEvidence::default();
         evidence.record(Outcome::Miss, 400, 0);
         evidence.record(Outcome::Miss, 500, 0);
-        assert_eq!(evidence.effective(Some(3_600), 0).unwrap().secs, 500);
+        assert_eq!(evidence.effective(Some(3_600), 0, true).unwrap().secs, 500);
         // Misses past the default only confirm it; they never lengthen it.
-        assert_eq!(evidence.effective(Some(300), 0).unwrap(), Lifetime { secs: 300, source: Source::Default });
+        assert_eq!(evidence.effective(Some(300), 0, true).unwrap(), Lifetime { secs: 300, source: Source::Default });
         // A later hit after 450 s is hard evidence: the 400 s miss was not expiry.
         evidence.record(Outcome::Hit, 450, 0);
         assert_eq!(evidence.misses.iter().map(|m| m.pause_secs).collect::<Vec<_>>(), vec![500]);
-        assert_eq!(evidence.effective(Some(300), 0).unwrap(), Lifetime { secs: 451, source: Source::Learned });
-        assert_eq!(evidence.effective(Some(3_600), 0).unwrap().source, Source::Default, "one miss left: unconfirmed");
+        assert_eq!(evidence.effective(Some(300), 0, true).unwrap(), Lifetime { secs: 451, source: Source::Learned });
+        assert_eq!(evidence.effective(Some(3_600), 0, true).unwrap().source, Source::Default, "one miss left: unconfirmed");
         // Between a hit and a longer confirmed miss, the hit decides.
         evidence.record(Outcome::Miss, 520, 0);
-        assert_eq!(evidence.effective(Some(300), 0).unwrap().secs, 451);
-        assert_eq!(evidence.effective(None, 0).unwrap().secs, 520, "without a default the confirmed miss is all there is");
+        assert_eq!(evidence.effective(Some(300), 0, true).unwrap().secs, 451);
+        assert_eq!(evidence.effective(None, 0, true).unwrap().secs, 520, "without a default the confirmed miss is all there is");
         // The provider shortens its lifetime: one miss under the old hit is not
         // enough, two are, and they replace the stale hit.
         let mut shrunk = CacheEvidence::default();
         shrunk.record(Outcome::Hit, 3_000, 0);
         shrunk.record(Outcome::Miss, 600, 0);
-        assert_eq!(shrunk.effective(Some(300), 0).unwrap().secs, 3_001);
+        assert_eq!(shrunk.effective(Some(300), 0, true).unwrap().secs, 3_001);
         shrunk.record(Outcome::Miss, 700, 0);
         assert_eq!(shrunk.longest_hit_secs, None);
-        assert_eq!(shrunk.effective(Some(300), 0).unwrap(), Lifetime { secs: 300, source: Source::Default });
-        assert_eq!(shrunk.effective(Some(3_600), 0).unwrap(), Lifetime { secs: 700, source: Source::Learned });
+        assert_eq!(shrunk.effective(Some(300), 0, true).unwrap(), Lifetime { secs: 300, source: Source::Default });
+        assert_eq!(shrunk.effective(Some(3_600), 0, true).unwrap(), Lifetime { secs: 700, source: Source::Learned });
     }
 
     #[test]
@@ -389,9 +498,9 @@ mod tests {
         let mut evidence = CacheEvidence::default();
         evidence.record(Outcome::Miss, 400, 0);
         evidence.record(Outcome::Miss, 420, DAY_MS);
-        assert_eq!(evidence.effective(Some(3_600), 2 * DAY_MS).unwrap().secs, 420);
+        assert_eq!(evidence.effective(Some(3_600), 2 * DAY_MS, true).unwrap().secs, 420);
         // 14 days after the first miss only one is fresh: back to the default.
-        assert_eq!(evidence.effective(Some(3_600), 14 * DAY_MS + 1).unwrap(), Lifetime { secs: 3_600, source: Source::Default });
+        assert_eq!(evidence.effective(Some(3_600), 14 * DAY_MS + 1, true).unwrap(), Lifetime { secs: 3_600, source: Source::Default });
         // Recording drops the expired entries.
         evidence.record(Outcome::Miss, 4_000, 16 * DAY_MS);
         assert_eq!(evidence.misses.iter().map(|m| m.pause_secs).collect::<Vec<_>>(), vec![4_000]);

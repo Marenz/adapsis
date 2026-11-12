@@ -22,6 +22,7 @@ pub mod replay;
 mod stored_tests;
 mod retest;
 mod application;
+pub(crate) mod deep_read;
 
 /// Per-resource locked map of `+shared` variable values (issue #9, Tier 2).
 ///
@@ -532,6 +533,9 @@ pub struct AgentBranch {
     pub runtime_state: RuntimeState,
     /// Snapshot of shared_vars at fork time — used to detect changes during merge.
     runtime_state_snapshot: HashMap<String, crate::eval::Value>,
+    /// The parent's library policy state (shared handle): the branch refuses
+    /// what the merge would refuse, while the agent can still react.
+    library_state: Option<crate::library::LibraryState>,
 }
 
 impl AgentBranch {
@@ -560,6 +564,7 @@ impl AgentBranch {
             mutations: Vec::new(),
             runtime_state,
             runtime_state_snapshot: snapshot,
+            library_state: meta.library_state.clone(),
         }
     }
 
@@ -635,6 +640,12 @@ impl AgentBranch {
                     false,
                 )]);
             }
+        }
+
+        // The branch is merged by replaying its sources, where the same check
+        // refuses; refuse here first so the agent learns it while it can react.
+        if let Err(error) = crate::library::refuse_unsupported_operations(self.library_state.as_ref(), &self.program, &operations, false) {
+            return Ok(vec![(error.to_string(), false)]);
         }
 
         let mut results = Vec::new();
@@ -1333,6 +1344,14 @@ impl Session {
         let mut results = Vec::new();
         let mut any_definition = false;
         let typed = matches!(submission.origin, replay::SourceOrigin::Python { .. });
+        // Under a source manifest: Adapsis-source module creation and
+        // whole-module removal are refused before any state change (#128, #126).
+        crate::library::refuse_unsupported_operations(
+            self.meta.library_state.as_ref(),
+            &self.program,
+            operations,
+            typed,
+        )?;
         submission.preflight_record(operations, &self.program, &self.meta)?;
         let before_program = self.program.clone();
 
@@ -1500,10 +1519,16 @@ impl Session {
     }
 
     /// Load session from a JSON file and replay mutations.
+    ///
+    /// Runs on the dedicated reader thread (`session/deep_read.rs`): stored
+    /// declarations nest deeper than serde_json's default limit allows.
     pub fn load(path: &Path) -> Result<Self> {
         let json = std::fs::read_to_string(path)?;
-        let mut session: Session = serde_json::from_str(&json).map_err(|error| anyhow!(
-            "invalid session encoding at line {}, column {}", error.line(), error.column()))?;
+        deep_read::on_reader_stack(|| Self::from_json(&json))
+    }
+
+    fn from_json(json: &str) -> Result<Self> {
+        let mut session: Session = deep_read::parse(json)?;
         for (index, entry) in session.meta.sources.iter().enumerate() {
             if matches!(entry, replay::ReplayEntry::Python(_)) {
                 entry.operations().map_err(|_| anyhow!("invalid python replay record at revision {}", index + 1))?;

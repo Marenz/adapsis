@@ -363,6 +363,7 @@ pub(super) fn finish(
         agent_spawned: false,
         spawned_agent_names: vec![],
         done_accepted: false,
+        unsaved_notice: None,
     };
     // The text appears once; the shared keys stay so every native envelope has one shape.
     let content = serde_json::json!({

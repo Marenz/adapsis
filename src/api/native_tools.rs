@@ -805,6 +805,7 @@ fn denied_result(tool: &str, msg: String) -> NativeToolResult {
         agent_spawned: false,
         spawned_agent_names: vec![],
         done_accepted: false,
+        unsaved_notice: None,
     };
     let content = build_envelope(tool, &execution, &msg, None, None);
     NativeToolResult {
@@ -927,6 +928,7 @@ fn execute_inspect(
                 agent_spawned: false,
                 spawned_agent_names: vec![],
                 done_accepted: false,
+                unsaved_notice: None,
             };
             let content = build_envelope("inspect", &execution, &output, Some(&output), None);
             NativeToolResult {
@@ -1128,7 +1130,7 @@ fn inspect_library(config: &AppConfig, model: &str, program: &Program) -> String
         if let Ok(entries) = std::fs::read_dir(&dir) {
             let mut files: Vec<String> = entries
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "ax"))
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "ax" || ext == "py"))
                 .map(|e| {
                     e.path()
                         .file_stem()
@@ -1143,6 +1145,13 @@ fn inspect_library(config: &AppConfig, model: &str, program: &Program) -> String
             for f in files {
                 out.push_str(&format!("  {f}\n"));
             }
+        }
+    }
+    // One line while something is not saved as source; nothing otherwise.
+    if let Some(state) = config.governed_library() {
+        let readable = |name: &str| resolve_module(config, model, name) >= PermissionLevel::Read;
+        if let Some(line) = crate::library::unsaved_line(&state.unsaved(), readable) {
+            out.push_str(&format!("\n{line}\n"));
         }
     }
     out
@@ -1221,6 +1230,7 @@ fn memory_ok_result(name: &str, output: String, as_query: bool) -> NativeToolRes
         agent_spawned: false,
         spawned_agent_names: vec![],
         done_accepted: false,
+        unsaved_notice: None,
     };
     let content = build_envelope(
         name,

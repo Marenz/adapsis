@@ -709,6 +709,16 @@ pub fn eval_compiled_or_interpreted_cached(
 
 /// Try synchronous VM execution. Only NotAdmitted permits tree fallback; executed
 /// values/errors are rendered by the caller without re-running the invocation.
+/// Test-only: the VM tier alone. `None`: not admitted (no instruction ran).
+#[cfg(test)]
+pub(crate) fn try_vm_execute_for_tests(program: &ast::Program, function_name: &str, input: &parser::Expr) -> Option<Result<Value>> {
+    let func = program.get_function(function_name)?;
+    match try_vm_execute(program, func, input) {
+        vm::VmAttempt::Executed(result) => Some(result),
+        vm::VmAttempt::NotAdmitted(_) => None,
+    }
+}
+
 fn try_vm_execute(
     program: &ast::Program,
     func: &ast::FunctionDecl,

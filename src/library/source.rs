@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub(super) const MANIFEST_FILE: &str = "library-sources.json";
 pub(super) const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -63,7 +63,7 @@ fn read_bounded(path: &Path, limit: usize) -> std::io::Result<String> {
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "source must be UTF-8"))
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum SourceFormat {
     Python,
@@ -79,14 +79,14 @@ impl SourceFormat {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ModuleSource {
     pub(super) format: SourceFormat,
     pub(super) dependencies: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceManifest {
     version: u32,
@@ -138,7 +138,62 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Modules the managed writer never enrols: runtime scratch space and the
+/// reserved `__` prefix (#124). They are not source and never reach a manifest.
+pub(super) fn never_enrolled(name: &str) -> bool {
+    name == "RunToolScratch" || name.starts_with("__") || !valid_name(name)
+}
+
+impl SourceManifest {
+    /// Same module set and the same dependency SETS (declared order is free).
+    pub(super) fn same_policy(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.modules.len() == other.modules.len()
+            && self.modules.iter().all(|(name, source)| {
+                other.modules.get(name).is_some_and(|theirs| {
+                    theirs.format == source.format
+                        && theirs.dependencies.iter().collect::<BTreeSet<_>>()
+                            == source.dependencies.iter().collect::<BTreeSet<_>>()
+                })
+            })
+    }
+}
+
 impl ManagedSources {
+    /// Writer-side replacement of the manifest. Order: the caller has already
+    /// written every new source file; this rename is the commit point. The
+    /// loaded manifest must still be the one on disk (external edits win).
+    pub(super) fn write_updated(&self, dir: &Path, manifest: SourceManifest) -> Result<Self> {
+        let order = dependency_order(&manifest)?;
+        let mut text = serde_json::to_string_pretty(&manifest)
+            .context("could not serialize the source manifest")?;
+        text.push('\n');
+        if text.len() > MAX_MANIFEST_BYTES {
+            bail!("source manifest would exceed its 64 KiB budget; manifest unchanged");
+        }
+        let updated = Self { manifest, manifest_hash: super::source_hash(&text), order };
+        updated.check_files(dir)?;
+        self.verify_manifest(dir)?;
+        let target = dir.join(MANIFEST_FILE);
+        let tmp = unique_temp(dir, MANIFEST_FILE);
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)
+            .context("could not create the manifest temporary file; manifest unchanged")?;
+        let result = (|| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            self.verify_manifest(dir)?;
+            std::fs::rename(&tmp, &target)?;
+            File::open(dir)?.sync_all().context(
+                "manifest rename succeeded but directory sync failed; reconcile and restart before retrying",
+            )?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map(|()| updated)
+    }
+
     pub(super) fn read(dir: &Path) -> Result<Option<Self>> {
         if !manifest_present(dir)? {
             return Ok(None);
@@ -165,7 +220,10 @@ impl ManagedSources {
         let text = read_bounded(&dir.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)
             .context("source manifest unavailable; reconcile it and restart before saving")?;
         if super::source_hash(&text) != self.manifest_hash {
-            bail!("source manifest changed; no source was saved. Reconcile and restart the server");
+            return Err(super::source_unsaved::refusal(
+                super::UnsavedKind::ChangedOnDisk,
+                "source manifest changed; no source was saved. Reconcile and restart the server",
+            ));
         }
         self.check_files(dir)
     }
@@ -188,6 +246,14 @@ impl ManagedSources {
             }
         }
         names
+    }
+}
+
+impl ManagedSources {
+    /// A manifest that is not on disk (yet), for checks before a commit.
+    pub(super) fn trial(manifest: SourceManifest) -> Result<Self> {
+        let order = dependency_order(&manifest)?;
+        Ok(Self { manifest, manifest_hash: String::new(), order })
     }
 }
 
@@ -230,6 +296,64 @@ fn dependency_order(manifest: &SourceManifest) -> Result<Vec<String>> {
         order.push(name);
     }
     Ok(order)
+}
+
+fn unique_temp(dir: &Path, filename: &str) -> std::path::PathBuf {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(".{filename}.{}.new{suffix}.tmp", std::process::id()))
+}
+
+/// First source file of a module that is being enrolled. It is written BEFORE
+/// the manifest lists it: until then the file is unlisted and ignored by a
+/// start. An unlisted leftover of the same name (crash between this write and
+/// the manifest, or a stray file) is never authoritative under the whitelist:
+/// identical content is reused, anything else is moved aside, never deleted.
+/// Returns the names of files that were moved aside.
+pub(super) fn write_new_source(dir: &Path, name: &str, source: &str) -> Result<Vec<String>> {
+    if source.len() > MAX_SOURCE_BYTES {
+        bail!("serialized source exceeds the 2 MiB budget; disk unchanged");
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let mut moved = Vec::new();
+    let target = dir.join(format!("{name}.py"));
+    let mut reuse = false;
+    for extension in ["py", "ax"] {
+        let existing = dir.join(format!("{name}.{extension}"));
+        match std::fs::symlink_metadata(&existing) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("could not inspect an existing source file"),
+            Ok(_) => {}
+        }
+        if extension == "py" && read_source(&existing).is_ok_and(|text| text == source) {
+            reuse = true;
+            continue;
+        }
+        let aside = format!("{name}.{extension}.orphan-{stamp}");
+        std::fs::rename(&existing, dir.join(&aside))
+            .context("could not move an unlisted leftover source file aside")?;
+        moved.push(aside);
+    }
+    if reuse {
+        return Ok(moved);
+    }
+    let tmp = unique_temp(dir, &format!("{name}.py"));
+    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)
+        .context("could not create the new source temporary file")?;
+    let result = (|| {
+        file.write_all(source.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &target)?;
+        File::open(dir)?.sync_all().context("new source rename succeeded but directory sync failed")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map(|()| moved)
 }
 
 /// A unique owner-only sibling is renamed only after both source and manifest
@@ -282,7 +406,10 @@ fn verify_source(path: &Path, expected: &str) -> Result<()> {
         "authoritative source unavailable; restore/reconcile it and restart before saving",
     )?;
     if super::source_hash(&bytes) != expected {
-        bail!("authoritative source changed externally; disk wins. Preserve recovery checkpoint, reconcile, and restart");
+        return Err(super::source_unsaved::refusal(
+            super::UnsavedKind::ChangedOnDisk,
+            "authoritative source changed externally; disk wins. Preserve recovery checkpoint, reconcile, and restart",
+        ));
     }
     Ok(())
 }

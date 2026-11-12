@@ -482,6 +482,42 @@ async fn a_cut_off_final_status_reply_is_marked_without_another_generation() {
     assert_eq!(requests[1]["tool_choice"], "none");
 }
 
+/// #146's accepted-finish notice and the cutoff marker are independent reply
+/// annotations: a cutoff fragment followed by a second, accepted finish must
+/// carry both. The first finish still enforces this turn's unsaved edit once.
+#[tokio::test]
+async fn unsaved_finish_notice_and_cut_off_reply_marker_both_survive_integration() {
+    let harness = Harness::new(true);
+    let library = tempfile::tempdir().unwrap();
+    std::fs::write(library.path().join("library-sources.json"),
+        r#"{"version":1,"modules":{"IntegratedSave":{"format":"python","dependencies":[]}}}"#).unwrap();
+    std::fs::write(library.path().join("IntegratedSave.py"), "def value() -> int:\n    return 1\n").unwrap();
+    let mut program = crate::ast::Program::default();
+    let state = crate::library::load_library_from_dir_for_tests(&mut program, library.path());
+    state.require_authoritative_sources().unwrap();
+    program.require_modules = true;
+    *harness.program.write().await = program;
+    harness.meta.lock().unwrap().library_state = Some(state);
+    // Accepted by the legacy source surface, but its printed form exceeds the
+    // stored-source limit, so this edit remains live and unsaved.
+    let deep = format!("+module IntegratedSave\n+fn long (x:Int)->Int\n  +return x{}\n+end\n", " + 1".repeat(130));
+    let mut fragment = response("Partial status", vec![]);
+    fragment["choices"][0]["finish_reason"] = json!("length");
+    let provider = provider(vec![
+        tool("edit", "mutate", json!({"source":deep})),
+        tool("first", "finish", json!({})),
+        fragment,
+        tool("second", "finish", json!({})),
+    ]).await;
+    let reply = harness.turn(&provider, "telegram:group:-88276", ADMIN, "edit and report").await;
+    assert!(reply.starts_with("Partial status [cut off at the model's output limit]"), "{reply}");
+    assert!(reply.contains("[Runtime: not saved to source: IntegratedSave ("), "{reply}");
+    assert!(reply.ends_with("The change is live only until the next restart.]"), "{reply}");
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(text_of(&requests[2], "first").contains("Cannot accept finish yet"));
+}
+
 /// A result stored under a model with a large window stays usable after a switch to a
 /// model with a small one: the view cuts the over-long RESULT with the omission marker
 /// (C4) and keeps the batch, instead of dropping the whole batch.

@@ -304,3 +304,65 @@ fn release(program: &ast::Program, token: &str) -> Value {
     worker.join().unwrap();
     value
 }
+
+/// #134: a real slice panic quotes the string it failed on. Through the
+/// production panic hook, the journal, `runtime_errors`, the Watchdog's triage
+/// prompt and its admin notice carry the location and a length, never the text.
+/// Runs in a child process: the panic hook and the journal are process-global.
+#[test]
+fn watchdog_panic_payload_never_reaches_the_journal_or_the_triage_prompt() {
+    const SENTINEL: &str = "PANIC_SENTINEL_user_text_4711";
+    const NAME: &str = "watchdog_tests::watchdog_panic_payload_never_reaches_the_journal_or_the_triage_prompt";
+    if !crate::logging::tests::child() {
+        // Default logging: nothing the child printed (hook output included)
+        // contains the text. With the content opt-in the diagnostic log may.
+        let quiet = crate::logging::tests::capture(NAME, false);
+        assert!(!quiet.contains(SENTINEL), "panic payload reached the default log");
+        assert!(quiet.contains("[panic] detail_bytes="), "the panic was logged by class and size");
+        crate::logging::tests::capture(NAME, true);
+        return;
+    }
+    std::panic::set_hook(Box::new(crate::error_journal::panic_hook));
+    // 1. A slice panic (the #134 shape) and a formatted panic, both real.
+    let text = format!("ä{SENTINEL}");
+    let cut = || std::panic::catch_unwind(|| std::hint::black_box(text.as_str())[1..].len());
+    let slice = cut().unwrap_err();
+    let quoted = slice.downcast_ref::<String>().expect("slice panics carry a String");
+    assert!(quoted.contains(SENTINEL), "the panic message itself quotes the text: {quoted}");
+    let line = line!() + 1;
+    let _ = std::panic::catch_unwind(|| panic!("could not handle {SENTINEL}"));
+    // 2. The journal: two entries (two source lines), location and length only.
+    let journal = crate::error_journal::query(0);
+    assert!(!journal.contains(SENTINEL), "journal: {journal}");
+    let json: serde_json::Value = serde_json::from_str(&journal).unwrap();
+    let panics: Vec<&serde_json::Value> = json["entries"].as_array().unwrap().iter().filter(|e| e["category"] == "panic").collect();
+    assert_eq!(panics.len(), 2, "{journal}");
+    assert_ne!(panics[0]["fingerprint"], panics[1]["fingerprint"], "one fingerprint per source line");
+    let message = panics[1]["message"].as_str().unwrap();
+    assert!(message.starts_with(&format!("panic at src/watchdog_tests.rs:{line}:")), "{message}");
+    assert!(message.ends_with(&format!("(message of {} bytes not recorded)", "could not handle ".len() + SENTINEL.len())), "{message}");
+    assert!(panics[0]["message"].as_str().unwrap().contains(".rs:"), "the slice panic names its location");
+    // The same site again is the same finding.
+    let _ = cut();
+    let again: serde_json::Value = serde_json::from_str(&crate::error_journal::query(0)).unwrap();
+    let repeat = again["entries"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((repeat["fingerprint"].clone(), repeat["count"].as_u64()), (panics[0]["fingerprint"].clone(), Some(2)));
+    // 3. `runtime_errors`, as module code reads it.
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    let Value::String(builtin) = CoroutineHandle::new(sender).execute_await("runtime_errors", &[Value::Int(0)]).unwrap() else { panic!("String") };
+    assert!(!builtin.contains(SENTINEL) && builtin.contains("not recorded"), "{builtin}");
+    // 4. The Watchdog triages that snapshot: prompt and admin notice.
+    let program = program();
+    install(&program);
+    let (outcome, calls) = run(&program, "Watchdog.process", parser::Expr::String(builtin.to_string()), vec![]);
+    assert!(outcome.contains("triaged 2"), "{outcome}");
+    assert_eq!((calls.triages.len(), calls.notices.len()), (2, 2));
+    for (system, prompt) in &calls.triages {
+        assert!(!system.contains(SENTINEL) && !prompt.contains(SENTINEL), "triage prompt: {prompt}");
+        assert!(prompt.contains("category: panic") && prompt.contains("panic at ") && prompt.contains("bytes not recorded"), "{prompt}");
+    }
+    for (context, notice) in &calls.notices {
+        assert_eq!(context, ADMIN);
+        assert!(!notice.contains(SENTINEL) && notice.contains("panic error in panic"), "{notice}");
+    }
+}

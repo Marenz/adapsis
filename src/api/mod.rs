@@ -21,7 +21,6 @@ use tokio::sync::Mutex;
 
 use crate::eval;
 use crate::parser;
-use crate::session::{RuntimeState, SandboxState, SessionMeta};
 use crate::typeck;
 
 use crate::validator;
@@ -49,6 +48,10 @@ pub(crate) mod http_context;
 mod request_meter;
 mod working_set;
 pub use llm_handlers::handle_llm_takeover;
+pub(crate) use working_set::WorkingSet;
+mod source_save;
+pub(crate) use source_save::start_save as start_source_save;
+pub(crate) use source_save::TurnSaves;
 use llm_handlers::EventSender;
 
 fn emit_event(state: &AppConfig, event_json: &str) {
@@ -84,21 +87,6 @@ fn encode_broadcast_event(event: &serde_json::Value) -> String {
         .map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
         .unwrap_or_else(|| event.to_string());
     make_sse_event(kind, serde_json::json!({"data": data}))
-}
-
-/// Temporary mutable working state used by complex handlers.
-/// Live truth is still the three tiers in AppConfig; this is just a local bag.
-pub(crate) struct WorkingSet {
-    program: crate::ast::Program,
-    runtime: RuntimeState,
-    meta: SessionMeta,
-    sandbox: Option<SandboxState>,
-    /// Snapshot of the live program at the moment this working set was created.
-    /// Used by `write_back_working_set` to compute the per-function CoW delta
-    /// (issue #9), so a concurrent writer touching a different function is not
-    /// clobbered. `None` when the working set was built by hand (e.g. tests or
-    /// llm_takeover), in which case write-back falls back to a full overwrite.
-    base_program: Option<crate::ast::Program>,
 }
 
 /// Thread-safe session manager: maps session IDs to independent Program instances.
@@ -176,6 +164,8 @@ pub struct AppConfig {
     pub(crate) workspaces: Option<std::sync::Arc<native_tools::workspace::Site>>,
     /// Origin of the HTTP request this turn serves (`origin.rs`); `None` when it serves none.
     pub origin: Option<origin::Origin>,
+    /// Per-turn save state (#146); fresh for every conversational turn.
+    pub(crate) turn_saves: TurnSaves,
 }
 
 impl AppConfig {
@@ -263,6 +253,11 @@ pub async fn mutate(
             }
             *config.meta.lock().unwrap() = meta.clone();
             config.notify_save();
+            // The real outcome of the source save (#146); none for an empty mutation.
+            let mut response_results = response_results;
+            for (message, success) in config.save_committed_delta(&base_program, &program).await {
+                response_results.push(MutationResult { message, success });
+            }
             emit_event(&config, &make_sse_event("mutation", serde_json::json!({
                 "revision": meta.revision,
                 "summary": summary,
@@ -358,6 +353,7 @@ pub async fn eval_fn(
                         // Sync mutations back to session if any occurred (CoW merge).
                         if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                             config.program.write().await.merge_changed_from(&base_program, &mutated);
+                            config.start_source_save(&base_program, &mutated);
                         }
                         let response = match eval_result {
                             Ok(Ok(val)) => EvalResponse {
@@ -505,6 +501,7 @@ pub async fn eval_fn(
             // Sync mutations back to session if any occurred (CoW merge).
             if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
                 config.program.write().await.merge_changed_from(&base_program, &mutated);
+                config.start_source_save(&base_program, &mutated);
             }
 
             let response = match eval_result {
@@ -1724,6 +1721,7 @@ async fn adapsis_route_dispatch(
     // Sync mutations back to program tier if any occurred (CoW merge, issue #9)
     if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
         config.program.write().await.merge_changed_from(&base_program, &mutated);
+        config.start_source_save(&base_program, &mutated);
     }
 
     match eval_result {

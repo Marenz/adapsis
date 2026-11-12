@@ -40,6 +40,51 @@
 /// Maximum nesting accepted by the frontend. More than six times below the
 /// smallest measured overflow depth, and half of CPython's own bracket limit (200).
 pub(crate) const MAX_NESTING: usize = 100;
+/// Limit for STORED source only: text the runtime printed itself and the
+/// managed module files it reads back (`StoredSource` scope). The printer puts
+/// every binary operation and `not` operand in parentheses and qualifies local
+/// calls, so the printed form of an accepted function scans up to twice as deep
+/// as its submission (MEASURED 2026-11-12: 199 for a 100-level operator chain or
+/// call nest, 197 for `not`, 101 for an `elif` chain). With the submission limit
+/// alone, a function the guard had accepted could not be saved. Submissions keep
+/// `MAX_NESTING`. A start prints every module it loads, so a hand-edited
+/// managed file is accepted only if its PRINTED form fits this limit: nested
+/// blocks and `elif` chains can carry real depth up to this value, expression
+/// shapes about half of it. `api/storage_depth_tests.rs` runs the deepest
+/// accepted file of every shape through load, stored-case re-run, tree-walker,
+/// JIT/VM dispatch, a route handler and save on a 2 MiB stack. Smallest
+/// measured overflow (#133): evaluating about 660 `elif` branches.
+/// When the printer emits minimal parentheses (#140) this can come down again.
+pub(crate) const MAX_STORED_NESTING: usize = 250;
+
+thread_local! {
+    static LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_NESTING) };
+}
+
+/// While alive, `check` on this thread uses `MAX_STORED_NESTING`. Dropping it
+/// (also by unwinding) restores the limit that was in force before, so scopes
+/// nest and cannot leak into a later submission on the same thread.
+pub(super) struct StoredSource {
+    previous: usize,
+}
+
+impl StoredSource {
+    pub(super) fn enter() -> Self {
+        Self { previous: LIMIT.with(|limit| limit.replace(MAX_STORED_NESTING)) }
+    }
+}
+
+impl Drop for StoredSource {
+    fn drop(&mut self) {
+        LIMIT.with(|limit| limit.set(self.previous));
+    }
+}
+
+/// The limit `check` applies on this thread right now.
+pub(super) fn current_limit() -> usize {
+    LIMIT.with(std::cell::Cell::get)
+}
+
 /// Most expression bytes inside the `{}` fields of one f-string literal.
 pub(super) const MAX_FSTRING_FIELD_BYTES: usize = 2_000;
 
@@ -84,6 +129,8 @@ struct Scan<'a> {
     elifs: Vec<usize>,
     /// Deepest point seen so far.
     deepest: usize,
+    /// Refuse beyond this depth.
+    limit: usize,
 }
 
 fn identifier_byte(byte: u8) -> bool {
@@ -106,14 +153,15 @@ impl Scan<'_> {
     fn check(&mut self, offset: usize) -> Result<(), TooDeep> {
         let depth = self.depth();
         self.deepest = self.deepest.max(depth);
-        if depth <= MAX_NESTING {
+        let limit = self.limit;
+        if depth <= limit {
             return Ok(());
         }
         Err(TooDeep {
             offset,
             message: format!(
-                "nesting too deep: more than {MAX_NESTING} levels of nested brackets, chained operators, \
-                 indented blocks and elif branches at this point (limit {MAX_NESTING}); split the expression \
+                "nesting too deep: more than {limit} levels of nested brackets, chained operators, \
+                 indented blocks and elif branches at this point (limit {limit}); split the expression \
                  into typed local bindings, or move inner blocks and later branches into helper functions"
             ),
         })
@@ -336,17 +384,25 @@ impl Scan<'_> {
 /// Refuse `source` if any point of it nests deeper than the frontend can lower
 /// safely. Linear in the source size, no recursion, no allocation per token.
 pub(super) fn check(source: &str) -> Result<(), TooDeep> {
-    scan(source).run()
+    scan(source, current_limit()).run()
 }
 
-fn scan(source: &str) -> Scan<'_> {
-    Scan { bytes: source.as_bytes(), at: 0, frames: vec![Frame::default()], indents: Vec::new(), elifs: vec![0], deepest: 0 }
+fn scan(source: &str, limit: usize) -> Scan<'_> {
+    Scan { bytes: source.as_bytes(), at: 0, frames: vec![Frame::default()], indents: Vec::new(), elifs: vec![0], deepest: 0, limit }
+}
+
+/// The estimate without any limit (test-only: what a printed form needs).
+#[cfg(test)]
+pub(super) fn deepest_unbounded(source: &str) -> usize {
+    let mut scan = scan(source, usize::MAX);
+    scan.run().expect("no limit");
+    scan.deepest
 }
 
 /// The deepest nesting estimate of an accepted source (test-only: headroom).
 #[cfg(test)]
 pub(super) fn deepest(source: &str) -> usize {
-    let mut scan = scan(source);
+    let mut scan = scan(source, MAX_NESTING);
     scan.run().expect("accepted source");
     scan.deepest
 }

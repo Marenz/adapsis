@@ -8,6 +8,8 @@ mod python_turn_tests;
 mod native_repair_turn_tests;
 #[path = "run_turn_tests.rs"]
 mod run_turn_tests;
+#[path = "source_save_tests.rs"]
+mod source_save_tests;
 
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}})

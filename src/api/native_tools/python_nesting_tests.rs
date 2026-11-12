@@ -31,16 +31,6 @@ async fn tool(name: &str, arguments: serde_json::Value, cfg: &AppConfig, ws: &mu
     execute_native_tool(name, &arguments.to_string(), cfg, ws, baseline).await
 }
 
-/// DIVERGENCE from the release line's copy of this file (6136115), confined to the two
-/// "at the limit" tests: this branch stores a typed replay record for every Python
-/// mutation (#122), and that record's own depth budget (96 JSON levels,
-/// `session/replay/limits.rs`) is reached before 100 source levels. So the deepest source
-/// `mutate` can STORE here is below `MAX_NESTING`; it is found by stepping down from the
-/// nesting limit. The nesting guard itself is unchanged and exact (asserted one level
-/// above `MAX_NESTING` below, and at exactly `MAX_NESTING` through `run`, which stores
-/// nothing, in `run_hardening_tests.rs`).
-const STORAGE_BUDGET: &str = "typed persistence structural budget exceeded";
-
 fn refusal(result: &NativeToolResult) -> String {
     assert!(result.execution.has_errors, "expected a refusal: {}", result.content);
     result.content.clone()
@@ -76,17 +66,8 @@ fn python_nesting_at_the_limit_runs_through_mutate_test_and_evaluate() {
         for (name, source, test, input, expected) in CASES {
             let module = format!("PyNestOk{}", name.replace(' ', ""));
             let (cfg, mut ws, baseline) = setup(&module).await;
-            let nesting_limit = crate::python_frontend::MAX_NESTING;
-            let mut limit = nesting_limit;
-            let result = loop {
-                let result = tool("mutate", json!({"language":"python","module":module,"source":source(limit)}), &cfg, &mut ws, &baseline).await;
-                if !(result.execution.has_errors && result.content.contains(STORAGE_BUDGET)) {
-                    break result;
-                }
-                limit -= 1;
-            };
-            println!("storable depth for {name}: {limit}");
-            assert!(limit >= 16, "{name}: storable depth {limit}");
+            let limit = crate::python_frontend::MAX_NESTING;
+            let result = tool("mutate", json!({"language":"python","module":module,"source":source(limit)}), &cfg, &mut ws, &baseline).await;
             assert!(!result.execution.has_errors, "{name} mutate: {}", result.content);
             let result = tool("test", json!({"language":"python","module":module,"source":test(limit)}), &cfg, &mut ws, &baseline).await;
             assert!(!result.execution.has_errors, "{name} test: {}", result.content);
@@ -96,7 +77,7 @@ fn python_nesting_at_the_limit_runs_through_mutate_test_and_evaluate() {
             assert!(result.content.contains(&expected(limit)), "{name}: {}", result.content);
             // One level more is refused, with the position, and nothing is stored.
             let before = format!("{:?}", ws.program.get_function(&format!("{module}.f")).map(|function| function as *const _));
-            let text = refusal(&tool("mutate", json!({"language":"python","module":module,"source":source(nesting_limit + 1)}), &cfg, &mut ws, &baseline).await);
+            let text = refusal(&tool("mutate", json!({"language":"python","module":module,"source":source(limit + 1)}), &cfg, &mut ws, &baseline).await);
             assert!(text.contains("nesting too deep: more than 100 levels") && text.contains(&format!("{module}:")), "{name}: {text}");
             assert_eq!(format!("{:?}", ws.program.get_function(&format!("{module}.f")).map(|function| function as *const _)), before, "{name}: stored function untouched");
         }
@@ -170,30 +151,20 @@ fn python_elif_chains_run_at_the_limit_and_are_refused_beyond_it() {
             source
         };
         // The function body, 98 branches and `==` (or the branch's block): 100 levels.
-        // (On this branch the storable chain is shorter; see STORAGE_BUDGET.)
-        let mut stored = 98;
-        let result = loop {
-            let result = tool("mutate", json!({"language":"python","module":"PyNestElif","source":chain(stored)}), &cfg, &mut ws, &baseline).await;
-            if !(result.execution.has_errors && result.content.contains(STORAGE_BUDGET)) {
-                break result;
-            }
-            stored -= 1;
-        };
-        println!("storable elif branches: {stored}");
-        assert!(stored >= 16, "storable elif chain: {stored}");
+        let result = tool("mutate", json!({"language":"python","module":"PyNestElif","source":chain(98)}), &cfg, &mut ws, &baseline).await;
         assert!(!result.execution.has_errors, "{}", result.content.chars().take(400).collect::<String>());
-        let test = format!("def test_f() -> None:\n    assert f({stored}) == {}\n\ndef test_f_default() -> None:\n    assert f(5000) == -1\n", stored * 2);
+        let test = "def test_f() -> None:\n    assert f(98) == 196\n\ndef test_f_default() -> None:\n    assert f(5000) == -1\n";
         let result = tool("test", json!({"language":"python","module":"PyNestElif","source":test}), &cfg, &mut ws, &baseline).await;
         assert!(!result.execution.has_errors, "{}", result.content.chars().take(400).collect::<String>());
-        let result = tool("evaluate", json!({"language":"python","function":"PyNestElif.f","input":(stored - 2).to_string()}), &cfg, &mut ws, &baseline).await;
-        assert!(!result.execution.has_errors && result.content.contains(&((stored - 2) * 2).to_string()), "{}", result.content.chars().take(400).collect::<String>());
+        let result = tool("evaluate", json!({"language":"python","function":"PyNestElif.f","input":"96"}), &cfg, &mut ws, &baseline).await;
+        assert!(!result.execution.has_errors && result.content.contains("192"), "{}", result.content.chars().take(400).collect::<String>());
         for branches in [99, 400, 700] {
             let source = chain(branches);
             assert!(source.len() <= 32_000);
             let text = refusal(&tool("mutate", json!({"language":"python","module":"PyNestElif","source":source}), &cfg, &mut ws, &baseline).await);
             assert!(text.contains("nesting too deep") && text.contains("elif branches") && text.contains("PyNestElif:"), "{branches}: {}", text.chars().take(300).collect::<String>());
         }
-        // The stored function is still the one that runs.
+        // The stored 98-branch function is still the one that runs.
         let result = tool("evaluate", json!({"language":"python","function":"PyNestElif.f","input":"1"}), &cfg, &mut ws, &baseline).await;
         assert!(!result.execution.has_errors && result.content.contains('2'), "{}", result.content);
     });

@@ -202,6 +202,9 @@ pub struct CodeExecutionResult {
     pub spawned_agent_names: Vec<String>,
     /// True when `!done` was accepted (all functions tested, task complete).
     pub done_accepted: bool,
+    /// Runtime line for the visible reply: finish was accepted although a
+    /// module this turn changed is not saved as source (#146).
+    pub unsaved_notice: Option<String>,
 }
 
 impl CodeExecutionResult {
@@ -214,6 +217,7 @@ impl CodeExecutionResult {
             agent_spawned: false,
             spawned_agent_names: Vec::new(),
             done_accepted: false,
+            unsaved_notice: None,
         }
     }
 
@@ -321,6 +325,41 @@ pub(super) async fn execute_code_with_baseline(
 /// Internal typed entry. Native callers must finish whole-batch preflight and
 /// pinned authorization first; legacy/guest callers enter through the wrapper.
 pub(super) async fn execute_operations_with_baseline(
+    ops: Vec<crate::parser::Operation>,
+    submission: &crate::session::replay::Submission,
+    config: &AppConfig,
+    session: &mut WorkingSet,
+    agent_callback: Option<AgentCompletionCallback>,
+    completion_baseline: Option<&crate::ast::Program>,
+) -> CodeExecutionResult {
+    // A flag left by an earlier call on this working set must not skip a
+    // write-back of this one.
+    session.take_committed();
+    let mut result = execute_operations_unsaved(ops, submission, config, session, agent_callback, completion_baseline).await;
+    // One source save per call that changed a module (mutation, stored tests,
+    // a mutation builtin inside an evaluation), its real outcome, and the
+    // finish gate (#146). `done_accepted` is provisional until here.
+    let outcome = config.save_and_gate(session, result.done_accepted, completion_baseline.is_some()).await;
+    for (line, saved) in outcome.lines {
+        if saved {
+            result.push_ok(line);
+        } else {
+            result.push_err(line);
+        }
+    }
+    if let Some(refusal) = outcome.refusal {
+        result.done_accepted = false;
+        result.push_err(refusal);
+    } else if result.done_accepted {
+        eprintln!("[execute_code:done] accepted");
+    }
+    result.unsaved_notice = outcome.notice;
+    result
+}
+
+/// The executor proper. It commits to the live Program; the caller above
+/// reports the source save.
+async fn execute_operations_unsaved(
     ops: Vec<crate::parser::Operation>,
     submission: &crate::session::replay::Submission,
     config: &AppConfig,
@@ -923,6 +962,8 @@ pub(super) async fn execute_operations_with_baseline(
                             // Per-function CoW merge (issue #9): only apply the
                             // branch's function delta onto the live program.
                             agent_program.write().await.merge_changed_from(&base_program, &program);
+                            let changed_modules = crate::ast::Program::changed_module_names(&base_program, &program);
+                            let library = super::source_save::governed_state(&meta);
                             if let Ok(mut rt) = agent_runtime.write() {
                                 rt.shared_vars.replace_from(runtime.shared_vars.snapshot());
                                 rt.http_routes = runtime.http_routes.clone();
@@ -936,14 +977,29 @@ pub(super) async fn execute_operations_with_baseline(
                             if let Some(ref tx) = agent_save_notify {
                                 let _ = tx.try_send(());
                             }
+                            // A branch is saved when it is merged: report the
+                            // real outcome where the completion is reported (#146).
+                            let mut save_text = String::new();
+                            if let Some(state) = library.filter(|_| !changed_modules.is_empty()) {
+                                let lines = super::source_save::save_committed(agent_program.clone(), &state, changed_modules, &|_| true).await;
+                                save_text = lines.into_iter().map(|(line, _)| line).collect::<Vec<_>>().join("; ");
+                                if !save_text.is_empty() {
+                                    agent_meta.lock().unwrap().conversations.get_or_create("main").push_system(
+                                        format!("Agent '{agent_name}' source save: {save_text}"),
+                                    );
+                                }
+                            }
 
                             // Notify conversation context if callback configured
                             if let Some(cb) = agent_callback {
-                                let agent_result = if conflicts.is_empty() {
+                                let mut agent_result = if conflicts.is_empty() {
                                     format!("Agent '{agent_name}' completed and merged successfully.")
                                 } else {
                                     format!("Agent '{agent_name}' had merge conflicts: {}", conflicts.join(", "))
                                 };
+                                if !save_text.is_empty() {
+                                    agent_result.push_str(&format!(" Source save: {save_text}"));
+                                }
                                 eprintln!("[agent:{agent_name}] notifying context '{}'", cb.context);
 
                                 // Append result to conversation as user message to prompt summary
@@ -1064,7 +1120,7 @@ pub(super) async fn execute_operations_with_baseline(
                                 continue;
                             }
                         }
-                        eprintln!("[execute_code:done] accepted");
+                        // Provisional: the wrapper decides after the source save.
                         result.done_accepted = true;
                     }
                     crate::parser::Operation::Message { to, content } => {

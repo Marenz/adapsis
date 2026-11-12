@@ -115,7 +115,7 @@ fn managed_policy_never_managed_legacy_control_remains_writable() {
     super::reload_module_from_dir(&mut program, "Extra", Some(&state), dir.path()).unwrap();
 }
 
-fn directory() -> tempfile::TempDir {
+pub(super) fn directory() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
 
@@ -245,9 +245,9 @@ fn managed_source_write_is_owner_only_and_leaves_no_temporary_files() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
 }
 
-const PYTHON: &str = "def value(x: int) -> int:\n    a: int = x + 1\n    b: int = a + 1\n    return b\n\n@stored_test(\"A.value\")\ndef test_case_0() -> None:\n    assert A.value(1) == 3\n\n@stored_test(\"A.value\")\ndef test_case_1() -> None:\n    assert A.value(2) == 4\n";
+pub(super) const PYTHON: &str = "def value(x: int) -> int:\n    a: int = x + 1\n    b: int = a + 1\n    return b\n\n@stored_test(\"A.value\")\ndef test_case_0() -> None:\n    assert A.value(1) == 3\n\n@stored_test(\"A.value\")\ndef test_case_1() -> None:\n    assert A.value(2) == 4\n";
 
-fn python_library() -> tempfile::TempDir {
+pub(super) fn python_library() -> tempfile::TempDir {
     let dir = directory();
     std::fs::write(
         dir.path().join(MANIFEST_FILE),
@@ -258,7 +258,7 @@ fn python_library() -> tempfile::TempDir {
     dir
 }
 
-fn load(dir: &std::path::Path) -> (crate::ast::Program, super::LibraryState) {
+pub(super) fn load(dir: &std::path::Path) -> (crate::ast::Program, super::LibraryState) {
     let mut program = crate::ast::Program::default();
     let mut state = super::LibraryState::new();
     super::load_module_files(&mut program, dir, &mut state);
@@ -277,7 +277,7 @@ fn run_cases(program: &crate::ast::Program, text: &str) {
     }
 }
 
-fn flush(
+pub(super) fn flush(
     program: &crate::ast::Program,
     state: &super::LibraryState,
     dir: &std::path::Path,
@@ -674,7 +674,7 @@ fn managed_disjoint_mutations_queue_without_writing_and_flush_the_merged_live_pr
         let results = super::persist_affected_modules(snapshot, &affected, Some(&state));
         assert_eq!(results.len(), 1);
         assert!(results[0].1);
-        assert!(results[0].0.contains("not yet durable"));
+        assert_eq!(results[0].0, "module `A` changed in memory");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("A.py")).unwrap(),
             source
@@ -794,7 +794,7 @@ fn managed_source_authority_cannot_be_overwritten_by_an_unmanaged_legacy_file() 
 }
 
 #[test]
-fn managed_whitelist_refuses_unlisted_cached_code_and_ignores_route_hijack_files() {
+fn managed_whitelist_refuses_cached_top_level_code_and_ignores_route_hijack_files() {
     let dir = python_library();
     let routed = format!(
         "@route(\"POST\", \"/hook\")\ndef handle(body: str) -> str:\n    return body\n\n{PYTHON}"
@@ -805,16 +805,19 @@ fn managed_whitelist_refuses_unlisted_cached_code_and_ignores_route_hijack_files
     assert_eq!(program.pending_routes.len(), 1);
     assert_eq!(program.pending_routes[0].handler_fn, "A.handle");
     assert!(program.get_function("Legacy.steal").is_none());
-    for op in crate::parser::parse("+module Cached\n+fn old ()->Int\n  +return 9\n+end\n").unwrap()
-    {
+    // Cached top-level code has no module to be saved in: the start refuses
+    // and the cache is preserved for recovery. (A cached unlisted MODULE is
+    // adopted or dropped instead, see source_enrol_tests.)
+    for op in crate::parser::parse("+fn old ()->Int\n  +return 9\n+end\n").unwrap() {
         crate::validator::apply_and_validate(&mut program, &op).unwrap();
     }
     let recovery = serde_json::to_string(&program).unwrap();
     let mut fresh_state = super::LibraryState::new();
     super::load_module_files(&mut program, dir.path(), &mut fresh_state);
     let error = fresh_state.require_authoritative_sources().unwrap_err();
-    assert!(format!("{error:#}").contains("Cached"));
+    assert!(format!("{error:#}").contains("top-level"), "{error:#}");
     assert_eq!(serde_json::to_string(&program).unwrap(), recovery);
+    // The snapshot persistence API still refuses anything the manifest governs.
     assert!(
         super::persist_program_module_to_dir(&program, "Cached", Some(&state), dir.path()).is_err()
     );
@@ -912,8 +915,9 @@ fn managed_flush_refuses_qualification_when_live_resolution_differs_from_catalog
     program.modules.insert(0, moved);
     program.rebuild_function_index();
     let receipt = flush(&program, &state, dir.path());
-    // `Early` is unlisted, so its snapshot write is refused too; the managed
-    // module must fail on the live-resolution proof specifically.
+    // `Early` is unlisted and printable, so this save enrols it; the managed
+    // module must still fail on the live-resolution proof specifically.
+    assert_eq!(receipt.enrolled, vec!["Early".to_string()]);
     assert!(
         receipt.failures.iter().any(|f| f.contains("module `A`")
             && f.contains("resolves to another declaration in the live program")),
