@@ -29,6 +29,12 @@ mod python_frontend;
 mod python_cli;
 mod repl;
 mod reserved_names;
+mod run_limits;
+#[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: test_alloc::Counting = test_alloc::Counting;
 mod server;
 mod session;
 mod shared_state;

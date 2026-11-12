@@ -780,11 +780,12 @@ replaces that branch with one composer.
 
 ## Conversation System (llm_takeover)
 - **Native tools remain opt-in pending parity (#89).** `--native-tools` enables
-  the native protocol for eligible write-capable, non-guest `/api/ask`,
-  `/api/ask-stream` and `llm_takeover` turns. With no flag, legacy remains the
-  default. `--legacy-tools` explicitly forces legacy and wins if both flags are
-  supplied, regardless of order. Guests/execute-only speakers retain whole-turn
-  legacy routing. Native turns do not have per-feature fallback for unavailable
+  the native protocol for `/api/ask`, `/api/ask-stream` and `llm_takeover` turns,
+  with a tool list per speaker class (see "Speaker classes and restricted `run`"
+  below). With no flag, legacy remains the default. `--legacy-tools` explicitly
+  forces legacy and wins if both flags are supplied, regardless of order. Only
+  guests on the HTTP `main` context retain whole-turn legacy routing under the
+  flag. Native turns do not have per-feature fallback for unavailable
   operations. The owner's superseding gate requires executable conversation
   capability parity and independent review before changing the default. Preserve
   legacy code and the guarded external `!opencode` integration (process/model
@@ -824,8 +825,9 @@ replaces that branch with one composer.
   The main conversation's permission profile intersects the active model per
   group in a pinned turn snapshot; an override can only narrow execution.
 - **Native `run`: one ad-hoc Python block, executed once (#129, DESIGN L2).**
-  `{"source", "module"?}`; offered exactly where `mutate` is (write-capable, non-guest
-  HTTP and takeover turns). It replaces the role of `!eval`/top-level statements.
+  `{"source", "module"?}` for write-capable speakers (described here); guests and
+  execute-only speakers get the restricted form described in the next entry. It replaces
+  the role of `!eval`/top-level statements.
   `api/native_tools/run.rs` owns it; the pieces it shares must stay shared:
   - **Lowering** (`python_frontend/lower/block.rs`): the source is parsed AS WRITTEN (no
     synthetic `def`, so positions are exact; rustpython-parser 0.4.0 accepts module-level
@@ -894,6 +896,111 @@ replaces that branch with one composer.
     per-module Write check, and `evaluate` writes that back.
   Tests: `cargo test --release block_tests` (frontend), `run_` (tool, freeze, turn,
   takeover), `program_effects`, `program_freeze`.
+- **Speaker classes and restricted `run` (#129, DESIGN L3 as decided 2026-11-10).** With
+  `--native-tools`, every takeover speaker is native; the tool list is the class of the
+  pinned snapshot (`api/native_tools/speaker.rs::speaker_class`):
+  - **Writer**: unchanged. **ExecuteOnly**: `inspect`, `evaluate`, restricted `run`,
+    `finish`, plus the four memory tools when the turn has an identity (the same turn-bound
+    builtins with their own rules). **Guest(tools)**: the profile's `GUEST_TOOLS` as direct tools
+    (`guest_tools.rs`: JSON object to the builtin's positional literals), restricted `run`,
+    `finish`. HTTP `main` turns: writers and execute-only speakers are native; guests stay
+    legacy (no turn identity to bind tools to).
+  - **Fail closed.** The two guest signals (the snapshot's `guest_profiles[model]` and
+    `turn.guest_tools`) must agree; otherwise, or when a named profile has no entry
+    (`permission_snapshot_for` pins `guest_profiles[model] = []`), or with no authority in
+    any group, the class is `Guest([])`: only pure `run` and `finish`. `native_snapshot`
+    writes a guest's list into the snapshot's turn identity, so schemas, dispatcher and the
+    IO boundary (`check_guest_tool`) read one list.
+  - **The rule: `run` adds composition, never authority.** Admission
+    (`run::restricted_admission`, program-free, so batch preflight refuses too): no `module`
+    scope (hence no `+shared`), bare calls only from `builtins/pure.rs` (non-IO registry
+    minus `home_dir`) or the guest's own tools, qualified calls refused for guests and
+    Execute-checked for execute-only, no `spawn`/source/event helpers. The interpreter
+    enforces the same rule on the block's OWN frame (`eval/meter.rs`): the frame is marked
+    `Block` when the block is entered and every declared function pushes `Callee`
+    (`invocation::invoke`), so the policy never depends on depth arithmetic. Callee bodies
+    are owner-written and run as under `evaluate`.
+  - **The meter (`eval/meter.rs`)** exists only inside `eval_detached_block`; all other
+    interpreter use pays one thread-local `Cell<bool>` read per site (sites are listed in
+    the module doc). Limits are policy constants in ONE place, `src/run_limits.rs`, read
+    through `RunLimits` (a per-profile override can later build a different one).
+    Restricted: 200,000 steps, 1 MiB per value (deep), 32 MiB produced in total, 8 IO calls
+    per block, each `COSTLY_TOOLS` entry once per block, 60 s wall clock (cooperative:
+    checked between steps and before IO), 24 turn-bound tool calls per TURN (`TurnBudget`,
+    shared by direct tools and blocks; new, legacy turns are unbounded). Owner: only the
+    64 MiB deep value cap. A tripped limit is sticky for the rest of the block.
+  - **Deep size without re-walking.** Arguments of every builtin are admitted before the
+    call, results after. Container sizes are remembered per allocation with a `Weak`
+    (address cannot be reused while the entry lives; `Arc::make_mut` never mutates an
+    allocation that has a `Weak`), and `push`/`insert`/`map_set`/`set_add` record
+    "sum of arguments" instead of walking. A walk visits at most `cap / 32` nodes.
+    `remembered_sizes_never_undercount` is the soundness test; add a builtin to `GROWERS`
+    only if its result is bounded by the sum of its arguments.
+  - **Sizes are real bytes.** One `SLOT` (`size_of::<Value>()`, 176 bytes today because a
+    coroutine handle is stored inline) per value, `HEAP` (40) per string or container,
+    plus text. 1 MiB is therefore about 5,900 numbers or 4,800 short strings, and the
+    32 MiB produced-bytes cap is about 600 one-by-one list appends (each `push` copies).
+    Boxing the handle and attachment variants would shrink `Value` to 32 bytes.
+  - **One call is bounded BEFORE it allocates (review F1).** The meter admits arguments
+    and measures results; a builtin whose output can exceed its input must compute a bound
+    first: `meter::reserve`/`reserve_shape` (`join`, `split`, `map_entries`, `json_escape`,
+    `base64_encode`, `concat`), `meter::render` (a writer that stops at the cap, for every
+    value-to-text path: `to_string`, `concat`, `join`, `Err`, `error_suggest`), the bounded
+    regex loop and the JSON tree bound (`eval/bounded.rs`). `builtins/pure.rs::COSTS`
+    classifies every pure builtin (a test fails for a new one without a class), and
+    `eval/builtin_alloc_tests.rs` measures real allocations with a counting allocator
+    (`src/test_alloc.rs`, test builds only) for every pure builtin x hostile arguments at
+    the cap: MEASURED worst 2.27 x cap (`concat`), asserted <= 3. All of this is a no-op
+    outside a block. Applies to the owner's 64 MiB cap too.
+  - **Regex in restricted blocks (review F3).** `RegexLimits` in `run_limits.rs`: pattern
+    <= 2,048 bytes (parsing costs ~300 bytes per pattern byte), compiled under the
+    smallest power-of-two `size_limit` class that admits it (<= 512 KiB), and
+    class x text length <= 8 GiB^2. MEASURED worst case 1.1e-10 s per byte^2 (the lazy DFA
+    gives up, e.g. `(?:a?){n}a{n}[^a]`), so the worst admitted call is ~0.8 s; `\w`
+    patterns (64 to 256 KiB classes) get 32 to 128 KiB of text, ASCII classes 1 MiB. The
+    modelled work is charged to the step budget (50,000 steps per worst-case second);
+    `regex_replace` bounds its output before every append and stops between matches
+    after 1 s (iterating matches is worst-case quadratic). The owner has no regex work
+    limit, only the output bound. JSON: `json_tree_bound` (700 per `{`, 160 per `[` and
+    `:`, 96 per `,`) is reserved before parsing; adversarial texts reach 99x their length.
+  - **Steps also count bytes.** Each builtin call costs 1 step plus 1 per 4 KiB of
+    arguments (`ARGUMENT_BYTES_PER_STEP`), so linear builtins over cap-sized values cannot
+    be repeated 200,000 times.
+    `set(...)` construction is quadratic (not linear): it scans all earlier elements
+    for each unique input. Restricted blocks pay `n*(n-1)/2` extra steps BEFORE the
+    scan. Owner/outside-block results and representation are unchanged.
+  - **Capture-state correction (review adv3).** `regex_replace` reserves capture
+    work/scratch before the FIRST search, even for literal replacements: <=8 groups,
+    compiled-size class * capture slots <=512 KiB, and slot-weighted class * text
+    within the regex work budget. Refusals advise fewer groups, `(?:...)`, a simpler
+    pattern or shorter text. Literal replacements (including `$$`) use `find_iter`;
+    other dollar forms use regex's exact capture expansion. Owner and outside-block
+    capture semantics are unchanged. JSON reservations now include three text lengths
+    for unescape scratch/decoded strings as well as the structural tree estimate.
+  - **Turn clock.** Restricted blocks of one turn share 180 s (`turn_block_time`, in
+    `TurnBudget` with the tool-call count); a block runs against the shorter of its own
+    60 s and what is left, and the refusal names the one that stopped it.
+  - **Stack (review F4, `eval/stack.rs`).** One call level costs 10 to 20 KiB of native
+    stack (MEASURED), so MAX_CALL_DEPTH 256 never held on 2 MiB threads. Now:
+    `stack::check` at every call, on ANY thread, refuses with `call stack exhausted in ...`
+    when less than 256 KiB of the thread's stack is left (bounds from
+    `pthread_getattr_np`, once per thread); and `io_eval::evaluate_with_io` (run blocks
+    and async `evaluate`) runs on a 64 MiB thread (`on_deep_stack`), where the depth guard
+    fires first. Synchronous `evaluate`, routes, tasks and tests stay on their own stacks
+    and get the clean stack error instead of an abort. The nesting guard of #133
+    (`python_frontend/nesting.rs`, copied unchanged from 6136115) protects the frontend.
+  - **Interpreter cost that is NOT the meter's:** `xs = push(xs, x)` copies the list on
+    every step (the argument is a second reference), so 100,000 list appends take minutes
+    with or without a block. String appends are linear.
+  - Builtin fixes from the hostile-argument sweep (`eval/builtin_sweep_tests.rs`):
+    `div`/`rem` of `i64::MIN` by `-1` wrap like the operators instead of panicking;
+    `abs`/`pow` wrap explicitly. `char_at` and `substring` are the release line's #134
+    implementation, copied unchanged (`eval/strings.rs`, same file as on
+    `release/2026-11-01` at 6136115): the whole character containing the byte offset, and
+    cuts moved down to a character boundary.
+  Tests: `cargo test --release meter::tests`, `builtin_sweep`, `builtin_alloc_tests`,
+  `stack_tests`, `run_restricted`, `run_hardening_tests`, `nesting`, `takeover_native`
+  (module `restricted`), `run_limits`, `pure::`.
 - **Native takeover turns (#85).** With the native protocol opted in (see above),
   `handle_llm_takeover`
   (Telegram DMs/groups) uses the native protocol when the speaker's pinned snapshot
@@ -1573,7 +1680,13 @@ schema since day one and was never set:
   at most 30k content characters, chronological within each page; `before_ms` is
   exclusive (equal-timestamp rows may straddle pages). Assistant rows establish
   generation only, not successful delivery. Guests cannot invoke this tool.
-- Guest `memory_remember` accepts context scope only. Guest `memory_correct` is
+- Guest `memory_remember` accepts context scope only. **Since 2026-11-10 the builtin
+  itself also refuses scope `global` for every turn that is not write-capable**
+  (`global memories require a write-capable speaker; …`): a global canonical memory is
+  injected into every conversation, the owner's included, so a non-owner writing one was
+  an injection path into owner turns. This applies on every path (legacy `!eval`, module
+  functions running in such a turn, native tool, `run` block); context scope is unchanged
+  and write-capable turns are unchanged. Guest `memory_correct` is
   turn-bound and can change only an authorized single-context record; its scoped IO
   request independently preserves the bound principal/context and non-write authority.
   Guest `memory_forget` additionally requires an assertion by that principal governed

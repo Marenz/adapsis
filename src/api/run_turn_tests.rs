@@ -199,3 +199,52 @@ async fn native_run_is_recorded_for_training_like_every_other_native_tool() {
     assert!(feedback[1].as_str().unwrap().contains("TRAINING_RUN_RESULT"));
     assert_eq!(recorded.matches("\\\"tool\\\":\\\"run\\\"").count(), 1, "{recorded}");
 }
+
+/// DESIGN L3 on HTTP: an execute-only speaker is native with `inspect`, `evaluate`,
+/// restricted `run` and `finish` (no memory tools: HTTP turns have no turn identity).
+/// A forged `mutate` skips its batch; nothing the turn does changes code.
+#[tokio::test]
+async fn native_http_execute_only_turn_has_its_own_tool_list_and_a_restricted_run() {
+    let module = "RunTurnViewer";
+    let mut fixture = Fixture::new(
+        vec![
+            response("", vec![
+                call("eval", "evaluate", json!({"function": format!("{module}.twice"), "input": "4"})),
+                run_call("block", &format!("n: int = {module}.twice(5)\nreturn concat(\"n=\", to_string(n))\n")),
+                call("look", "inspect", json!({"kind": "symbols"})),
+            ]),
+            response("", vec![python_mutate("forged", "RunTurnViewerMade")]),
+            response("", vec![run_call("io", "t: str = await file_read(\"/etc/hostname\")\nreturn t\n")]),
+            response("", vec![call("scoped", "run", json!({"source": "return twice(1)\n", "module": module}))]),
+            tool("done", "finish", json!({})),
+        ],
+        &format!("+module {module}\n+fn twice (x:Int)->Int\n  +return x * 2\n+end\n"),
+    )
+    .await;
+    let log = recording_io(&mut fixture);
+    fixture.config.access_level = crate::permissions::AccessLevel::ExecuteOnly;
+    assert!(super::super::super::native_turn::eligible(&fixture.config));
+    let result = fixture.run(false).await;
+    assert_eq!(result.completed, Some(true), "{:?}", result.results);
+    let requests = fixture.requests.lock().unwrap().clone();
+    let names: Vec<&str> = requests[0]["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["inspect", "evaluate", "run", "finish"]);
+    let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(system.contains("Fixed native tool protocol") && system.contains("Combining steps: run"), "{system}");
+    assert!(!system.contains("Preferred workflow") && !system.contains("mutate"), "{system}");
+    assert!(tool_results(&requests[1..2], "eval")[0]["output"].as_str().unwrap().contains("= 8"));
+    assert_eq!(tool_results(&requests[1..2], "block")[0]["output"], "n=10");
+    for (index, fragment) in [
+        (2, "not write-capable (`mutate` is not available to this speaker)"),
+        (3, "`file_read` is not available in this conversation"),
+        (4, "a `module` scope is not available in this conversation"),
+    ] {
+        let text = requests[index]["messages"].to_string();
+        assert!(text.contains(fragment), "{fragment}: {text}");
+    }
+    assert!(log.lock().unwrap().is_empty());
+    let program = fixture.config.program.read().await;
+    assert_eq!(program.modules.len(), 1);
+    assert_eq!(program.modules[0].functions.len(), 1);
+    assert_eq!(fixture.config.meta.lock().unwrap().revision, 1, "only the fixture prelude is a mutation");
+}

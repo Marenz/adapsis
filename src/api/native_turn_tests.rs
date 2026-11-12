@@ -459,18 +459,25 @@ async fn native_finish_cannot_share_a_batch_and_old_debt_does_not_block() {
 }
 
 #[test]
-fn native_mode_is_opt_in_and_excludes_execute_only_and_guests() {
+fn native_mode_is_opt_in_and_http_excludes_guests() {
+    use super::super::native_tools::{speaker_class, SpeakerClass};
     let mut config = test_config();
     assert!(!super::super::native_turn::eligible(&config));
     config.native_tools = true;
     assert!(super::super::native_turn::eligible(&config));
+    assert_eq!(speaker_class(&config), SpeakerClass::Writer);
+    // Execute-only speakers are native on HTTP too, with their own tool list (DESIGN L3).
     config.access_level = crate::permissions::AccessLevel::ExecuteOnly;
-    assert!(!super::super::native_turn::eligible(&config));
+    assert!(super::super::native_turn::eligible(&config));
+    assert_eq!(speaker_class(&config), SpeakerClass::ExecuteOnly);
+    // Guests stay on the legacy protocol on HTTP: there is no turn identity to bind
+    // their tools to. Without one a guest profile is the most restricted class.
     config.access_level = crate::permissions::AccessLevel::Full;
     Arc::make_mut(&mut config.permission_config)
         .guest_profiles
-        .insert(String::new(), vec![]);
+        .insert(String::new(), vec!["web_search".into()]);
     assert!(!super::super::native_turn::eligible(&config));
+    assert_eq!(speaker_class(&config), SpeakerClass::Guest(vec![]));
 }
 
 #[tokio::test]
@@ -641,7 +648,13 @@ fn native_permission_snapshot_respects_default_profiles_and_is_pinned() {
         .get_or_create("main")
         .permission_model = Some("permissive".into());
     let snapshot = super::super::native_turn::permission_snapshot(&config);
-    assert!(!super::super::native_turn::eligible(&config));
+    // The active model's default profile caps the turn at Read: an execute-only
+    // speaker, native with the execute-only tool list, never a writer.
+    assert!(super::super::native_turn::eligible(&config));
+    assert_eq!(
+        super::super::native_tools::speaker_class(&snapshot),
+        super::super::native_tools::SpeakerClass::ExecuteOnly
+    );
     *config.llm_model.write().unwrap() = "permissive".into();
     assert_eq!(
         *snapshot.llm_model.read().unwrap(),
@@ -748,6 +761,37 @@ async fn native_missing_targets_are_neutral_in_http_and_sse_results() {
         assert!(
             !wire.contains(&private) && !wire.contains("SECRET_DIAGNOSTIC"),
             "{wire}"
+        );
+    }
+}
+
+/// Decision 4 at the snapshot: a named profile without a usable entry pins the most
+/// restricted class instead of falling through to "unlisted model resolves to Execute".
+#[test]
+fn a_missing_or_malformed_profile_pins_the_most_restricted_class() {
+    use super::super::native_tools::{speaker_class, SpeakerClass};
+    let permissions = |extra: &str| -> Arc<crate::permissions::PermissionConfig> {
+        Arc::new(toml::from_str(&format!("[model.listed]\nuser = \"execute\"\n[model.native-fixture]\nuser = \"write\"\n{extra}")).unwrap())
+    };
+    for (label, config_text, profile, expected) in [
+        ("listed profile", "", Some("listed"), SpeakerClass::ExecuteOnly),
+        ("no profile at all", "", None, SpeakerClass::Writer),
+        ("profile without an entry", "", Some("no-such-profile"), SpeakerClass::Guest(vec![])),
+        ("guest profile without model permissions", "[guest_profiles]\nhalf = [\"web_search\"]\n", Some("half"), SpeakerClass::Guest(vec![])),
+        ("a default entry makes every name listed", "[model.default]\nuser = \"execute\"\n", Some("anything"), SpeakerClass::ExecuteOnly),
+    ] {
+        let mut config = test_config();
+        config.native_tools = true;
+        *config.llm_model.write().unwrap() = "native-fixture".into();
+        config.permission_config = permissions(config_text);
+        config.meta.lock().unwrap().conversations.get_or_create("main").permission_model = profile.map(str::to_string);
+        let snapshot = super::super::native_turn::permission_snapshot(&config);
+        assert_eq!(speaker_class(&snapshot), expected, "{label}");
+        // HTTP: only writers and execute-only speakers are native; the rest stay legacy.
+        assert_eq!(
+            super::super::native_turn::eligible(&config),
+            matches!(expected, SpeakerClass::Writer | SpeakerClass::ExecuteOnly),
+            "{label}"
         );
     }
 }

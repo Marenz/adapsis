@@ -2,6 +2,7 @@
 //! Single source of truth for all builtin names and their descriptions.
 mod json;
 pub mod program_effects;
+pub mod pure;
 
 /// A builtin function entry.
 pub struct Builtin {
@@ -725,7 +726,8 @@ pub static IO_BUILTINS: &[Builtin] = &[
                the current turn and are NOT arguments, so a note cannot be filed against the wrong \
                conversation. Optional scope: \"context\" (default — this conversation only) or \"global\" \
                (every conversation on this node). Prefer \"context\"; \"global\" is for facts that are true \
-               everywhere. Requires `+await`.",
+               everywhere, and is refused unless the speaker of the turn may change code (a global \
+               memory reaches every conversation). Requires `+await`.",
         category: BuiltinCategory::Io,
     },
     Builtin {

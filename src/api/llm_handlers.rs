@@ -1329,7 +1329,7 @@ pub async fn handle_llm_takeover(
         authority.may_agent = false;
         authority.may_opencode = false;
     }
-    let program_summary = if let Some(ref tools) = guest_tools {
+    let mut program_summary = if let Some(ref tools) = guest_tools {
         crate::coroutine::scoped::prompt(tools)
     } else {
         let prog = program.read().await;
@@ -1384,10 +1384,21 @@ pub async fn handle_llm_takeover(
     // Native protocol decision (#85) uses the same pinned, intersected
     // snapshot that will execute the turn; guests/non-write speakers stay legacy.
     let native_config = super::takeover_native::native_snapshot(native_tools, &tmp_config, &context);
-    if native_config.is_some() {
+    if let Some(native) = &native_config {
         // The native protocol has no agent or !opencode tool; say so truthfully.
         authority.may_agent = false;
         authority.may_opencode = false;
+        // The speaker class of the pinned snapshot decides the tool list; the prompt
+        // must describe that class, including when it is narrower than the profile's
+        // nominal authority (an unclassifiable turn is a guest without tools).
+        let class = super::native_tools::speaker_class(native);
+        if class.restricted() {
+            authority.may_write = false;
+        }
+        if matches!(class, super::native_tools::SpeakerClass::Guest(_)) {
+            authority.may_read_source = false;
+            program_summary = crate::prompt::NATIVE_GUEST_SUMMARY.to_string();
+        }
     }
 
     // Composed fresh every turn (issue #41). The identity comes from the
