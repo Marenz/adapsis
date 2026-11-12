@@ -1,6 +1,31 @@
 # AdapsisOS Roadmap
 
-## Deployed 2026-11-12 — here captionless-image provider hotfix (#148), `7201856`
+## Deployed 2026-11-12 20:33 UTC — here receipt/start feedback (#147), `c7a4927`
+
+- Manager installed binary sha256
+  `218ba5bd6a1b60a247b35d01a5532a399255decf0fee20194792b99e00c9c21f`.
+  PID 2349670, NRestarts 0, 275/275 startup cases, six managed modules including
+  unchanged Buddy. The deployed #148 image serializer fix is retained.
+- **Real Telegram delivery evidence:** intake 549374 and automatic runtime
+  receipt/start notice 549375 both at 20:33:23 UTC; final `ACK147-OK` reply
+  549377 at 20:33:27 UTC. No provider error. This certifies that immediate
+  runtime notice was delivered; queued/start ordering is covered by offline
+  evaluated-callback tests, not a separate live queued-turn certification.
+- Independent source review accepted. Final corrected full gate: 2401 unit
+  passed, only known strict parity failed (334/58/181, zero AST mismatches or
+  non-idempotence), seven ignored; CLI 5/5, startup 9/9, Result CLI 4/4.
+  Original gate: 2399 passed / three failed / seven ignored. The new journal
+  fixture's concurrent 100-entry query-window race was corrected by test-only
+  child-process isolation. The other extra failure was the known live-baseline
+  #96 Cranelift relocation `TryFromIntError`; it passed the corrected run but is
+  **not fixed in this deployment**. Both gate results remain recorded.
+- Residuals: ASR/photo acquisition still precedes generic takeover receipt;
+  pending notices stop at turn end, but an already-running callback may arrive
+  late. #104 does not certify remote delivery from evaluator completion. #147
+  remains open for diagnosis/evidence quality and blocking delayed rechecks;
+  this deployment completes only its receipt/queued/start feedback slice.
+
+## Historical deployment 2026-11-12 — here captionless-image provider hotfix (#148), `7201856`
 
 - Manager installed binary sha256
   `0b37c7ceb32e32db01ec6f340101f493753982cc4f0ba89eb930850773ee514e`.

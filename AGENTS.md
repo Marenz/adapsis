@@ -10,7 +10,17 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- **Current here deployment (2026-11-12, #148): `7201856`**, binary sha256
+- **Current here deployment (2026-11-12, #147): `c7a4927`**, binary sha256
+  `218ba5bd6a1b60a247b35d01a5532a399255decf0fee20194792b99e00c9c21f`.
+  Manager verified PID 2349670, NRestarts 0, 275/275 startup cases and six managed
+  modules (Buddy unchanged). Real Telegram intake 549374 and automatic runtime
+  start notice 549375 both occurred at 20:33:23 UTC; final `ACK147-OK` reply
+  549377 arrived at 20:33:27 UTC, with no provider error. The #148 image fix is
+  retained. Pre-takeover ASR/photo-download silence and potentially late delivery
+  of an already-running callback remain; #104 remote-delivery semantics and the
+  known live-baseline #96 JIT relocation defect are not fixed. #147's diagnosis
+  quality and blocking-recheck problems remain open beyond this feedback slice.
+- **Historical image hotfix deployment (2026-11-12, #148): `7201856`**, binary sha256
   `0b37c7ceb32e32db01ec6f340101f493753982cc4f0ba89eb930850773ee514e`.
   The shared provider serializer omits exactly-empty image-caption text blocks,
   including historical replay; conversation history is retained. Manager verified
