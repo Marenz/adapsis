@@ -529,6 +529,10 @@ pub struct OpenAiBackend {
     max_request_bytes: usize,
     /// Total timeout for non-streaming requests, which have no chunk-gap check.
     non_streaming_timeout: Duration,
+    /// `prompt_cache_key` sent with every request of this client (None: the
+    /// field is omitted and the gateway derives one). See
+    /// `cache_lifetime::prompt_cache_key`.
+    pub(crate) prompt_cache_key: Option<String>,
 }
 
 /// Non-streaming requests cannot detect a stall early, so their total is capped
@@ -545,6 +549,7 @@ impl OpenAiBackend {
             chunk_timeout: Duration::from_secs(120),
             max_request_bytes: crate::model_limits::for_model("").max_request_bytes,
             non_streaming_timeout: NON_STREAMING_TIMEOUT_CAP,
+            prompt_cache_key: None,
         }
     }
 
@@ -589,7 +594,16 @@ impl OpenAiBackend {
         if request.temperature >= 0.0 {
             body["temperature"] = json!(request.temperature);
         }
+        self.add_prompt_cache_key(&mut body);
         body
+    }
+
+    /// Every request shape (legacy, streaming, native) carries the client's
+    /// cache key, when it has one.
+    pub(crate) fn add_prompt_cache_key(&self, body: &mut Value) {
+        if let Some(key) = &self.prompt_cache_key {
+            body["prompt_cache_key"] = json!(key);
+        }
     }
 
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -950,6 +964,14 @@ impl LlmClient<OpenAiBackend> {
             max_tokens: limits.output_tokens,
             recovered: Default::default(),
         }
+    }
+
+    /// Send `key` as `prompt_cache_key` with every request of this client: a
+    /// stable identity for the provider's cache routing (ChatGPT and OpenAI
+    /// routes; the gateway drops the field for the others).
+    pub fn with_prompt_cache_key(mut self, key: String) -> Self {
+        self.backend.prompt_cache_key = Some(key);
+        self
     }
 
     /// Start a streaming LLM request and return a channel receiver.

@@ -270,8 +270,12 @@ impl NativeLoop {
             .generator
             .clone()
             .unwrap_or_else(|| config.llm_model.read().unwrap().clone());
-        let llm =
-            LlmClient::new_with_model_and_key(&config.llm_url, &model, config.llm_api_key.clone());
+        let llm = super::http_context::conversation_client(
+            &config.llm_url,
+            &model,
+            config.llm_api_key.clone(),
+            &self.context,
+        );
         let mut iteration = 0;
         loop {
             let final_round = match budget.next(iteration) {

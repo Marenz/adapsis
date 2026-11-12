@@ -569,8 +569,8 @@ pub async fn ask(
     if super::native_turn::eligible(&config) {
         return Json(super::native_turn::run(&config, &req, &tx, false).await);
     }
-    let llm = crate::llm::LlmClient::new_with_model_and_key(
-        &config.llm_url, &config.llm_model.read().unwrap(), config.llm_api_key.clone(),
+    let llm = super::http_context::conversation_client(
+        &config.llm_url, &config.llm_model.read().unwrap(), config.llm_api_key.clone(), "main",
     );
 
     let max_iterations = config.max_iterations;
@@ -810,8 +810,8 @@ pub async fn ask_stream(
         let _context_guard = context_lock.lock().await;
         config_clone.install_handler_locals();
         let tx = EventSender::with_mpsc(raw_tx, config_clone.event_broadcast.clone(), config_clone.log_file.clone());
-        let llm = crate::llm::LlmClient::new_with_model_and_key(
-            &config_clone.llm_url, &config_clone.llm_model.read().unwrap(), config_clone.llm_api_key.clone(),
+        let llm = super::http_context::conversation_client(
+            &config_clone.llm_url, &config_clone.llm_model.read().unwrap(), config_clone.llm_api_key.clone(), "main",
         );
 
         let _ = tx.send(serde_json::json!({"type": "start", "message": req.message})).await;
@@ -1246,8 +1246,11 @@ pub async fn handle_llm_takeover(
         .await
         .context("join Ladybug attachment write")??;
     }
-    let llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone());
+    let llm = super::http_context::conversation_client(llm_url, llm_model, llm_key.clone(), &context);
     let compaction = if compaction_attempt_due(&context) {
+        // Compaction requests have their own prefix, so their own cache key.
+        let compaction_llm = crate::llm::LlmClient::new_with_model_and_key(llm_url, llm_model, llm_key.clone())
+            .with_prompt_cache_key(crate::cache_lifetime::prompt_cache_key("compact", &context, llm_model));
         // The same calibrated estimate as the view checkpoint drives compaction.
         let bytes_per_token = meta
             .lock()
@@ -1259,7 +1262,7 @@ pub async fn handle_llm_takeover(
             compact_context_if_needed(
                 &memory_graph,
                 &memory_embedder,
-                &llm,
+                &compaction_llm,
                 llm_model,
                 &context,
                 bytes_per_token,
