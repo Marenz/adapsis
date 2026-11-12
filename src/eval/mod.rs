@@ -2,10 +2,9 @@ use anyhow::{Result, anyhow, bail};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::ast;
-use crate::compiler::CompiledProgram;
 use crate::intern::{self, InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
@@ -21,14 +20,11 @@ pub(crate) mod result_contract;
 #[cfg(test)]
 mod jit_cache_tests;
 
-/// Cache for JIT-compiled programs, keyed by session revision.
-/// When the revision matches, the compiled module is reused instead of recompiling.
-pub type JitCache = Arc<Mutex<Option<(usize, CompiledProgram)>>>;
-
-/// Create a new empty JIT cache.
-pub fn new_jit_cache() -> JitCache {
-    Arc::new(Mutex::new(None))
-}
+pub use jit_dispatch::{JitCache, contained_panic as jit_contained_panic, new_jit_cache};
+#[cfg(test)]
+pub(crate) use jit_dispatch::seam as jit_seam;
+#[cfg(test)]
+mod jit_containment_tests;
 
 /// #92: `i64::MIN / -1` and `i64::MIN % -1` overflow in Rust's inherent
 /// operators (panic in debug, wrap in release). Every execution tier must agree,

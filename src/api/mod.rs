@@ -449,12 +449,11 @@ pub async fn eval_fn(
         inline_expr: None,
     };
 
-    // Tier 1: read program to check testedness and get function info
-    // Clone what we need so the lock is released before eval runs
-    let (_require_modules, needs_async, revision) = {
-        let program = config.program.read().await;
-        let meta = config.meta.lock().unwrap();
-
+    // One snapshot of the program with its revision. The testedness and effect
+    // checks, the evaluation and the history entry below all use this pair;
+    // no lock is held while anything is evaluated.
+    let (program, revision) = config.program_at_revision().await;
+    let needs_async = {
         // Block eval of untested functions (>2 statements) in AdapsisOS mode
         if program.require_modules {
             if let Some(func) = program.get_function(&ev.function_name) {
@@ -474,17 +473,13 @@ pub async fn eval_fn(
             }
         }
 
-        let needs_async = program.get_function(&ev.function_name)
+        program.get_function(&ev.function_name)
             .is_some_and(|f| f.effects.iter().any(|e|
-                matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)));
-
-        (program.require_modules, needs_async, meta.revision)
+                matches!(e, crate::ast::Effect::Io | crate::ast::Effect::Async)))
     };
 
     if needs_async {
         if let Some(sender) = &config.io_sender {
-            // Tier 1: clone program for the blocking task (lock released before blocking)
-            let program = config.program.read().await.clone();
             // Base snapshot for the per-function CoW merge (issue #9).
             let base_program = program.clone();
             let program_mut = crate::eval::make_shared_program_mut(&program);
@@ -529,17 +524,15 @@ pub async fn eval_fn(
         }
     }
 
-    // Tier 1: read program for eval (no lock held during eval itself for sync path)
-    let program = config.program.read().await;
     match eval::eval_compiled_or_interpreted_cached(&program, &ev.function_name, &ev.input, Some(&config.jit_cache), revision) {
         Ok((result, compiled)) => {
-            drop(program); // release Tier 1 before writing Tier 3
-            // Tier 3: record eval in history (brief lock)
+            drop(program);
+            // Tier 3: record eval in history (brief lock), at the revision
+            // that was evaluated, not whatever the session has moved on to.
             {
                 let mut meta = config.meta.lock().unwrap();
-                let rev = meta.revision;
                 meta.history.push(crate::session::HistoryEntry::Eval {
-                    revision: rev,
+                    revision,
                     function: ev.function_name.clone(),
                     input: req.input.clone(),
                     result: result.clone(),

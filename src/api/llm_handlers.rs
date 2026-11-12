@@ -1678,14 +1678,7 @@ pub async fn handle_llm_takeover(
             let has_agent = ops.iter().any(|op| matches!(op, crate::parser::Operation::Agent { .. }));
             if has_agent {
                 eprintln!("[llm_takeover:{context}] !agent detected, spawning via execute_code and breaking");
-                let base_program = program.read().await.clone();
-                let mut session = WorkingSet {
-                    program: base_program.clone(),
-                    base_program: Some(base_program),
-                    runtime: runtime.read().unwrap().clone(),
-                    meta: meta.lock().unwrap().clone(),
-                    sandbox: None,
-                };
+                let mut session = super::working_set::working_set_snapshot(&program, &runtime, &meta).await;
                 execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
                 // Write back mutations (per-function CoW merge, issue #9)
                 write_back_takeover_program(&program, &session).await;
@@ -1701,14 +1694,7 @@ pub async fn handle_llm_takeover(
         }
 
         // Execute code inline
-        let base_program = program.read().await.clone();
-        let mut session = WorkingSet {
-            program: base_program.clone(),
-            base_program: Some(base_program),
-            runtime: runtime.read().unwrap().clone(),
-            meta: meta.lock().unwrap().clone(),
-            sandbox: None,
-        };
+        let mut session = super::working_set::working_set_snapshot(&program, &runtime, &meta).await;
         let exec_result = execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
 
         // Write back mutations to shared state (per-function CoW merge, issue #9)
