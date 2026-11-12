@@ -41,6 +41,7 @@ pub mod llm_handlers;
 mod native_turn;
 mod takeover_budget;
 mod takeover_native;
+mod takeover_progress;
 pub mod native_tools;
 pub(crate) mod http_context;
 mod request_meter;

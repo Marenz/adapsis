@@ -38,6 +38,7 @@ mod typeck;
 mod tui;
 mod validator;
 mod vm;
+mod conversation_callback;
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
@@ -90,13 +91,9 @@ async fn dispatch_conversation_callback(
     function_name: String,
     args: Vec<eval::Value>,
 ) -> Result<String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (request, rx) = conversation_callback::request(function_name, args);
     sender
-        .send(coroutine::IoRequest::Spawn {
-            function_name,
-            args,
-            reply: tx,
-        })
+        .send(request)
         .await
         .context("reply callback could not be queued")?;
     await_spawned_callback(rx, registry).await

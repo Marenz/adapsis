@@ -9,6 +9,8 @@ mod logging;
 mod cache;
 #[path = "takeover_image_tests.rs"]
 mod images;
+#[path = "takeover_progress_tests.rs"]
+mod progress;
 
 const ADMIN: &str = "telegram:user:100000001";
 
@@ -158,8 +160,10 @@ impl Harness {
             Some(metadata),
             self.graph.clone(),
             Arc::new(crate::memory_graph::MemoryEmbedder::deterministic()),
-            Some("FixtureBot.send_reply".into()),
-            Some("42".into()),
+            // Provider-only fixtures have no delivery endpoint. Progress tests
+            // supply and execute a real bound callback with their own IO loop.
+            None,
+            None,
             self.meta.clone(),
             self.program.clone(),
             Default::default(),

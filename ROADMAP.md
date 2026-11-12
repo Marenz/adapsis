@@ -1,5 +1,22 @@
 # AdapsisOS Roadmap
 
+## Deployed 2026-11-12 — here captionless-image provider hotfix (#148), `7201856`
+
+- Manager installed binary sha256
+  `0b37c7ceb32e32db01ec6f340101f493753982cc4f0ba89eb930850773ee514e`.
+  Exactly-empty text blocks beside images are omitted at the shared serializer,
+  including old history; captions, images, trusted markers and native call IDs
+  are preserved. No history wipe or source-library replacement.
+- Independent source review accepted. One full release gate: 2391 unit passed,
+  only known strict parity failed (334 verified / 58 invalid / 181 unsupported,
+  zero AST mismatches/non-idempotence), seven ignored; CLI 5/5, startup 9/9 and
+  Result CLI 4/4. Negative-control historical-image replay failed before omission.
+- Live manager evidence: PID 2263168, NRestarts 0, 275/275 startup cases, six
+  managed modules; real Telegram reply 549322 (`IMAGE148-OK`) with prior photos
+  recovered and retained, HTTP 200, native finish after two generations.
+- #147 receipt/queued/start feedback is separate work; this deployment only
+  resolves the provider's empty text-block rejection.
+
 ## Deployed 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
 
 - **Live on here:** commit `b7bfa64` (`work/python-source-library`: Result runtime,

@@ -10,7 +10,14 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- **Current here deployment (2026-11-12, switch #128): commit `b7bfa64` on
+- **Current here deployment (2026-11-12, #148): `7201856`**, binary sha256
+  `0b37c7ceb32e32db01ec6f340101f493753982cc4f0ba89eb930850773ee514e`.
+  The shared provider serializer omits exactly-empty image-caption text blocks,
+  including historical replay; conversation history is retained. Manager verified
+  a real Telegram `IMAGE148-OK` reply (549322), prior photos recovered, HTTP 200,
+  native finish in two generations; 275/275 startup cases, six managed modules,
+  NRestarts 0. No module-source replacement accompanied this binary hotfix.
+- **Source-library switch baseline (2026-11-12, switch #128): commit `b7bfa64` on
   `work/python-source-library`**, binary sha256
   `fa04e3677b4adf70aafc65196c7ff6facaece2c155f3f9b36de272359c7ce3e8`. The module
   library on this node is manifest-managed Python: `~/.config/adapsis/modules/`
@@ -986,6 +993,26 @@ replaces that branch with one composer.
   widening is not.
 
 ## Conversation System (llm_takeover)
+- **Runtime receipt/start feedback (#147), `api/takeover_progress.rs`.** A takeover
+  pins only its supplied complete `reply_fn`/`reply_arg` pair; no stored-callback
+  fallback. Before the context lock it can report queued receipt; only after the
+  lock is acquired can it report processing started (immediate turns combine
+  receipt/start). These fixed English notices are interface feedback, never
+  model-generated task/tool-execution claims. HTTP ask/SSE is unchanged.
+  A two-event worker uses the same trusted callback Spawn builder as final
+  notifications (`conversation_callback::request`). No progress text enters
+  conversation history, Ladybug, training or provider requests. One attempt is
+  bounded by five seconds including queue admission; one categorical failure
+  stops the worker without retrying or failing the turn. End/check/launch share
+  one tiny synchronous mutex; after turn end, pending notices cannot launch.
+  Normal/native return drains only an in-flight observer for at most five seconds,
+  holding no Program/runtime/meta lock; Drop closes early-error/cancel paths too.
+  Existing Spawn cannot cancel an already-running callback, so late delivery is
+  still possible and #104's application-outcome/remote-delivery gap remains.
+  Pre-takeover ASR and photo downloads still precede any generic receipt. These
+  notices are not durable tasks, cancellation or scheduling. Focused gate:
+  `cargo test --release takeover_progress` (mock provider and evaluated callbacks,
+  plus deterministic end/backpressure/cancel races).
 - **Native tools remain opt-in pending parity (#89).** `--native-tools` enables
   the native protocol for eligible write-capable, non-guest `/api/ask`,
   `/api/ask-stream` and `llm_takeover` turns. With no flag, legacy remains the
