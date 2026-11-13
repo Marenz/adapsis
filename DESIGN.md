@@ -26,6 +26,7 @@ Evidence: [docs/design-intent-audit-20261109.md](docs/design-intent-audit-202611
 | I3 | Interfaces | TUI: `adapsis tui` (ratatui). | | active | |
 | I4 | Interfaces | Telegram is an easy UI: inline buttons (approve / merge / pause / cancel / details), `/tasks`, and a reply to a task message routes to that task. | | active | |
 | I5 | Interfaces | Voice and discussion interfaces. | Later. | deferred | |
+| I6 | Conversation feedback | Normal conversation answers directly without a runtime receipt/start message. Only a conversation-lock wait lasting 10 seconds may produce one honest queue notice; a paired start requires that notice to have actually launched. | Owner UX correction 2026-11-13: confidence without chat noise. This does not supply substantive task-progress reporting or typing indicators. | active | #147 |
 
 ## Nodes & security
 

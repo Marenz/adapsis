@@ -20,6 +20,10 @@ narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
   of an already-running callback remain; #104 remote-delivery semantics and the
   known live-baseline #96 JIT relocation defect are not fixed. #147's diagnosis
   quality and blocking-recheck problems remain open beyond this feedback slice.
+  **Owner UX correction (2026-11-13, DESIGN.md I6):** routine receipt/start
+  messages from this deployed baseline were rejected as chat noise. The pending
+  correction stays silent unless a conversation-lock queue lasts 10 seconds;
+  substantive task progress and typing indicators remain separate work.
 - **Historical image hotfix deployment (2026-11-12, #148): `7201856`**, binary sha256
   `0b37c7ceb32e32db01ec6f340101f493753982cc4f0ba89eb930850773ee514e`.
   The shared provider serializer omits exactly-empty image-caption text blocks,
@@ -1003,11 +1007,16 @@ replaces that branch with one composer.
   widening is not.
 
 ## Conversation System (llm_takeover)
-- **Runtime receipt/start feedback (#147), `api/takeover_progress.rs`.** A takeover
+- **Quiet queue feedback (#147, DESIGN.md I6), `api/takeover_progress.rs`.** A takeover
   pins only its supplied complete `reply_fn`/`reply_arg` pair; no stored-callback
-  fallback. Before the context lock it can report queued receipt; only after the
-  lock is acquired can it report processing started (immediate turns combine
-  receipt/start). These fixed English notices are interface feedback, never
+  fallback. Immediate lock acquisition and queues shorter than 10 seconds are
+  silent, even when the provider is slow. Only a persistent lock queue starts the
+  notification worker. Acquiring the lock clears WAITING under the lifecycle
+  mutex, suppressing any not-yet-launched queue notice, including a send blocked
+  on channel capacity. A paired start is allowed only if the queue notice already
+  launched; scheduling a notice is not enough. At the threshold edge, an available
+  lock wins. The local delay future is dropped on acquisition or cancellation.
+  These fixed English notices are interface feedback, never
   model-generated task/tool-execution claims. HTTP ask/SSE is unchanged.
   A two-event worker uses the same trusted callback Spawn builder as final
   notifications (`conversation_callback::request`). No progress text enters
@@ -1020,7 +1029,8 @@ replaces that branch with one composer.
   Existing Spawn cannot cancel an already-running callback, so late delivery is
   still possible and #104's application-outcome/remote-delivery gap remains.
   Pre-takeover ASR and photo downloads still precede any generic receipt. These
-  notices are not durable tasks, cancellation or scheduling. Focused gate:
+  notices are not durable tasks, cancellation or scheduling. This policy does not
+  implement substantive task progress or typing indicators. Focused gate:
   `cargo test --release takeover_progress` (mock provider and evaluated callbacks,
   plus deterministic end/backpressure/cancel races).
 - **Native tools remain opt-in pending parity (#89).** `--native-tools` enables

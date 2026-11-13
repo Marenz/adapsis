@@ -1,14 +1,15 @@
 //! Real takeover + configured callback regressions; all transport is intercepted.
 use super::*;
-use crate::api::takeover_progress::{IMMEDIATE, QUEUED, STARTED};
+use crate::api::takeover_progress::{QUEUED, STARTED};
 #[path = "takeover_progress_fixtures.rs"]
 mod fixtures;
 use fixtures::*;
 
 const REPLY: &str = "ProgressFixture.reply";
+const OLD_IMMEDIATE: &str = "Message received. I am starting to process it now.";
 
 #[tokio::test]
-async fn takeover_progress_immediate_is_bound_and_independent_of_provider_in_both_protocols() {
+async fn takeover_progress_immediate_lock_stays_silent_even_while_provider_is_held() {
     for (native, error) in [(true, false), (false, false), (true, true), (false, true)] {
         let harness = Arc::new(Harness::new(native));
         let io = Arc::new(CallbackIo::new(&harness, false).await);
@@ -34,22 +35,10 @@ async fn takeover_progress_immediate_is_bound_and_independent_of_provider_in_bot
                 .await
             })
         };
-        until(|| {
-            io.delivered.lock().unwrap().len() == 1 && provider.requests.lock().unwrap().len() == 1
-        })
-        .await;
-        assert!(
-            !turn.is_finished(),
-            "provider is held, but acknowledgement already arrived"
-        );
-        assert_eq!(
-            *io.launches.lock().unwrap(),
-            vec![Launch {
-                function: REPLY.into(),
-                destination: "bound-destination".into(),
-                message: IMMEDIATE.into(),
-            }]
-        );
+        until(|| provider.requests.lock().unwrap().len() == 1).await;
+        assert!(!turn.is_finished(), "provider is held");
+        assert!(io.launches.lock().unwrap().is_empty());
+        assert!(io.delivered.lock().unwrap().is_empty());
         // A different conversation's stored callback must not be consulted.
         {
             let mut meta = harness.meta.lock().unwrap();
@@ -66,7 +55,7 @@ async fn takeover_progress_immediate_is_bound_and_independent_of_provider_in_bot
         } else {
             assert_eq!(reply, "final answer");
         }
-        assert_eq!(io.launches.lock().unwrap().len(), 1);
+        assert!(io.launches.lock().unwrap().is_empty());
         let requests = provider.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 1);
         assert_eq!(all_text(&requests[0]).matches("original input").count(), 1);
@@ -102,18 +91,15 @@ async fn takeover_progress_queued_receipt_precedes_lock_start_and_keeps_pinned_c
             })
         };
         let first = spawn("first turn", "first-destination");
-        until(|| {
-            io.delivered.lock().unwrap().len() == 1 && provider.requests.lock().unwrap().len() == 1
-        })
-        .await;
+        until(|| provider.requests.lock().unwrap().len() == 1).await;
         let second = spawn("queued turn", "second-destination");
-        until(|| io.delivered.lock().unwrap().len() == 2).await;
+        until(|| io.delivered.lock().unwrap().len() == 1).await;
         assert_eq!(
             provider.requests.lock().unwrap().len(),
             1,
             "queued turn must not call provider"
         );
-        assert_eq!(io.launches.lock().unwrap()[1].message, QUEUED);
+        assert_eq!(io.launches.lock().unwrap()[0].message, QUEUED);
         assert!(
             !harness
                 .meta
@@ -135,11 +121,11 @@ async fn takeover_progress_queued_receipt_precedes_lock_start_and_keeps_pinned_c
         release.add_permits(1);
         assert_eq!(first.await.unwrap(), "final answer");
         until(|| {
-            io.delivered.lock().unwrap().len() == 3 && provider.requests.lock().unwrap().len() == 2
+            io.delivered.lock().unwrap().len() == 2 && provider.requests.lock().unwrap().len() == 2
         })
         .await;
         assert_eq!(
-            io.launches.lock().unwrap()[2],
+            io.launches.lock().unwrap()[1],
             Launch {
                 function: REPLY.into(),
                 destination: "second-destination".into(),
@@ -148,7 +134,51 @@ async fn takeover_progress_queued_receipt_precedes_lock_start_and_keeps_pinned_c
         );
         release.add_permits(1);
         assert_eq!(second.await.unwrap(), "final answer");
-        assert_eq!(io.launches.lock().unwrap().len(), 3);
+        assert_eq!(io.launches.lock().unwrap().len(), 2);
+        assert_clean(&harness, &io, &provider, &context).await;
+    }
+}
+
+#[tokio::test]
+async fn takeover_progress_short_queue_is_silent_in_native_and_legacy_turns() {
+    for native in [true, false] {
+        let harness = Harness::new(native);
+        let mut io = CallbackIo::new(&harness, false).await;
+        io.queue_delay = std::time::Duration::from_secs(86_400);
+        let (provider, release) = held_provider(native, false).await;
+        let context = format!("telegram:progress-short-queue-{native}");
+        let first = io.turn(
+            &harness,
+            &provider,
+            &context,
+            ADMIN,
+            "first",
+            (Some(REPLY), Some("first")),
+        );
+        tokio::pin!(first);
+        tokio::select! {
+            _ = &mut first => panic!("first provider is held"),
+            _ = until(|| provider.requests.lock().unwrap().len() == 1) => {},
+        }
+        let second = io.turn(
+            &harness,
+            &provider,
+            &context,
+            ADMIN,
+            "second",
+            (Some(REPLY), Some("second")),
+        );
+        tokio::pin!(second);
+        assert!(futures::poll!(&mut second).is_pending());
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        release.add_permits(2);
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("final answer", "final answer")
+        );
+        assert!(io.launches.lock().unwrap().is_empty());
+        assert!(io.delivered.lock().unwrap().is_empty());
         assert_clean(&harness, &io, &provider, &context).await;
     }
 }
@@ -182,7 +212,7 @@ async fn takeover_progress_callback_failure_does_not_hide_provider_failure_or_re
         }])
         .await;
         let reply = io
-            .turn(
+            .queued_turn(
                 &harness,
                 &provider,
                 &format!("telegram:progress-error-{native}-{error}"),
@@ -240,11 +270,12 @@ async fn takeover_progress_callback_failure_does_not_hide_provider_failure_or_re
 }
 
 #[tokio::test]
-async fn takeover_progress_missing_callback_pairs_never_use_stored_callback() {
+async fn takeover_progress_quick_turns_are_silent_and_never_use_stored_callback() {
     for pair in [
         (None, None),
         (Some(REPLY), None),
         (None, Some("destination")),
+        (Some(REPLY), Some("destination")),
     ] {
         let harness = Harness::new(true);
         let io = CallbackIo::new(&harness, false).await;
@@ -274,7 +305,7 @@ async fn takeover_progress_callback_timeout_is_bounded_and_does_not_retry_provid
     let harness = Harness::new(true);
     let io = CallbackIo::new(&harness, true).await;
     let (provider, release) = held_provider(true, true).await;
-    let turn = io.turn(
+    let turn = io.queued_turn(
         &harness,
         &provider,
         "telegram:progress-timeout",
@@ -335,14 +366,8 @@ async fn takeover_progress_fast_provider_error_suppresses_unlaunched_queued_star
     release.add_permits(2);
     assert!(first.await.unwrap().contains("technisches Problem"));
     until(|| provider.requests.lock().unwrap().len() == 2).await;
-    // Let the scripted 400 reach the bounded drain while receipt delivery is
-    // still blocked. The lifecycle tests separately pin the exact end/send race.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(
-        !second.is_finished(),
-        "in-flight receipt is drained, not re-launched"
-    );
-    io.gate.add_permits(1);
+    // Keep receipt delivery blocked until the bounded observer expires; no
+    // wall-clock sleep is used to guess when the provider error has completed.
     assert!(second.await.unwrap().contains("technisches Problem"));
     assert_eq!(
         io.launches.lock().unwrap().len(),
@@ -350,6 +375,8 @@ async fn takeover_progress_fast_provider_error_suppresses_unlaunched_queued_star
         "pending STARTED was suppressed"
     );
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    io.gate.add_permits(1);
+    until(|| io.delivered.lock().unwrap().len() == 1).await;
 }
 
 #[tokio::test]
@@ -378,10 +405,7 @@ async fn takeover_progress_guest_callback_does_not_widen_conversational_authorit
         .await,
         "final answer"
     );
-    assert_eq!(
-        io.launches.lock().unwrap()[0].destination,
-        "guest-destination"
-    );
+    assert!(io.launches.lock().unwrap().is_empty());
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(
@@ -391,7 +415,7 @@ async fn takeover_progress_guest_callback_does_not_widen_conversational_authorit
     let request = all_text(&requests[0]);
     assert!(!request.contains("Add or modify code: yes"));
     assert!(!request.contains("CALLBACK_PRIVATE_ERROR"));
-    assert!(!request.contains(IMMEDIATE));
+    assert!(!request.contains(OLD_IMMEDIATE));
 }
 
 async fn assert_clean(harness: &Harness, io: &CallbackIo, provider: &Provider, context: &str) {
@@ -416,7 +440,7 @@ async fn assert_clean(harness: &Harness, io: &CallbackIo, provider: &Provider, c
     let training = tokio::fs::read_to_string(io.training_file.path())
         .await
         .unwrap();
-    for notice in [IMMEDIATE, QUEUED, STARTED] {
+    for notice in [OLD_IMMEDIATE, QUEUED, STARTED] {
         assert!(!history.contains(notice));
         assert!(!graph_text.contains(notice));
         assert!(!training.contains(notice));

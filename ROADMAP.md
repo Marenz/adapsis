@@ -1,5 +1,22 @@
 # AdapsisOS Roadmap
 
+## Owner UX correction 2026-11-13 — quiet queue feedback (#147), pending deployment
+
+- Owner: "not desired behavior btw, I don't want a processing message confirm
+  every time like that.. I mean think about what desired behavior we want".
+  DESIGN.md I6 records the decision: normal conversation answers directly;
+  confidence comes from meaningful delay feedback, not routine acknowledgement.
+- This correction removes runtime notices on immediate lock acquisition and
+  queues shorter than 10 seconds. Only a still-waiting queue may launch one
+  notice; after acquisition a paired start requires that notice to have already
+  launched. Lifecycle gating suppresses delayed queue sends after acquisition
+  or turn end. Existing pinned callback authority and five-second attempt/drain
+  bounds are preserved; an already-running callback may still arrive late.
+- This does not implement substantive task progress, per-action reporting,
+  typing indicators, task classification or a task system. #148 image handling
+  and the recorded live-baseline #96 defect are unchanged. The deployed record
+  below remains historical evidence of the now-rejected always-acknowledge UX.
+
 ## Deployed 2026-11-12 20:33 UTC — here receipt/start feedback (#147), `c7a4927`
 
 - Manager installed binary sha256

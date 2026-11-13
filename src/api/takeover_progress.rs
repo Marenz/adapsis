@@ -4,13 +4,31 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{OwnedMutexGuard, mpsc};
 
-pub(super) const IMMEDIATE: &str = "Message received. I am starting to process it now.";
-pub(super) const QUEUED: &str = "Message received. It is queued behind earlier work in this chat.";
+pub(super) const QUEUED: &str = "Your message is waiting behind earlier work in this chat.";
 pub(super) const STARTED: &str = "I am now processing your queued message.";
+const QUEUE_NOTICE_AFTER: Duration = Duration::from_secs(10);
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+tokio::task_local! { pub(super) static TEST_QUEUE_DELAY: Duration; }
+
+#[derive(Default)]
+struct State {
+    ended: bool,
+    waiting: bool,
+    queue_launched: bool,
+}
+
+struct Callback {
+    function: String,
+    argument: String,
+    sender: mpsc::Sender<IoRequest>,
+    registry: TaskRegistry,
+}
+
 pub(super) struct Progress {
-    ended: Arc<Mutex<bool>>,
+    state: Arc<Mutex<State>>,
+    callback: Option<Callback>,
     events: Option<mpsc::Sender<&'static str>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -22,43 +40,79 @@ impl Progress {
         sender: mpsc::Sender<IoRequest>,
         registry: TaskRegistry,
     ) -> Self {
-        let ended = Arc::new(Mutex::new(false));
-        let Some((function, argument)) = function.zip(argument) else {
-            return Self {
-                ended,
-                events: None,
-                worker: None,
-            };
+        Self {
+            state: Arc::new(Mutex::new(State::default())),
+            callback: function.zip(argument).map(|(function, argument)| Callback {
+                function,
+                argument,
+                sender,
+                registry,
+            }),
+            events: None,
+            worker: None,
+        }
+    }
+
+    fn notify_waiting(&mut self) {
+        let Some(callback) = self.callback.take() else {
+            return;
         };
         let (events, receiver) = mpsc::channel(2);
         let worker = tokio::spawn(run(
             receiver,
-            ended.clone(),
-            function,
-            argument,
-            sender,
-            registry,
+            self.state.clone(),
+            callback.function,
+            callback.argument,
+            callback.sender,
+            callback.registry,
         ));
-        Self {
-            ended,
-            events: Some(events),
-            worker: Some(worker),
-        }
+        self.events = Some(events);
+        self.worker = Some(worker);
+        self.emit(QUEUED);
     }
 
-    pub(super) async fn acquire(&self, lock: Arc<tokio::sync::Mutex<()>>) -> OwnedMutexGuard<()> {
-        match lock.clone().try_lock_owned() {
-            Ok(guard) => {
-                self.emit(IMMEDIATE);
-                guard
-            }
-            Err(_) => {
-                self.emit(QUEUED);
-                let guard = lock.lock_owned().await;
-                self.emit(STARTED);
-                guard
-            }
+    pub(super) async fn acquire(
+        &mut self,
+        lock: Arc<tokio::sync::Mutex<()>>,
+    ) -> OwnedMutexGuard<()> {
+        let delay = QUEUE_NOTICE_AFTER;
+        #[cfg(test)]
+        let delay = TEST_QUEUE_DELAY.try_with(|delay| *delay).unwrap_or(delay);
+        self.acquire_after(lock, tokio::time::sleep(delay)).await
+    }
+
+    async fn acquire_after(
+        &mut self,
+        lock: Arc<tokio::sync::Mutex<()>>,
+        notice_after: impl std::future::Future<Output = ()>,
+    ) -> OwnedMutexGuard<()> {
+        if let Ok(guard) = lock.clone().try_lock_owned() {
+            return guard;
         }
+        let acquire = lock.lock_owned();
+        tokio::pin!(acquire);
+        tokio::select! {
+            biased;
+            guard = &mut acquire => return guard,
+            _ = notice_after => {},
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.waiting = true;
+        }
+        self.notify_waiting();
+        let guard = acquire.await;
+        let queue_launched = self
+            .state
+            .lock()
+            .map(|mut state| {
+                state.waiting = false;
+                state.queue_launched
+            })
+            .unwrap_or(false);
+        if queue_launched {
+            self.emit(STARTED);
+        }
+        guard
     }
 
     fn emit(&self, message: &'static str) {
@@ -69,8 +123,9 @@ impl Progress {
     }
 
     fn end(&mut self) {
-        if let Ok(mut ended) = self.ended.lock() {
-            *ended = true;
+        if let Ok(mut state) = self.state.lock() {
+            state.ended = true;
+            state.waiting = false;
         }
         self.events.take();
     }
@@ -100,7 +155,7 @@ impl Drop for Progress {
 
 async fn run(
     mut events: mpsc::Receiver<&'static str>,
-    ended: Arc<Mutex<bool>>,
+    state: Arc<Mutex<State>>,
     function: String,
     argument: String,
     sender: mpsc::Sender<IoRequest>,
@@ -108,7 +163,7 @@ async fn run(
 ) {
     while let Some(message) = events.recv().await {
         let attempt = attempt(
-            &ended,
+            &state,
             &function,
             &argument,
             message,
@@ -134,7 +189,7 @@ async fn run(
 }
 
 async fn attempt(
-    ended: &Mutex<bool>,
+    state: &Mutex<State>,
     function: &str,
     argument: &str,
     message: &str,
@@ -152,9 +207,15 @@ async fn attempt(
     {
         // End/check/launch is one synchronous critical section. In particular,
         // channel backpressure cannot launch a queued notice after turn end.
-        let ended = ended.lock().map_err(|_| ())?;
-        if *ended {
+        let mut state = state.lock().map_err(|_| ())?;
+        if state.ended
+            || (message == QUEUED && !state.waiting)
+            || (message == STARTED && !state.queue_launched)
+        {
             return Ok(false);
+        }
+        if message == QUEUED {
+            state.queue_launched = true;
         }
         permit.send(request);
     }

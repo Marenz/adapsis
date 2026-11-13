@@ -12,6 +12,7 @@ pub(super) struct Launch {
 }
 
 pub(super) struct CallbackIo {
+    pub queue_delay: std::time::Duration,
     pub sender: mpsc::Sender<IoRequest>,
     pub registry: TaskRegistry,
     pub launches: Arc<Mutex<Vec<Launch>>>,
@@ -62,6 +63,7 @@ impl CallbackIo {
             gate.clone(),
         ));
         Self {
+            queue_delay: std::time::Duration::ZERO,
             sender,
             registry,
             launches,
@@ -109,10 +111,47 @@ impl CallbackIo {
             None,
             harness.native_tools,
         );
+        let future =
+            crate::api::takeover_progress::TEST_QUEUE_DELAY.scope(self.queue_delay, future);
         tokio::time::timeout(std::time::Duration::from_secs(15), future)
             .await
             .unwrap()
             .unwrap()
+    }
+
+    pub async fn queued_turn(
+        &self,
+        harness: &Harness,
+        provider: &Provider,
+        context: &str,
+        principal: &str,
+        text: &str,
+        pair: (Option<&str>, Option<&str>),
+    ) -> String {
+        let (blocker, release) = held_provider(harness.native_tools, false).await;
+        let first = self.turn(
+            harness,
+            &blocker,
+            context,
+            ADMIN,
+            "queue blocker",
+            (None, None),
+        );
+        tokio::pin!(first);
+        tokio::select! {
+            _ = &mut first => panic!("blocker provider is held"),
+            _ = until(|| blocker.requests.lock().unwrap().len() == 1) => {},
+        }
+        let before = self.launches.lock().unwrap().len();
+        let second = self.turn(harness, provider, context, principal, text, pair);
+        tokio::pin!(second);
+        tokio::select! {
+            _ = &mut second => panic!("must queue behind first turn"),
+            _ = until(|| self.launches.lock().unwrap().len() > before) => {},
+        }
+        release.add_permits(1);
+        let (_, result) = tokio::join!(first, second);
+        result
     }
 }
 
