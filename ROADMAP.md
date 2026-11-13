@@ -1,7 +1,22 @@
 # AdapsisOS Roadmap
 
-## Owner UX correction 2026-11-13 — quiet queue feedback (#147), pending deployment
+## Deployed 2026-11-13 — quiet queue feedback (#147), `47fe43c`
 
+- Manager installed binary sha256
+  `615f3dd45ff1c2756d29928961a0c944e0fb681d26d8f29d60c04261104ebca5`.
+  PID 3852743, NRestarts 0, six unchanged managed modules; preflight stable and
+  checkpoint passed. Runtime and persisted unit use `chatgpt/gpt-6.1-sol`; this
+  model-setting change was separate from the source-only quiet-feedback patch.
+- Independent source review accepted. One full release gate: 2406 unit passed,
+  only known strict parity failed (334/58/181, zero AST mismatches or
+  non-idempotence), seven ignored; CLI 5/5, startup 9/9, Result CLI 4/4.
+  Focused progress 15/15 and takeover 55/55 passed; explicit release build passed.
+- **Live quiet-turn verification confirmed:** manager resubmitted the failed
+  request as normal text 550541 at 18:11:21 UTC; the single answer 550542 arrived
+  at 18:11:40 UTC, with no receipt/processing/start messages between. Provider
+  latency was 17,415 ms, native finish took one generation, no errors, exact model
+  `chatgpt/gpt-6.1-sol`. No printer/code/module changes were requested or performed.
+  The queued path remains offline-tested only; this is not live queue certification.
 - Owner: "not desired behavior btw, I don't want a processing message confirm
   every time like that.. I mean think about what desired behavior we want".
   DESIGN.md I6 records the decision: normal conversation answers directly;
@@ -17,7 +32,7 @@
   and the recorded live-baseline #96 defect are unchanged. The deployed record
   below remains historical evidence of the now-rejected always-acknowledge UX.
 
-## Deployed 2026-11-12 20:33 UTC — here receipt/start feedback (#147), `c7a4927`
+## Historical deployment 2026-11-12 20:33 UTC — here receipt/start feedback (#147), `c7a4927`
 
 - Manager installed binary sha256
   `218ba5bd6a1b60a247b35d01a5532a399255decf0fee20194792b99e00c9c21f`.

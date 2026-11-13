@@ -10,7 +10,21 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- **Current here deployment (2026-11-12, #147): `c7a4927`**, binary sha256
+- **Current here deployment (2026-11-13, quiet #147): `47fe43c`**, binary sha256
+  `615f3dd45ff1c2756d29928961a0c944e0fb681d26d8f29d60c04261104ebca5`.
+  Manager verified PID 3852743, NRestarts 0, six unchanged managed modules and
+  stable preflight/checkpoint. Model `chatgpt/gpt-6.1-sol` is persisted in the
+  unit and verified at runtime; that operator configuration change is separate
+  from this source-only quiet-feedback patch. Per owner decision DESIGN.md I6,
+  ordinary turns and short lock queues are silent; only a 10-second lock wait
+  may launch a queue notice, with a paired start only if that notice launched.
+  Manager verified real normal-text intake 550541 at 18:11:21 UTC and the single
+  answer 550542 at 18:11:40 UTC, with no receipt/processing/start messages between.
+  Provider latency was 17,415 ms; native finish took one generation with no errors,
+  on exact model `chatgpt/gpt-6.1-sol`. The queued path is offline-tested only,
+  not live-certified. #148 is retained; substantive
+  task progress, typing indicators, #104 delivery semantics and #96 remain open.
+- **Historical receipt/start deployment (2026-11-12, #147): `c7a4927`**, binary sha256
   `218ba5bd6a1b60a247b35d01a5532a399255decf0fee20194792b99e00c9c21f`.
   Manager verified PID 2349670, NRestarts 0, 275/275 startup cases and six managed
   modules (Buddy unchanged). Real Telegram intake 549374 and automatic runtime
@@ -21,8 +35,8 @@ narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
   known live-baseline #96 JIT relocation defect are not fixed. #147's diagnosis
   quality and blocking-recheck problems remain open beyond this feedback slice.
   **Owner UX correction (2026-11-13, DESIGN.md I6):** routine receipt/start
-  messages from this deployed baseline were rejected as chat noise. The pending
-  correction stays silent unless a conversation-lock queue lasts 10 seconds;
+  messages from this baseline were rejected as chat noise. `47fe43c` supersedes
+  them, staying silent unless a conversation-lock queue lasts 10 seconds;
   substantive task progress and typing indicators remain separate work.
 - **Historical image hotfix deployment (2026-11-12, #148): `7201856`**, binary sha256
   `0b37c7ceb32e32db01ec6f340101f493753982cc4f0ba89eb930850773ee514e`.
