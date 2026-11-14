@@ -1,6 +1,35 @@
 # AdapsisOS Roadmap
 
-## Live acceptance blocked 2026-11-14 — workspace protocol contradiction (#129/#147)
+## Deployed 2026-11-14 — direct workspace tools live (#129/#147), `2bd7fec`
+
+- Manager installed `2bd7fec` atop `3678a5b`; binary sha256
+  `55fdc0f570fc678ee4cc2b637fdf541d29117c01bc2cc19dd96d59a005beb5d8`, PID 718631,
+  NRestarts 0, 275/275 startup cases, six modules. Fresh preflight save, no
+  in-flight work, all seven live baseline files unchanged, activation backup
+  taken; strict personalized creative gate and authored-context `cmp` passed with
+  no permission change. Registry is the sole default `adapsis`, base exactly
+  `2bd7fec` at `Projects/adapsis-wt`, shared acceptance target/jobs6.
+- **Real same-request acceptance:** owner-private Telegram 550948 (13:15:01 UTC)
+  → Kronk 550949 (13:15:28 UTC) `DIRECT129-WORKSPACE-OK`. Server metadata: six
+  calls all ok (`workspace_open` 141 ms, `write` 19, `read` 0, `edit` 18, `bash`
+  69, `close` 139); assertion exit 0; self-created smoke file deleted and clean
+  workspace removed; all seven authoritative files unchanged at revision 269; no
+  helper module, source/config/service/printer change or push by the bot. The same
+  HTTP `main` `workspace_status` request now takes 5.7 s and returns successfully
+  with no active workspace/open workspaces; the earlier one-off native `run`
+  likewise needed no helper module.
+- The preceding failed activation and its 6-vs-16 schema/protocol reproduction
+  remain history below. Fix accepted by reviewer
+  `ses_e2607a49effezRQAThMNe06L4M`; product change is `2bd7fec` (`3678a5b` plus the
+  enabled-only closed-list correction) and the binary above. This certifies direct
+  tool usability, not physical print-task ownership, named secret capabilities or
+  W3. #136/old cache permissions are parked; #104, #145, named secrets, W3 and the
+  task MVP remain open. Owner reported several manual restarts and difficult blue
+  loading, later "works now, apparently"; no cause/deposition is certified, the
+  current attempt is left undisturbed, and the prior black-spool left/right plus
+  shelf parts remain unfinished.
+
+## Historical failed activation 2026-11-14 — workspace protocol contradiction (#129/#147)
 
 - Manager deployed `3678a5b`, binary `f541a5ed…`, PID 678264, NRestarts 0,
   275/275 startup cases and six modules. Direct native `run` succeeded without a
@@ -23,10 +52,11 @@
   `55fdc0f570fc678ee4cc2b637fdf541d29117c01bc2cc19dd96d59a005beb5d8`.
   Corrective source review ACCEPT: `ses_e2607a49effezRQAThMNe06L4M`, reviewed
   diff `5309e6757e0a3bbe774374d0319f70a849c2ee9725c33aeb9d7e3db9ae99adbc`.
-  This results update is docs-only; actual manager-run post-fix tool-call
-  acceptance is still required, not inferred from a model's permission prose.
+  This results update was docs-only; actual manager-run post-fix tool-call
+  acceptance subsequently passed in `2bd7fec` above, not inferred from a model's
+  permission prose.
 
-## Candidate 2026-11-14 — reviewed W2 + quiet/outcome integration (#129/#147/#151)
+## Historical integration checkpoint 2026-11-14 — reviewed W2 + quiet/outcome (#129/#147/#151)
 
 - Writer `ses_e2ec28eb9ffeyAROXQzG2ZDNxq` merges reviewed `faaad9d` into
   `85cf929` without a commit or deployment; #136 WIP is excluded.

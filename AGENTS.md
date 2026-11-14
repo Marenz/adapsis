@@ -10,7 +10,28 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- **Current here deployment (2026-11-14, native outcome #151): `dc19bb9`**, binary sha256
+- **Current here deployment (2026-11-14, direct workspace tools #129/#147): `2bd7fec`**,
+  binary sha256 `55fdc0f570fc678ee4cc2b637fdf541d29117c01bc2cc19dd96d59a005beb5d8`.
+  Manager installed PID 718631, NRestarts 0, 275/275 startup cases, six modules;
+  fresh preflight save, no in-flight work and all seven live baseline files
+  unchanged; activation backup taken; strict personalized creative check and
+  authored-context `cmp` passed, with no permission change. The default registry
+  is the sole `adapsis`, base exactly `2bd7fec` at `Projects/adapsis-wt` with the
+  shared acceptance target/jobs6.
+  Owner-private Telegram 550948 (13:15:01 UTC) → 550949 (13:15:28 UTC)
+  `DIRECT129-WORKSPACE-OK`; server metadata shows six successful calls
+  (`workspace_open` 141 ms, `write` 19, `read` 0, `edit` 18, `bash` 69, `close`
+  139), assertion exit 0, self-created smoke file deleted and clean workspace
+  removed; all seven live authoritative files unchanged at revision 269. No helper
+  module, source/config/service/printer change or push by Kronk. The identical
+  local HTTP `workspace_status` request now completes in 5.7 s with the tool
+  successful and no active workspace/open workspaces; the earlier one-off native
+  `run` similarly needed no helper module. This certifies actual direct-tool
+  usability, not physical print-task ownership, named secret capabilities or W3
+  completion. Quiet #147, outcome #151 and image #148 behavior are preserved.
+  #136 and the old external-cache-permissions task remain parked; #104, #145,
+  named secrets, W3 and the task MVP are not done.
+- **Historical native-outcome deployment (2026-11-14, #151): `dc19bb9`**, binary sha256
   `70424d24857a381b9b232db6513c5f049b5df85faeb855b837407ed671856416`.
   Manager verified PID 527495, NRestarts 0, 275 startup cases and six unchanged
   managed modules. Exact model `chatgpt/gpt-6.1-sol`, quiet #147 and image #148
@@ -485,7 +506,7 @@ N3, N5/N6, C4.
   `cargo test --release http_` and `a_disconnected` (HTTP `main`, the real HTTP layer,
   a client disconnect), `origin`, `cut_off`, `conversation_view`.
 
-### W2 repository changes and foreground commands (#129, candidate, not deployed)
+### W2 repository changes and foreground commands (#129, deployed 2026-11-14 in `2bd7fec`)
 
 - `edit(path,old,new,replace_all?)` and `write(path,content)` share the existing
   read-ledger/freshness, atomic-file, CRLF and cut-line rules. Their TOTAL JSON arguments
