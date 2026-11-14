@@ -2,34 +2,34 @@ use anyhow::{Result, anyhow, bail};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::ast;
-use crate::compiler::CompiledProgram;
 use crate::intern::{self, InternedId, SharedInterner, StringInterner};
 use crate::parser;
 use crate::vm;
+mod bounded;
 mod json;
+mod stack;
+mod strings;
 mod jit_dispatch;
 mod invocation;
+pub(crate) mod meter;
 mod statement_execution;
 mod tracing;
 pub use tracing::trace_function;
 pub(crate) use statement_execution::eval_function_body;
-pub use invocation::{eval_declared_function, eval_declared_function_unframed};
+pub use invocation::{eval_declared_function, eval_declared_function_unframed, eval_detached_block};
+pub use stack::on_deep_stack;
 pub(crate) mod result_contract;
 #[cfg(test)]
 mod jit_cache_tests;
-mod strings;
 
-/// Cache for JIT-compiled programs, keyed by session revision.
-/// When the revision matches, the compiled module is reused instead of recompiling.
-pub type JitCache = Arc<Mutex<Option<(usize, CompiledProgram)>>>;
-
-/// Create a new empty JIT cache.
-pub fn new_jit_cache() -> JitCache {
-    Arc::new(Mutex::new(None))
-}
+pub use jit_dispatch::{JitCache, contained_panic as jit_contained_panic, new_jit_cache};
+#[cfg(test)]
+pub(crate) use jit_dispatch::seam as jit_seam;
+#[cfg(test)]
+mod jit_containment_tests;
 
 /// #92: `i64::MIN / -1` and `i64::MIN % -1` overflow in Rust's inherent
 /// operators (panic in debug, wrap in release). Every execution tier must agree,
@@ -1785,6 +1785,7 @@ fn execute_statement(
                 );
             }
         }
+        meter::tick()?;
         match &stmt.kind {
             ast::StatementKind::Let { name, value, .. } => {
                 let val = eval_ast_expr(program, value, env)?;
@@ -1836,6 +1837,7 @@ fn execute_statement(
                 match iter_val {
                     Value::List(items) => {
                         for item in items.iter().cloned() {
+                            meter::tick()?;
                             env.push_scope();
                             env.set(&binding.name, item);
                             let result = eval_function_body(program, each_body, env);
@@ -1853,6 +1855,7 @@ fn execute_statement(
                     }
                     Value::Set(items) => {
                         for item in items.iter().cloned() {
+                            meter::tick()?;
                             env.push_scope();
                             env.set(&binding.name, item);
                             let result = eval_function_body(program, each_body, env);
@@ -1869,6 +1872,7 @@ fn execute_statement(
                     }
                     Value::Map(entries) => {
                         for (k, v) in entries.iter().cloned() {
+                            meter::tick()?;
                             env.push_scope();
                             // Binding is a 2-element list [key, value]
                             env.set(&binding.name, Value::list(vec![k, v]));
@@ -2090,17 +2094,12 @@ fn execute_statement(
                         set_shared_program(Some(std::sync::Arc::new(program.clone())));
                     }
                     // Ensure mutation builtins can write to the program AST via thread-local.
+                    // The classification lives next to the registry (builtins/program_effects.rs).
                     let is_mutation_builtin = matches!(
-                        call.callee.as_str(),
-                        "mutate"
-                            | "fn_remove"
-                            | "type_remove"
-                            | "module_remove"
-                            | "module_create"
-                            | "fn_replace"
-                            | "move_symbols"
+                        crate::builtins::program_effects::program_access(&call.callee),
+                        Some(crate::builtins::program_effects::ProgramAccess::Edits)
                     );
-                    if is_mutation_builtin {
+                    if is_mutation_builtin && !handle.program_frozen() {
                         // Create a mutable wrapper if not already set
                         if get_shared_program_mut().is_none() {
                             set_shared_program_mut(Some(std::sync::Arc::new(
@@ -2108,7 +2107,15 @@ fn execute_statement(
                             )));
                         }
                     }
+                    let metered = meter::active();
+                    if metered {
+                        meter::check_builtin(&call.callee)?;
+                        meter::admit_arguments(&args)?;
+                    }
                     let result = handle.execute_await(&call.callee, &args)?;
+                    if metered {
+                        meter::admit_value(&result)?;
+                    }
                     // See note above: reassign an existing outer-scope binding
                     // rather than shadowing it in the current block scope.
                     env.set_existing(name, result);
@@ -2119,6 +2126,10 @@ fn execute_statement(
                     Some(Value::CoroutineHandle(h)) => h.clone(),
                     _ => bail!("+spawn requires async context"),
                 };
+                if meter::active() {
+                    meter::check_statement("spawn")?;
+                    meter::io_call("spawn")?;
+                }
                 let args: Vec<Value> = call
                     .args
                     .iter()
@@ -2135,6 +2146,7 @@ fn execute_statement(
                     .try_send(crate::coroutine::IoRequest::Spawn {
                         function_name: spawn_fn_name,
                         args,
+                        program_frozen: handle.program_frozen(),
                         reply: reply_tx,
                     })
                     .map_err(|e| anyhow::anyhow!("+spawn failed to send: {e}"))?;
@@ -2164,6 +2176,7 @@ fn execute_statement(
                     if iterations > 10000 {
                         bail!("while loop exceeded 10000 iterations — possible infinite loop");
                     }
+                    meter::tick()?;
                     env.push_scope();
                     let result = eval_function_body(program, body, env);
                     env.pop_scope();
@@ -2183,6 +2196,9 @@ fn execute_statement(
             }
             // Source statements — send IoRequest::SourceAdd in async context
             ast::StatementKind::Source(op) => {
+                if meter::active() {
+                    meter::check_statement("a source declaration")?;
+                }
                 match op {
                     ast::SourceOp::Add {
                         source_type,
@@ -2223,6 +2239,9 @@ fn execute_statement(
             }
             // Event statements — evaluate emit expressions
             ast::StatementKind::Event(op) => {
+                if meter::active() {
+                    meter::check_statement("an event statement")?;
+                }
                 if let ast::EventOp::Emit { value, .. } = op {
                     let _val = eval_ast_expr(program, value, env)?;
                 }
@@ -2395,8 +2414,8 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                 bail!("error_suggest() expects 1 argument");
             }
             let message = match &args[0] {
-                Value::String(s) => s.as_ref().clone(),
-                other => format!("{other}"),
+                Value::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
+                other => std::borrow::Cow::Owned(meter::render(other, 0)?),
             };
             let lower = message.to_lowercase();
             let suggestion = if lower.contains("undefined variable") {
@@ -2440,11 +2459,14 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                         parts.push(std::borrow::Cow::Borrowed(s.as_ref()));
                     }
                     other => {
-                        let formatted = format!("{other}");
+                        let formatted = meter::render(other, total_len)?;
                         total_len += formatted.len();
                         parts.push(std::borrow::Cow::Owned(formatted));
                     }
                 }
+                // Inside a run block: refuse before the result (or the next rendering)
+                // is allocated.
+                meter::reserve(total_len)?;
             }
             let mut result = String::with_capacity(total_len);
             for part in &parts {
@@ -2456,7 +2478,7 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             if args.len() != 1 {
                 bail!("to_string() expects 1 argument");
             }
-            Ok(Value::string(format!("{}", args[0])))
+            Ok(Value::string(meter::render(&args[0], 0)?))
         }
         "char_at" => {
             if args.len() != 2 {
@@ -2556,34 +2578,8 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
                 ),
             }
         }
-        "regex_match" => {
-            if args.len() != 2 {
-                bail!("regex_match(pattern, text) expects 2 arguments");
-            }
-            match (&args[0], &args[1]) {
-                (Value::String(pattern), Value::String(text)) => match regex::Regex::new(pattern) {
-                    Ok(re) => Ok(Value::Bool(re.is_match(text))),
-                    Err(_) => Ok(Value::Bool(false)),
-                },
-                _ => bail!("regex_match expects (String, String)"),
-            }
-        }
-        "regex_replace" => {
-            if args.len() != 3 {
-                bail!("regex_replace(pattern, replacement, text) expects 3 arguments");
-            }
-            match (&args[0], &args[1], &args[2]) {
-                (Value::String(pattern), Value::String(replacement), Value::String(text)) => {
-                    match regex::Regex::new(pattern) {
-                        Ok(re) => Ok(Value::string(
-                            re.replace_all(text, replacement.as_ref()).into_owned(),
-                        )),
-                        Err(e) => bail!("regex_replace: invalid pattern '{}': {}", pattern, e),
-                    }
-                }
-                _ => bail!("regex_replace expects (String, String, String)"),
-            }
-        }
+        "regex_match" => bounded::regex_match(&args),
+        "regex_replace" => bounded::regex_replace(&args),
         "index_of" => {
             if args.len() != 2 {
                 bail!("index_of(s, substr) expects 2 arguments");
@@ -2602,6 +2598,12 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(delim)) => {
+                    if meter::active() {
+                        // Every part is a value of its own (an empty delimiter yields
+                        // one per character): bound the list before building it.
+                        let count = s.split(delim.as_str()).count();
+                        meter::reserve_shape(count + 1, count + 1, s.len())?;
+                    }
                     let parts: Vec<Value> = s
                         .split(delim.as_ref())
                         .map(|p| Value::string(p.to_string()))
@@ -2639,7 +2641,7 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             }
             match &args[0] {
                 Value::String(json_str) => {
-                    let parsed: serde_json::Value = serde_json::from_str(json_str)
+                    let parsed: serde_json::Value = bounded::parse_json(json_str)?
                         .map_err(|e| anyhow!("json_array_len: invalid JSON: {e}"))?;
                     match &parsed {
                         serde_json::Value::Array(arr) => Ok(Value::Int(arr.len() as i64)),
@@ -2655,6 +2657,10 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             }
             match &args[0] {
                 Value::String(s) => {
+                    if meter::active() {
+                        let escapes = s.bytes().filter(|b| matches!(b, b'\\' | b'"' | b'\n' | b'\r' | b'\t')).count();
+                        meter::reserve(s.len() + escapes)?;
+                    }
                     let mut escaped = String::with_capacity(s.len());
                     for ch in s.chars() {
                         match ch {
@@ -2677,6 +2683,7 @@ fn eval_builtin_string(callee: &str, args: Vec<Value>) -> Result<Value> {
             }
             match &args[0] {
                 Value::String(s) => {
+                    meter::reserve(s.len().div_ceil(3) * 4)?;
                     use base64::Engine;
                     let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
                     Ok(Value::string(encoded))
@@ -2735,14 +2742,29 @@ fn eval_builtin_list(callee: &str, args: Vec<Value>) -> Result<Value> {
                     // Use raw string content for String elements; the Display impl
                     // quotes strings ("..."), which is wrong for a text join. Fall
                     // back to Display only for non-String values.
-                    let parts: Vec<String> = items
-                        .iter()
-                        .map(|v| match v {
-                            Value::String(s) => s.as_ref().clone(),
-                            other => format!("{other}"),
-                        })
-                        .collect();
-                    Ok(Value::string(parts.join(delim.as_ref())))
+                    // The exact size is known before anything is built: inside a run
+                    // block it is checked first (K parts and a long delimiter used to
+                    // allocate K times the delimiter before any limit saw it).
+                    let mut parts: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(items.len());
+                    let mut total = delim.len().saturating_mul(items.len().saturating_sub(1));
+                    meter::reserve(total)?;
+                    for item in items.iter() {
+                        let part = match item {
+                            Value::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
+                            other => std::borrow::Cow::Owned(meter::render(other, total)?),
+                        };
+                        total = total.saturating_add(part.len());
+                        meter::reserve(total)?;
+                        parts.push(part);
+                    }
+                    let mut joined = String::with_capacity(total);
+                    for (index, part) in parts.iter().enumerate() {
+                        if index > 0 {
+                            joined.push_str(delim);
+                        }
+                        joined.push_str(part);
+                    }
+                    Ok(Value::string(joined))
                 }
                 _ => bail!("join expects (List, String)"),
             }
@@ -2981,12 +3003,16 @@ fn eval_builtin_map(callee: &str, args: Vec<Value>) -> Result<Value> {
                 bail!("map_entries(map) expects 1 argument");
             }
             match &args[0] {
-                Value::Map(entries) => Ok(Value::list(
-                    entries
-                        .iter()
-                        .map(|(k, v)| Value::list(vec![k.clone(), v.clone()]))
-                        .collect(),
-                )),
+                Value::Map(entries) => {
+                    // One new two-element list per entry.
+                    meter::reserve_shape(3 * entries.len() + 1, entries.len() + 1, 0)?;
+                    Ok(Value::list(
+                        entries
+                            .iter()
+                            .map(|(k, v)| Value::list(vec![k.clone(), v.clone()]))
+                            .collect(),
+                    ))
+                }
                 _ => bail!("map_entries expects Map"),
             }
         }
@@ -3072,7 +3098,7 @@ fn eval_builtin_math(callee: &str, args: Vec<Value>) -> Result<Value> {
                 bail!("abs() expects 1 argument");
             }
             match &args[0] {
-                Value::Int(n) => Ok(Value::Int(n.abs())),
+                Value::Int(n) => Ok(Value::Int(n.wrapping_abs())),
                 Value::Float(n) => Ok(Value::Float(n.abs())),
                 _ => bail!("abs() expects number"),
             }
@@ -3092,7 +3118,9 @@ fn eval_builtin_math(callee: &str, args: Vec<Value>) -> Result<Value> {
                 bail!("pow() expects 2 arguments");
             }
             match (&args[0], &args[1]) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(*b as u32))),
+                // Explicit wrapping: the release result, without the overflow panic a
+                // build with overflow checks would raise.
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_pow(*b as u32))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(*b))),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).powf(*b))),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.powi(*b as i32))),
@@ -3108,7 +3136,8 @@ fn eval_builtin_math(callee: &str, args: Vec<Value>) -> Result<Value> {
                     if *b == 0 {
                         bail!("division by zero")
                     }
-                    Ok(Value::Int(a / b))
+                    // i64::MIN / -1 overflows and panicked; wrap like the `/` operator.
+                    Ok(Value::Int(checked_div(*a, *b)))
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 / b)),
@@ -3130,7 +3159,7 @@ fn eval_builtin_math(callee: &str, args: Vec<Value>) -> Result<Value> {
                     if *b == 0 {
                         bail!("modulo by zero")
                     }
-                    Ok(Value::Int(a % b))
+                    Ok(Value::Int(checked_rem(*a, *b)))
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 % b)),
@@ -3347,6 +3376,18 @@ pub fn eval_builtin_or_user(
     args: Vec<Value>,
     env: &mut Env,
 ) -> Result<Value> {
+    if !meter::active() {
+        return eval_builtin_or_user_unmetered(program, callee, args, env);
+    }
+    meter::call(program, callee, args, env)
+}
+
+pub(super) fn eval_builtin_or_user_unmetered(
+    program: &ast::Program,
+    callee: &str,
+    args: Vec<Value>,
+    env: &mut Env,
+) -> Result<Value> {
     // Function stubs: intercept user function calls during tests.
     if let Some(function) = program.get_function(callee) {
         if let Some(Value::CoroutineHandle(handle)) = env.get_raw("__coroutine_handle") {
@@ -3388,7 +3429,7 @@ pub fn eval_builtin_or_user(
             if args.len() == 1 {
                 match &args[0] {
                     Value::String(s) => Ok(Value::Err(s.as_ref().clone().into())),
-                    other => Ok(Value::Err(format!("{other}").into())),
+                    other => Ok(Value::Err(meter::render(other, 0)?.into())),
                 }
             } else {
                 Ok(Value::Err("unknown".into()))
@@ -3611,7 +3652,11 @@ fn eval_ast_expr(program: &ast::Program, expr: &ast::Expr, env: &mut Env) -> Res
                 let val = eval_ast_expr(program, &f.value, env)?;
                 field_map.insert(intern::intern_display(&f.name), val);
             }
-            Ok(Value::strct_interned(intern::intern_display(ty), field_map))
+            let value = Value::strct_interned(intern::intern_display(ty), field_map);
+            if meter::active() {
+                meter::admit_value(&value)?;
+            }
+            Ok(value)
         }
     }
 }
@@ -4164,13 +4209,19 @@ pub fn eval_async_function(
     }
 
     // Tree-walker fallback
-    let mut env = Env::new_with_shared_interner(&program.shared_interner);
-    env.populate_shared_from_program(program);
     let input_val = eval_parser_expr_with_program(input, program)?;
-    env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    let mut env = invocation::async_tree_env(program, handle);
     bind_input_to_params(program, func, &input_val, &mut env);
     eval_declared_function(program, function_name, func, &mut env)
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod builtin_sweep_tests;
+#[cfg(test)]
+mod builtin_alloc_tests;
+#[cfg(test)]
+mod bounded_delta_tests;
+#[cfg(test)]
+mod stack_tests;

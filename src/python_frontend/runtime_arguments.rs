@@ -11,9 +11,18 @@ use std::collections::HashSet;
 /// Native Python entry preflight, not transitive authorization or payload validation.
 /// Inspect only the reachable graph in this snapshot, with tree resolution and no cache.
 pub fn validate_entry_await_contract(program: &Program, entry: &str) -> Result<(), String> {
+    let root = program.get_function(entry).ok_or("Python entry was not found")?;
+    validate_await_contract_from(program, root)
+}
+
+/// The same reachable-graph check from a root declaration that need not be in `program`
+/// (the native `run` tool's ad-hoc block, #129).
+pub fn validate_await_contract_from<'a>(
+    program: &'a Program,
+    root: &'a crate::ast::FunctionDecl,
+) -> Result<(), String> {
     use crate::ast::{StatementKind, Type};
     use crate::vm::await_admission::{expression_work, statement_work, Work};
-    let root = program.get_function(entry).ok_or("Python entry was not found")?;
     let mut visited = HashSet::new();
     let mut work = vec![Work::Function(root)];
     while let Some(item) = work.pop() {

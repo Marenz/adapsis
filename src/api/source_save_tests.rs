@@ -316,7 +316,7 @@ async fn finish_is_refused_once_for_a_fixable_unsaved_edit_of_this_turn() {
 /// no runtime line in the reply. It is visible in the tail and in inspect.
 #[tokio::test]
 async fn older_unsaved_module_does_not_refuse_a_later_turn_but_is_shown() {
-    let m = Managed::new(vec![
+    let mut m = Managed::new(vec![
         adapsis("deep", &too_deep("PyA", "long")),
         finish("first"),
         finish("second"),
@@ -325,6 +325,9 @@ async fn older_unsaved_module_does_not_refuse_a_later_turn_but_is_shown() {
         finish("later"),
     ])
     .await;
+    let repo = crate::workspace::test_support::RepoFixture::new();
+    m.fixture.config.workspaces = Some(repo.site("integration-tail"));
+    m.fixture.config.origin = Some(crate::api::origin::Origin::Local);
     m.fixture.run(false).await;
     let before = m.fixture.requests.lock().unwrap().len();
     let response = m.fixture.run(false).await;
@@ -335,6 +338,13 @@ async fn older_unsaved_module_does_not_refuse_a_later_turn_but_is_shown() {
     assert!(m.tool_result("look").contains(line), "{}", m.tool_result("look"));
     let request = m.fixture.requests.lock().unwrap()[before].to_string();
     assert_eq!(request.matches("Source NOT saved").count(), 1, "one line in the runtime tail of the new turn");
+    assert!(request.contains("Workspace of this conversation: none. Registered repositories: integration-tail."));
+    let requests = m.fixture.requests.lock().unwrap();
+    let wire = &requests[before];
+    let stable = wire["messages"][0]["content"].as_str().unwrap();
+    assert!(stable.contains("## Workspace tools") && !stable.contains("Source NOT saved") && !stable.contains("Workspace of this conversation"));
+    assert!(wire["tools"].as_array().unwrap().iter().any(|tool| tool["function"]["name"] == "read"));
+    assert_eq!(crate::context_log::gateway_boundary_errors(wire["messages"].as_array().unwrap()), Vec::<String>::new());
 }
 
 /// The cache prefix depends on it: with nothing unsaved the whole request is
@@ -573,11 +583,21 @@ async fn route_handler_mutation_starts_the_save_without_waiting_for_it() {
     config.io_sender = Some(sender);
     {
         let mut program = config.program.write().await;
-        // The handler lives in the scratch module, which is never source.
-        let handler = "+module RunToolScratch\n+fn handle (body:String)->String [io,async,mut]\n  +await done:String = mutate(\"+module PyB\\n+fn five ()->Int\\n  +return 5\\n+end\")\n  +return done\n+end\n";
+        let reserved = crate::parser::parse("+module RunToolScratch\n").unwrap();
+        assert!(crate::validator::apply_and_validate(&mut program, &reserved[0]).unwrap_err().to_string().contains("reserved"));
+        // Cached/pre-existing scratch state, never a declaration loophole:
+        // parse/validate an ordinary fixture module, then explicitly install
+        // that module under the reserved name. The route and its mutation/save
+        // still run through the real runtime below; scratch is never source.
+        let handler = "+module FixtureSaveRoute\n+fn handle (body:String)->String [io,async,mut]\n  +await done:String = mutate(\"+module PyB\\n+fn five ()->Int\\n  +return 5\\n+end\")\n  +return done\n+end\n";
+        let mut fixture = crate::ast::Program::default();
         for operation in crate::parser::parse(handler).unwrap() {
-            crate::validator::apply_and_validate(&mut program, &operation).unwrap();
+            crate::validator::apply_and_validate(&mut fixture, &operation).unwrap();
         }
+        let mut module = fixture.modules.remove(0);
+        module.name = "RunToolScratch".into();
+        program.modules.push(module);
+        program.rebuild_function_index();
     }
     config.runtime.write().unwrap().http_routes.push(crate::ast::HttpRoute { method: "POST".into(), path: "/edit".into(), handler_fn: "RunToolScratch.handle".into() });
     // The writer is held: the response must arrive anyway.
@@ -599,6 +619,8 @@ async fn route_handler_mutation_starts_the_save_without_waiting_for_it() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(m.state.unsaved().is_empty());
+    assert!(!m.dir.path().join("RunToolScratch.py").exists());
+    assert!(!m.file("library-sources.json").contains("RunToolScratch"));
 }
 
 /// Under a manifest a native Adapsis-source `mutate` cannot create a module
@@ -733,7 +755,7 @@ async fn disk_error_at_enrolment_or_dependency_update_is_an_environment_cause_pe
 async fn state_written_by_others_during_the_save_wait_is_not_reverted() {
     for native in [true, false] {
         let outputs = if native {
-            vec![python("edit", "PyA", "def three() -> int:\n    return 3\n"), finish("done")]
+            vec![python("edit", "PyA", "def three() -> int:\n    return 3\n"), tool("workspace", "workspace_status", json!({})), finish("done")]
         } else {
             vec![response("<code>\n+module PyA\n+fn three ()->Int\n  +return 3\n+end\n!done\n</code>", vec![])]
         };
@@ -742,6 +764,9 @@ async fn state_written_by_others_during_the_save_wait_is_not_reverted() {
         let release = m.state.hold_flushes_for_tests();
         let mut config = m.fixture.config.clone();
         config.native_tools = native;
+        let repo = crate::workspace::test_support::RepoFixture::new();
+        config.workspaces = Some(repo.site("save-wait-integration"));
+        config.origin = Some(crate::api::origin::Origin::Local);
         let turn = tokio::spawn(async move {
             llm_handlers::ask(State(config), Json(AskRequest { message: "edit".into(), caller: None })).await.0
         });

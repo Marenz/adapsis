@@ -4,6 +4,8 @@ use crate::api::takeover_progress::{QUEUED, STARTED};
 #[path = "takeover_progress_fixtures.rs"]
 mod fixtures;
 use fixtures::*;
+#[path = "takeover_progress_workspace_tests.rs"]
+mod workspace;
 
 const REPLY: &str = "ProgressFixture.reply";
 const OLD_IMMEDIATE: &str = "Message received. I am starting to process it now.";
@@ -343,11 +345,13 @@ async fn takeover_progress_callback_timeout_is_bounded_and_does_not_retry_provid
         (Some(REPLY), Some("destination")),
     );
     tokio::pin!(turn);
-    let started = std::time::Instant::now();
     tokio::select! {
         result = &mut turn => panic!("provider is held: {result}"),
         _ = until(|| io.launches.lock().unwrap().len() == 1 && provider.requests.lock().unwrap().len() == 1) => {},
     }
+    // Measure the bounded in-flight attempt/drain, not unrelated setup of two
+    // Ladybug/provider turns under the larger combined suite's parallel load.
+    let started = std::time::Instant::now();
     release.add_permits(1);
     let reply = tokio::time::timeout(std::time::Duration::from_secs(7), &mut turn)
         .await
@@ -410,41 +414,71 @@ async fn takeover_progress_fast_provider_error_suppresses_unlaunched_queued_star
 
 #[tokio::test]
 async fn takeover_progress_guest_callback_does_not_widen_conversational_authority() {
-    let mut harness = Harness::new(true);
-    let principal = "telegram:user:progress-guest";
-    let mut permissions = crate::permissions::PermissionConfig::default();
-    permissions
-        .principals
-        .insert(principal.into(), "progress-guest".into());
-    permissions
-        .guest_profiles
-        .insert("progress-guest".into(), vec!["web_search".into()]);
-    harness.permissions = Arc::new(permissions);
-    let io = CallbackIo::new(&harness, false).await;
-    let provider = provider(vec![output(false, 0)]).await;
-    assert_eq!(
-        io.turn(
-            &harness,
-            &provider,
-            "telegram:progress-guest",
-            principal,
-            "hello",
-            (Some(REPLY), Some("guest-destination"))
-        )
-        .await,
-        "final answer"
-    );
-    assert!(io.launches.lock().unwrap().is_empty());
-    let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(
-        requests[0].get("tools").is_none(),
-        "existing guest legacy routing"
-    );
-    let request = all_text(&requests[0]);
-    assert!(!request.contains("Add or modify code: yes"));
-    assert!(!request.contains("CALLBACK_PRIVATE_ERROR"));
-    assert!(!request.contains(OLD_IMMEDIATE));
+    for native in [true, false] {
+        let mut harness = Harness::new(native);
+        let principal = "telegram:user:progress-guest";
+        let mut permissions = crate::permissions::PermissionConfig::default();
+        permissions
+            .principals
+            .insert(principal.into(), "progress-guest".into());
+        permissions
+            .guest_profiles
+            .insert("progress-guest".into(), vec!["web_search".into()]);
+        harness.permissions = Arc::new(permissions);
+        let repo = crate::workspace::test_support::RepoFixture::new();
+        harness.workspaces = Some(repo.site("progress-guest"));
+        let io = CallbackIo::new(&harness, false).await;
+        let before = serde_json::to_string(&*harness.program.read().await).unwrap();
+        let revision = harness.meta.lock().unwrap().revision;
+        let provider = provider(vec![output(native, 0)]).await;
+        assert_eq!(
+            io.turn(
+                &harness,
+                &provider,
+                "telegram:progress-guest",
+                principal,
+                "hello",
+                (Some(REPLY), Some("guest-destination"))
+            )
+            .await,
+            "final answer"
+        );
+        assert!(io.launches.lock().unwrap().is_empty());
+        let requests = provider.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        if native {
+            // Current DESIGN L3: takeover guests are native. This original
+            // fixture has a guest profile but no model permission entry, so W1's
+            // existing fail-closed classifier gives exactly pure run + finish.
+            let names: Vec<_> = requests[0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["run", "finish"]);
+        } else {
+            assert!(
+                requests[0].get("tools").is_none(),
+                "explicit non-native control stays legacy"
+            );
+        }
+        let request = all_text(&requests[0]);
+        assert!(!request.contains("Add or modify code: yes"));
+        assert!(!request.contains("CALLBACK_PRIVATE_ERROR"));
+        assert!(!request.contains(OLD_IMMEDIATE));
+        assert!(
+            !request.contains("## Workspace tools")
+                && !request.contains("Workspace of this conversation")
+        );
+        assert_eq!(
+            serde_json::to_string(&*harness.program.read().await).unwrap(),
+            before
+        );
+        assert_eq!(harness.meta.lock().unwrap().revision, revision);
+        assert!(io.delivered.lock().unwrap().is_empty());
+        assert_clean(&harness, &io, &provider, "telegram:progress-guest").await;
+    }
 }
 
 async fn assert_clean(harness: &Harness, io: &CallbackIo, provider: &Provider, context: &str) {

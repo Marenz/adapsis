@@ -57,3 +57,16 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     }
     pi == p.len()
 }
+
+/// Stringify a call argument for mock/stub matching (issue #7).
+///
+/// For `Value::String` this returns the **raw content** (no surrounding Display
+/// quotes), so patterns match what the user actually wrote — and so anchored
+/// exact patterns (`^...$`) work. Other value kinds use their `Display` form.
+/// Substring patterns are unaffected (the quote chars were never their target).
+pub(super) fn mock_arg_string(arg: &super::Value) -> String {
+    match arg {
+        super::Value::String(s) => s.as_ref().clone(),
+        other => format!("{other}"),
+    }
+}

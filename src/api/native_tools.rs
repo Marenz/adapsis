@@ -28,11 +28,17 @@
 //! out of scope here (#79) — this module only guarantees the native path does
 //! not silently broaden them.
 //!
-//! * Eligibility (`native_tools_eligible`): non-guest, write-capable turns only.
+//! * Tool lists come from the speaker class of the pinned snapshot (`speaker.rs`,
+//!   DESIGN L3): writers keep the full list; execute-only speakers get `inspect`,
+//!   `evaluate`, restricted `run`, `finish` and the memory tools; guests get their
+//!   profile's turn-bound tools, restricted `run` and `finish`. A tool outside the
+//!   class's list is refused before its arguments are parsed.
 //! * `inspect` `source`/`deps` → target module **Read**.
 //! * `evaluate` → target module **Execute**.
 //! * `test` → target module **Write** (test persistence mutates the AST).
 //! * `mutate` → **Write** on every mentioned module (nested included).
+//! * `run` → the `mutate` checks for a function containing the block (**Write** on its
+//!   scope module, **Execute** on every referenced module); see `native_tools/run.rs`.
 //! * `finish` → `!done` against the *same* immutable baseline.
 //!
 //! Authority is read **only** from the caller-pinned config (`llm_model`) and
@@ -48,8 +54,14 @@ use crate::permissions::PermissionLevel;
 use crate::parser;
 mod authored;
 mod frontend;
+mod guest_tools;
 mod literals;
+mod run;
 mod scalar_entry;
+mod speaker;
+pub(crate) mod workspace;
+pub(in crate::api) use speaker::{speaker_class, SpeakerClass};
+pub(in crate::api) use crate::eval::meter::TurnBudget;
 
 // ── Bounds ─────────────────────────────────────────────────────────────────
 
@@ -102,14 +114,6 @@ impl NativeToolResult {
 
 // ── Eligibility ────────────────────────────────────────────────────────────
 
-fn is_guest(config: &AppConfig) -> bool {
-    config.permission_config.guest_profiles.contains_key(&model_name(config)) || config
-        .turn
-        .as_ref()
-        .and_then(|t| t.guest_tools.as_ref())
-        .is_some()
-}
-
 /// The pinned authority snapshot. `config.llm_model` is set by the caller
 /// (integrator's per-turn `permission_snapshot`) to the intersected active
 /// model; the native path reads it directly and applies **no** further model
@@ -131,26 +135,16 @@ fn module_of(target: &str) -> &str {
     target.split('.').next().unwrap_or(target)
 }
 
-/// Whether this turn may use native tools at all: non-guest and write-capable.
+/// Whether this turn is in the writer class: non-guest and write-capable. Restricted
+/// classes use native tools too, with their own lists (`speaker.rs`).
 ///
 /// Write-capability is resolved against the pinned authority snapshot
 /// (`config.llm_model`, the caller's intersected active model) and further
 /// narrowed by the turn identity (`turn.may_write`, `turn.guest_tools`). The
 /// caller pins the single authority; this only ever narrows it, never widens.
+#[cfg(test)]
 pub fn native_tools_eligible(config: &AppConfig) -> bool {
-    if is_guest(config) {
-        return false;
-    }
-    if let Some(turn) = config.turn.as_ref() {
-        if !turn.may_write {
-            return false;
-        }
-    }
-    let model = model_name(config);
-    config
-        .permission_config
-        .authority(config.access_level, &model)
-        .may_write
+    speaker_class(config) == SpeakerClass::Writer
 }
 
 // ── Tool definitions ───────────────────────────────────────────────────────
@@ -218,6 +212,7 @@ pub fn tool_definitions(config: &AppConfig) -> Vec<ToolDefinition> {
                 }),
             ),
         },
+        run::definition(obj),
         ToolDefinition {
             name: "finish".into(),
             description: "Conclude this interactive turn with a visible reply, subject to its test/save baseline. This does not certify physical job or durable task completion.".into(),
@@ -242,7 +237,7 @@ pub fn tool_definitions(config: &AppConfig) -> Vec<ToolDefinition> {
             },
             ToolDefinition {
                 name: "memory_remember".into(),
-                description: "Remember something permanently in THIS conversation (Ladybug). Scope context is the default; scope global is a governance choice. No context or speaker arguments: they are bound to this conversation.".into(),
+                description: "Remember something permanently in THIS conversation (Ladybug). Scope context is the default; scope global is a governance choice and is refused unless the speaker may change code. No context or speaker arguments: they are bound to this conversation.".into(),
                 parameters: obj(
                     &["content"],
                     serde_json::json!({
@@ -277,7 +272,7 @@ pub fn tool_definitions(config: &AppConfig) -> Vec<ToolDefinition> {
         ]);
     }
 
-    tools
+    speaker::definitions(config, tools)
 }
 
 // ── Argument parsing (pure, side-effect free) ──────────────────────────────
@@ -294,6 +289,10 @@ enum ParsedTool {
     Inspect { kind: InspectKind, target: Option<String>, format: frontend::SourceFormat },
     Mutate { source: crate::session::replay::Submission, operations: Vec<parser::Operation>, modules: Vec<String>, python: bool, roles: Option<crate::python_frontend::NativeReferences> },
     PythonMutate { source: String, module: String, preflight: crate::python_frontend::NativePreflight },
+    /// An ad-hoc block before signature-aware admission (`run`).
+    PythonRun { source: String, module: String, preflight: crate::python_frontend::NativePreflight },
+    /// An admitted ad-hoc block; never applied to a Program.
+    Run(run::Block),
     Test { source: crate::session::replay::Submission, operations: Vec<parser::Operation>, targets: Vec<String>, python: bool },
     Evaluate { function: String, source: crate::session::replay::Submission, operations: Vec<parser::Operation>, python: bool },
     MemoryInspect { query: String },
@@ -305,12 +304,18 @@ enum ParsedTool {
         valid_until_ms: Option<i64>,
     },
     MemoryForget { id: String },
+    /// A guest profile's turn-bound builtin, called directly with literal arguments.
+    TurnTool { op: &'static str, args: Vec<crate::eval::Value> },
     Finish,
 }
 
 fn parse_args_object(arguments: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    if arguments.len() > MAX_ARGUMENTS_BYTES {
-        return Err(format!("arguments exceed {MAX_ARGUMENTS_BYTES} bytes"));
+    parse_args_object_with_cap(arguments, MAX_ARGUMENTS_BYTES)
+}
+
+fn parse_args_object_with_cap(arguments: &str, cap: usize) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    if arguments.len() > cap {
+        return Err(format!("arguments exceed {cap} bytes"));
     }
     let value: serde_json::Value = serde_json::from_str(arguments)
         .map_err(|e| format!("arguments are not valid JSON: {e}"))?;
@@ -568,6 +573,7 @@ fn parse_tool(name: &str, arguments: &str) -> Result<ParsedTool, String> {
         "mutate" => frontend::parse_mutate(&map, false),
         "test" => frontend::parse_tests(&map, normalized.python),
         "evaluate" => frontend::parse_evaluate(&map, normalized.python),
+        "run" => run::parse(&map),
         "memory_inspect" => {
             reject_extra_fields(&map, &["query"])?;
             let query = take_string(&map, "query", false, MAX_TARGET_BYTES)?.unwrap_or_default();
@@ -632,6 +638,17 @@ fn parse_tool(name: &str, arguments: &str) -> Result<ParsedTool, String> {
     }
 }
 
+/// Parse for one speaker class: the tool must be on the class's list first.
+fn parse_for(class: &SpeakerClass, name: &str, arguments: &str) -> Result<ParsedTool, String> {
+    speaker::admit_tool(class, name)?;
+    match class {
+        SpeakerClass::Guest(_) if !matches!(name, "run" | "finish") && !speaker::is_memory_tool(name) => {
+            guest_tools::parse(name, &parse_args_object(arguments)?)
+        }
+        _ => parse_tool(name, arguments),
+    }
+}
+
 /// Preflight a single tool's arguments without any side effects.
 ///
 /// Validates only the argument schema and static constraints (closed object,
@@ -655,24 +672,39 @@ pub fn validate_native_tool_authorized(
     arguments: &str,
     config: &AppConfig,
 ) -> Result<(), String> {
-    if is_guest(config) {
-        return Err("native tool dispatch denied: guest turns are not eligible".to_string());
+    let class = speaker_class(config);
+    // Only for a turn that has workspace tools. For every other turn these names take
+    // the path of any name that is not a tool, with the same refusal text.
+    if workspace::is_tool(name) && workspace::available(config) {
+        return workspace::preflight(name, arguments);
     }
-    if !native_tools_eligible(config) {
-        return Err("native tool dispatch denied: not write-capable".to_string());
-    }
-    let parsed = parse_tool(name, arguments)?;
+    let parsed = parse_for(&class, name, arguments)?;
     let model = model_name(config);
-    check_authorization(&parsed, config, &model)
+    check_authorization(&parsed, config, &model, &class)
 }
 
 /// Per-module permission checks for a parsed tool. Single source of truth —
 /// shared by [`validate_native_tool_authorized`] and [`execute_native_tool`].
-fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> Result<(), String> {
+fn check_authorization(
+    parsed: &ParsedTool,
+    config: &AppConfig,
+    model: &str,
+    class: &SpeakerClass,
+) -> Result<(), String> {
     match parsed {
-        ParsedTool::PythonMutate { module, preflight, .. } => {
-            if resolve_module(config, model, module) < PermissionLevel::Write {
-                return Err(format!("permission denied: cannot modify module '{module}' (need Write)"));
+        // A block is authorized as the function it is lowered to: same two rules. A
+        // restricted speaker's block has no module scope to need Write on; it is held
+        // to the restricted call rule instead (pure builtins, own tools, Execute).
+        ParsedTool::PythonMutate { module, preflight, .. }
+        | ParsedTool::PythonRun { module, preflight, .. } => {
+            let restricted = class.restricted() && matches!(parsed, ParsedTool::PythonRun { .. });
+            if restricted {
+                run::restricted_admission(module, preflight, class)?;
+            } else if resolve_module(config, model, module) < PermissionLevel::Write {
+                return Err(match parsed {
+                    ParsedTool::PythonRun { .. } => run::write_denied(module),
+                    _ => format!("permission denied: cannot modify module '{module}' (need Write)"),
+                });
             }
             for target in &preflight.references {
                 if resolve_module(config, model, module_of(target)) < PermissionLevel::Execute {
@@ -701,14 +733,13 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
             InspectKind::Tasks | InspectKind::Library => {}
         },
         ParsedTool::Mutate { modules, operations, roles, .. } => {
-            for m in modules {
-                if resolve_module(config, &model, m) < PermissionLevel::Write {
-                    return Err(format!(
-                        "permission denied: cannot modify module '{m}' (need Write)"
-                    ));
-                }
-            }
-            authored::check_operations(operations, config, model, None, roles.as_ref())?;
+            authorize_declarations(modules, operations, roles.as_ref(), config, model)?;
+        }
+        ParsedTool::Run(block) if class.restricted() => {
+            authored::check_operations(&block.operations, config, model, None, Some(&block.roles))?;
+        }
+        ParsedTool::Run(block) => {
+            authorize_declarations(&block.modules, &block.operations, Some(&block.roles), config, model)?;
         }
         ParsedTool::Test { targets, .. } => {
             for t in targets {
@@ -731,7 +762,8 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
         ParsedTool::MemoryInspect { .. }
         | ParsedTool::MemoryRemember { .. }
         | ParsedTool::MemoryCorrect { .. }
-        | ParsedTool::MemoryForget { .. } => {
+        | ParsedTool::MemoryForget { .. }
+        | ParsedTool::TurnTool { .. } => {
             // Turn-bound: context and speaker come from the turn identity, and
             // there is no honest default for a route handler or the autonomous
             // loop. Fail closed when no conversation is in scope.
@@ -746,6 +778,25 @@ fn check_authorization(parsed: &ParsedTool, config: &AppConfig, model: &str) -> 
         ParsedTool::Finish => {}
     }
     Ok(())
+}
+
+/// Canonical declarations: Write on every declaring module, then the authored-reference
+/// rules. `mutate` applies them; `run` passes the same check for its unapplied block.
+fn authorize_declarations(
+    modules: &[String],
+    operations: &[parser::Operation],
+    roles: Option<&crate::python_frontend::NativeReferences>,
+    config: &AppConfig,
+    model: &str,
+) -> Result<(), String> {
+    for module in modules {
+        if resolve_module(config, model, module) < PermissionLevel::Write {
+            return Err(format!(
+                "permission denied: cannot modify module '{module}' (need Write)"
+            ));
+        }
+    }
+    authored::check_operations(operations, config, model, None, roles)
 }
 
 // ── Envelope / result helpers ──────────────────────────────────────────────
@@ -1132,31 +1183,25 @@ fn prepare_native_tool(
     arguments: &str,
     config: &AppConfig,
     program: &Program,
-) -> Result<(ParsedTool, String), String> {
-    if is_guest(config) {
-        return Err("native tool dispatch denied: guest turns are not eligible".to_string());
-    }
-    if !native_tools_eligible(config) {
-        return Err("native tool dispatch denied: not write-capable".to_string());
-    }
-    let parsed = parse_tool(name, arguments)?;
-    // Resolve the pinned permission model and re-check per-module permission
-    // before dispatching. Authority is read only from the pinned config
-    // (`llm_model`) and turn identity — never a live mutable conversation read,
-    // so it cannot drift from the caller's per-turn permission snapshot (#79).
+) -> Result<(ParsedTool, String, SpeakerClass), String> {
+    // The class of the pinned snapshot decides the tool list. Authority is read only
+    // from the pinned config (`llm_model`) and turn identity — never a live mutable
+    // conversation read, so it cannot drift from the caller's per-turn snapshot (#79).
+    let class = speaker_class(config);
+    let parsed = parse_for(&class, name, arguments)?;
     let model = model_name(config);
-    check_authorization(&parsed, config, &model)?;
+    check_authorization(&parsed, config, &model, &class)?;
     let parsed = frontend::finalize(parsed, config, program)?;
-    check_authorization(&parsed, config, &model)?;
+    check_authorization(&parsed, config, &model, &class)?;
     authored::runtime_targets(&parsed, config, program)?;
-    Ok((parsed, model))
+    Ok((parsed, model, class))
 }
 
 /// Run a turn-bound memory builtin through the exact same coroutine dispatch
 /// the `!eval memory_*` path uses, so ACL, scope and write-capability rules are
 /// identical. The handle is bound to the turn identity and runs in a blocking
 /// task because `execute_await` spin-waits on the IO reply.
-async fn run_memory_builtin(
+async fn run_turn_builtin(
     config: &AppConfig,
     op: &str,
     args: Vec<crate::eval::Value>,
@@ -1225,6 +1270,7 @@ fn memory_ok_result(name: &str, output: String, as_query: bool) -> NativeToolRes
 /// read-only and permission-filtered. Memory tools bypass the code executor and
 /// dispatch the turn-bound builtins directly. The caller snapshots before and
 /// writes the working set back after **every** call.
+#[cfg_attr(not(test), allow(dead_code))] // production turns use `execute_native_tool_in_turn`
 pub async fn execute_native_tool(
     name: &str,
     arguments: &str,
@@ -1232,12 +1278,55 @@ pub async fn execute_native_tool(
     session: &mut WorkingSet,
     completion_baseline: &Program,
 ) -> NativeToolResult {
-    let (parsed, model) = match prepare_native_tool(name, arguments, config, &session.program) {
+    let budget = turn_budget(&speaker_class(config));
+    execute_native_tool_in_turn(name, arguments, config, session, completion_baseline, &budget).await
+}
+
+/// The per-turn tool-call limit of a class (`None` = unlimited). Tests build budgets
+/// with only this limit.
+#[cfg(test)]
+pub(in crate::api) fn turn_tool_calls(class: &SpeakerClass) -> Option<usize> {
+    class.limits().turn_tool_calls
+}
+
+/// The per-turn budget of a class: tool calls and block run time (unlimited for writers).
+pub(in crate::api) fn turn_budget(class: &SpeakerClass) -> std::sync::Arc<TurnBudget> {
+    TurnBudget::for_limits(&class.limits())
+}
+
+/// [`execute_native_tool`] within one conversational turn: `budget` is the turn's shared
+/// tool-call budget (restricted speakers only; unlimited for writers).
+pub(in crate::api) async fn execute_native_tool_in_turn(
+    name: &str,
+    arguments: &str,
+    config: &AppConfig,
+    session: &mut WorkingSet,
+    completion_baseline: &Program,
+    budget: &std::sync::Arc<TurnBudget>,
+) -> NativeToolResult {
+    let (parsed, model, class) = match prepare_native_tool(name, arguments, config, &session.program) {
         Ok(prepared) => prepared,
         Err(error) => return denied_result(name, error),
     };
+    // Direct turn-bound tools of a restricted speaker draw from the turn's budget; IO
+    // inside a `run` block draws from the same budget through the block's meter.
+    let turn_bound = matches!(
+        parsed,
+        ParsedTool::MemoryInspect { .. } | ParsedTool::MemoryRemember { .. } | ParsedTool::MemoryCorrect { .. }
+            | ParsedTool::MemoryForget { .. } | ParsedTool::TurnTool { .. }
+    );
+    if turn_bound && class.restricted() {
+        if let Err(error) = budget.take(name) {
+            return denied_result(name, error);
+        }
+    }
     match parsed {
-        ParsedTool::PythonMutate { .. } => denied_result(name, "Python mutation was not finalized".into()),
+        ParsedTool::PythonMutate { .. } | ParsedTool::PythonRun { .. } => denied_result(name, "Python source was not finalized".into()),
+        ParsedTool::Run(block) => run::execute(name, block, config, session, &class, budget).await,
+        ParsedTool::TurnTool { op, args } => match run_turn_builtin(config, op, args).await {
+            Ok(output) => memory_ok_result(name, output, false),
+            Err(error) => denied_result(name, error),
+        },
         ParsedTool::Inspect { kind, target, format } => execute_inspect(config, session, &model, kind, target, format),
         ParsedTool::Mutate { source, operations, .. } => {
             let code =
@@ -1302,13 +1391,13 @@ pub async fn execute_native_tool(
             } else {
                 vec![crate::eval::Value::string(query)]
             };
-            match run_memory_builtin(config, "memory_inspect", args).await {
+            match run_turn_builtin(config, "memory_inspect", args).await {
                 Ok(output) => memory_ok_result(name, output, true),
                 Err(error) => denied_result(name, error),
             }
         }
         ParsedTool::MemoryRemember { content, scope } => {
-            match run_memory_builtin(
+            match run_turn_builtin(
                 config,
                 "memory_remember",
                 vec![crate::eval::Value::string(content), crate::eval::Value::string(scope)],
@@ -1335,13 +1424,13 @@ pub async fn execute_native_tool(
             if let Some(value) = valid_until_ms {
                 args.push(crate::eval::Value::Int(value));
             }
-            match run_memory_builtin(config, "memory_correct", args).await {
+            match run_turn_builtin(config, "memory_correct", args).await {
                 Ok(output) => memory_ok_result(name, output, false),
                 Err(error) => denied_result(name, error),
             }
         }
         ParsedTool::MemoryForget { id } => {
-            match run_memory_builtin(config, "memory_forget", vec![crate::eval::Value::string(id)]).await {
+            match run_turn_builtin(config, "memory_forget", vec![crate::eval::Value::string(id)]).await {
                 Ok(output) => memory_ok_result(name, output, false),
                 Err(error) => denied_result(name, error),
             }

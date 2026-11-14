@@ -1,0 +1,228 @@
+//! One error type for the workspace tools.
+//!
+//! Every message is written for the model that made the call: it names what
+//! was refused and what to do instead. A message never contains more of a path
+//! outside the workspace than the caller supplied: refusals echo the caller's
+//! own spelling (shortened), never a resolved location or a symlink target.
+
+use std::fmt;
+
+use super::ledger::Freshness;
+use super::limits::ECHO_MAX_CHARS;
+
+/// The path rule a refused path broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    EmptyPath,
+    NulByte,
+    PathTooLong,
+    ComponentTooLong,
+    /// The path names a location outside the workspace and its readable roots.
+    OutsideWorkspace,
+    /// A `..` in the path climbs out of the workspace.
+    ParentEscape,
+    /// A symlink on the path leads outside the workspace and its readable roots.
+    SymlinkOutside,
+    SymlinkLoop,
+    /// A component turned into a symlink between resolving and opening.
+    ChangedToSymlink,
+    /// Write to a path whose final component is a symlink.
+    WriteThroughSymlink,
+    /// Write to git's own files.
+    WriteGitDir,
+    /// Write into a read-only extra root.
+    WriteReadOnlyRoot,
+}
+
+impl Rule {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Rule::EmptyPath => "the path is empty",
+            Rule::NulByte => "the path contains a NUL byte",
+            Rule::PathTooLong => "the path is longer than 4096 bytes",
+            Rule::ComponentTooLong => "a path component is longer than 255 bytes",
+            Rule::OutsideWorkspace => "it is outside the workspace; use a path relative to the workspace root",
+            Rule::ParentEscape => "its `..` leaves the workspace",
+            Rule::SymlinkOutside => "a symlink on it leads outside the workspace and its readable roots",
+            Rule::SymlinkLoop => "it passes through too many symlinks",
+            Rule::ChangedToSymlink => "a component became a symlink while it was being opened; resolve it again",
+            Rule::WriteThroughSymlink => "writes never go through a symlink as the final component; write to the real file",
+            Rule::WriteGitDir => "writes under `.git` are not allowed; use the git tools",
+            Rule::WriteReadOnlyRoot => "it is in a read-only extra root; only the workspace itself is writable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// The registry file is unreadable or invalid. The text lists every problem.
+    Registry(String),
+    /// A repository, workspace or ref name is not acceptable.
+    InvalidName { what: &'static str, reason: String },
+    InvalidArgument(String),
+    InvalidPattern(String),
+    /// A path was refused by a path rule. `path` is the caller's own spelling.
+    Refused { rule: Rule, path: String },
+    NotFound { path: String },
+    /// The path exists but is not what the operation needs.
+    WrongKind { path: String, expected: &'static str },
+    Binary { path: String, size: u64 },
+    /// A filesystem operation failed. `reason` is the error kind, never a path.
+    Io { path: String, action: &'static str, reason: String },
+    /// git exited with an error, or could not be started.
+    Git { action: String, detail: String },
+    GitTimeout { action: String, millis: u128 },
+    /// A lifecycle rule refused the operation (exists, limit, unknown name).
+    Lifecycle(String),
+    /// git lists no worktree for this workspace: it is positively not open
+    /// (closed, or removed with git). Not used for failures to ask git.
+    NotOpen(String),
+    /// `close` refused because the worktree has uncommitted changes.
+    Dirty { workspace: String, files: Vec<String>, omitted: usize },
+    /// A change to an existing file was refused because the file is not
+    /// provably what the model read.
+    NotFresh { path: String, state: Freshness },
+    /// `edit`: the text to replace does not occur. `hint` says what to check.
+    NoMatch { path: String, hint: &'static str },
+    /// `edit`: the text to replace occurs more than once. `lines` are the
+    /// first line numbers where it starts.
+    Ambiguous { path: String, count: usize, lines: Vec<u64> },
+    /// `run`: the command was refused before anything was started.
+    CommandRefused(String),
+    /// A command ran but did not complete successfully (output is private data).
+    CommandFailed(String),
+    /// A systemd client call failed, or no user manager is reachable.
+    Systemd { action: String, detail: String },
+    /// A background-job rule refused the operation (limit, unknown id).
+    Job(String),
+    /// A conversation's workspace binding could not be read or stored.
+    Binding(String),
+}
+
+impl Error {
+    pub fn refused(rule: Rule, supplied: &str) -> Self {
+        Error::Refused { rule, path: shown(supplied) }
+    }
+
+    pub fn io(supplied: &str, action: &'static str, error: &std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Error::NotFound { path: shown(supplied) };
+        }
+        Error::Io { path: shown(supplied), action, reason: error.kind().to_string() }
+    }
+
+    /// The rule of a refusal, for callers and tests that branch on it.
+    pub fn rule(&self) -> Option<Rule> {
+        match self {
+            Error::Refused { rule, .. } => Some(*rule),
+            _ => None,
+        }
+    }
+}
+
+/// A caller-supplied string made safe to echo: bounded, no control characters.
+pub fn shown(text: &str) -> String {
+    let mut out: String = text
+        .chars()
+        .take(ECHO_MAX_CHARS)
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect();
+    if text.chars().nth(ECHO_MAX_CHARS).is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// A file name as it is rendered in a tool result.
+///
+/// A name is data from the repository and can contain anything but `/` and
+/// NUL: a newline in it would add a line to the result (a fake `error:` line,
+/// a fake continuation note). A name with control characters, line or
+/// direction-changing characters, or one that starts with `"`, is therefore
+/// rendered as a JSON string literal in double quotes; every other name is
+/// rendered as it is. The rendering is injective: two names never look alike,
+/// and a quoted name decodes (as JSON) to the real one.
+pub fn shown_name(name: &str) -> String {
+    let unsafe_char =
+        |c: char| c.is_control() || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    if !name.starts_with('"') && !name.chars().any(unsafe_char) {
+        return name.to_string();
+    }
+    let mut out = String::with_capacity(name.len() + 8);
+    out.push('"');
+    for c in name.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if unsafe_char(c) => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The note a result carries when it shows a name in the quoted form.
+pub const QUOTED_NAME_NOTE: &str = "names in double quotes are JSON strings: the file name contains control characters or starts with a quote. To address such a file, pass the decoded name (the same escapes inside the JSON string of the path argument)";
+
+/// Whether `rendered` (from [`shown_name`]) is in the quoted form.
+pub fn is_quoted_name(rendered: &str) -> bool {
+    rendered.starts_with('"')
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Registry(text) => write!(f, "workspace registry: {text}"),
+            Error::InvalidName { what, reason } => write!(f, "invalid {what}: {reason}"),
+            Error::InvalidArgument(text) => write!(f, "invalid argument: {text}"),
+            Error::InvalidPattern(text) => write!(f, "invalid pattern: {text}"),
+            Error::Refused { rule, path } => write!(f, "path `{path}` refused: {}", rule.describe()),
+            Error::NotFound { path } => write!(f, "`{path}` does not exist in the workspace"),
+            Error::WrongKind { path, expected } => write!(f, "`{path}` is not {expected}"),
+            Error::Binary { path, size } => {
+                write!(f, "`{path}` is a binary file ({size} bytes); it cannot be shown as text")
+            }
+            Error::Io { path, action, reason } => write!(f, "cannot {action} `{path}`: {reason}"),
+            Error::Git { action, detail } => write!(f, "git {action} failed: {detail}"),
+            Error::GitTimeout { action, millis } => {
+                write!(f, "git {action} did not finish within {millis} ms and was stopped")
+            }
+            Error::Lifecycle(text) | Error::NotOpen(text) => f.write_str(text),
+            Error::NotFresh { path, state } => {
+                write!(f, "`{path}` was not changed: {}", state.refusal().unwrap_or("it could not be verified"))
+            }
+            Error::NoMatch { path, hint } => write!(f, "`{path}` was not changed: the text to replace was not found. {hint}"),
+            Error::Ambiguous { path, count, lines } => {
+                let places: Vec<String> = lines.iter().map(u64::to_string).collect();
+                let more = if *count > lines.len() { ", …" } else { "" };
+                write!(
+                    f,
+                    "`{path}` was not changed: the text to replace occurs {count} times (starting at lines {}{more}). Add surrounding lines to make it unique, or set replace_all",
+                    places.join(", ")
+                )
+            }
+            Error::CommandRefused(reason) => write!(f, "command not run: {reason}"),
+            Error::CommandFailed(text) => f.write_str(text),
+            Error::Systemd { action, detail } => write!(f, "systemd {action} failed: {detail}"),
+            Error::Job(text) | Error::Binding(text) => f.write_str(text),
+            Error::Dirty { workspace, files, omitted } => {
+                write!(f, "workspace `{workspace}` has uncommitted changes and was not closed; commit or discard them first:")?;
+                for file in files {
+                    write!(f, "\n  {file}")?;
+                }
+                if *omitted > 0 {
+                    write!(f, "\n  … and {omitted} more")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;

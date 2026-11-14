@@ -4,6 +4,9 @@ use std::collections::{HashMap, HashSet};
 use crate::ast;
 use crate::parser;
 
+mod detached;
+pub use detached::detached_module_function;
+
 /// Apply a parsed operation to the program state and validate it.
 /// Returns a human-readable success message or an error with diagnostics.
 /// Any `+route` declarations inside modules are stored in `program.pending_routes`
@@ -201,6 +204,7 @@ pub fn apply_and_validate(program: &mut ast::Program, op: &parser::Operation) ->
 
 
 fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result<String> {
+    crate::reserved_names::check_module(&decl.name)?;
     // Find existing module to merge into, or create new
     let existing_idx = program.modules.iter().position(|m| m.name == decl.name);
     if existing_idx.is_none() {
@@ -245,26 +249,7 @@ fn apply_module(program: &mut ast::Program, decl: &parser::ModuleDecl) -> Result
                 }
             }
             parser::Operation::Function(fd) => {
-                let mut converted = convert_function(fd)?;
-                // Resolve union types — collect names via immutable borrow first
-                let union_names = {
-                    let mut names = collect_union_names(program);
-                    for td in &program.modules[mod_idx].types {
-                        if let ast::TypeDecl::TaggedUnion(u) = td {
-                            names.insert(u.name.clone());
-                        }
-                    }
-                    names
-                };
-                if !union_names.is_empty() {
-                    resolve_type(&mut converted.return_type, &union_names);
-                    for param in &mut converted.params {
-                        resolve_type(&mut param.ty, &union_names);
-                    }
-                    resolve_union_types_in_stmts(&mut converted.body, &union_names);
-                }
-                validate_function_struct_literals(program, &converted, Some(&decl.name))?;
-                validate_function_effects(program, &converted, Some(&decl.name))?;
+                let mut converted = detached::checked_module_function(program, &program.modules[mod_idx].types, &decl.name, fd)?;
                 // Now mutably access module to add/replace function
                 let m = &mut program.modules[mod_idx];
                 if let Some(pos) = m.functions.iter().position(|f| f.name == converted.name) {

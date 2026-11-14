@@ -96,9 +96,17 @@ fn stable_prefix_keyed_mode(
         Some(takeover) => {
             // Memory tools are advertised only for turns with a TurnIdentity
             // (takeover); HTTP native turns have none, so their prompt omits them.
-            let mut sections = vec![crate::prompt::native_tool_prompt(inputs.context, takeover)];
+            // Speakers who cannot change code get the restricted protocol text: it names
+            // no tool they do not have (DESIGN L3). The text is the same for guests and
+            // execute-only speakers, so `may_write` remains the whole prefix key.
+            let restricted = !inputs.authority.may_write;
+            let mut sections = vec![if restricted {
+                crate::prompt::native_restricted_prompt(inputs.context)
+            } else {
+                crate::prompt::native_tool_prompt(inputs.context, takeover)
+            }];
             if takeover {
-                sections.push(crate::prompt::native_takeover_mechanics());
+                sections.push(crate::prompt::native_takeover_mechanics(restricted));
             }
             sections.push(mesh.clone().unwrap_or_default());
             sections.push(identity.clone());
@@ -110,6 +118,7 @@ fn stable_prefix_keyed_mode(
         may_write: inputs.authority.may_write,
         identity_hash: hash_bytes(identity.as_bytes()),
         mesh_hash: hash_bytes(mesh.as_deref().unwrap_or_default().as_bytes()),
+        tools_hash: 0,
     };
     (rendered, key)
 }
@@ -199,6 +208,19 @@ pub struct StablePrefixKey {
     pub may_write: bool,
     pub identity_hash: u64,
     pub mesh_hash: u64,
+    /// Hash of the tool schemas sent with the request (0: none). Providers cache
+    /// the tool list ahead of the system prompt, and since speaker classes
+    /// (DESIGN L3) two speakers with the same `may_write` and the same prefix text
+    /// can have different tools. The composer does not know the tools; the request
+    /// builder sets this with [`StablePrefixKey::with_tools`].
+    pub tools_hash: u64,
+}
+
+impl StablePrefixKey {
+    pub fn with_tools(mut self, tools_hash: u64) -> Self {
+        self.tools_hash = tools_hash;
+        self
+    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {

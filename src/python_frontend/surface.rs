@@ -4,6 +4,11 @@ use super::{Context, Diagnostic, expressions};
 use rustpython_parser::ast as py;
 use std::collections::HashMap;
 
+/// One text per shape, shared by structural admission and strict lowering, so a function
+/// body (`mutate`) and an ad-hoc block (`run`) refuse both the same way and name the fix.
+pub(super) const UNANNOTATED_AWAIT: &str = "await needs an annotated binding: write `name: T = await call(...)`, for example `text: str = await file_read(path)`; repeat the annotation when rebinding an existing name";
+pub(super) const BARE_AWAIT: &str = "a bare await statement is unsupported: bind its result with an annotation, for example `written: str = await file_write(path, text)`";
+
 pub(super) fn statements(
     cx: &Context<'_>,
     body: &[py::Stmt],
@@ -52,6 +57,9 @@ fn statement(
                 || value.type_comment.is_some()
             {
                 return Err(cx.at(stmt, "assignment requires one simple name; unpacking and type comments are unsupported"));
+            }
+            if matches!(value.value.as_ref(), py::Expr::Await(_)) {
+                return Err(cx.at(stmt, UNANNOTATED_AWAIT));
             }
             expression(cx, &value.value, refs, type_refs)
         }
@@ -114,6 +122,9 @@ fn source_event_call(
     refs: &mut Vec<String>,
     type_refs: &mut Vec<String>,
 ) -> Result<(), Diagnostic> {
+    if matches!(value.value.as_ref(), py::Expr::Await(_)) {
+        return Err(cx.at(value, BARE_AWAIT));
+    }
     let py::Expr::Call(call) = value.value.as_ref() else {
         return Err(cx.at(value, "expression statements must call a source/event helper"));
     };

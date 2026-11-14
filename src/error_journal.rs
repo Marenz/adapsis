@@ -35,6 +35,8 @@ pub enum Category {
     Startup,
     /// A guard refused an operation (shell policy, destructive guard, permission).
     Refusal,
+    /// Workspace tools: registry, state directory, cleanup. Never a path or command.
+    Workspace,
 }
 
 impl Category {
@@ -48,6 +50,7 @@ impl Category {
             Self::Panic => "panic",
             Self::Startup => "startup",
             Self::Refusal => "refusal",
+            Self::Workspace => "workspace",
         }
     }
 }
@@ -227,7 +230,11 @@ pub fn panic_hook(info: &std::panic::PanicHookInfo<'_>) {
         .map(|text| text.len())
         .or_else(|| payload.downcast_ref::<String>().map(String::len));
     let location = info.location().map(|at| (at.file(), at.line(), at.column()));
-    record_panic(location, payload_bytes);
+    // A JIT compile panic is contained and journaled once by its dispatch
+    // (#96). Skip only that journal entry, never diagnostics or the backtrace.
+    if !crate::eval::jit_contained_panic(info.location()) {
+        record_panic(location, payload_bytes);
+    }
     eprintln!("{}", std::backtrace::Backtrace::force_capture());
 }
 

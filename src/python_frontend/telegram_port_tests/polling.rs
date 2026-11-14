@@ -128,6 +128,7 @@ fn collect(mut receiver: tokio::sync::mpsc::Receiver<IoRequest>) -> Vec<(String,
             function_name,
             args,
             reply,
+            ..
         } = request
         else {
             panic!("slice A permits only intercepted +spawn; no network, file or sleep IO")

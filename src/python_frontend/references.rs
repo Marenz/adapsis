@@ -204,8 +204,22 @@ fn function_named(program: &ast::Program, name: &str) -> bool {
 /// two tiers disagree, so refuse before execution. Legacy collisions elsewhere
 /// in the program must still allow unrelated functions to evaluate (#95).
 pub fn check_constructor_environment(program: &ast::Program, entry: &str) -> Result<(), String> {
+    constructor_environment(program, vec![program.qualify_function_name(entry)])
+}
+
+/// The same reachable-graph check for statements that are not a declared function (the
+/// native `run` tool's ad-hoc block, #129): every function the body can reach is checked.
+pub fn check_constructor_environment_from(
+    program: &ast::Program,
+    body: &[ast::Statement],
+) -> Result<(), String> {
+    let mut pending = Vec::new();
+    reachable_calls(program, body, &mut pending);
+    constructor_environment(program, pending)
+}
+
+fn constructor_environment(program: &ast::Program, mut pending: Vec<String>) -> Result<(), String> {
     let variants = all_variant_names(program);
-    let mut pending = vec![program.qualify_function_name(entry)];
     let mut seen = HashSet::new();
     while let Some(target) = pending.pop() {
         if !seen.insert(target.clone()) {

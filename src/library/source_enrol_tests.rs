@@ -494,12 +494,20 @@ fn managed_startup_adopts_without_touching_the_recovery_folder_when_nothing_is_d
 fn managed_scratch_and_reserved_modules_are_never_enrolled() {
     let dir = python_library();
     let (mut program, state) = load(dir.path());
-    for name in ["RunToolScratch", "__internal"] {
-        let mut module = unprintable(name);
-        module.functions.clear();
-        program.modules.push(module);
-    }
-    apply_ax(&mut program, "+module RunToolScratch\n+fn probe ()->Int\n  +return 1\n+end\n");
+    let declaration = crate::parser::parse("+module RunToolScratch\n").unwrap();
+    assert!(crate::validator::apply_and_validate(&mut program, &declaration[0]).unwrap_err().to_string().contains("reserved"));
+    let mut internal = unprintable("__internal");
+    internal.functions.clear();
+    program.modules.push(internal);
+    // Represent pre-existing/cached scratch state directly: normal declarations
+    // are now reserved by the run tool. This fixture must still prove that the
+    // source writer excludes such state, without weakening declaration admission.
+    let mut fixture = ast::Program::default();
+    apply_ax(&mut fixture, "+module FixtureEnrolScratch\n+fn probe ()->Int\n  +return 1\n+end\n");
+    let mut scratch = fixture.modules.remove(0);
+    scratch.name = "RunToolScratch".into();
+    program.modules.push(scratch);
+    program.rebuild_function_index();
     let bytes = manifest_bytes(dir.path());
     let affected = std::collections::BTreeSet::from(["RunToolScratch".to_string(), "__internal".to_string()]);
     assert!(super::persist_affected_modules(&program, &affected, Some(&state)).is_empty());

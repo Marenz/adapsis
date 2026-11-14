@@ -83,6 +83,34 @@ async fn native_compaction_shape_error_is_redacted_in_both_sinks() {
     assert!(harness.graph.episode_summaries(context, 6).unwrap().is_empty());
 }
 
+/// #129/#88: a `run` block's source and result are content. Through a complete native
+/// takeover turn with a `--log-file`, neither reaches stdout, stderr or the log file by
+/// default; the model still receives both results in its tool messages.
+#[tokio::test]
+async fn native_run_source_and_result_stay_out_of_the_journal_and_the_log_file() {
+    if captured("api::takeover_native::tests::logging::native_run_source_and_result_stay_out_of_the_journal_and_the_log_file",
+        "CANARY_RUN_TURN", "run-error") { return; }
+    let mut harness = Harness::new(true);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("activity.log");
+    harness.log_file = Some(Arc::new(tokio::sync::Mutex::new(
+        tokio::fs::File::create(&path).await.unwrap())));
+    let provider = provider(vec![
+        tool("value", "run", json!({"source": "text: str = \"CANARY_RUN_TURN_SOURCE\"\nreturn concat(text, \"_RESULT\")\n"})),
+        tool("failure", "run", json!({"source": "check(\"probe\", 1 > 2, \"CANARY_RUN_TURN_ERROR\")\nreturn 1\n"})),
+        response("Ran both.", vec![call("done", "finish", json!({}))]),
+    ]).await;
+    assert_eq!(harness.turn(&provider, "telegram:group:-88010", ADMIN, "run it").await, "Ran both.");
+    let requests = provider.requests.lock().unwrap();
+    let delivered = requests[2]["messages"].to_string();
+    assert!(delivered.contains("CANARY_RUN_TURN_SOURCE_RESULT"), "{delivered}");
+    assert!(delivered.contains("CANARY_RUN_TURN_ERROR"), "{delivered}");
+    let log = tokio::fs::read_to_string(path).await.unwrap();
+    // The takeover log file carries user/ai-text entries only; tool content never.
+    assert!(!log.contains("CANARY_RUN_TURN"), "{log}");
+    assert_eq!(log.contains("Ran both."), crate::logging::content(), "{log}");
+}
+
 #[tokio::test]
 async fn native_provider_error_feeds_the_runtime_error_journal() {
     let last = |text: &str| serde_json::from_str::<Value>(text).unwrap();
@@ -99,4 +127,31 @@ async fn native_provider_error_feeds_the_runtime_error_journal() {
     assert!(entries.iter().all(|e| !e.to_string().contains("private journal chat text")));
     // The provider's own error text is kept (redacted, 1 KiB): it is the diagnosis.
     assert!(entry["message"].as_str().unwrap().starts_with("provider error"));
+}
+
+/// Workspace tools: paths, patterns and file content are content. The default log has
+/// one metadata line per call (tool, success, workspace name, sizes) and none of them.
+#[tokio::test]
+async fn workspace_tool_calls_log_metadata_only() {
+    if captured("api::takeover_native::tests::logging::workspace_tool_calls_log_metadata_only",
+        "CANARY_WS_SECRET", "tool=read ok=true workspace=log-repo/logged result_bytes=") { return; }
+    let repo = crate::workspace::test_support::RepoFixture::new();
+    crate::workspace::test_support::write(&repo.repository.checkout, "CANARY_WS_SECRET.txt", "CANARY_WS_SECRET content\n");
+    crate::workspace::test_support::commit_all(&repo.repository.checkout, "canary");
+    let mut harness = Harness::new(true);
+    harness.workspaces = Some(repo.site("log-repo"));
+    let provider = provider(vec![
+        tool("open", "workspace_open", json!({"repo": "log-repo", "name": "logged"})),
+        response("", vec![
+            call("rd", "read", json!({"path": "CANARY_WS_SECRET.txt"})),
+            call("se", "search", json!({"pattern": "CANARY_WS_SECRET"})),
+            call("gl", "glob", json!({"pattern": "CANARY_WS_SECRET*"})),
+            call("miss", "read", json!({"path": "CANARY_WS_SECRET/absent"})),
+        ]),
+        response("Read.", vec![call("done", "finish", json!({}))]),
+    ]).await;
+    assert_eq!(harness.turn(&provider, "telegram:user:100000001", ADMIN, "read it").await, "Read.");
+    // The model did get the content.
+    let requests = provider.requests.lock().unwrap();
+    assert!(all_text(&requests[2]).contains("CANARY_WS_SECRET content"));
 }

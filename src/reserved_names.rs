@@ -36,6 +36,27 @@ fn refuse(name: &str, role: &str) -> Result<()> {
     Ok(())
 }
 
+/// The scope an ad-hoc `run` block is lowered in when the caller names no module (#129).
+///
+/// The block's declaration is never applied, so this is a name for resolution and
+/// diagnostics only. If a real module could carry it, such a block would resolve that
+/// module's functions, types and `+shared` variables as its own; therefore no module with
+/// this name can be declared. It is an ordinary identifier (the Python operation IR
+/// accepts nothing else as a module name), chosen to be useless as a real module name.
+pub(crate) const RUN_SCOPE: &str = "RunToolScratch";
+
+/// Every module declaration (mutation, `module_create`, library load, replay) passes the
+/// validator's `apply_module`, which calls this.
+pub(crate) fn check_module(name: &str) -> Result<()> {
+    if name == RUN_SCOPE {
+        bail!(
+            "module name `{RUN_SCOPE}` is reserved for the run tool's ad-hoc blocks and \
+             cannot be declared; choose a different module name"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn check_param(name: &str) -> Result<()> {
     refuse(name, "parameter")
 }

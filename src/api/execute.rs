@@ -7,6 +7,8 @@ use crate::eval;
 
 use super::{AppConfig, MutationResult, TestCaseResult, WorkingSet};
 
+pub(super) mod io_eval;
+
 pub(super) fn collect_opencode_tasks(ops: &[crate::parser::Operation]) -> Vec<String> {
     ops.iter()
         .filter_map(|op| match op {
@@ -268,6 +270,27 @@ pub struct AgentCompletionCallback {
 /// turns must call [`execute_code_with_baseline`] with the turn's frozen program so
 /// completion is judged against changed functions only (#66).
 #[allow(dead_code)]
+/// One evaluation of a watched function, as text.
+///
+/// The program and its revision are snapshotted together
+/// (`working_set::program_at_revision`) and both locks are released before
+/// the function runs: an evaluation must never hold a state lock. Holding the
+/// session-metadata mutex here used to mean that a panic during evaluation
+/// poisoned it for every later request (#96).
+pub(super) async fn watch_evaluate(
+    program: &tokio::sync::RwLock<crate::ast::Program>,
+    meta: &crate::session::SharedMeta,
+    jit_cache: &crate::eval::JitCache,
+    function_name: &str,
+    input: &crate::parser::Expr,
+) -> String {
+    let (program, revision) = super::working_set::program_at_revision(program, meta).await;
+    match crate::eval::eval_compiled_or_interpreted_cached(&program, function_name, input, Some(jit_cache), revision) {
+        Ok((result, _)) => result,
+        Err(error) => format!("error: {error}"),
+    }
+}
+
 pub async fn execute_code(
     code: &str,
     config: &AppConfig,
@@ -625,26 +648,13 @@ async fn execute_operations_unsaved(
 
                         if needs_async {
                             if let Some(sender) = &config.io_sender {
-                                let program = session.program.clone();
-                                // Base for the per-function CoW merge (issue #9).
-                                let base_program = program.clone();
-                                let program_mut = crate::eval::make_shared_program_mut(&program);
                                 let fn_name = ev.function_name.clone();
                                 let input = ev.input.clone();
-                                let sender = sender.clone();
-                                let turn = config.turn.clone();
-                                let ctx = eval::EvalContext::new(config.runtime.clone(), config.meta.clone(), config.event_broadcast.clone(), &program, program_mut.clone());
-                                let eval_fn_name = ev.function_name.clone();
-                                let eval_result = tokio::task::spawn_blocking(move || {
-                                    ctx.install();
-                                    let handle = crate::coroutine::CoroutineHandle::new(sender)
-                                        .with_turn(turn);
-                                    crate::eval::eval_async_function(&program, &fn_name, &input, handle)
-                                }).await;
-                                let (msg, success) = match &eval_result {
-                                    Ok(Ok(val)) => (format!("eval {}() = {val}", eval_fn_name), true),
-                                    Ok(Err(e)) => { (format!("eval error: {e}"), false) }
-                                    Err(e) => { (format!("eval task error: {e}"), false) }
+                                let evaluation = io_eval::evaluate_with_io(config, &session.program, sender.clone(),
+                                    io_eval::ProgramPolicy::Editable, move |program, handle| crate::eval::eval_async_function(program, &fn_name, &input, handle)).await;
+                                let (msg, success) = match &evaluation.outcome {
+                                    Ok(val) => (format!("eval {}() = {val}", ev.function_name), true),
+                                    Err(failure) => (failure.describe("eval"), false),
                                 };
                                 if crate::logging::content() {
                                     eprintln!("[execute_code:eval] {msg}");
@@ -654,9 +664,9 @@ async fn execute_operations_unsaved(
                                 } else {
                                     result.push_err(msg);
                                 }
-                                if let Some(mutated) = crate::eval::read_back_program_mutations(&program_mut) {
+                                if let Some(mutated) = evaluation.after {
                                     session.program = mutated.clone();
-                                    config.program.write().await.merge_changed_from(&base_program, &mutated);
+                                    config.program.write().await.merge_changed_from(&evaluation.base, &mutated);
                                 }
                                 config.sync_async_side_effects_into(session);
                             }
@@ -747,17 +757,7 @@ async fn execute_operations_unsaved(
                             let mut last_result = String::new();
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
-                                let result = {
-                                    let program = watch_program.read().await;
-                                    let meta = watch_meta.lock().unwrap();
-                                    match crate::eval::eval_compiled_or_interpreted_cached(
-                                        &program, &fn_name, &input_expr,
-                                        Some(&watch_jit_cache), meta.revision,
-                                    ) {
-                                        Ok((r, _)) => r,
-                                        Err(e) => format!("error: {e}"),
-                                    }
-                                };
+                                let result = watch_evaluate(&watch_program, &watch_meta, &watch_jit_cache, &fn_name, &input_expr).await;
                                 if result != last_result && !last_result.is_empty() {
                                     if crate::logging::content() {
                                         eprintln!("[execute_code:watch:trigger] {fn_name} changed: {last_result} → {result}");
@@ -1062,6 +1062,7 @@ async fn execute_operations_unsaved(
                                                             crate::eval::Value::string(cb.reply_arg),
                                                             crate::eval::Value::string(reply),
                                                         ],
+                                                        program_frozen: false,
                                                         reply: tx,
                                                     }).await;
                                                 }

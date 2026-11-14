@@ -31,6 +31,12 @@ mod python_frontend;
 mod python_cli;
 mod repl;
 mod reserved_names;
+mod run_limits;
+#[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: test_alloc::Counting = test_alloc::Counting;
 mod server;
 mod session;
 mod shared_state;
@@ -38,6 +44,7 @@ mod typeck;
 mod tui;
 mod validator;
 mod vm;
+mod workspace;
 mod conversation_callback;
 
 use anyhow::{Context as _, Result};
@@ -321,7 +328,12 @@ fn migrate_conversations_to_memory(
     let mut imported = 0usize;
 
     for (context, conversation) in contexts {
+        // File content of the owner's repositories does not go into the memory graph.
+        let workspace_results = api::native_tools::workspace::result_positions(&conversation.messages);
         for (index, message) in conversation.messages.iter().enumerate() {
+            if workspace_results.contains(&index) {
+                continue;
+            }
             let graph_message_id = format!("legacy:{context}:{index}");
             if graph.has_message(&graph_message_id)? {
                 imported += 1;
@@ -1212,7 +1224,7 @@ async fn main() -> Result<()> {
             let io_loop = async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
-                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
+                        coroutine::IoRequest::Spawn { function_name, args, program_frozen, reply } => {
                             // Register the task
                             let task_id = rt_for_id.next_task_id();
                             let task_info = coroutine::TaskInfo {
@@ -1252,7 +1264,7 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
+                                let handle = coroutine::CoroutineHandle::for_spawned_task(sender, task_id, registry.clone(), snap_reg, program_frozen);
                                 let mut env = eval::Env::new_with_shared_interner(&prog.shared_interner);
                                 env.set("__coroutine_handle", eval::Value::CoroutineHandle(handle));
                                 // Bind args to params
@@ -1597,6 +1609,8 @@ async fn main() -> Result<()> {
 
             // Spawn IO event loop (including +spawn support)
             let rt = runtime.clone();
+            let shell_policy_for_config = runtime.shell_policy.clone();
+            let shell_policy_for_spawn = runtime.shell_policy.clone();
             let rt_for_id = runtime.clone();
             let task_registry_for_spawn = runtime.task_registry.clone();
             let snap_registry_for_spawn2 = runtime.snapshot_registry.clone();
@@ -1656,7 +1670,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 while let Some(request) = io_rx.recv().await {
                     match request {
-                        coroutine::IoRequest::Spawn { function_name, args, reply } => {
+                        coroutine::IoRequest::Spawn { function_name, args, program_frozen, reply } => {
                             let task_id = rt_for_id.next_task_id();
                             let task_info = coroutine::TaskInfo {
                                 id: task_id,
@@ -1698,7 +1712,7 @@ async fn main() -> Result<()> {
                                 );
                                 ctx.install();
 
-                                let handle = coroutine::CoroutineHandle::new_with_task(sender, task_id, registry.clone(), snap_reg);
+                                let handle = coroutine::CoroutineHandle::for_spawned_task(sender, task_id, registry.clone(), snap_reg, program_frozen);
                                 let mut env = eval::Env::new_with_shared_interner(&program.shared_interner);
                                 env.populate_shared_from_program(&program);
                                 // Set shared runtime so +shared vars resolve from runtime state
@@ -1864,6 +1878,7 @@ async fn main() -> Result<()> {
                             let t_log = training_log_for_spawn.read().unwrap().clone();
                             let al = access_level_for_spawn;
                             let pc = perm_config_for_spawn.clone();
+                            let shell_policy = shell_policy_for_spawn.clone();
                             let save_notify = save_notify_for_spawn.read().unwrap().clone();
                             let ai_log = ai_log_for_spawn.read().unwrap().clone();
                             let memory_graph = memory_graph_for_spawn.clone();
@@ -1877,7 +1892,7 @@ async fn main() -> Result<()> {
                                     io_sender, task_registry, snap_registry,
                                     oc_lock, oc_git_dir, t_log,
                                     al, pc,
-                                    save_notify, ai_log, native_tools,
+                                    save_notify, ai_log, native_tools, None, shell_policy,
                                 ).await;
                                 let _ = reply.send(result);
                             });
@@ -2316,6 +2331,7 @@ async fn main() -> Result<()> {
             *save_notify_shared.write().unwrap() = Some(save_tx.clone());
 
             let permission_config = perm_config_for_config;
+            workspace::foreground::startup().await;
             let access_level_for_config = access_level_parsed;
 
             let config = api::AppConfig {
@@ -2344,8 +2360,9 @@ async fn main() -> Result<()> {
                 save_notify: Some(save_tx),
                 access_level: access_level_for_config,
                 permission_config,
-                turn: None,
+                turn: None, workspaces: None, origin: None,
                 turn_saves: Default::default(),
+                shell_policy: shell_policy_for_config,
             };
 
             // Clone tier handles before config is moved into the router
@@ -2619,7 +2636,7 @@ async fn main() -> Result<()> {
                 .map(|(listener, h)| {
                     let app = app.clone();
                     async move {
-                        let result = axum::serve(listener, app).await;
+                        let result = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
                         if let Err(e) = &result {
                             eprintln!("[adapsis] server error on {h}:{port}: {e}");
                         }

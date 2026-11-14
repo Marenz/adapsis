@@ -9,6 +9,8 @@ pub(in crate::python_frontend) struct Usage {
     pub values: HashSet<String>,
     pub calls: HashSet<String>,
     pub namespaces: HashSet<String>,
+    /// Reserved frontend helpers that were called (`spawn`, `check`, `source_add`, ...).
+    pub helpers: HashSet<String>,
 }
 
 pub(in crate::python_frontend) fn collect(
@@ -36,6 +38,17 @@ pub(in crate::python_frontend) fn collect(
         scope.extend(args.args.iter().map(|a| a.def.arg.to_string()));
         usage.block(cx, body, &mut scope)?;
     }
+    Ok(usage)
+}
+
+/// An ad-hoc statement block has no parameters and declares nothing: every name starts
+/// unbound, exactly as at the first line of a parameterless function body.
+pub(in crate::python_frontend) fn collect_block(
+    cx: &Context<'_>,
+    body: &[py::Stmt],
+) -> Result<Usage, Diagnostic> {
+    let mut usage = Usage::default();
+    usage.block(cx, body, &mut HashSet::new())?;
     Ok(usage)
 }
 
@@ -118,10 +131,9 @@ impl Usage {
                         "Python callable variables/dynamic attributes are unsupported",
                     ));
                 }
-                if !name.contains('.')
-                    && c.keywords.is_empty()
-                    && !crate::python_frontend::reserved_helper_name(&name)
-                {
+                if crate::python_frontend::reserved_helper_name(&name) {
+                    self.helpers.insert(name);
+                } else if !name.contains('.') && c.keywords.is_empty() {
                     self.calls.insert(name);
                 }
                 for arg in &c.args {

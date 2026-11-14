@@ -7,28 +7,41 @@
 //! - Bool → i8 (0 or 1)
 //! - Arithmetic, comparison, logic operators
 //! - if/elif/else (Branch nodes)
-//! - Function calls (direct)
+//! - Function calls (through absolute addresses, see `relocation`)
 //! - Check/Result/fallible graphs are refused before code generation (#97/#119)
 //!
-//! Strings and structs are deferred to a later phase.
+//! Strings and structs are deferred to a later phase. Nothing emitted may depend
+//! on the distance between separately allocated blocks; see [`relocation`] (#96).
 
 use std::collections::HashMap;
 
 use anyhow::{Result, anyhow, bail};
+#[cfg(test)]
+use cranelift::codegen::binemit::Reloc;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 
 use crate::ast;
+pub(crate) mod relocation;
+mod string_length_admission;
 mod truthiness;
 pub(crate) mod failure_admission;
+pub(crate) mod input;
 #[cfg(test)]
 mod admission_measurement_tests;
+#[cfg(test)]
+mod far_apart_tests;
+#[cfg(test)]
+pub(crate) mod relocation_tests;
 
 /// A compiled Adapsis program, ready to execute.
 pub struct CompiledProgram {
     module: JITModule,
     functions: HashMap<String, FuncId>,
+    /// Relocation kinds of each compiled function, in definition order.
+    #[cfg(test)]
+    pub(crate) relocations: Vec<(String, Vec<Reloc>)>,
 }
 
 impl CompiledProgram {
@@ -270,7 +283,8 @@ extern "C" fn rt_int_rem(a: i64, b: i64) -> i64 {
     crate::eval::checked_rem(a, b)
 }
 
-/// Compile an Adapsis program to native code via Cranelift JIT.
+/// Compile an Adapsis program to native code via Cranelift JIT. Whatever this
+/// reads of `program` MUST be part of [`input::CompileInput`] (the cache key).
 pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     // This entry emits every top-level function, even ones unrelated to the requested
     // root. Check all emitted functions before constructing any executable module.
@@ -340,6 +354,8 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     }
 
     // Second pass: compile function bodies
+    #[cfg(test)]
+    let mut relocations = Vec::new();
     for func in &program.functions {
         let sig = signatures.get(&func.name).unwrap().clone();
         let func_id = *compiled_functions.get(&func.name).unwrap();
@@ -357,6 +373,10 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
         )?;
 
         module.define_function(func_id, &mut ctx)?;
+        // Relocations are applied (and can panic) only in `finalize_definitions`.
+        let _kinds = relocation::check(&ctx, &func.name)?;
+        #[cfg(test)]
+        relocations.push((func.name.clone(), _kinds));
         module.clear_context(&mut ctx);
     }
 
@@ -366,6 +386,8 @@ pub fn compile(program: &ast::Program) -> Result<CompiledProgram> {
     Ok(CompiledProgram {
         module,
         functions: compiled_functions,
+        #[cfg(test)]
+        relocations,
     })
 }
 
@@ -534,7 +556,7 @@ fn flatten_type(ty: &ast::Type, program: &ast::Program) -> Vec<types::Type> {
 }
 
 /// Get field names and types for a struct from the program.
-fn get_struct_field_types(program: &ast::Program, name: &str) -> Option<Vec<(String, ast::Type)>> {
+pub(super) fn get_struct_field_types(program: &ast::Program, name: &str) -> Option<Vec<(String, ast::Type)>> {
     for td in &program.types {
         if let ast::TypeDecl::Struct(s) = td {
             if s.name == name {
@@ -575,7 +597,7 @@ struct CompilationContext<'a, 'b> {
     program: &'b ast::Program,
     return_type: &'b ast::Type,
     terminated: bool,
-    string_literals: &'b mut Vec<(String, cranelift_module::DataId)>,
+    string_literals: &'b mut Vec<(String, DataId)>,
     // Semantic types are needed to distinguish an I64 string pointer from Int.
     // Rebinding invalidates the proof rather than guessing from machine bits.
     value_types: HashMap<String, Option<ast::Type>>,
@@ -1000,7 +1022,7 @@ fn compile_call(
         .get(&call.callee)
         .ok_or_else(|| anyhow!("undefined function `{}` in compiled code", call.callee))?;
 
-    let local_callee = ctx.module.declare_func_in_func(*func_id, ctx.builder.func);
+    let local_callee = relocation::far_call(ctx.module, *func_id, ctx.builder.func);
 
     let mut arg_vals = Vec::new();
     for arg in &call.args {
@@ -1056,7 +1078,7 @@ fn compile_expr(
                 ctx.string_literals.push((s.clone(), data_id));
 
                 // Get a pointer to the data
-                let gv = ctx.module.declare_data_in_func(data_id, ctx.builder.func);
+                let gv = relocation::far_data(ctx.module, data_id, ctx.builder.func);
                 let ptr = ctx.builder.ins().global_value(types::I64, gv);
 
                 // Store the length in a temp variable so it can be retrieved
@@ -1300,7 +1322,7 @@ fn expr_to_var_name(expr: &ast::Expr) -> String {
 }
 
 /// Heuristic: check if an expression is a string.
-fn is_string_ast_expr(expr: &ast::Expr) -> bool {
+pub(super) fn is_string_ast_expr(expr: &ast::Expr) -> bool {
     match expr {
         ast::Expr::Literal(ast::Literal::String(_)) => true,
         ast::Expr::Binary { left, right, .. } => {

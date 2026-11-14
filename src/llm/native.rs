@@ -171,8 +171,9 @@ fn parse_native_finish_reason(raw: &str) -> Result<NativeFinishReason> {
     match raw {
         "stop" => Ok(NativeFinishReason::Stop),
         "tool_calls" => Ok(NativeFinishReason::ToolCalls),
+        "length" => Ok(NativeFinishReason::Length),
         other => Err(anyhow!(
-            "unsupported finish_reason '{other}'; expected 'stop' or 'tool_calls'"
+            "unsupported finish_reason '{other}'; expected 'stop', 'tool_calls' or 'length'"
         )),
     }
 }
@@ -199,7 +200,8 @@ fn assemble_native_response(parsed: NativeCompletionResponse) -> Result<NativeRe
     let finish = parse_native_finish_reason(&finish_reason)?;
 
     let message = choice.message;
-    let tool_calls = message.tool_calls;
+    // A cut-off response may end inside a tool call: none of its calls is kept.
+    let tool_calls = if finish == NativeFinishReason::Length { Vec::new() } else { message.tool_calls };
     validate_tool_calls(&tool_calls).map_err(anyhow::Error::msg)?;
 
     match finish {
@@ -478,7 +480,8 @@ impl StreamState {
         let finish =
             parse_native_finish_reason(&finish_reason).map_err(|error| error.to_string())?;
 
-        let tool_calls = self.accumulator.finish()?;
+        // A cut-off stream may end inside a tool call: none of its calls is kept.
+        let tool_calls = if finish == NativeFinishReason::Length { Vec::new() } else { self.accumulator.finish()? };
 
         match finish {
             NativeFinishReason::Stop if !tool_calls.is_empty() => {
@@ -956,16 +959,57 @@ mod tests {
 
     #[tokio::test]
     async fn complete_turn_errors_on_unsupported_finish_reason() {
-        let body = r#"{"choices":[{"finish_reason":"length","message":{"content":"truncated"}}]}"#;
+        let body = r#"{"choices":[{"finish_reason":"content_filter","message":{"content":"truncated"}}]}"#;
         let url = mock_server(body.as_bytes().to_vec()).await;
         let err = client(&url)
             .complete_turn(simple_request(vec![ChatMessage::user("hi")]))
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("finish_reason 'length'"),
+            err.to_string().contains("finish_reason 'content_filter'"),
             "got: {err}"
         );
+    }
+
+    /// A response the provider cut off is handed on as `Length` with its partial
+    /// text and WITHOUT tool calls, however complete a call looks: the caller
+    /// must not be able to execute any of it.
+    #[tokio::test]
+    async fn a_cut_off_response_keeps_its_text_and_drops_every_tool_call() {
+        for calls in [
+            r#"[]"#,
+            // Arguments cut mid-JSON.
+            r#"[{"id":"call_1","type":"function","function":{"name":"write","arguments":"{\"path\":\"a.txt\",\"content\":\"abc"}}]"#,
+            r#"[{"id":"call_1","type":"function","function":{"name":"mutate","arguments":"{}"}}]"#,
+        ] {
+            let body = format!(r#"{{"choices":[{{"finish_reason":"length","message":{{"content":"partial text","tool_calls":{calls}}}}}],"usage":{{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}}}"#);
+            let url = mock_server(body.into_bytes()).await;
+            let response = client(&url).complete_turn(simple_request(vec![ChatMessage::user("hi")])).await.unwrap();
+            assert_eq!(response.finish_reason, NativeFinishReason::Length, "{calls}");
+            assert_eq!((response.content.as_str(), response.tool_calls.len()), ("partial text", 0), "{calls}");
+            assert_eq!(response.usage.prompt_tokens, 7);
+        }
+        // Streaming: the stream ends inside a tool call (no id yet, half the arguments).
+        let stream = [
+            sse(r#"{"choices":[{"index":0,"delta":{"content":"partial "},"finish_reason":null}]}"#),
+            sse(r#"{"choices":[{"index":0,"delta":{"content":"text","tool_calls":[{"index":0,"function":{"name":"write","arguments":"{\"path\":\"a"}}]},"finish_reason":null}]}"#),
+            sse(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#),
+            sse("[DONE]"),
+        ]
+        .concat();
+        let url = mock_server(stream.into_bytes()).await;
+        let mut events = client(&url).stream_turn(simple_request(vec![ChatMessage::user("hi")])).await.unwrap();
+        let mut done = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                NativeStreamEvent::Done(response) => done = Some(response),
+                NativeStreamEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        let response = done.expect("a cut-off stream is a result, not an error");
+        assert_eq!(response.finish_reason, NativeFinishReason::Length);
+        assert_eq!((response.content.as_str(), response.tool_calls.len()), ("partial text", 0));
     }
 
     #[tokio::test]
@@ -1331,8 +1375,13 @@ mod tests {
             parse_native_finish_reason("tool_calls").unwrap(),
             NativeFinishReason::ToolCalls
         );
-        assert!(parse_native_finish_reason("length").is_err());
-        assert!(parse_native_finish_reason("content_filter").is_err());
+        assert_eq!(
+            parse_native_finish_reason("length").unwrap(),
+            NativeFinishReason::Length
+        );
+        for other in ["content_filter", "pause_turn", "unknown", "", "LENGTH", "max_tokens"] {
+            assert!(parse_native_finish_reason(other).is_err(), "{other}");
+        }
     }
 
     #[test]

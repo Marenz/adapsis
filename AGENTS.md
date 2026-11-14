@@ -57,6 +57,31 @@ narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
   a real Telegram `IMAGE148-OK` reply (549322), prior photos recovered, HTTP 200,
   native finish in two generations; 275/275 startup cases, six managed modules,
   NRestarts 0. No module-source replacement accompanied this binary hotfix.
+- **Historical here deployment (2026-11-12, upgrade #146): commit `8b985cb` on
+  `work/python-source-library`**, binary sha256
+  `8c8e8a4d55990272ecd06d15927dbd213432cf710dbcda18600b054b99623046`.
+  The five manifest-managed Python modules remain as installed by switch #128
+  below (275 stored cases, all passing at startup). Mutation results now report
+  the real source-save outcome; finish names unsaved edits, with one refusal per
+  turn for fixable causes in modules that turn's own calls changed. Saving stays
+  automatic; the git-commit boundary for the module library is still pending
+  (#146). The earlier #136 whole-metadata concurrency window remains open.
+  - Manager verified after the owner-approved upgrade: fresh checkpoint,
+    inhibitor and install checks, NRestarts 0, five modules, one route, two loops,
+    no library errors and shared-variable probes unchanged. Telegram reply
+    `SAVE146-OK` delivered (message 549037); no provider error with the newly
+    deployed `prompt_cache_key`.
+  - Live acknowledgement proof: adding `Peer.upgrade_probe` through
+    `/api/mutate` returned `saved to Peer.py` with the file already changed;
+    `!remove Peer.upgrade_probe` returned saved again and restored the library
+    bytes. Revision after verification: 248.
+  - Pre-upgrade bundle:
+    `~/.local/share/adapsis/upgrade-146/pre-upgrade-bundle/`; previous binary also
+    at `~/.local/bin/adapsis.bak-fa04e367`. The previous binary can read the
+    candidate-written session and managed library (rehearsed). Operator notes
+    and rollback checks: `~/.local/share/adapsis/rehearsal-146/REPORT.md`.
+  - sleek and edox are unchanged. The exit-78 drop-in and helper installed at
+    switch #128 remain active.
 - **Source-library switch baseline (2026-11-12, switch #128): commit `b7bfa64` on
   `work/python-source-library`**, binary sha256
   `fa04e3677b4adf70aafc65196c7ff6facaece2c155f3f9b36de272359c7ce3e8`. The module
@@ -85,6 +110,11 @@ narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
     conversion set, review and rehearsal.
   - Gate and tools for a repeat: `rehearsal-128/rehearse.sh`, `selftest.sh`,
     `bin/preflight.py` (requests a save and proves the session file is final).
+- **Owner direction for this development phase:** prioritize fix-forward and
+  minimal release ceremony. Do not start new compatibility or rollback projects;
+  retain the existing backups. Review, appropriate tests and live verification
+  are still required. The historical switch/rehearsal records below are evidence
+  of completed work, not a mandate to expand that machinery for each change.
 - Historical (superseded 2026-11-12): here Telegram deployment (2026-11-02): runtime binary `88b4275`;
   TelegramBot/TgFormat are now production-Python-frontend-authored modules
   (48/18 functions, 221 stored cases), prepared with reviewed tooling `9ffd3fa`.
@@ -257,6 +287,260 @@ falls back to the last URL path segment (query included) as the attachment name 
 response has no Content-Disposition header.
 
 ## Architecture
+
+### Workspace foundation (#129, S1–S3 library only)
+
+`src/workspace/` owns repository/worktree lifecycle, bounded read/search/glob,
+read-ledger-checked atomic edit/write, foreground commands/cancel and durable
+background jobs. This is reviewed library code, **not live deployment
+certification**; the first wiring slice is described below. Focused gate:
+`cargo test --release workspace::`.
+
+- Registry: `~/.config/adapsis/workspaces.toml`, override
+  `ADAPSIS_WORKSPACES_FILE`; optional per-repository `env` is applied before
+  request overrides. Private job state: `~/.local/share/adapsis/workspaces`,
+  override `ADAPSIS_WORKSPACE_STATE_DIR`. Test defaults never use live paths.
+- Dependencies: Linux `/proc`/cgroup v2, `/usr/bin/python3 -I` static trusted
+  adapters, `systemd-run`/`systemctl` user manager, `env`, and bash. Jobs require
+  the user manager; foreground commands can explicitly report process-group
+  fallback. Cgroup lifetime containment is not filesystem isolation (DESIGN N5).
+- Keep clean supervisor/client environments structurally separate from payload
+  environment dictionaries. Never export payload variables into a supervisor
+  shell or interpolate them into adapter source/argv. Foreground environment
+  memfds stay owned **through adapter stop/reap**; cancel/deadline is not proof
+  of handoff. Releasing early creates a cross-request fd-reuse/ABA race.
+- Private state operations use held directory descriptors and nofollow
+  open/mkdir/read/atomic-write/unlink operations, including recursive deletion.
+  Errors and unverifiable records fail closed. Root ancestors/bind mounts remain
+  operator-trusted; maintain one active daemon per state root.
+- Reservation order: lifecycle-global (where used) → per-workspace reservation
+  → descriptor operations. Start/close/list/prune/forget/status share it; internal
+  locked helpers must not reacquire it. Invoke these blocking APIs through
+  `spawn_blocking`, without Program/runtime/session state locks held.
+- Preserve `Exit::CleanupUncertain` / cleanup errors as failure: never turn them
+  into success, a fully-stopped claim, or permission to replay a command.
+
+### Workspace tools in owner turns (#129 W1: lifecycle + read-only)
+
+Wired: `workspace_open`, `workspace_use`, `workspace_status`, `workspace_close`, `read`,
+`search`, `glob`, plus W2's `edit`, `write`, `bash` (`api/native_tools/workspace.rs`,
+`workspace/change_tools.rs`, `workspace/exec.rs`, `workspace/changes.rs`). Still pending:
+`job_*` and the workspace turn budget (W3). DESIGN L2, L3, T4,
+N3, N5/N6, C4.
+
+- **Who and where: ONE predicate, `workspace::available(config)`.** Schemas
+  (`speaker::definitions`), prompt section, runtime-tail line, batch preflight, the view
+  filter and execution all ask it. True only for: the writer class, on a node whose turn
+  snapshot carries a workspace site, in an OWNER-PRIVATE conversation:
+  - a conversational turn (it has a turn identity): `memory_graph::is_private_admin`, the
+    administrator in the administrator's own DM (the predicate of `conversation_history`
+    and the inbox snapshot). Not the owner in a group, not another writer anywhere.
+  - an HTTP turn on `main` (no turn identity): only `Origin::Local` (`api/origin.rs`): the
+    TCP peer is loopback (127/8, ::1, IPv4-mapped loopback) AND the request carries no
+    `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header. A forwarding header can only
+    narrow (a reverse proxy on this node forwards from 127.0.0.1). DESIGN N3 makes node
+    identity the WireGuard address plus a per-node profile; until that profile exists, a
+    request from another node has no authority we can name, so it gets no workspace tools.
+    The per-node profile is the place that may widen this (`Origin::Remote(ip)` carries
+    the address for it). `AppConfig.origin` is set by the routed wrappers `origin::ask` /
+    `origin::ask_stream`; a turn without it is not local. The server must be served with
+    `into_make_service_with_connect_info::<SocketAddr>()`, else every request is remote.
+  The reason is the history: tool results stay in a conversation's history and that
+  history is sent to whoever speaks there next.
+  Everywhere else the tools do not exist: not in schemas, prompt or tail, and a call gets
+  the `unknown native tool` text of any invented name (for a writer without a registry
+  byte for byte what it was before these tools). Do NOT add the names to `admit_tool`'s
+  `known`, and never branch on `is_tool(name)` without `available(config)`.
+- **The site is decided once per turn** by `workspace::attach(&mut snapshot)` at the two
+  turn entries (`takeover_native::native_snapshot`, `native_turn::run`): not eligible means
+  no site and the registry file is not read; eligible means the site the configuration
+  carries (tests) or the registry file, read in `spawn_blocking`. Missing, empty or
+  invalid file: no workspace tools; an invalid file is journaled once per distinct problem
+  (category `workspace`, source `registry`), not once per turn. `Site` = registry + binding
+  store; tests give each test its own state root (`RepoFixture::site`).
+- **History of a conversation that has workspace batches** (`main` after a local turn; a
+  shared conversation with older data): a turn WITHOUT workspace tools is not shown them.
+  `request_meter::turn_view(.., show_workspace)` sets `ViewPolicy::hidden_tools`, and the
+  view leaves out every complete batch that calls a workspace tool name (all 15 names of
+  all slices, `workspace::ALL_NAMES`), with the notice `[System: N earlier tool
+  exchange(s) of this conversation are not shown in this turn.]`, which the request
+  builders move to the volatile tail like the omitted-history notice. Default is HIDE:
+  only `http_context::checkpointed_view_for(.., Some(config))` with an available config
+  shows them; legacy turns and the `!watch` self-trigger always hide. Stored history is
+  untouched; checkpoint and cold start are projected on the unfiltered history; a turn
+  that sees less than the previous one is a new cache epoch by itself (its history is not
+  an extension). **Not covered (#145):** the owner's questions and the model's own prose
+  stay visible; if the model wrote "the file says X", X is in the history.
+- **Binding.** One conversation has at most one workspace; one workspace at most one
+  conversation (T4). The record (repo name, workspace name, read ledger) is a file,
+  `<state root>/_bindings/<sha256 prefix of the key>.json` (`workspace/binding.rs`), not
+  session state: restart and rewind do not touch it. The name is a hash so neither the
+  directory nor an error text shows a conversation key. Rules:
+  - A workspace is taken only by `BindingStore::claim`, one transaction under the
+    workspace's reservation (the lock job start and close share): read every record, get
+    every other holder idle (else refuse, nothing changed), remove their records and
+    fsync the directory, publish the claimant's record; the holders' guards are held to
+    the end. A crash or error between removal and publication leaves the workspace bound
+    to NOBODY (safe: `workspace_use` gets it back, with an empty ledger); two records
+    never name one workspace. `workspace_open` creates first (the lifecycle lock is taken
+    inside the library and must come before the reservation), then claims; if another
+    conversation got in between, the opener is told it is bound elsewhere, never to whom.
+  - A conversation is IDLE when its turn lock and its WORK lock are both free
+    (`api/turn_lock.rs`). The work lock is taken before every blocking workspace call and
+    MOVED INTO the blocking task, so it is held until the library call has really
+    finished, also when the turn's future is dropped meanwhile. What drops a turn future
+    in production: `/api/ask` when its client disconnects (the handler future is the
+    turn); `/api/ask-stream` and `llm_takeover` run in spawned tasks nobody aborts today.
+    A dropped turn's call FINISHES AND BINDS, nothing is rolled back. A later call of the
+    same conversation waits for it (at most `WORK_WAIT_MAX`, 210 s, then a refusal with
+    nothing done) and says so when it waited over 3 s; the tail line does not load a
+    binding while earlier work runs.
+  - A conversation's record is written or removed only under that conversation's work
+    lock (its own blocking task, or a claimant that holds it idle). The ledger save is
+    conditional (`save_ledger`: only while the record still binds that workspace), so a
+    late writer never brings a binding back.
+  - Lock order: own turn lock (handler) → own work lock (moved into the worker) → library
+    lifecycle lock (inside open/close only, released before the next step) → workspace
+    reservation → try-locks on other conversations' turn and work locks (never wait) →
+    state files. No path takes two reservations.
+  - Fail closed: every entry of `_bindings` must be an attributable record (regular file,
+    decodes, version 1, its file name is the hash of the key it names). Anything else
+    (also a stray file, a directory, a symlink) is an error for the conversation itself
+    and for EVERY claim and holder query, naming the file for the owner to repair or
+    remove; journaled once per file per process (source `binding`, no path or key). Only
+    our own in-flight `.tmp-*` files are skipped.
+  - The binding and its ledger are removed for a vanished workspace in ONE case: git
+    answered and lists no such worktree (`Error::NotOpen`). A git failure or timeout, a
+    missing checkout or worktree directory (an unmounted disk looks the same) or a
+    repository missing from the registry keep the binding and report the cause.
+  - All of these locks are process-local: one active daemon per state root; a second
+    process on the same state root is not excluded.
+- **Results are plain text**, the library's `render()` under a header line; failures
+  start with `error:`. Success is `Outcome::success`, which feeds `has_errors` and the
+  training log's outcome. Never derive it from the text, and never parse a workspace
+  result as the JSON envelope (`NativeLoop::workspace_call`: no working-set snapshot, no
+  write-back; these tools never touch the Program). The workspace branch in
+  `execute_call` comes after the turn's tool budget exists and draws from it for a
+  restricted class, so offering a workspace tool to another class cannot skip its budget.
+- **What is recorded where** (the rule is also beside the #88 gate in `logging.rs`):
+  model: the full text. `/api/events` and `AskResponse.results`: only `` `tool`: ok ``
+  or `` `tool`: failed `` (every subscriber sees events). Default log: one metadata line
+  per call (`[workspace:<context>] tool= ok= workspace= result_bytes= ms=`); arguments
+  and header only with `ADAPSIS_LOG_CONTENT=1`. Journal: fixed texts. TRAINING LOG:
+  for workspace tools STRUCTURAL METADATA ONLY: static/schema-known argument names
+  and sizes (unknown fields only counts/combined sizes), static tool label, execution
+  success and result byte count (`logged_call`, `logged_result`). No raw header, error,
+  prose, correlation id, unknown key or argument value: any of these may contain a
+  credential and that log is long-lived (N6). Explicit #88 debug logging is separate.
+  New workspace tools inherit this by being in `ALL_NAMES`; their field names remain
+  anonymous counts until added to the static/schema-known field list.
+  A workspace-caused preflight refusal retains its failing-call provenance: every
+  skipped peer call in that batch gets categorical training/public failure metadata
+  too, because its private correlated result carries the same workspace diagnosis.
+  Ordinary-tool-only refusal policy stays unchanged.
+  `adapsis memory-migrate` leaves out workspace results (`result_positions`), by complete
+  sequential batch positions, never by conversation-wide call ids (ids may be reused
+  between turns). Malformed/orphan batches follow the model-history policy. At run
+  time tool results never reach the memory graph (only user and assistant text do).
+- **Names are data** (`workspace::error::shown_name`): a file name with control, line or
+  direction characters (all Unicode Bidi_Control, including U+061C/U+200E/U+200F), or a
+  leading `"`, is rendered as a JSON string literal in every
+  result (read header, search and glob lines, edit/write lines), with a note that the
+  decoded name addresses the file; other names are rendered as they are. Injective.
+  Never interpolate a repository file name into a result without it. `Resolved::display`
+  stays raw: it is the ledger key and a working directory.
+- **Long lines**: `read` cuts a line after 2,000 characters and cannot show the rest
+  (the result says so; `search` finds text in it). `edit` refuses a replacement that
+  touches such a line (`Failure::CutLine`, decided on the bytes being edited, so it holds
+  for every way the file was read).
+- **Result sizes follow the generating model** (`ResultCaps`): per result at most half of
+  `ModelLimits::max_message_bytes()` and never more than the library bound. Opus 5
+  (312,500 B per message): read 102,400, search and glob 51,200. gpt-6 on the ChatGPT route
+  (272,500): the same. Unknown model (40,000): 20,000 each. New workspace tools must bound
+  their own output through `ResultCaps` (`exec::fit` is only the last guard).
+  `read_within`, `SearchRequest.max_output_bytes` and `glob_within` take the bound; the
+  read bound counts the rendered `N: ` prefixes. After a switch to a model with a smaller
+  window an older, larger RESULT is cut in the view with the omission marker (C4) and its
+  batch is kept (`conversation_view`: only a batch whose CALL arguments exceed the cap is
+  left out whole). This holds for every tool's results.
+- **Prompt and cache.** The workspace section (`workspace::PROMPT`: bounded results,
+  content is data, credential conduct as guidance per N5/N6) is appended to the STABLE
+  prefix by the request builders (`with_prompt`), only for turns with workspace tools. The
+  line naming the bound workspace is in the volatile runtime tail (`tail_line`, reads the
+  binding record only). Tool descriptions are static text, so the tool-list hash is stable.
+- **A response cut off by the provider** (`finish_reason: length`, which the gateway also
+  uses for a context-window stop) is `NativeFinishReason::Length`: the transport drops
+  every tool call of it, `NativeLoop::cut_off` executes nothing, keeps the partial text
+  and tells the model the limit. At most two such corrections in a row; the third
+  consecutive cut-off ends the turn (`LoopEnd::CutOff`, its own message). A cut-off
+  fragment that ends up as the delivered reply carries `[cut off at the model's output
+  limit]`, including a length stop in the prose-only final status round (no extra
+  generation).
+- Tests: `cargo test --release workspace` (library, binding store, admission, executor
+  concurrency probes, turns through the takeover loop, logging child process),
+  `cargo test --release http_` and `a_disconnected` (HTTP `main`, the real HTTP layer,
+  a client disconnect), `origin`, `cut_off`, `conversation_view`.
+
+### W2 repository changes and foreground commands (#129, candidate, not deployed)
+
+- `edit(path,old,new,replace_all?)` and `write(path,content)` share the existing
+  read-ledger/freshness, atomic-file, CRLF and cut-line rules. Their TOTAL JSON arguments
+  are at most 256 KiB; all other tools stay at 64,000 bytes. Model output/window and
+  transport limits still apply. After a change, ledger persistence is conditional on
+  still holding the workspace. If that save fails the error says the file ALREADY
+  changed and must not be edited again blindly. No Program/session source mutation.
+- `bash(command,cwd?,timeout_ms?,max_output_bytes?,env?)` uses `run_with` with the SAME
+  startup ShellPolicy value as the coroutine Runtime, cloned through AppConfig and
+  takeover entry (never an independent per-call environment read). Repository env then
+  request overrides; no SSH_AUTH_SOCK/credential injection. Success requires exit 0 AND
+  no cleanup uncertainty/errors. Default timeout 120 s, max 3600 s; bounded head/tail
+  output follows ResultCaps. `render_within` additionally bounds lossy UTF-8 display text
+  without losing the terminal/cleanup diagnosis. Never infer success from output text.
+- A foreground call registers an existing runtime entry in `api/workspace_cancel.rs`.
+  Its cancel-on-drop guard lives in the ASYNC CALL future; Active and the work guard
+  live in the BLOCKING worker through stop/reap/environment handoff. Dropping a client
+  or call future therefore cancels bash; open/read still finish as in W1. Registry
+  entries are removed only when the worker is really done. A cancellation ends the
+  model turn as unconfirmed and skips later calls, never replays or buys a generation.
+  The visible cancellation note claims cleanup confirmed only from a scope result
+  without cleanup uncertainty/errors; fallback or uncertain cleanup gets a warning,
+  never a fully-stopped claim derived from output text.
+- `POST /api/workspace/cancel {"context":"..."}` is an out-of-band operator escape
+  hatch for EXISTING foreground work: same Origin extractor, direct loopback ONLY,
+  forwarding headers narrow, missing/remote peer denied. Context names identify a
+  registry entry, never grant authority; absent work gives 404 without creating work.
+  202 means cancellation REQUESTED, not stopped/delivered. No cancellation IO builtin,
+  Telegram /stop or queued/started receipt implementation in W2 (#147/#138 follow-up).
+- Foreground unit prefix = process-kind prefix + the state-root digest already used
+  by jobs (`workspace/foreground.rs`). Bootstrap sweeps only exact `<prefix>-run-PID-N.scope`
+  units of THIS root, once per process/root; every turn must reuse the memoized result
+  rather than sweeping this daemon's current commands. Unexpected names/status or failed
+  stop verification return cleanup-uncertain failure, never broaden the sweep. Without
+  a user manager the existing foreground process-group fallback remains available and
+  explicitly reports the uninspected earlier-scope/setsid limitation. All of this still
+  assumes one active daemon per state root. Job services are untouched and unexposed.
+- `push_guard` is a mistake guard before launch, NOT a shell sandbox. Common quoted git
+  argv and `-C`/`-c` are recognised. Explicit remote plus NONEMPTY source and full
+  `refs/heads/<destination>` required for EVERY refspec (for example
+  `git push origin HEAD:refs/heads/adapsis/<name>`). Source-only refs can be remapped by
+  `remote.<name>.push` config, so bare/default/short/bulk/wildcard destinations refuse.
+  `+` refspecs and ANY plain `--force`/`-f` (also combined short flags) refuse even
+  alongside `--force-with-lease`: plain force overrides stale-lease checks. Protected
+  base/main/master/release branches are normalised (`origin/release/foo`, full refs,
+  `HEAD:refs/heads/main`). Explicit allowed full destinations support lease-ONLY
+  `--force-with-lease` (including explicit expected-value leases).
+  Arbitrary generated shell/aliases can bypass this; server branch protection remains
+  separate. Policy/push/cleanup journal texts are categorical, never command contents.
+- Training/events/private-error rules above cover every W2 path, including failed mixed
+  preflight and cancelled batches. Cancelled batch peers get categorical metadata too,
+  with true success only for calls completed before cancellation. Close uses the pinned
+  site's job store and refuses dirty, running or unverifiable work before removing it.
+- Measurement: real temp-repository owner turn with 50 reads, 51 durable binding writes
+  including its claim: 448.385 ms; offline equivalent read/hash plus ONE ledger flush:
+  1.558 ms (includes no git-open/provider overhead, so not an isolated fsync speedup).
+  Keep per-call durability: under half a second for this 50-file turn does not justify a
+  weaker batch-commit boundary. Manual regression is ignored in routine suites:
+  `cargo test --release --bin adapsis -- measure_fifty_read --ignored --nocapture`.
 
 - Issue #121 opt-in source library: `library-sources.json` explicitly maps module
   names to `python`/transitional `legacy_ax` plus a closed acyclic dependency set.
@@ -492,7 +776,61 @@ signatures/catch consumers must be audited separately before deployment.
      This JIT checkpoint does NOT itself repair Result invocation normalization. The
      subsequent scalar VM safety rules are below. Native Check traps are unreachable through
      supported compile paths; other JIT limitations (e.g. integer zero-divisor abort,
-     #92, and relocation #96) are not fixed by this admission rule.
+     #92) are not fixed by this admission rule.
+   - **Relocations (#96).** `cranelift-jit` 0.119 allocates every function and data
+     object as its own heap block and PANICS when a PC-relative relocation between two
+     blocks exceeds 2 GiB (`compiled_blob.rs:56`), which a process with a huge
+     address-space reservation reaches. `compiler/relocation.rs` therefore declares
+     every user callee (`far_call`) and string literal (`far_data`) non-colocated, so
+     only absolute `Abs8` relocations are emitted, and `relocation::check` refuses any
+     other kind with an ordinary error before `finalize_definitions`. New codegen that
+     references another function or data object MUST go through these helpers
+     (`declare_func_in_func`/`declare_data_in_func` alone are colocated). Calls are
+     indirect now (about 4% on a call-only benchmark).
+   - **Compiler panics are contained (#96).** `jit_dispatch` runs `compiler::compile`
+     under `catch_unwind`: a panic means "no JIT for this revision" (remembered in the
+     cache slot as `JitSlot::Refused`, journaled once as `panic`/`jit.compile` without
+     the payload) and the call continues on the VM/tree path. An ordinary compile
+     `Err` is not remembered (unchanged). A poisoned cache mutex is recovered with an
+     empty slot. Only `compile` is contained, never the execution of compiled code.
+     Callers must not hold a state lock across evaluation: `/api/eval` and the
+     `!watch` loop (`execute::watch_evaluate`) snapshot program and revision first.
+     Tests: `cargo test --release jit_` (relocation kinds of real machine code incl.
+     all compilable example roots; injected compile panic; lock-freedom of the watch
+     and `/api/eval` paths; `compiler/far_apart_tests.rs` arranges code and data more
+     than 2 GiB apart in a child process (glibc/x86-64) and requires both a correct
+     result with the current codegen and a contained genuine Cranelift panic with the
+     old colocated codegen).
+   - **A cache hit is proven by what was compiled, not by the revision (#96 review).**
+     `compiler/input.rs::CompileInput::of(program)` builds a program holding exactly
+     what `compile` and its admission passes can reach: ALL functions (top-level and of
+     every module at any depth, the same `Arc`s) and all type declarations, in the same
+     module structure. Module functions are never emitted but ARE read: a bare callee
+     such as `concat` resolves to a module function of that name, and admission follows
+     it (an input without them compiled a program the live admission refuses). The
+     dispatch compiles THAT program and keeps it in the slot; a hit needs the same
+     revision (cheap first test only) AND `CompileInput::matches(live)` (`Arc::ptr_eq`
+     per function at every depth, module names and order, types by value). An edit to
+     any module function therefore recompiles once. A remembered panic refusal is tied
+     to the same input. The lookup table at the top of `input.rs` lists every lookup
+     the passes make and what answers it. The revision alone is unsound: `write_back_working_set` updates program and
+     metadata non-atomically, several write-backs do not bump it, and a rewind reuses
+     numbers (tracked with #136). If `compile` must read another part of `Program`, add
+     it to `CompileInput` first (`jit_compiling_from_the_input_equals_compiling_from_the_program`
+     compares both compilations byte for byte). Readers still take program and revision
+     under ONE read (`working_set::program_at_revision`, `snapshot_working_set`) so
+     history records the evaluated revision.
+   - **Strings whose length the generator does not know (safety refusal, defect open).**
+     The code generator takes the length of every string operand from the last string
+     expression compiled (`_last_str_len`); only a literal, `concat(...)` and a call to
+     a String-returning user function set it. A variable, a struct field or any other
+     form leaves it stale: `concat("hello ", name)` read `name` with length 6,
+     `+return p.label` returned "". `compiler/string_length_admission.rs` (called from
+     the `failure_admission` walk, so also before a cache hit) refuses a function unless
+     every length-consuming operand is one of those three forms: the value returned by a
+     String function, each `concat` argument, both operands of a string `==`/`!=` (one
+     must be a literal, otherwise the generator compares pointers), and an argument for
+     a String parameter. Lift the refusal only together with real length tracking.
 2. **Bytecode VM** (`vm.rs`) — near-full language coverage.
    - Sync path: `eval_compiled_or_interpreted_cached` → `try_vm_execute` (eval/mod.rs).
    - Async path: `eval_async_function` (eval/mod.rs) — IO suspensions serviced
@@ -1063,7 +1401,11 @@ replaces that branch with one composer.
   These fixed English notices are interface feedback, never
   model-generated task/tool-execution claims. HTTP ask/SSE is unchanged.
   A two-event worker uses the same trusted callback Spawn builder as final
-  notifications (`conversation_callback::request`). No progress text enters
+  notifications (`conversation_callback::request`). `Progress::acquire` gets the
+  SAME `turn_lock::of` lock that HTTP turns and workspace idle checks use, not a
+  parallel map. The builder sets `program_frozen:false` exactly as the old trusted
+  platform callback path did; callbacks have their own handle, not new model
+  permissions or inheritance from a frozen block. No progress text enters
   conversation history, Ladybug, training or provider requests. One attempt is
   bounded by five seconds including queue admission; one categorical failure
   stops the worker without retrying or failing the turn. End/check/launch share
@@ -1078,11 +1420,12 @@ replaces that branch with one composer.
   `cargo test --release takeover_progress` (mock provider and evaluated callbacks,
   plus deterministic end/backpressure/cancel races).
 - **Native tools remain opt-in pending parity (#89).** `--native-tools` enables
-  the native protocol for eligible write-capable, non-guest `/api/ask`,
-  `/api/ask-stream` and `llm_takeover` turns. With no flag, legacy remains the
-  default. `--legacy-tools` explicitly forces legacy and wins if both flags are
-  supplied, regardless of order. Guests/execute-only speakers retain whole-turn
-  legacy routing. Native turns do not have per-feature fallback for unavailable
+  the native protocol for `/api/ask`, `/api/ask-stream` and `llm_takeover` turns,
+  with a tool list per speaker class (see "Speaker classes and restricted `run`"
+  below). With no flag, legacy remains the default. `--legacy-tools` explicitly
+  forces legacy and wins if both flags are supplied, regardless of order. Only
+  guests on the HTTP `main` context retain whole-turn legacy routing under the
+  flag. Native turns do not have per-feature fallback for unavailable
   operations. The owner's superseding gate requires executable conversation
   capability parity and independent review before changing the default. Preserve
   legacy code and the guarded external `!opencode` integration (process/model
@@ -1121,6 +1464,183 @@ replaces that branch with one composer.
   semantics, so a corrected error can coexist with `completed: true`.
   The main conversation's permission profile intersects the active model per
   group in a pinned turn snapshot; an override can only narrow execution.
+- **Native `run`: one ad-hoc Python block, executed once (#129, DESIGN L2).**
+  `{"source", "module"?}` for write-capable speakers (described here); guests and
+  execute-only speakers get the restricted form described in the next entry. It replaces
+  the role of `!eval`/top-level statements.
+  `api/native_tools/run.rs` owns it; the pieces it shares must stay shared:
+  - **Lowering** (`python_frontend/lower/block.rs`): the source is parsed AS WRITTEN (no
+    synthetic `def`, so positions are exact; rustpython-parser 0.4.0 accepts module-level
+    `return`/`await`) and lowered by the unchanged `surface`/`usage`/`Lower` statement
+    rules as the body of one parameterless function with effects io, fail, mut, async.
+    The first typed `return` fixes the result type (`Lower.infer_result`), later returns
+    must match, falling off the end is allowed, and the plain-T-under-Result rule (G7) is
+    NOT applied. `x = await f()` and a bare `await f()` are refused with one text each
+    that shows the annotated form (`surface::UNANNOTATED_AWAIT`/`BARE_AWAIT`); the texts
+    are the shared frontend's, so `mutate` function bodies get them too.
+  - **Admission** = the Python `mutate` admission: `frontend::admit_python` is the one
+    signature-aware path (authorized catalog, reference roles, type-binding guard,
+    `validate_mutate_ops`), `authorize_declarations`/`authored::declarations` the one
+    authorization and runtime-target check, and `validator::detached_module_function`
+    (`validator/detached.rs`, also used by `apply_module`) the validator rules including
+    the reserved `__` prefix. Plus Python evaluate's reachable-graph checks
+    (`validate_await_contract_from`, `check_constructor_environment_from`). Not applied:
+    evaluate's whole-program builtin-shadow check (per-reference rule, as for mutate).
+    Never add a check to `mutate` without it reaching `run` through these helpers.
+  - **Scope.** `module: "M"` resolves M's names bare and needs Write on M (the block is
+    M's code, it can assign M's `+shared` variables). Without `module` the scope is
+    `reserved_names::RUN_SCOPE` (`RunToolScratch`): user functions are `Module.function`,
+    and the Write level of an unlisted module is required. `validator::apply_module`
+    refuses to declare a module of that name (every declaration path passes it), an
+    unscoped run is refused if a session file carries one anyway, and
+    `PermissionConfig::load` refuses the name in `[groups]` (a group entry would change
+    the level unscoped runs need).
+  - **Execution**: `execute/io_eval.rs::evaluate_with_io` is the blocking task native
+    `evaluate` uses (EvalContext, `CoroutineHandle::new(sender).with_turn(config.turn)`),
+    then `eval::eval_detached_block`: the raw named-block entry of lifecycle blocks, always
+    the tree-walker, no invocation normalization (the `return` value as written; a failed
+    check or propagated Err is an error, `success: false`). Every IO-boundary guard is
+    downstream of that handle and unchanged.
+  - **Nothing is persisted, and the Program is frozen.** The declaration never enters a
+    Program (there is nothing to roll back on error, panic or refusal),
+    `apply_operations_to_tiers_async` is never called (no library write, mutation, replay
+    record, retest or history entry) and the Program is never written back. The
+    program-changing builtins are ONE classification, `builtins/program_effects.rs` (also
+    used by the evaluator; its source-scan test fails for an unclassified
+    `get_shared_program_mut()` user), enforced twice:
+    a direct call is refused at admission, and the block's handle is frozen
+    (`CoroutineHandle::with_program_frozen`, `coroutine/program_freeze.rs`), so
+    `execute_await` refuses those builtins FIRST, before arguments, the Program wrapper,
+    a `+shared` slot, library hashes or any file are touched. The callee sees an ordinary
+    builtin error. The flag is a handle field: it travels with every clone (nested calls,
+    user awaits, `run_module_startups`) and through `IoRequest::Spawn { program_frozen }`
+    into spawned tasks; every IO loop must build task handles with
+    `CoroutineHandle::for_spawned_task`. NOT frozen, because the runtime gives them a
+    handle of their own: the nested conversation of `llm_takeover` (own authority), reply
+    callbacks started by `conversation_notify`, and timer/source handlers a called
+    function registers. Backstop: `run::same_program` (pointer identity of every
+    declaration) turns any difference into `success: false`. Runtime state changed through
+    called functions (`+shared`, routes, roadmap, mocks) persists exactly as under evaluate.
+  - Result cap `RUN_MAX_OUTPUT_CHARS` = 100,000 characters with
+    `…[truncated: N of M characters omitted]` and envelope `truncated`/`omitted_chars`.
+    There is no `returned` field: the evaluator's None is its "no value" marker, so a
+    block that returns it and a block without return are the same empty success.
+    Source/argument caps are the native 32,000/64,000 bytes. No test gate, no wall-clock
+    timeout (#131). Logging follows #88: result and errors only behind
+    `ADAPSIS_LOG_CONTENT=1`, the source is never logged; the training log records the
+    batch like any native tool.
+  - Still allowed from a block (owner decision, tracked in #132 and #129): `llm_set_model`
+    (the model name is the permission-profile key) and `file_read` of any file the service
+    user can read.
+  - Not fixed here: a function body may still await `mutate(...)` etc. without a
+    per-module Write check, and `evaluate` writes that back.
+  Tests: `cargo test --release block_tests` (frontend), `run_` (tool, freeze, turn,
+  takeover), `program_effects`, `program_freeze`.
+- **Speaker classes and restricted `run` (#129, DESIGN L3 as decided 2026-11-10).** With
+  `--native-tools`, every takeover speaker is native; the tool list is the class of the
+  pinned snapshot (`api/native_tools/speaker.rs::speaker_class`):
+  - **Writer**: unchanged. **ExecuteOnly**: `inspect`, `evaluate`, restricted `run`,
+    `finish`, plus the four memory tools when the turn has an identity (the same turn-bound
+    builtins with their own rules). **Guest(tools)**: the profile's `GUEST_TOOLS` as direct tools
+    (`guest_tools.rs`: JSON object to the builtin's positional literals), restricted `run`,
+    `finish`. HTTP `main` turns: writers and execute-only speakers are native; guests stay
+    legacy (no turn identity to bind tools to).
+  - **Fail closed.** The two guest signals (the snapshot's `guest_profiles[model]` and
+    `turn.guest_tools`) must agree; otherwise, or when a named profile has no entry
+    (`permission_snapshot_for` pins `guest_profiles[model] = []`), or with no authority in
+    any group, the class is `Guest([])`: only pure `run` and `finish`. `native_snapshot`
+    writes a guest's list into the snapshot's turn identity, so schemas, dispatcher and the
+    IO boundary (`check_guest_tool`) read one list.
+  - **The rule: `run` adds composition, never authority.** Admission
+    (`run::restricted_admission`, program-free, so batch preflight refuses too): no `module`
+    scope (hence no `+shared`), bare calls only from `builtins/pure.rs` (non-IO registry
+    minus `home_dir`) or the guest's own tools, qualified calls refused for guests and
+    Execute-checked for execute-only, no `spawn`/source/event helpers. The interpreter
+    enforces the same rule on the block's OWN frame (`eval/meter.rs`): the frame is marked
+    `Block` when the block is entered and every declared function pushes `Callee`
+    (`invocation::invoke`), so the policy never depends on depth arithmetic. Callee bodies
+    are owner-written and run as under `evaluate`.
+  - **The meter (`eval/meter.rs`)** exists only inside `eval_detached_block`; all other
+    interpreter use pays one thread-local `Cell<bool>` read per site (sites are listed in
+    the module doc). Limits are policy constants in ONE place, `src/run_limits.rs`, read
+    through `RunLimits` (a per-profile override can later build a different one).
+    Restricted: 200,000 steps, 1 MiB per value (deep), 32 MiB produced in total, 8 IO calls
+    per block, each `COSTLY_TOOLS` entry once per block, 60 s wall clock (cooperative:
+    checked between steps and before IO), 24 turn-bound tool calls per TURN (`TurnBudget`,
+    shared by direct tools and blocks; new, legacy turns are unbounded). Owner: only the
+    64 MiB deep value cap. A tripped limit is sticky for the rest of the block.
+  - **Deep size without re-walking.** Arguments of every builtin are admitted before the
+    call, results after. Container sizes are remembered per allocation with a `Weak`
+    (address cannot be reused while the entry lives; `Arc::make_mut` never mutates an
+    allocation that has a `Weak`), and `push`/`insert`/`map_set`/`set_add` record
+    "sum of arguments" instead of walking. A walk visits at most `cap / 32` nodes.
+    `remembered_sizes_never_undercount` is the soundness test; add a builtin to `GROWERS`
+    only if its result is bounded by the sum of its arguments.
+  - **Sizes are real bytes.** One `SLOT` (`size_of::<Value>()`, 176 bytes today because a
+    coroutine handle is stored inline) per value, `HEAP` (40) per string or container,
+    plus text. 1 MiB is therefore about 5,900 numbers or 4,800 short strings, and the
+    32 MiB produced-bytes cap is about 600 one-by-one list appends (each `push` copies).
+    Boxing the handle and attachment variants would shrink `Value` to 32 bytes.
+  - **One call is bounded BEFORE it allocates (review F1).** The meter admits arguments
+    and measures results; a builtin whose output can exceed its input must compute a bound
+    first: `meter::reserve`/`reserve_shape` (`join`, `split`, `map_entries`, `json_escape`,
+    `base64_encode`, `concat`), `meter::render` (a writer that stops at the cap, for every
+    value-to-text path: `to_string`, `concat`, `join`, `Err`, `error_suggest`), the bounded
+    regex loop and the JSON tree bound (`eval/bounded.rs`). `builtins/pure.rs::COSTS`
+    classifies every pure builtin (a test fails for a new one without a class), and
+    `eval/builtin_alloc_tests.rs` measures real allocations with a counting allocator
+    (`src/test_alloc.rs`, test builds only) for every pure builtin x hostile arguments at
+    the cap: MEASURED worst 2.27 x cap (`concat`), asserted <= 3. All of this is a no-op
+    outside a block. Applies to the owner's 64 MiB cap too.
+  - **Regex in restricted blocks (review F3).** `RegexLimits` in `run_limits.rs`: pattern
+    <= 2,048 bytes (parsing costs ~300 bytes per pattern byte), compiled under the
+    smallest power-of-two `size_limit` class that admits it (<= 512 KiB), and
+    class x text length <= 8 GiB^2. MEASURED worst case 1.1e-10 s per byte^2 (the lazy DFA
+    gives up, e.g. `(?:a?){n}a{n}[^a]`), so the worst admitted call is ~0.8 s; `\w`
+    patterns (64 to 256 KiB classes) get 32 to 128 KiB of text, ASCII classes 1 MiB. The
+    modelled work is charged to the step budget (50,000 steps per worst-case second);
+    `regex_replace` bounds its output before every append and stops between matches
+    after 1 s (iterating matches is worst-case quadratic). The owner has no regex work
+    limit, only the output bound. JSON: `json_tree_bound` (700 per `{`, 160 per `[` and
+    `:`, 96 per `,`) is reserved before parsing; adversarial texts reach 99x their length.
+  - **Steps also count bytes.** Each builtin call costs 1 step plus 1 per 4 KiB of
+    arguments (`ARGUMENT_BYTES_PER_STEP`), so linear builtins over cap-sized values cannot
+    be repeated 200,000 times.
+    `set(...)` construction is quadratic (not linear): it scans all earlier elements
+    for each unique input. Restricted blocks pay `n*(n-1)/2` extra steps BEFORE the
+    scan. Owner/outside-block results and representation are unchanged.
+  - **Capture-state correction (review adv3).** `regex_replace` reserves capture
+    work/scratch before the FIRST search, even for literal replacements: <=8 groups,
+    compiled-size class * capture slots <=512 KiB, and slot-weighted class * text
+    within the regex work budget. Refusals advise fewer groups, `(?:...)`, a simpler
+    pattern or shorter text. Literal replacements (including `$$`) use `find_iter`;
+    other dollar forms use regex's exact capture expansion. Owner and outside-block
+    capture semantics are unchanged. JSON reservations now include three text lengths
+    for unescape scratch/decoded strings as well as the structural tree estimate.
+  - **Turn clock.** Restricted blocks of one turn share 180 s (`turn_block_time`, in
+    `TurnBudget` with the tool-call count); a block runs against the shorter of its own
+    60 s and what is left, and the refusal names the one that stopped it.
+  - **Stack (review F4, `eval/stack.rs`).** One call level costs 10 to 20 KiB of native
+    stack (MEASURED), so MAX_CALL_DEPTH 256 never held on 2 MiB threads. Now:
+    `stack::check` at every call, on ANY thread, refuses with `call stack exhausted in ...`
+    when less than 256 KiB of the thread's stack is left (bounds from
+    `pthread_getattr_np`, once per thread); and `io_eval::evaluate_with_io` (run blocks
+    and async `evaluate`) runs on a 64 MiB thread (`on_deep_stack`), where the depth guard
+    fires first. Synchronous `evaluate`, routes, tasks and tests stay on their own stacks
+    and get the clean stack error instead of an abort. The nesting guard of #133
+    (`python_frontend/nesting.rs`, copied unchanged from 6136115) protects the frontend.
+  - **Interpreter cost that is NOT the meter's:** `xs = push(xs, x)` copies the list on
+    every step (the argument is a second reference), so 100,000 list appends take minutes
+    with or without a block. String appends are linear.
+  - Builtin fixes from the hostile-argument sweep (`eval/builtin_sweep_tests.rs`):
+    `div`/`rem` of `i64::MIN` by `-1` wrap like the operators instead of panicking;
+    `abs`/`pow` wrap explicitly. `char_at` and `substring` are the release line's #134
+    implementation, copied unchanged (`eval/strings.rs`, same file as on
+    `release/2026-11-01` at 6136115): the whole character containing the byte offset, and
+    cuts moved down to a character boundary.
+  Tests: `cargo test --release meter::tests`, `builtin_sweep`, `builtin_alloc_tests`,
+  `stack_tests`, `run_restricted`, `run_hardening_tests`, `nesting`, `takeover_native`
+  (module `restricted`), `run_limits`, `pure::`.
 - **Native takeover turns (#85).** With the native protocol opted in (see above),
   `handle_llm_takeover`
   (Telegram DMs/groups) uses the native protocol when the speaker's pinned snapshot
@@ -1294,7 +1814,7 @@ replaces that branch with one composer.
   as data to a caller that could continue effects. Result/capture graphs select the
   normalized interpreter path; lifting VM quarantine remains a separate acceptance gate.
   JIT Check/fallible graphs refuse before compilation rather than executing the historical
-  native trap. #96 JIT relocation remains open too.
+  native trap. #96 (JIT relocation panic) is fixed, see Execution Tiers.
   Float Eq/Neq condition operands deliberately refuse JIT compilation: tree/VM
   finite equality uses epsilon rather than IEEE equality. Ordered Float
   comparisons remain admitted. VM unordered Neq (NaN/identical infinities)
@@ -1707,8 +2227,10 @@ schema since day one and was never set:
   (cut on character boundaries, at most `max_message_bytes`) and inserts `[... N characters
   omitted here by the runtime to fit the model context; the stored message is complete
   ...]` with the exact count (short form for small caps). The cut depends only on the
-  message and the cap; persisted history is never changed. A native batch containing a
-  message over the cap is still dropped from the view whole.
+  message and the cap; persisted history is never changed. In a native batch an
+  over-long tool RESULT is cut the same way and the batch is kept; only a batch whose
+  assistant message (the tool-call arguments, which cannot be cut) exceeds the cap is
+  dropped from the view whole.
 - **Cache boundaries sit only on assistant messages (2026-11-10 fix).** The gateway merges
   consecutive same-role messages (a tool result is a user message for Anthropic), puts an
   explicit `cache_control` marker on the final block of the MERGED message, and rejects two
@@ -1720,6 +2242,14 @@ schema since day one and was never set:
   message of an assistant run with text or tool calls. `context_log::gateway_boundary_errors`
   (test-only) is the oracle for the gateway's rules; use it on recorded wire requests in
   any new request-building test. Do not mark user, tool or envelope messages.
+- **The tool list is part of the cache epoch.** Providers cache tool schemas ahead of the
+  system prompt, and since speaker classes two speakers with the same `may_write` and the
+  same prefix text can have different tools (two guest profiles, guest then execute-only,
+  in one group). `StablePrefixKey.tools_hash` (set by the request builder with
+  `http_context::tool_schema_hash`, 0 = no tools) makes that a reset ("tool list changed"),
+  so its unavoidable miss is not lifetime evidence. The final status round sends no tools:
+  it is accounted with `SentRequest::with_other_tools` (sizes calibrate, no hit or miss).
+  A new request path that changes the tool list between requests must do one of the two.
 - **Cache lifetime per route (`model_limits::BUILT_IN_CACHE`, `src/cache_lifetime.rs`).**
   Each route has a requested marker lifetime (`cache_ttl`: "5m"/"1h", sent as
   `cache_control.ttl` on EVERY boundary via `ContextLog::set_cache_ttl`, set in
@@ -1931,6 +2461,17 @@ schema since day one and was never set:
   carries the consent and privacy instructions.
   After restart, confirm the service's `--permissions-file` points at that exact
   permissions file before sending a live test message.
+  **Node-personalization exception (sanitized commands above are for the example
+  deployment):** principal `100000101` is a placeholder, and the worktree example
+  context may be absent. A personalized node keeps the SAME reviewed checker,
+  exact `principals`/`guest_profiles`/`model.creative` comparison and context
+  `cmp`; only the private deployment fragment's principal key changes, to the
+  identity the operator has explicitly recorded for that authored ignored
+  context. Do not infer the intended principal from the live permission file,
+  never grant the placeholder, and never commit a real ID or private context.
+  The authoritative `cmp` input is that authored ignored context from the main
+  checkout, not the sanitized or absent worktree example. This personalization
+  narrows the identity input only; it does not waive the strict gate.
 - `src/coroutine/scoped.rs` implements turn-bound argument checks and requests;
   `src/capabilities{,/music,/web}.rs` handles host IO. `music_generate` always
   delivers to the bound turn context, accepts 10–120 seconds, and allows one
@@ -1943,7 +2484,13 @@ schema since day one and was never set:
   at most 30k content characters, chronological within each page; `before_ms` is
   exclusive (equal-timestamp rows may straddle pages). Assistant rows establish
   generation only, not successful delivery. Guests cannot invoke this tool.
-- Guest `memory_remember` accepts context scope only. Guest `memory_correct` is
+- Guest `memory_remember` accepts context scope only. **Since 2026-11-10 the builtin
+  itself also refuses scope `global` for every turn that is not write-capable**
+  (`global memories require a write-capable speaker; …`): a global canonical memory is
+  injected into every conversation, the owner's included, so a non-owner writing one was
+  an injection path into owner turns. This applies on every path (legacy `!eval`, module
+  functions running in such a turn, native tool, `run` block); context scope is unchanged
+  and write-capable turns are unchanged. Guest `memory_correct` is
   turn-bound and can change only an authorized single-context record; its scoped IO
   request independently preserves the bound principal/context and non-write authority.
   Guest `memory_forget` additionally requires an assertion by that principal governed

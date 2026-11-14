@@ -11,19 +11,38 @@ use super::native_turn::{LoopEnd, NativeLoop, RoundBudget};
 use super::AppConfig;
 use crate::llm::ChatMessage;
 
-/// Native only when the process opted in and the pinned snapshot for this
-/// speaker/context is write-capable and non-guest. Guests and execute-only
-/// speakers keep the legacy scoped protocol unchanged.
-pub(super) fn native_snapshot(
+/// Native whenever the process opted in. The tool list comes from the speaker class of
+/// the pinned snapshot (DESIGN L3): writers, execute-only speakers and guests each get
+/// their own. A guest's tool list is pinned into the snapshot's turn identity, so the
+/// tool schemas, the dispatcher and the IO boundary all read the same list.
+pub(super) async fn native_snapshot(
     native_tools: bool,
     config: &AppConfig,
     context: &str,
 ) -> Option<AppConfig> {
+    let mut snapshot = classified_snapshot(native_tools, config, context)?;
+    // Once per turn, after the class is known: the tool list cannot change within it.
+    super::native_tools::workspace::attach(&mut snapshot).await;
+    Some(snapshot)
+}
+
+fn classified_snapshot(native_tools: bool, config: &AppConfig, context: &str) -> Option<AppConfig> {
+    use super::native_tools::{speaker_class, SpeakerClass};
     if !native_tools {
         return None;
     }
-    let snapshot = super::native_turn::permission_snapshot_for(config, context);
-    super::native_tools::native_tools_eligible(&snapshot).then_some(snapshot)
+    let mut snapshot = super::native_turn::permission_snapshot_for(config, context);
+    if let SpeakerClass::Guest(tools) = speaker_class(&snapshot) {
+        // Guest tools are bound to a speaker; without a turn identity there is none.
+        let turn = snapshot.turn.as_mut()?;
+        turn.may_write = false;
+        turn.guest_tools = Some(tools.clone());
+        let model = snapshot.llm_model.read().unwrap().clone();
+        let mut permissions = snapshot.permission_config.as_ref().clone();
+        permissions.guest_profiles.insert(model, tools);
+        snapshot.permission_config = std::sync::Arc::new(permissions);
+    }
+    Some(snapshot)
 }
 
 /// Assistant-turn writer into Ladybug, mirroring the legacy takeover loop.
@@ -115,7 +134,8 @@ pub(super) async fn run(turn: TakeoverRun<'_>) -> anyhow::Result<String> {
 /// The reply is always the model's visible prose, never tool JSON. When finish
 /// was not accepted, the person is told completion is unconfirmed.
 fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
-    let prose = native.prose.clone();
+    // A fragment of a cut-off response that ends up as the reply says so.
+    let prose = if native.prose_cut_off { format!("{} {}", native.prose, super::native_turn::CUT_OFF_REPLY_MARKER) } else { native.prose.clone() };
     let append = |note: &str| {
         if prose.is_empty() {
             note.to_string()
@@ -130,6 +150,9 @@ fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
         },
         LoopEnd::Empty(error) => error.to_string(),
         LoopEnd::NoOutcome => append(super::native_outcome::INCOMPLETE),
+        LoopEnd::CutOff => append(&format!("({})", super::native_turn::CUT_OFF_TURN_ERROR)),
+        LoopEnd::Cancelled { cleanup_confirmed: true } => append("(Foreground cancellation was requested; scope cleanup is confirmed. No later tools were executed.)"),
+        LoopEnd::Cancelled { cleanup_confirmed: false } => append("(Foreground cancellation was requested, but cleanup could not be fully confirmed; processes may still be running. No later tools were executed. Do not replay the command.)"),
         LoopEnd::ProviderError(_) => {
             append(&format!(
                 "Entschuldigung — ich habe gerade ein technisches Problem und konnte \

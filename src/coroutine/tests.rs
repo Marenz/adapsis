@@ -229,6 +229,56 @@ fn memory_remember_scope_is_context_or_global_and_nothing_else() {
     assert!(err.contains("String"), "a non-string scope is not explained: {err}");
 }
 
+/// A global canonical memory is injected into every conversation, the owner's included.
+/// Only a write-capable speaker may assert one; the builtin itself decides, so the legacy
+/// `!eval`, a module function and the native tool all get the same answer.
+#[test]
+fn memory_remember_global_scope_requires_a_write_capable_turn() {
+    let serve = |mut rx: mpsc::Receiver<IoRequest>| {
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Some(request) = rx.blocking_recv() {
+                let IoRequest::MemoryRemember { scope, content, reply, .. } = request else { panic!("unexpected IO") };
+                seen.push((content, matches!(scope, crate::memory_graph::MemoryScope::Global)));
+                let _ = reply.send(Ok("remembered".into()));
+            }
+            seen
+        })
+    };
+    let note = |text: &str, scope: Option<&str>| {
+        let mut args = vec![Value::string(text)];
+        args.extend(scope.map(Value::string));
+        args
+    };
+    // Not write-capable: global is refused before any request; context scope is accepted.
+    let (handle, rx) = unmocked_handle();
+    let worker = serve(rx);
+    let reader = handle.with_turn(Some(turn("telegram:group:-1", "telegram:user:100000103", false)));
+    for scope in ["global", "GLOBAL", " global "] {
+        let err = reader.execute_await("memory_remember", &note("everywhere", Some(scope))).unwrap_err().to_string();
+        assert_eq!(err, "global memories require a write-capable speaker; memories from this conversation must use context scope");
+    }
+    for scope in [None, Some("context"), Some("")] {
+        assert!(reader.execute_await("memory_remember", &note("here", scope)).is_ok(), "{scope:?}");
+    }
+    drop(reader);
+    assert_eq!(worker.join().unwrap(), vec![("here".to_string(), false); 3]);
+    // Write-capable: unchanged, both scopes reach the store.
+    let (handle, rx) = unmocked_handle();
+    let worker = serve(rx);
+    let writer = handle.with_turn(Some(turn("telegram:100000001", "telegram:user:100000001", true)));
+    assert!(writer.execute_await("memory_remember", &note("everywhere", Some("global"))).is_ok());
+    assert!(writer.execute_await("memory_remember", &note("here", None)).is_ok());
+    drop(writer);
+    assert_eq!(worker.join().unwrap(), vec![("everywhere".to_string(), true), ("here".to_string(), false)]);
+    // Guests keep their own, earlier refusal.
+    let (handle, _rx) = unmocked_handle();
+    let mut guest = turn("telegram:user:42", "telegram:user:42", false);
+    guest.guest_tools = Some(vec!["memory_remember".into()]);
+    let err = handle.with_turn(Some(guest)).execute_await("memory_remember", &note("x", Some("global"))).unwrap_err().to_string();
+    assert!(err.contains("guest memories must use context scope"), "{err}");
+}
+
 #[test]
 fn memory_forget_requires_a_memory_id() {
     let (handle, _rx) = unmocked_handle();
@@ -942,6 +992,7 @@ fn query_tasks_with_registry() {
         mocks: Some(vec![]),
         stubs: None,
         turn: None,
+        program_frozen: false,
     };
 
     let result = unwrap_string(handle.execute_await("query_tasks", &[]).unwrap());

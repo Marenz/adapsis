@@ -26,6 +26,10 @@ pub(crate) struct SentRequest {
     /// When the request was sent (unix ms). Providers count a cache lifetime
     /// from the start of the request that wrote or read the entry.
     pub(super) started_ms: u64,
+    /// False when the request was sent with another tool list than the turn's
+    /// first request (the final status round has none): the provider caches the
+    /// tools ahead of everything else, so no hit can be expected.
+    pub(super) same_tools: bool,
 }
 
 /// Serialized bytes of `messages` without image data, and the image count.
@@ -70,7 +74,15 @@ impl SentRequest {
             text_bytes: text + extra_bytes,
             images,
             started_ms: cache_lifetime::now_ms(),
+            same_tools: true,
         }
+    }
+
+    /// This request carries another tool list than the turn's first request: its
+    /// cache reads are neither a hit nor a miss. Sizes are still calibrated.
+    pub(crate) fn with_other_tools(mut self) -> Self {
+        self.same_tools = false;
+        self
     }
 
     /// Account this answered request with its conversation.
@@ -113,6 +125,7 @@ impl SentRequest {
             } else {
                 expected_tokens = probe
                     .expected_prefix_bytes()
+                    .filter(|_| self.same_tools)
                     .map(|bytes| crate::model_limits::tokens_for_bytes(bytes, ratio));
                 if probe.requests == 0 {
                     // The request wrote the prefix the next turn would read, if
@@ -207,6 +220,18 @@ fn log_cache_metric(
 /// leave) and grows append-only from there. An unknown lifetime or an unknown
 /// pause (no earlier request recorded) never cold-starts. The persisted history
 /// is untouched. Call under the metadata lock; never awaits.
+///
+/// `show_workspace`: whether this turn may see the conversation's workspace tool
+/// batches (file content of the owner's repositories). Only a turn that has the
+/// workspace tools itself does; for every other turn (another speaker class, a
+/// request from another node, a legacy turn, a `!watch` event) those batches are
+/// left out of the view whole, with a notice. The projection (checkpoint, cold
+/// start) is taken on the unfiltered history, which is the larger one. A turn
+/// that sees less than the previous one starts a new cache epoch by itself: its
+/// history is not an extension of the previous request's.
+/// NOT covered (#145): the owner's questions and the model's own prose in the
+/// same conversation stay visible; if the model wrote "the file says X", X is
+/// in the history.
 pub(super) fn turn_view(
     manager: &mut ConversationManager,
     context: &str,
@@ -214,11 +239,15 @@ pub(super) fn turn_view(
     system: &str,
     known_tail_bytes: usize,
     now_ms: u64,
+    show_workspace: bool,
 ) -> View {
     let limits = crate::model_limits::for_model(model);
     let lifetime = manager.cache_lifetimes.lifetime(model, &limits, now_ms);
     let conv = manager.get_or_create(context);
-    let policy = ViewPolicy::for_model(model, system, known_tail_bytes, conv.projection(model));
+    let mut policy = ViewPolicy::for_model(model, system, known_tail_bytes, conv.projection(model));
+    if !show_workspace {
+        policy.hidden_tools = Some(super::native_tools::workspace::is_workspace_name);
+    }
     let pause_secs = conv.last_request_ms.map(|last| now_ms.saturating_sub(last) / 1000);
     let mut cold = false;
     if let (Some(lifetime), Some(pause)) = (lifetime, pause_secs) {

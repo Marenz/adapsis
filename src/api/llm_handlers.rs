@@ -36,14 +36,9 @@ struct CompactionMemory {
     confidence: f64,
 }
 
-fn takeover_context_lock(context: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    > = std::sync::OnceLock::new();
-    let locks = LOCKS.get_or_init(Default::default);
-    let mut locks = locks.lock().unwrap();
-    locks.entry(context.to_string()).or_default().clone()
-}
+// Progress, HTTP turns and workspace idle checks must all use THIS context
+// lock map. Receipt delivery never introduces a parallel conversation lock.
+use super::turn_lock::of as takeover_context_lock;
 
 fn compaction_attempt_due(context: &str) -> bool {
     static ATTEMPTS: std::sync::OnceLock<
@@ -62,92 +57,9 @@ fn compaction_attempt_due(context: &str) -> bool {
     true
 }
 
-/// Strip the `[user:<id>]` / `[user:<id> <name>]` sender prefix that a group
-/// intake module prepends for the model's benefit.
-///
-/// Presentation only. The stripped text is what reaches Ladybug as message
-/// content and what is embedded as the recall query, so the prefix must not end
-/// up in either — but this function is deliberately NOT an identity source.
-pub(crate) fn strip_sender_prefix(message: &str) -> &str {
-    message
-        .strip_prefix("[user:")
-        .and_then(|rest| rest.split_once("] "))
-        .map_or(message, |(_, content)| content)
-}
-
-/// Resolve the Ladybug principal for a turn.
-///
-/// Identity comes from the structured `speaker_id` in `source_metadata`, never
-/// from the message text. It used to be parsed back out of the `[user:<id>] `
-/// prose prefix, which worked only for as long as that prefix held nothing but
-/// the id. Adding the display name (#38 item 4) turned `[user:100000103 Kata] `
-/// into the principal `telegram:user:100000103 Kata` — a second, silently created
-/// identity for the same person, splitting her messages across two `Principal`
-/// nodes and re-fragmenting on every Telegram display-name change. Prose is not
-/// an identity channel.
-pub(crate) fn takeover_principal(context: &str, source_metadata: Option<&str>) -> String {
-    source_metadata
-        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
-        .and_then(|metadata| {
-            metadata
-                .get("speaker_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .filter(|speaker| !speaker.is_empty())
-        .unwrap_or_else(|| context_principal(context))
-}
-
-/// Compact durable provenance for a binary attachment.
-///
-/// The graph schema predates Telegram video support and uses a `platform_ref`
-/// string rather than separate filename/duration/size columns. Store a JSON
-/// object there; ingestion creates one attachment occurrence node per message
-/// while retaining content-addressed bytes on disk, so repeated files keep the
-/// metadata supplied with each message.
-pub(crate) fn attachment_platform_ref(
-    source_metadata: Option<&str>,
-    attachment: &crate::attachment::Attachment,
-) -> String {
-    let metadata = source_metadata
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-        .unwrap_or_default();
-    let text = |key: &str| metadata.get(key).and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let name = match text("attachment_name") {
-        "" => attachment.name.as_str(),
-        value => value,
-    };
-    let mime = match text("attachment_mime") {
-        "" => attachment.mime_type.as_str(),
-        value => value,
-    };
-    let size = text("attachment_size_bytes").parse::<u64>()
-        .unwrap_or(attachment.len() as u64);
-    serde_json::json!({
-        "platform_ref": text("attachment_ref"),
-        "name": name,
-        "mime_type": mime,
-        "duration_seconds": text("attachment_duration_seconds"),
-        "size_bytes": size,
-    }).to_string()
-}
-
-/// Identity for a turn that carries no speaker metadata.
-///
-/// A group context has no single speaker, so it resolves to a group-kind
-/// principal rather than a fabricated user one: stripping `telegram:` off
-/// `telegram:group:-100…` used to yield the nonsense principal
-/// `telegram:user:group:-100…`.
-fn context_principal(context: &str) -> String {
-    if context.starts_with("telegram:group:") {
-        return context.to_string();
-    }
-    context
-        .strip_prefix("telegram:user:")
-        .or_else(|| context.strip_prefix("telegram:"))
-        .map_or_else(|| "user:unknown".to_string(), |id| format!("telegram:user:{id}"))
-}
+#[path = "takeover_input.rs"]
+mod input;
+pub(crate) use input::{strip_sender_prefix, takeover_principal, attachment_platform_ref};
 
 pub(super) async fn persist_takeover_message(
     memory_graph: &std::sync::Arc<crate::memory_graph::MemoryGraph>,
@@ -1248,6 +1160,9 @@ pub async fn handle_llm_takeover(
     log_file: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     // `--native-tools`: eligible write-capable turns use the native protocol (#85).
     native_tools: bool,
+    // Test injection of a workspace registry; production passes None (the registry file decides).
+    workspaces: Option<std::sync::Arc<super::native_tools::workspace::Site>>,
+    shell_policy: crate::coroutine::ShellPolicy,
 ) -> anyhow::Result<String> {
     let context_lock = takeover_context_lock(&context);
     let mut progress = super::takeover_progress::Progress::new(
@@ -1379,7 +1294,7 @@ pub async fn handle_llm_takeover(
         authority.may_agent = false;
         authority.may_opencode = false;
     }
-    let program_summary = if let Some(ref tools) = guest_tools {
+    let mut program_summary = if let Some(ref tools) = guest_tools {
         crate::coroutine::scoped::prompt(tools)
     } else {
         let prog = program.read().await;
@@ -1430,17 +1345,29 @@ pub async fn handle_llm_takeover(
             may_write: authority.may_write,
             guest_tools: guest_tools.clone(),
         }),
+        workspaces, origin: None, shell_policy,
         // One takeover = one turn.
         turn_saves: Default::default(),
     };
 
     // Native protocol decision (#85) uses the same pinned, intersected
     // snapshot that will execute the turn; guests/non-write speakers stay legacy.
-    let native_config = super::takeover_native::native_snapshot(native_tools, &tmp_config, &context);
-    if native_config.is_some() {
+    let native_config = super::takeover_native::native_snapshot(native_tools, &tmp_config, &context).await;
+    if let Some(native) = &native_config {
         // The native protocol has no agent or !opencode tool; say so truthfully.
         authority.may_agent = false;
         authority.may_opencode = false;
+        // The speaker class of the pinned snapshot decides the tool list; the prompt
+        // must describe that class, including when it is narrower than the profile's
+        // nominal authority (an unclassifiable turn is a guest without tools).
+        let class = super::native_tools::speaker_class(native);
+        if class.restricted() {
+            authority.may_write = false;
+        }
+        if matches!(class, super::native_tools::SpeakerClass::Guest(_)) {
+            authority.may_read_source = false;
+            program_summary = crate::prompt::NATIVE_GUEST_SUMMARY.to_string();
+        }
     }
 
     // Composed fresh every turn (issue #41). The identity comes from the
@@ -1465,6 +1392,9 @@ pub async fn handle_llm_takeover(
     } else {
         crate::context_prompt::stable_prefix_keyed(&prompt_inputs)
     };
+    let system = super::native_tools::workspace::with_prompt(system, native_config.as_ref());
+    // The tool list is part of what the provider caches (ahead of the prefix).
+    let prefix_key = prefix_key.with_tools(native_config.as_ref().map_or(0, super::http_context::tool_schema_hash));
     let authority_block = crate::context_prompt::volatile_suffix(&prompt_inputs);
 
     let messages = {
@@ -1489,7 +1419,7 @@ pub async fn handle_llm_takeover(
         // #68: checkpointed view sized by the generating model's window, with the
         // measured authority block and native tool schemas counted.
         let schemas = native_config.as_ref().map_or(0, super::http_context::tool_schema_bytes);
-        checkpointed_view(&mut meta_guard.conversations, &context, llm_model, &system, super::http_context::tail_bytes(&[&authority_block]) + schemas)
+        super::http_context::checkpointed_view_for(&mut meta_guard.conversations, &context, llm_model, &system, super::http_context::tail_bytes(&[&authority_block]) + schemas, native_config.as_ref())
     }; // meta_guard dropped here
     let (messages, checkpointed) = (messages.messages, messages.checkpointed);
     let view_bytes = serde_json::to_vec(&messages).map_or(0, |bytes| bytes.len());
@@ -1509,6 +1439,9 @@ pub async fn handle_llm_takeover(
     //
     let mut context_log = crate::context_log::ContextLog::from_conversation(messages);
     context_log.push_runtime_text(authority_block);
+    if let Some(line) = super::native_tools::workspace::tail_line(native_config.as_ref()).await {
+        context_log.push_runtime_text(line);
+    }
 
     // Attachments aren't serialized in the session JSON. Recover authorized
     // reference images when this view has none (e.g. after a service restart).
@@ -1736,8 +1669,7 @@ pub async fn handle_llm_takeover(
             let has_agent = ops.iter().any(|op| matches!(op, crate::parser::Operation::Agent { .. }));
             if has_agent {
                 eprintln!("[llm_takeover:{context}] !agent detected, spawning via execute_code and breaking");
-                let base_program = program.read().await.clone();
-                let mut session = WorkingSet::from_parts(base_program, runtime.read().unwrap().clone(), meta.lock().unwrap().clone());
+                let mut session = super::working_set::working_set_snapshot(&program, &runtime, &meta).await;
                 execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
                 write_back_takeover(&program, &runtime, &meta, session).await;
                 tmp_config.notify_save();
@@ -1746,8 +1678,7 @@ pub async fn handle_llm_takeover(
         }
 
         // Execute code inline
-        let base_program = program.read().await.clone();
-        let mut session = WorkingSet::from_parts(base_program, runtime.read().unwrap().clone(), meta.lock().unwrap().clone());
+        let mut session = super::working_set::working_set_snapshot(&program, &runtime, &meta).await;
         let exec_result = execute_code_with_baseline(&code, &tmp_config, &mut session, agent_cb.clone(), Some(&completion_baseline)).await;
 
         write_back_takeover(&program, &runtime, &meta, session).await;

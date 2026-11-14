@@ -110,6 +110,8 @@ impl CallbackIo {
             None,
             None,
             harness.native_tools,
+            harness.workspaces.clone(),
+            harness.shell_policy.clone(),
         );
         let future =
             crate::api::takeover_progress::TEST_QUEUE_DELAY.scope(self.queue_delay, future);
@@ -178,8 +180,13 @@ async fn drive(
             IoRequest::Spawn {
                 function_name,
                 args,
+                program_frozen,
                 reply,
             } => {
+                assert!(
+                    !program_frozen,
+                    "trusted callbacks keep their own unfrozen handle"
+                );
                 launches.lock().unwrap().push(Launch {
                     function: function_name.clone(),
                     destination: string(&args[0]),
@@ -285,6 +292,18 @@ pub(super) fn output(native: bool, index: usize) -> Value {
 }
 
 pub(super) async fn held_provider(native: bool, error: bool) -> (Provider, Arc<Semaphore>) {
+    held_provider_script(native, error, None).await
+}
+
+pub(super) async fn held_sequence(outputs: Vec<Value>) -> (Provider, Arc<Semaphore>) {
+    held_provider_script(true, false, Some(outputs)).await
+}
+
+async fn held_provider_script(
+    native: bool,
+    error: bool,
+    outputs: Option<Vec<Value>>,
+) -> (Provider, Arc<Semaphore>) {
     use axum::response::IntoResponse;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
@@ -293,7 +312,7 @@ pub(super) async fn held_provider(native: bool, error: bool) -> (Provider, Arc<S
     let app = axum::Router::new().route(
         "/v1/chat/completions",
         axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
-            let (recorded, held) = (recorded.clone(), held.clone());
+            let (recorded, held, outputs) = (recorded.clone(), held.clone(), outputs.clone());
             async move {
                 let index = {
                     let mut requests = recorded.lock().unwrap();
@@ -305,7 +324,16 @@ pub(super) async fn held_provider(native: bool, error: bool) -> (Provider, Arc<S
                 if error {
                     return (axum::http::StatusCode::BAD_REQUEST, "scripted error").into_response();
                 }
-                sse_or_json(&output(native, index), body["stream"] == true)
+                let answer = outputs
+                    .as_ref()
+                    .map(|outputs| {
+                        outputs
+                            .get(index)
+                            .cloned()
+                            .expect("unexpected provider generation")
+                    })
+                    .unwrap_or_else(|| output(native, index));
+                sse_or_json(&answer, body["stream"] == true)
             }
         }),
     );

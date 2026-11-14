@@ -1,5 +1,36 @@
 # AdapsisOS Roadmap
 
+## Candidate 2026-11-14 — reviewed W2 + quiet/outcome integration (#129/#147/#151)
+
+- Writer `ses_e2ec28eb9ffeyAROXQzG2ZDNxq` merges reviewed `faaad9d` into
+  `85cf929` without a commit or deployment; #136 WIP is excluded.
+- Five conflicts resolved by retaining latest quiet queue lifecycle and normalized
+  no-outcome finish alongside W2 tool budgets, workspace cancellation/cutoff states,
+  owner-private authority and shared turn/work locks. Trusted callbacks still use
+  the supplied complete pair and one builder with `program_frozen:false`.
+- #148 image serialization, #146 save marker, W2 privacy/binding/push guards and
+  certified #96 JIT fixes are preserved. No W3/job-tool/registry/live-state change.
+  Combined regressions cover a quiet running command with queued callback failure,
+  queued start after cancellation cleanup, workspace action once across refused
+  finish, and restricted guest no-outcome refusal.
+- Focused gates: progress 15, outcome 15, workspace 244 (one manual ignored),
+  native 314, JIT 57 (two ignored), origin 21, cutoff 6 and run 104 passed
+  (plus two matching Result CLI cases). Initial broad takeover: 91 passed /
+  one elapsed-clock fixture failure / one ignored; its setup time included two
+  unrelated turns. The clock now starts at the existing in-flight attempt
+  condition without relaxing the seven-second timeout. Corrected takeover:
+  92 passed / zero failed / one ignored.
+- ONE full gate: 2834 passed / only known strict parity failed (334/58/181,
+  zero AST mismatch/non-idempotence) / ten ignored; integration 5/9/4 passed.
+  Explicit build passed; private candidate `/tmp/opencode/w2-quiet151-candidate`
+  SHA-256 `f541a5ed9a95489ae85d29cccaea27830e2188ca8cedb2ea124bf94113e1c751`.
+  Candidate memory-eval passed (six cases, recall 1.0, ACL errors zero), Python
+  basic/flow examples passed 2/7 cases with an isolated `/tmp/opencode` library.
+- Integration review ACCEPT: `ses_e2607a49effezRQAThMNe06L4M`, tested tree
+  `11f2be0812cc53849b5335810f6992ebde7f783c`. Logs:
+  `/tmp/opencode/w2-quiet151-integration-*.log`. This results update is docs-only
+  after that tested/reviewed source identity; no new full run or source change.
+
 ## Incident 2026-11-14 — black-filament runout during print, recovery open (#147)
 
 - Owner observed filament exhausted while the job had advanced through many dry
@@ -98,6 +129,359 @@
   and the recorded live-baseline #96 defect are unchanged. The deployed record
   below remains historical evidence of the now-rejected always-acknowledge UX.
 
+## Historical workspace/run-tool integration checkpoints
+
+## Exact live ACK147 integration after W2 (2026-11-12, accepted, not deployed)
+
+- Parents: accepted W2 `355ff08` and EXACT live ACK source/docs `1f19c3f`
+  (source `c7a4927`; image fix `7201856` already common). No #136 uncommitted
+  source, W3 features, registry or deployment changes.
+- Approved semantic resolution: both final and progress delivery use ONE
+  `conversation_callback::request` builder, with explicit `program_frozen:false`
+  matching the former trusted platform-callback Spawn. Callbacks own their
+  trusted handle; this adds no model permission or freeze inheritance path.
+- Progress acquires the existing `turn_lock::of` context lock (no parallel
+  map), emits STARTED only after that lock, and drains at most five seconds
+  after work without tier locks. W2's work guard remains in the blocking
+  command worker through cancellation cleanup. Existing input identity,
+  supplied complete callback pairing, unsaved/cutoff reply notices, image
+  serialization and metadata/privacy paths remain.
+- Fixture-only adjustment: ACK's older guest test expected all opted-in guest
+  turns to remain legacy. It now pins current DESIGN L3's exact fail-closed
+  native `run`/`finish` schemas, plus a separate non-native legacy control;
+  Program/revision and callback arguments remain unchanged. Provider-only
+  fixtures retain absent callbacks, evaluated progress fixtures use supplied
+  complete pairs and Harness Site/ShellPolicy.
+- Interaction regressions: queued receipt before the shared lock, STARTED only
+  after the earlier actual bash command is locally cancelled/cleaned up;
+  callback failure does NOT cancel a held real command; notices absent from
+  provider/history/training/Ladybug; shared builder's false flag, argument
+  values and actual reply channel preserved. Targeted progress/builder11pass,
+  explicit workspace/callback interactions2pass. First combined gate651passed/
+  1 new fixture timeout/3ignored: unrelated fixtures contended for the same
+  real admin-DM key before that test's provider started (not a runtime failure).
+  The TWO new private-DM interactions now use the existing exact-test child
+  capture helper: per-child state/training, no attachments, no recursive runner,
+  bounded callback/turn/command waits. No fake context or production eligibility
+  change. Repeated combined focused gate652passed/0failed/3ignored.
+- Owner wind-down checkpoint: the already-approved ONE full gate completed with
+  2814 passed / 1 known strict Python-parity failure / 10 ignored; integration
+  5/9/4 passed. No other failure or timeout, no reruns, no compiled_blob panic.
+  Load11.97 before (23:58:57) /27.16 after (00:03:14), unit suite88.19s.
+  Log `/tmp/opencode/w2-ack-integration-full.log`.
+  Exact parents: HEAD `355ff08c0555cf94da206bc1b238cbb4539ddfce`, MERGE_HEAD
+  `1f19c3f696a9cddf009d336c5534d7c3ffd6777f`. Tested staged hash before/after gate:
+  `010d9c7c3390ca23fbf9fb4719880a7ba183564bd089aa23df43a1b4dd41a510`.
+  This recovery paragraph is a DOCS-ONLY update AFTER that test/hash; no source
+  changed after verification. Final independent semantic-integration-only review
+  ACCEPT (reviewer session `ses_e3e9595a2ffeksds1nSOBYRxZ2`, 13 focused passed;
+  full gate 2814 passed with only known strict parity failing). All reviewers are
+  idle; the accepted merge remains staged/uncommitted for manager closure only.
+  Live remains `c7a4927`; no registry, deployment, W3, feature or new correction
+  work is authorized during wind-down. Future deployment/registry/repository-task
+  acceptance is NOT started: the owner explicitly requested stop/no new tasks.
+  No leftover test units/state directories.
+
+## W2 repository edit/test turn (2026-11-12, accepted, not deployed)
+
+- Baseline `ce40048`: W1 accepted/committed as `aed5a2f`, exact live Python/save-outcome
+  integration accepted/committed as `5888268`, exact reviewed image hotfix `7201856`
+  merged as `ce40048` (focused image/takeover 65 passed). No #136 uncommitted work.
+- Adds owner-private edit/write/bash, foreground-drop cancellation and a direct-loopback
+  HTTP cancel escape hatch, push-mistake guard and digest-scoped startup cleanup.
+  No job tools, W3 turn budget, new cancellation builtin or Telegram /stop. The separate
+  ACK147 receipt worker is not duplicated here. Its live source/docs `c7a4927`/`1f19c3f`
+  are being integrated from their exact commit above, after W2's accepted commit.
+- Real mock-provider turn edits a repository file, writes a test script and executes it
+  successfully, preserving the live Program/revision. Other regressions cover freshness,
+  command failure, protected push before effects, dirty/running/unverifiable close,
+  actual HTTP cancellation/client disconnect, metadata/privacy and UTF-8 output bounds.
+- Read-ledger measurement: 50-read real owner turn448.385ms/51durable writes including
+  claim; offline read/hash+one-flush1.558ms (different overhead). Retain per-call durable
+  ledger writes; no batch-flush policy change. Evidence `/tmp/opencode/w2-read50-measurement.log`.
+- Combined focused gate: 618 passed, 0 failed, 1 manual-measurement test ignored;
+  production release build passes with no new warnings. The coordinated ONE full gate
+  and independent review are pending.
+  No live instance, registry, credentials or deployment changed.
+- Independent W2 review rejected ONLY two ordinary-Git push semantics: source-only
+  refspecs can follow a configured mapping to protected main; plain force overrides a
+  stale lease even when a lease flag is present. Minimal correction requires every
+  refspec to be nonempty `source:refs/heads/<destination>` and rejects plain force in
+  either flag order. Advertised command is now
+  `git push origin HEAD:refs/heads/adapsis/<name>`; lease-only remains supported.
+  Real local-bare regressions cover mapping, stale lease rejection and correct lease
+  success. Corrected focused push/workspace/native gate: 525 passed, 0 failed,
+  1 manual measurement ignored. Corrected ONE full gate: 2801 passed / 1 known strict
+  parity failure / 10 ignored, integration5/9/4 passed; push-only review ACCEPT.
+  Manager committed/pushed `355ff08`, accepted staged hash
+  `6edba000bc12d5b4f776ba73ff8d8af0c377ef769a69ecde08d878978e9e4a48`.
+
+## W1 integration with the exact live Python line (2026-11-12, accepted)
+
+- Parents: workspace W1 `aed5a2f` and exact live-plus-docs checkpoint `b779d1b`.
+  Manager committed/pushed the accepted integration as `5888268`. No #136 work-in-progress, W2 changes,
+  registry file or deployment is included.
+- Approved semantic resolutions: `!watch` uses plain model view/token-only
+  calibration (no active-turn accounting or cold start), with workspace batches
+  hidden; coherent Program/meta snapshot helpers construct the new WorkingSet
+  save checkpoint/commit mark; source-save write-back consumes that mark once;
+  the shared panic hook keeps payload-free journaling and suppresses ONLY the
+  duplicate journal entry of a contained JIT compile panic; the incoming stored
+  nesting scope (250) and exact submission-limit (100) tests supersede the old
+  reduced-depth test adaptation. Both lines' remaining tests and guards stay.
+- Added interaction assertions: watch leaves an active turn's probe unchanged
+  and hides its workspace results; P3's concurrent shared-key/chat changes
+  survive a save wait followed by a workspace call; an accepted unsaved finish
+  preserves both its notice and a cutoff marker; unsaved and bound-workspace
+  runtime-tail lines leave the stable prefix unchanged; the real process panic
+  hook emits one contained-compile entry and still journals a later uncontained
+  panic on the same thread without its payload. The #136 general whole-metadata
+  write-back window remains open.
+- Fixture-only integration: incoming route/enrolment tests declared the now-reserved
+  RunToolScratch module. They now parse/validate an ordinary fixture name, then install
+  it explicitly as pre-existing/cached scratch state and rebuild indexes. Both assert
+  that ordinary scratch declarations remain refused and scratch is never persisted;
+  the real route still performs the mutation and starts its source save.
+- Gates: seven targeted interactions pass; combined focused gate 750 passed / 0 failed /
+  4 ignored, plus 7 startup integration cases. Default-JSON/stored-nesting/submission/
+  block gate: 31 passed. Logs `/tmp/opencode/w1-live-integration-{targeted,focused,json-nesting}.log`.
+  ONE full run: 2779 passed / 1 known strict Python-parity failure / 9 ignored,
+  integration5/9/4 passed; integration-only review ACCEPT. Staged hash at acceptance
+  `0ea8868fe90d465f284026cf4799cd9b64bbd518a3e355a2c74be29386838d07`.
+
+## Workspace tools W1: lifecycle and read-only tools in owner turns (#129, 2026-11-12)
+
+- On `work/workspace-tools` after the merges of the run-tool line (`f12c426`) and the
+  Python release line (`3d29a13`) and the cache-epoch fix (`17c566f`).
+- Wired for the writer class on a node with a workspace registry: `workspace_open`,
+  `workspace_use`, `workspace_status`, `workspace_close`, `read`, `search`, `glob`.
+  Binding and read ledger persist in the workspace state directory. Results are plain
+  text bounded by the generating model's per-message cap. A provider length stop is a
+  correction round now, not a provider error.
+- After the independent review (REJECT as first staged: workspace ownership, shared
+  history) one correction on top: workspace tools only in owner-private conversations
+  (administrator's DM; HTTP `main` from this node only), workspace batches hidden from
+  every other turn's view, atomic claim under the workspace reservation with the work
+  lock owned by the blocking call, fail-closed binding directory, names escaped, result
+  survives a model switch, training log and events without content.
+- Delta review closed the original ownership/cancellation/shared-history blockers.
+  Its remaining training-log blocker is corrected to structural metadata only (no
+  header/error/prose, no arbitrary JSON key or correlation id). Final-status length
+  stops retain the cutoff marker without an extra generation; migration exclusions
+  use complete batch positions so reused call ids cannot hide unrelated results; file
+  names escape the complete Unicode Bidi_Control set. Final delta review is pending.
+- Next: W2 (`edit`, `write`, `bash`, cancel, push guard), W3 (`job_*`, workspace turn
+  budget), then live acceptance on this node (#115 task). No registry file exists on any
+  node yet, so nothing changes for a running instance until the owner creates one.
+- Not deployed. AGENTS.md "Workspace tools in owner turns" has the invariants.
+
+## Restricted run + JIT fix: merged and clean (2026-11-12)
+
+- `d819b0d` restricted `run` for guests and execute-only speakers (adversarial
+  review ACCEPT) and `f09de27` the #96 JIT fix (independent review ACCEPT) are
+  merged on `work/run-tool`. The merge had no conflicts.
+- Gate on the merged tree: 20 consecutive whole-binary runs, 0 `compiled_blob`
+  panics (baseline before the fix: 5 of 20); one full run 2380 passed, only the
+  documented strict Python-parity failure, integration 5/5/4.
+- Not deployed, not wired into the live node. The entry below is the earlier
+  checkpoint and is superseded where it says the #96 failure is outstanding.
+
+## Recovery checkpoint — restricted native `run` accepted review, full gate pending (#129/#138, 2026-11-10)
+
+- Cumulative restricted-`run` candidate on `work/run-tool`, HEAD `44e66e8`, is
+  **accepted by adversarial review**, including the final shared pre-search regex
+  capture/group/scratch/weighted-work admission for both regex builtins. Reviewer
+  verified the restored candidate unchanged. Source is frozen; this is a recovery
+  checkpoint, **not completion, a green full suite, a commit or a deployment**.
+- Reviewed candidate digest (source before this docs-only checkpoint):
+  `80ca561da0ca1a208174cde608909f90fccce2c096dac7b300cd217f7c473cf5`.
+  Algorithm: SHA-256 of `git diff HEAD --binary`, followed by each sorted untracked
+  file as NUL + `UNTRACKED` + NUL + path + NUL + file bytes. Tracked diff alone:
+  `9a0a9c970570f46dee5127ae40c528cf8737afc2da1760a08bcf012534cb38f6`.
+  Adding this documentation changes the whole-worktree digest, not the accepted source.
+- Final full release gate: **2345 passed / 2 failed / 6 ignored**, integration
+  targets **5 + 5 + 4 passed**. Failures explicitly remain outstanding:
+  expected strict `python_parity` (334 verified / 58 invalid / 181 unsupported),
+  and **#96**: `eval::tests::test_eval_func_name_still_works` panicked in
+  Cranelift `compiled_blob.rs:56` with `TryFromIntError`. Do not describe the suite
+  as green. Separate read-only #96 root-cause investigation is in progress;
+  no #96 fix is included in this candidate.
+- Logs: `/tmp/opencode/shared-regex-focused.log` (14 focused tests passed),
+  `/tmp/opencode/run-tool-full-shared-regex.log` (full gate); reviewer regression
+  seeds and logs: `/tmp/opencode/run-review/`.
+- Sessions: manager `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`; writer
+  `ses_e3ae0b257ffekvdCXKh6wtL44R`; adversarial reviewer
+  `ses_e3a974b00ffejrrcEK7TtvpUc9` (final minimal shared-regex **ACCEPT**).
+  Writer is pinned to OpenAI Sol; independently observed weekly quota was **93%**
+  before the last correction, with a **<=75% remaining pause threshold**.
+- Status: candidate **not committed and not deployed**. Hold all source edits,
+  tests and commits pending the manager's separate #96/full-gate decision.
+
+## Workspace tools #129 — S3 recovery (2026-11-10)
+
+- **Current: final independent review ACCEPT.** Reviewer
+  `ses_e3e9595a2ffeksds1nSOBYRxZ2` closed original B1–B5/F1–F3 and accepted
+  the final memfd-lifetime delta; manager verified the three tested source
+  hashes below. Final full release gate: **2456 passed / 1 known strict
+  Python-parity failure / 6 ignored**, integration **5/5/4 passed**.
+  S1–S3 are library foundations only: **not wired into native tools and not
+  live-certified/deployed**. Manager owns the reviewed-source/docs commit.
+- Nonblocking followups are tracked in **#139**: account for unreadable job
+  records as potentially running, a global state-tree budget beyond the
+  per-directory cap, and the conservative prospective edit-cap edge. These
+  were not silently folded into the final lifetime correction.
+
+### Historical S3 review checkpoints — superseded, not current commit status
+
+The frozen/uncommitted labels and base hashes below describe those earlier
+checkpoints only; the current review outcome is ACCEPT above. They do not
+claim that a later manager integration remains uncommitted.
+
+- **Final minimal memfd-lifetime delta (frozen):** the delta review closed
+  B1–B5/F1–F3 but found an ABA race when cancel/deadline returned from handoff
+  waiting before the adapter opened its source. `drop(environment)` now occurs
+  only after supervision stops/reaps the adapter. Successful handoff may close
+  the adapter's own reader earlier, but the parent conservatively retains its
+  descriptor until reap; cancel/deadline alone never authorize fd reuse.
+- Two deterministic options-scoped inert-adapter/stop-barrier regressions cover
+  cancellation and deadline: pause before source open, attempt fd reuse with 64
+  other-request sentinel memfds, verify original inode remains pinned and only
+  original env is consumed, one invocation/no replay, then ordinary env control.
+  Both tests fail when the old early drop is restored and pass with the fix.
+  Production change is only the ownership/drop order; adapter override is
+  `cfg(test)` and scoped to the run options, with no process-global mutation.
+- Final affected release gates: run tests **23/23**, repair tests **6/6**.
+  Exactly one final full suite: **2456 passed / 1 known strict Python-parity
+  failure / 6 ignored**, integration **5/5/4 passed**, unit run 40.21 s.
+  Logs: `/tmp/opencode/ws-memfd-negative.log`, `ws-memfd-run-focused.log`,
+  `ws-memfd-repair-focused.log`, `ws-memfd-full.log` (same directory).
+  Final `git diff --check` passes and test-unit listing is empty. Cached quota
+  remains **94%**, Sol pin unchanged. No extra full gates or source edits after
+  this checkpoint. Nonblocking unreadable-job concurrency accounting, global
+  state-tree budget and conservative exact edit-cap followups are untouched.
+- Historical pre-integration base HEAD: `c809071df5b7e1dcf139e0209b80ce1a30dadfe1`.
+  Tested minimal-delta source SHA-256:
+  - `run.rs`: `b2fd760806a987f19573e4e0dfc98ed257b30efd868be3db95cb1bba9b1d0524`
+  - `contain.rs`: `16aba0806a7febfe91aadddb6d34ec7ae5d9d015bdefb811e23cc073bc8d15a7`
+  - `repair_tests.rs`: `05a5bd5164c417161caac5314b6bfc7732e6d051f0d1df6347c9bd55e4894800`
+
+- **Independent review repair checkpoint (supersedes the initial S3 freeze
+  below):** the initial candidate was rejected for B1–B5. One bounded repair
+  pass also addresses F1–F3, with no wiring or feature expansion. Frozen for
+  the same reviewer's delta recheck: focused release **183 passed**; one full
+  repair `cargo test --release --no-fail-fast` **2454 passed / 1 known strict
+  Python-parity failure / 6 ignored**, integration **5/5/4 passed**. Logs:
+  `/tmp/opencode/ws-repair-release-focused.log`, `/tmp/opencode/ws-repair-full.log`.
+- B1: static trusted `/usr/bin/python3 -I` adapters structurally separate clean
+  supervisors/clients from payload env dictionaries. Foreground CLOEXEC memfds
+  are explicit handoffs, 0600, bounded to 512 KiB, and closed after adapter read;
+  no env values are in argv. Establishment precedes payload `BASH_ENV`; startup
+  effects/exit cannot trigger Auto replay. Jobs stage private JSON env through
+  nofollow descriptors, then small-process `Popen(env=...)` (not a daemon fork).
+  Python is an explicit dependency; it does not sandbox the owner's command.
+- B2/B3/B4: shared per-workspace reservation serializes start/close/list/prune/
+  forget and status observation. Fallible enumeration propagates directory and
+  per-entry errors; malformed/unreadable/missing-existing-history `last-id`
+  refuses allocation. Private state uses held directory descriptors, nofollow
+  open/mkdir/read/atomic-write/unlink operations and recursive nofollow removal;
+  static links refuse and swapped paths cannot redirect operations outside.
+  Configured-root ancestors and bind mounts remain operator-trusted limitations.
+- B5: unit signal/inspection errors propagate cleanup uncertainty, rather than
+  silently substituting process-group proof. `Exit::CleanupUncertain` and
+  `RunResult.cleanup_errors` forbid a successful/fully-stopped claim or replay.
+  Real scopes still stop detached children; injected post-start kill and
+  show/cgroup failures return truthful uncertainty.
+- F1/F2/F3: edit inputs at most 2 MiB each, checked prospective output at most
+  16 MiB before allocation, at most 10 ambiguity offsets retained; search has a
+  64 MiB per-file byte ceiling even for a growing newline-free stream, with a
+  partial-result note. Semantic v1 job-record invariants are checked before a
+  terminal record is used or pruned. Record fields/version remain v1; malformed
+  type-correct data is refused/preserved. Env staging changed from unpublished
+  shell/NUL handling to private JSON, with no deployed staging migration claim.
+- All eight review IDs have discriminating tests, including a barrier start/
+  close race, outside sentinel link checks and a held-dir swap, endless generated
+  reader, expansion refusal preserving file/ledger, BASH_ENV effects exactly
+  once, and semantic-record preservation. Final test-unit listing is empty and
+  `git diff --check` passes. No repair commits/deployment/stash. Final readable
+  cached OpenAI weekly quota **94%**, pinned Sol unchanged; no further tests
+  after this docs-only recovery update.
+
+- S1/S2 accepted and committed by manager as `cce4cb2` / `c809071`.
+  S3 writer continues in `/home/marenz/Projects/adapsis-ws` on
+  `work/workspace-tools`; manager session `ses_e8d6d9d1bffe8G7KEI4yUw8DPi`.
+- Owner routing/budget decision: Anthropic exhausted; resume approved S3 on
+  OpenAI, no extra agents. Preserve about 70% weekly quota; pause and report
+  at <=75% remaining or an unreadable meter. Cached weekly quota at resumption
+  is 97%. No commits/deployment by this worker.
+- Initial S3 candidate (then uncommitted): systemd scopes for foreground/cancel, services and private
+  versioned disk records for restart-surviving jobs, head/tail output and
+  per-repository environment. Frozen after focused release **173 passed** and
+  one full `cargo test --release --no-fail-fast`: **2444 passed / 1 known
+  strict Python-parity failure / 6 ignored**, plus integration **5/5/4 passed**.
+  Logs: `/tmp/opencode/ws-s3-focused.log`, `/tmp/opencode/ws-s3-full.log`.
+  No additional full gate after these docs-only updates.
+- Job record `version: 1`: private `job.json`, command/cwd/unit identity,
+  start/end timestamps, runtime/output caps, environment names only, state,
+  exit status and end reason. `last-id` prevents retention from reusing ids;
+  unit names encode component lengths and a 128-bit state-root digest to
+  separate hyphenated repo/workspace pairs and isolated stores. A manager
+  that cannot be reached means unverifiable, never proof a job stopped;
+  close refuses those records as well as confirmed running jobs.
+- Regression evidence includes killing a separate starter process, reopening
+  its record and finishing the same surviving job; detached `setsid` children
+  are stopped by scopes/services; manager environment is absent from jobs;
+  both foreground containments and cancellation are covered. Only uniquely
+  prefixed test units were used; final `adapsis-wstest-*` listing is empty.
+  No live service/config changes, commits or pushes by this worker.
+- Session `ses_e3a2152a2fferDqyzS23BuI8K9` pinned to
+  `openai/gpt-6.1-sol` (medium), per owner. Final readable cached weekly quota
+  **97%**; freeze/report completed above the <=75% pause threshold.
+- Owner secret decision (2026-11-10, verbatim): "I think our secrets should
+  generally be in a \"secret store\" and if there are any found through bash
+  then so be it. they should be properly set anyway and of course the bot
+  should actively try to avoid reading any in .env files and such, but it does
+  that anyway nowadays, no?" N5/N6/L2 in DESIGN.md record ordinary
+  owner-authority bash, no mandatory bwrap filesystem secret masking, and
+  required behavioral guidance against deliberate credential discovery/read/
+  dump in bash/read/search. That guidance is for the wiring slice; an actual
+  secret store/provider and migration remain undecided/unimplemented, and
+  active avoidance has not been verified. Named capabilities and existing
+  logging/redaction gates remain required. No secret scans were performed.
+
+## Deployed 2026-11-12 — here (Kronk), `8b985cb`, real source-save acknowledgements (#146)
+
+- **Live:** commit `8b985cb`, binary sha256
+  `8c8e8a4d55990272ecd06d15927dbd213432cf710dbcda18600b054b99623046`,
+  replacing `b7bfa64` / `fa04e367…`. The five manifest-managed Python modules
+  are unchanged; 275 of 275 stored tests passed at startup. sleek and edox are
+  unchanged.
+- **Owner-approved deployment, executed by the manager:** fresh checkpoint,
+  inhibitor and install checks passed; NRestarts 0; five modules, one route, two
+  permanent loops, no library errors; shared-variable probes unchanged.
+  Telegram `SAVE146-OK` delivered (message 549037), with no provider error from
+  the newly deployed stable `prompt_cache_key` (release-line `7dc69aa`).
+- **Live save-outcome proof:** `/api/mutate` adding `Peer.upgrade_probe` returned
+  `saved to Peer.py` and the file was already changed when the response arrived;
+  removal returned saved again and the library returned byte-identical.
+  Revision after verification: 248. The earlier acknowledgement pitfall is
+  resolved by runtime save outcomes; saving remains automatic.
+- **Acceptance evidence:** independent delta review accepted `8b985cb`; reviewer
+  probes passed. Full suite 2386 passed / 1 known strict-parity failure
+  (334 / 58 / 181, zero mismatches) / 7 ignored; upgrade rehearsal 216 of 216;
+  gate self-test 9 of 9 deliberately wrong runs rejected.
+- **Existing recovery material retained:**
+  `~/.local/share/adapsis/upgrade-146/pre-upgrade-bundle/`, previous binary
+  `~/.local/bin/adapsis.bak-fa04e367`; operator procedure in
+  `~/.local/share/adapsis/rehearsal-146/REPORT.md`. Rehearsal proved the previous
+  binary reads the new one's session and managed library, including a new module.
+- **Still pending:** #136 (the pre-existing whole-metadata write-back concurrency
+  window; this change avoids extending it across the save wait); #146's later
+  module-library git-commit boundary; trusted `/api/mutate` rendering can omit a
+  named successful-save line when the active model lacks Read permission.
+- **Owner direction:** during this development phase prioritize fix-forward and
+  minimal release ceremony, without new compatibility or rollback projects.
+  Existing backups stay; review, tests and live verification remain required.
+
 ## Historical deployment 2026-11-12 20:33 UTC — here receipt/start feedback (#147), `c7a4927`
 
 - Manager installed binary sha256
@@ -140,7 +524,7 @@
 - #147 receipt/queued/start feedback is separate work; this deployment only
   resolves the provider's empty text-block rejection.
 
-## Deployed 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
+## Historical deployment 2026-11-12 16:12 CET — here (Kronk), `b7bfa64`, manifest-managed Python library (#128)
 
 - **Live on here:** commit `b7bfa64` (`work/python-source-library`: Result runtime,
   typed execution/replay, manifest-managed `.py` library, run-time module

@@ -5,8 +5,12 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 #[path = "takeover_logging_tests.rs"]
 mod logging;
+#[path = "takeover_restricted_tests.rs"]
+mod restricted;
 #[path = "takeover_cache_tests.rs"]
 mod cache;
+#[path = "takeover_workspace_tests.rs"]
+mod workspace;
 #[path = "takeover_image_tests.rs"]
 mod images;
 #[path = "takeover_progress_tests.rs"]
@@ -46,6 +50,9 @@ struct Harness {
     log_file: Option<Arc<tokio::sync::Mutex<tokio::fs::File>>>,
     /// The generating model (its limits decide the requested cache lifetime).
     model: &'static str,
+    /// Workspace site of the node (`None`: no workspace tools).
+    workspaces: Option<Arc<crate::api::native_tools::workspace::Site>>,
+    shell_policy: crate::coroutine::ShellPolicy,
 }
 
 struct Provider {
@@ -126,6 +133,8 @@ impl Harness {
             native_tools,
             log_file: None,
             model: "takeover-fixture",
+            workspaces: None,
+            shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
         }
     }
 
@@ -183,6 +192,8 @@ impl Harness {
             None,
             self.log_file.clone(),
             self.native_tools,
+            self.workspaces.clone(),
+            self.shell_policy.clone(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(30), future)
             .await
@@ -254,7 +265,7 @@ async fn native_takeover_python_mutate_test_evaluate_finish_delivers_prose() {
     assert!(speaker.contains("Change the runtime itself (`!opencode`): no"));
     assert!(speaker.contains("Add or modify code: yes"));
     assert!(!system.contains("NEVER use <tool_call>"), "no legacy language prompt");
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 10);
     assert!(requests.iter().all(|r| r.get("temperature").is_none()));
     assert!(requests.iter().all(|r| r["model"] == "takeover-fixture"));
     let first = all_text(&requests[0]);
@@ -351,33 +362,15 @@ async fn native_takeover_double_empty_response_terminates_with_the_existing_erro
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
 }
 
+/// Without `--native-tools` nothing changes for guests and execute-only speakers: they
+/// keep the legacy `<code>` protocol. (With the flag they are native; see `restricted`.)
 #[tokio::test]
-async fn guest_and_non_write_takeover_turns_stay_on_the_legacy_protocol() {
-    let mut harness = Harness::new(true);
-    harness.permissions = Arc::new(
-        toml::from_str(
-            r#"
-        [principals]
-        "telegram:user:100000777" = "guest"
-        [guest_profiles]
-        guest = []
-        [model.guest]
-        user = "execute"
-        [model.viewer]
-        user = "execute"
-        [model.takeover-fixture]
-        user = "write"
-    "#,
-        )
-        .unwrap(),
-    );
-    // Guest principal (server-bound speaker mapping).
+async fn guest_and_non_write_takeover_turns_stay_legacy_without_the_native_flag() {
+    let mut harness = Harness::new(false);
+    harness.permissions = restricted::permissions();
     let guest = provider(vec![response("Hallo!\n<code>!done</code>", vec![])]).await;
-    let reply = harness
-        .turn(&guest, "telegram:user:100000777", "telegram:user:100000777", "Hi")
-        .await;
+    let reply = harness.turn(&guest, restricted::GUEST_DM, restricted::GUEST, "Hi").await;
     assert_eq!(reply, "Hallo!");
-    // Execute-only speaker selected by the intake module's permission_model.
     let context = "telegram:group:-100000086";
     harness.set_profile(context, Some("viewer"));
     let viewer = provider(vec![response("Nur Lesen.\n<code>!done</code>", vec![])]).await;
@@ -580,6 +573,39 @@ async fn native_takeover_memory_inspect_then_correct_authorized_memory() {
         "{active:?}"
     );
     assert!(!active.iter().any(|m| m.content == "Opus 5 does not exist"));
+}
+
+/// #129: a `run` block in a native takeover turn executes with the turn's identity, so a
+/// turn-bound builtin inside it sees this conversation's memories (and only those), and
+/// nothing about the block is declared or recorded as a mutation.
+#[tokio::test]
+async fn native_takeover_run_block_uses_the_turn_identity_and_persists_nothing() {
+    let context = "telegram:100000001";
+    let harness = Harness::new(true);
+    let embedder = crate::memory_graph::MemoryEmbedder::deterministic();
+    remember(&harness, &embedder, "RunBlockVisibleNote", context, ADMIN, crate::memory_graph::MemoryScope::Context);
+    remember(&harness, &embedder, "RunBlockForeignNote", "telegram:group:-100000099", "telegram:user:100000555",
+        crate::memory_graph::MemoryScope::Context);
+    let io = spawn_memory_io(harness.graph.clone(), Arc::new(embedder));
+    let provider = provider(vec![
+        tool("block", "run", json!({"source": "seen: str = await memory_inspect()\nreturn seen\n"})),
+        response("Looked.", vec![call("done", "finish", json!({}))]),
+    ])
+    .await;
+    let reply = harness.turn_with_io(&provider, io, context, ADMIN, "What do you remember?").await;
+    assert_eq!(reply, "Looked.");
+    let requests = provider.requests.lock().unwrap().clone();
+    let names: Vec<&str> = requests[0]["tools"].as_array().unwrap().iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap()).collect();
+    assert_eq!(&names[..6], ["inspect", "mutate", "test", "evaluate", "run", "finish"]);
+    let delivered = all_text(&requests[1]);
+    assert!(delivered.contains("\"tool_call_id\":\"block\""), "{delivered}");
+    assert!(delivered.contains("RunBlockVisibleNote"), "{delivered}");
+    assert!(!delivered.contains("RunBlockForeignNote"), "{delivered}");
+    assert!(harness.program.read().await.modules.is_empty());
+    let meta = harness.meta.lock().unwrap();
+    assert_eq!(meta.revision, 0);
+    assert!(meta.mutations.is_empty() && meta.sources.is_empty());
 }
 
 #[tokio::test]

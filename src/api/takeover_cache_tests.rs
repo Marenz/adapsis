@@ -172,6 +172,66 @@ async fn takeover_accounts_requests_and_skips_refused_turns() {
     assert!(conv(&harness, context, |c| c.last_request_ms) > before);
 }
 
+/// Providers cache the tool schemas ahead of the system prompt. Two speakers who cannot
+/// change code share the restricted prompt text, but not the tool list (a guest's
+/// profile tools, another guest's, an execute-only speaker's). A turn whose tool list
+/// differs from the previous turn's starts a new cache epoch: its unavoidable miss is not
+/// lifetime evidence, and no boundary is set at a history position the provider cannot
+/// have cached. The same speaker's next turn continues the epoch.
+#[tokio::test]
+async fn takeover_a_changed_tool_list_is_a_new_cache_epoch_and_no_miss_evidence() {
+    const MODEL: &str = "takeover-fixture";
+    const VIEWER: &str = "telegram:user:100000778";
+    const OTHER_GUEST: &str = "telegram:user:100000781";
+    let usage = |read: u64, created: u64| json!({"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,
+        "cache_read_input_tokens":read,"cache_creation_input_tokens":created});
+    let answer = |id: &str, read: u64| {
+        let mut answer = finish("ok", id);
+        answer["usage"] = usage(read, 50_000 - read);
+        answer
+    };
+    let tools = |request: &Value| -> Vec<String> {
+        request["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap().to_string()).collect()
+    };
+    let marks = |request: &Value| request["messages"].as_array().unwrap().iter().filter(|m| m.get("cache_control").is_some()).count();
+    for (label, context, second) in [
+        ("guest then execute-only", "telegram:group:-88090", VIEWER),
+        ("two guests with different profiles", "telegram:group:-88091", OTHER_GUEST),
+    ] {
+        let mut harness = Harness::new(true);
+        harness.permissions = restricted::permissions();
+        // The intake module's generic non-admin profile; `[principals]` narrows a guest further.
+        harness.set_profile(context, Some("viewer"));
+        prefill(&harness, context, 20, 6_000); // ≈120 KB ≈ 48k tokens
+        let evidence = |harness: &Harness| harness.meta.lock().unwrap().conversations.cache_lifetimes.evidence(MODEL).cloned();
+        let provider = provider(vec![answer("f0", 0), answer("f1", 0), answer("f2", 49_000)]).await;
+
+        harness.turn(&provider, context, restricted::GUEST, "first").await;
+        // 90 s later another speaker of the same authority class, with another tool list:
+        // the provider reads nothing from its cache.
+        conv(&harness, context, |c| c.last_request_ms = Some(now_ms() - 90_000));
+        harness.turn(&provider, context, second, "second").await;
+        assert_eq!(evidence(&harness), None, "{label}: the miss after a tool list change is not evidence");
+        // The same speaker again: the history only appended and the tool list is the same.
+        conv(&harness, context, |c| c.last_request_ms = Some(now_ms() - 90_000));
+        harness.turn(&provider, context, second, "third").await;
+        let recorded = evidence(&harness).unwrap_or_else(|| panic!("{label}: the hit of an unchanged tool list is evidence"));
+        assert_eq!((recorded.hit_count, recorded.miss_count), (1, 0), "{label}");
+
+        let requests = provider.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3, "{label}");
+        assert_ne!(tools(&requests[0]), tools(&requests[1]), "{label}: the fixture must change the tool list");
+        assert_eq!(tools(&requests[1]), tools(&requests[2]), "{label}");
+        assert_eq!(requests[0]["messages"][0], requests[1]["messages"][0], "{label}: the stable prefix text is shared");
+        // New epoch: stable prefix and history end only. Continued epoch: also the
+        // previous turn's history end.
+        assert_eq!((marks(&requests[1]), marks(&requests[2])), (2, 3), "{label}");
+        for request in &requests {
+            assert_eq!(crate::context_log::gateway_boundary_errors(request["messages"].as_array().unwrap()), Vec::<String>::new(), "{label}");
+        }
+    }
+}
+
 fn key_of(request: &Value) -> Option<&str> {
     request.get("prompt_cache_key").and_then(Value::as_str)
 }

@@ -155,6 +155,22 @@ pub(super) fn checkpointed_view(
     checkpointed_view_at(manager, context, model, system, known_tail_bytes, crate::cache_lifetime::now_ms())
 }
 
+/// [`checkpointed_view`] for a native turn: `config` is its pinned snapshot (`None`: a
+/// legacy turn). Workspace tool batches of the history are shown only to a turn that has
+/// the workspace tools itself (`request_meter::turn_view`).
+pub(super) fn checkpointed_view_for(
+    manager: &mut crate::session::ConversationManager,
+    context: &str,
+    model: &str,
+    system: &str,
+    known_tail_bytes: usize,
+    config: Option<&AppConfig>,
+) -> crate::session::conversation_view::View {
+    manager.get_or_create(context).set_primary_system(system.to_string());
+    let show = config.is_some_and(super::native_tools::workspace::available);
+    super::request_meter::turn_view(manager, context, model, system, known_tail_bytes, crate::cache_lifetime::now_ms(), show)
+}
+
 pub(super) fn checkpointed_view_at(
     manager: &mut crate::session::ConversationManager,
     context: &str,
@@ -164,7 +180,7 @@ pub(super) fn checkpointed_view_at(
     now_ms: u64,
 ) -> crate::session::conversation_view::View {
     manager.get_or_create(context).set_primary_system(system.to_string());
-    super::request_meter::turn_view(manager, context, model, system, known_tail_bytes, now_ms)
+    super::request_meter::turn_view(manager, context, model, system, known_tail_bytes, now_ms, false)
 }
 
 /// Self-trigger (`!watch`) request for the `main` conversation (#68): the event is
@@ -189,7 +205,9 @@ pub(crate) fn self_trigger_messages(
         .unwrap_or_default();
     // Not a user turn: no cold start and no turn accounting (it holds no turn
     // lock, so it must not replace the probe of an `ask` turn in flight).
-    let policy = crate::session::conversation_view::ViewPolicy::for_model(model, &system, 0, conv.projection(model));
+    let mut policy = crate::session::conversation_view::ViewPolicy::for_model(model, &system, 0, conv.projection(model));
+    // Watch has no private-owner turn identity: never expose workspace batches.
+    policy.hidden_tools = Some(super::native_tools::workspace::is_workspace_name);
     conv.model_view(&policy).messages
 }
 
@@ -205,6 +223,17 @@ pub(super) fn tool_schema_bytes(config: &AppConfig) -> usize {
             .iter()
             .map(|tool| (tool.name.as_str(), tool.description.as_str(), &tool.parameters)),
     )
+}
+
+/// Hash of the native tool schemas this snapshot's requests carry, for the cache
+/// epoch (`StablePrefixKey::tools_hash`). Never 0, which means "no tools".
+pub(super) fn tool_schema_hash(config: &AppConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for tool in super::native_tools::tool_definitions(config) {
+        (tool.name.as_str(), tool.description.as_str(), tool.parameters.to_string()).hash(&mut hasher);
+    }
+    hasher.finish().max(1)
 }
 
 /// Serialized size of tool schemas given as `(name, description, parameters)`.

@@ -172,6 +172,7 @@ fn collect(mut receiver: tokio::sync::mpsc::Receiver<IoRequest>, s: Script) -> V
                 function_name,
                 args,
                 reply,
+                ..
             } => {
                 drop(reply);
                 let args = args
@@ -561,6 +562,7 @@ fn dispatch_replica(
             function_name,
             args,
             reply,
+            ..
         } = request
         else {
             panic!("a webhook handler may only spawn")

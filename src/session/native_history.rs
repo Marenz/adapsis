@@ -35,6 +35,25 @@ pub(super) fn complete_groups(messages: &[ChatMessage]) -> Vec<&[ChatMessage]> {
     groups
 }
 
+/// Positions omitted when migrating history: malformed/orphan protocol
+/// fragments (the same policy as the model view), and results of complete
+/// batches calling `hidden`. Correlation ids may repeat between turns, so
+/// attribution is by the batch's sequential range, never a global id set.
+pub(crate) fn migration_omissions(messages: &[ChatMessage], hidden: fn(&str) -> bool) -> std::collections::HashSet<usize> {
+    let mut omitted: std::collections::HashSet<usize> = (0..messages.len()).collect();
+    for group in complete_groups(messages) {
+        let start = (group.as_ptr() as usize - messages.as_ptr() as usize) / std::mem::size_of::<ChatMessage>();
+        let hides_results = group.len() > 1 && group[0].tool_calls.iter().flatten().any(|call| hidden(&call.name));
+        // Retain ordinary messages and assistant prose. Only this batch's
+        // results are hidden; a later batch reusing an id is independent.
+        let keep = if hides_results { 1 } else { group.len() };
+        for index in start..start + keep {
+            omitted.remove(&index);
+        }
+    }
+    omitted
+}
+
 pub(super) fn to_llm(message: &ChatMessage) -> crate::llm::ChatMessage {
     match message.role.as_str() {
         "system" => crate::llm::ChatMessage::system(message.content.clone()),

@@ -64,7 +64,7 @@ fn start_turn_with(meta: &SharedMeta, context: &str, model: &str, now_ms: u64, m
 }
 
 fn sent(model: &str, text_bytes: usize, now_ms: u64) -> SentRequest {
-    SentRequest { model: model.into(), text_bytes, images: 0, started_ms: now_ms }
+    SentRequest { model: model.into(), text_bytes, images: 0, started_ms: now_ms, same_tools: true }
 }
 
 /// Answer one request of the turn, sent to `model` at `now_ms`.
@@ -620,6 +620,35 @@ fn cold_start_simulation_paused_chat_versus_active_session() {
     assert!(evidence.hit_count > 400 && evidence.miss_count == 0, "{evidence:?}");
 }
 
+/// A request sent with another tool list than the turn's first request (the final
+/// status round sends none) cannot read the turn's cached prefix: its zero read is not
+/// a miss, its sizes still calibrate, and the turn's other requests stay evidence.
+#[test]
+fn a_request_with_another_tool_list_is_no_cache_evidence() {
+    let meta = new_meta();
+    let evidence = |meta: &SharedMeta| meta.lock().unwrap().conversations.cache_lifetimes.evidence(OPUS).cloned();
+    let history: Vec<ChatMessage> = (0..20)
+        .flat_map(|_| [ChatMessage::user("x".repeat(3_000)), ChatMessage::assistant("y".repeat(3_000))])
+        .collect();
+    {
+        let mut guard = meta.lock().unwrap();
+        guard.conversations.get_or_create("ctx").turn_probe = Some(TurnProbe::default());
+        expect_cached_prefix(&mut guard.conversations, "ctx", "s", &history, None);
+    }
+    // First request of the turn writes the prefix.
+    answer(&meta, "ctx", OPUS, 150_000, T0, &usage(10, Some(0), Some(60_000)));
+    // Ten minutes of tool work, then the status round without tools reads nothing.
+    let last = T0 + secs(600);
+    sent(OPUS, 140_000, last).with_other_tools().calibrate(&meta, "ctx", false, false, &usage(56_000, Some(0), None));
+    assert_eq!(evidence(&meta), None, "not a miss");
+    let calibration = with_conv(&meta, "ctx", |conv| conv.token_calibration.clone()).expect("sizes are still calibrated");
+    assert_eq!((calibration.request_bytes, calibration.input_tokens), (140_000, 56_000));
+    assert_eq!(with_conv(&meta, "ctx", |conv| conv.last_request_ms), Some(last), "it is the conversation's last request");
+    // The same request with the turn's tools would have been a miss.
+    answer(&meta, "ctx", OPUS, 140_000, last + secs(600), &usage(56_000, Some(0), None));
+    assert_eq!(evidence(&meta).map(|e| e.miss_count), Some(1));
+}
+
 /// The `!watch` self-trigger is not a user turn (review follow-up): it holds no
 /// turn lock and writes no cache boundaries. It never cold-starts, is not the
 /// conversation's last request for the pause, and leaves the accounting of an
@@ -628,6 +657,14 @@ fn cold_start_simulation_paused_chat_versus_active_session() {
 fn watch_self_trigger_never_touches_the_turn_accounting() {
     let meta = new_meta();
     fill(&meta, "main", 200, 6_000); // far over the cold-start size
+    {
+        let mut guard = meta.lock().unwrap();
+        guard.conversations.get_or_create("main").push_native_batch(
+            String::new(),
+            vec![ToolCall { id: "watch-private".into(), name: "read".into(), arguments: r#"{"path":"PRIVATE_WATCH_PATH"}"#.into() }],
+            vec!["PRIVATE_WATCH_RESULT".into()],
+        );
+    }
     // An `ask` turn on main is in flight: view built, first request answered.
     let view = start_turn(&meta, "main", OPUS, T0);
     answer(&meta, "main", OPUS, text_bytes(&view.messages) + 9_000, T0, &usage(10, Some(0), Some(480_000)));
@@ -636,7 +673,11 @@ fn watch_self_trigger_never_touches_the_turn_accounting() {
     assert!(before.3.as_ref().is_some_and(|probe| probe.requests == 1 && probe.wrote_prefix));
     // A watch event fires three hours later (far past the one-hour lifetime).
     let messages = crate::api::http_context::self_trigger_messages(&mut meta.lock().unwrap(), "Watcher 'W.f' triggered: 1 -> 2", OPUS);
-    let request = SentRequest { model: OPUS.into(), text_bytes: text_bytes(&messages), images: 0, started_ms: T0 + secs(3 * HOUR) };
+    let wire = serde_json::to_string(&messages).unwrap();
+    assert!(!wire.contains("PRIVATE_WATCH") && !wire.contains("watch-private"), "watch must hide workspace batches");
+    assert!(wire.contains("earlier tool exchange(s)"), "the omission is explicit");
+    assert!(meta.lock().unwrap().conversations.get("main").unwrap().messages.iter().any(|message| message.content == "PRIVATE_WATCH_RESULT"));
+    let request = SentRequest { model: OPUS.into(), text_bytes: text_bytes(&messages), images: 0, started_ms: T0 + secs(3 * HOUR), same_tools: true };
     request.calibrate_tokens_only(&meta, "main", false, &usage(250_000, Some(0), Some(0)));
     let after = with_conv(&meta, "main", |conv| (conv.view_start, conv.last_request_ms, conv.tail_bytes, conv.turn_probe.clone()));
     assert_eq!(after, before, "no cold start, not the last request, tail and probe untouched");
@@ -653,7 +694,7 @@ fn watch_self_trigger_never_touches_the_turn_accounting() {
     assert!(!start_turn(&meta, "main", OPUS, T0 + secs(3 * HOUR + 60)).checkpointed, "55 s after the turn's last request");
     // A shrunk self-trigger request teaches nothing.
     let stored = with_conv(&meta, "main", |conv| conv.token_calibration.clone());
-    SentRequest { model: OPUS.into(), text_bytes: 10, images: 0, started_ms: T0 }.calibrate_tokens_only(&meta, "main", true, &usage(900_000, None, None));
+    SentRequest { model: OPUS.into(), text_bytes: 10, images: 0, started_ms: T0, same_tools: true }.calibrate_tokens_only(&meta, "main", true, &usage(900_000, None, None));
     assert_eq!(with_conv(&meta, "main", |conv| conv.token_calibration.clone()), stored);
 }
 

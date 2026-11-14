@@ -18,6 +18,47 @@ fn find<'a>(entries: &'a [serde_json::Value], category: &str, source: &str) -> O
     entries.iter().find(|e| e["category"] == category && e["source"] == source)
 }
 
+/// The merged process hook must keep #134's payload-free journal and #96's
+/// once-per-contained-compile entry. Install it only in an isolated child;
+/// then panic again on the SAME thread after unwind to prove the flag reset.
+#[test]
+fn integrated_jit_panic_hook_keeps_diagnostics_and_resets_containment() {
+    if !crate::logging::tests::child() {
+        let output = crate::logging::tests::capture(
+            "error_journal::hook_tests::integrated_jit_panic_hook_keeps_diagnostics_and_resets_containment", false,
+        );
+        assert!(!output.contains("HOOK_PRIVATE_PAYLOAD"), "{output}");
+        assert_eq!(output.matches("[panic] detail_bytes=").count(), 2, "both diagnostics still run: {output}");
+        return;
+    }
+    std::panic::set_hook(Box::new(crate::error_journal::panic_hook));
+    let mut program = crate::ast::Program::default();
+    for op in crate::parser::parse("+fn hook_probe ()->Int\n  +return 7\n+end\n").unwrap() {
+        crate::validator::apply_and_validate(&mut program, &op).unwrap();
+    }
+    program.rebuild_function_index();
+    let input = crate::parser::parse_single_expr("{}").unwrap();
+    let cache = crate::eval::new_jit_cache();
+    let before = last_seq();
+    let seam = crate::eval::jit_seam::hook(|| panic!("HOOK_PRIVATE_PAYLOAD contained"));
+    let evaluate = || crate::eval::eval_compiled_or_interpreted_cached(&program, "hook_probe", &input, Some(&cache), 1).unwrap();
+    assert_eq!(evaluate(), ("7".into(), false));
+    assert_eq!(evaluate(), ("7".into(), false), "remembered refusal does not panic again");
+    assert_eq!(crate::eval::jit_seam::journaled(), 1);
+    assert!(!crate::eval::jit_contained_panic(None), "containment ends after the caught unwind");
+    let entries = entries_since(before);
+    assert_eq!(entries.iter().filter(|entry| entry["source"] == "jit.compile").count(), 1);
+    assert!(entries.iter().all(|entry| entry["source"] != "panic" && !entry.to_string().contains("HOOK_PRIVATE_PAYLOAD")));
+    drop(seam);
+    assert!(std::panic::catch_unwind(|| panic!("HOOK_PRIVATE_PAYLOAD uncontained")).is_err());
+    let entries = entries_since(before);
+    let ordinary: Vec<_> = entries.iter().filter(|entry| entry["source"] == "panic").collect();
+    assert_eq!(ordinary.len(), 1, "the same thread's later panic is journaled");
+    let text = ordinary[0]["message"].as_str().unwrap();
+    assert!(text.contains("error_journal_hook_tests.rs:") && text.contains("bytes not recorded"), "{text}");
+    assert!(entries.iter().all(|entry| !entry.to_string().contains("HOOK_PRIVATE_PAYLOAD")));
+}
+
 #[test]
 fn library_reload_error_is_journaled_with_module_source() {
     let before = last_seq();

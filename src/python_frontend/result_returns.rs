@@ -18,7 +18,7 @@ pub(super) fn implicit_inner_matches(expected: &Ty, actual: &Ty) -> bool {
         && known(actual)
 }
 
-fn known(ty: &Ty) -> bool {
+pub(super) fn known(ty: &Ty) -> bool {
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
         match ty {

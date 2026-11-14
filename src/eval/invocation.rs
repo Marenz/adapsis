@@ -53,6 +53,45 @@ pub fn eval_declared_function_unframed(
     )
 }
 
+/// The tree-walker environment of an async entry point: shared slots materialized from
+/// the Program and the coroutine handle that services every `+await`. One construction
+/// for named-function evaluation and ad-hoc blocks, so both reach IO the same way.
+pub(super) fn async_tree_env(
+    program: &ast::Program,
+    handle: crate::coroutine::CoroutineHandle,
+) -> Env {
+    let mut env = Env::new_with_shared_interner(&program.shared_interner);
+    env.populate_shared_from_program(program);
+    env.set("__coroutine_handle", Value::CoroutineHandle(handle));
+    env
+}
+
+/// Execute the statements of an ad-hoc block (#129) that is NOT declared in `program`.
+///
+/// This is the raw named-block entry lifecycle blocks use: a module frame for `+shared`
+/// resolution and no declared-return contract, so the value of `return` comes back as
+/// written and a language failure (failed check, propagated Err) stays an error. It always
+/// runs on the tree-walker: the only tier that executes statements without a Program
+/// entry, and the one whose callees keep `Env`-based shared access.
+///
+/// The block runs under `context`: its resource limits and, for restricted speakers, the
+/// call policy of the block's own frame (`eval/meter.rs`). The meter exists exactly for
+/// the duration of this call.
+pub fn eval_detached_block(
+    program: &ast::Program,
+    frame: &str,
+    body: &[ast::Statement],
+    handle: crate::coroutine::CoroutineHandle,
+    context: super::meter::RunContext,
+) -> Result<Value> {
+    let _meter = super::meter::install(context);
+    let mut env = async_tree_env(program, handle);
+    let value = super::eval_function_body_named(program, frame, body, &mut env)?;
+    // The result is rendered as text by the caller; bound it like every other value.
+    super::meter::admit_value(&value)?;
+    Ok(value)
+}
+
 pub(super) fn invoke(
     program: &ast::Program,
     name: &str,
@@ -60,6 +99,9 @@ pub(super) fn invoke(
     body: Body<'_>,
     observer: Option<&mut dyn OutcomeObserver>,
 ) -> Result<Value> {
+    // Inside a native `run` block, mark this as a callee frame: the block's call policy
+    // applies to the block's own statements only. Popped on every exit path.
+    let _frame = if super::meter::active() { super::meter::enter_callee() } else { None };
     let outcome = match body {
         Body::Declared(env) => super::eval_function_body_named(program, name, &function.body, env),
         Body::ObservedDeclared(env, observer) => with_named_frame(program, name, || {
@@ -100,6 +142,8 @@ pub(super) fn with_call_depth(
     callee: &str,
     execute: impl FnOnce() -> Result<Value>,
 ) -> Result<Value> {
+    // A stack overflow aborts the process; refuse the call while there is still room.
+    super::stack::check(callee)?;
     let depth = super::CALL_DEPTH.with(|d| {
         let value = d.get();
         d.set(value + 1);

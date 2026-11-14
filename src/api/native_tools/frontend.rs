@@ -103,31 +103,62 @@ pub(super) fn finalize(
     config: &AppConfig,
     program: &Program,
 ) -> Result<ParsedTool, String> {
-    let ParsedTool::PythonMutate {
-        source,
-        module,
-        preflight,
-    } = parsed
-    else {
-        return Ok(parsed);
-    };
+    match parsed {
+        ParsedTool::PythonMutate {
+            source,
+            module,
+            preflight,
+        } => {
+            let admitted = admit_python(config, program, &module, &preflight, |signatures| {
+                crate::python_frontend::lower_module_with_program(&source, &module, signatures)
+                    .map_err(|error| error.to_string())
+            })?;
+            Ok(ParsedTool::Mutate {
+                source: crate::session::replay::Submission::python(&module, &source),
+                operations: admitted.operations, modules: admitted.modules, python: true, roles: Some(admitted.roles),
+            })
+        }
+        ParsedTool::PythonRun {
+            source,
+            module,
+            preflight,
+        } => super::run::finalize(source, module, preflight, config, program),
+        other => Ok(other),
+    }
+}
+
+pub(super) struct AdmittedPython {
+    pub operations: Vec<parser::Operation>,
+    pub modules: Vec<String>,
+    pub roles: crate::python_frontend::NativeReferences,
+}
+
+/// The ONE signature-aware admission of submitted Python: a module submission (`mutate`)
+/// and an ad-hoc block (`run`) differ only in `lower`. Everything else is shared, so a
+/// block is never checked more loosely than the function it could have been declared as.
+pub(super) fn admit_python(
+    config: &AppConfig,
+    program: &Program,
+    module: &str,
+    preflight: &crate::python_frontend::NativePreflight,
+    lower: impl FnOnce(&Program) -> Result<crate::python_frontend::LoweredSource, String>,
+) -> Result<AdmittedPython, String> {
     let model = model_name(config);
     let mut signatures = authorized_program(config, &model, program);
     let roles = crate::python_frontend::resolve_native_references(
-        &preflight,
-        &module,
+        preflight,
+        module,
         &signatures,
         program,
     )?;
     crate::python_frontend::retain_native_dependencies(&mut signatures, &roles)?;
-    let lowered = crate::python_frontend::lower_module_with_program(&source, &module, &signatures)
-        .map_err(|error| error.to_string())?;
+    let lowered = lower(&signatures)?;
     // Verify owner erasure before the canonical executor can consult full-state
     // schemas. The guard sees only full-state binding metadata and returns a
     // categorical refusal, never hidden field/type diagnostics.
     crate::python_frontend::check_native_type_bindings(
         &lowered.operations,
-        &module,
+        module,
         &roles.types,
         &roles.functions,
         &signatures,
@@ -139,10 +170,7 @@ pub(super) fn finalize(
     for operation in &lowered.operations {
         if let parser::Operation::Module(module) = operation { collect_module_names(module, &mut modules); }
     }
-    Ok(ParsedTool::Mutate {
-        source: crate::session::replay::Submission::python(&module, &source),
-        operations: lowered.operations, modules, python: true, roles: Some(roles),
-    })
+    Ok(AdmittedPython { operations: lowered.operations, modules, roles })
 }
 
 fn authorized_program(config: &AppConfig, model: &str, program: &Program) -> Program {

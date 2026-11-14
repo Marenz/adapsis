@@ -18,11 +18,13 @@ mod rewind_managed_tests;
 mod reject_identity_tests;
 #[path = "error_journal_route_tests.rs"]
 mod error_journal_route_tests;
+#[path = "jit_containment_tests.rs"]
+mod jit_containment_tests;
 #[path = "storage_depth_tests.rs"]
 mod storage_depth_tests;
 
 /// Helper: build a minimal AppConfig for testing multi-session endpoints.
-fn test_config() -> AppConfig {
+pub(super) fn test_config() -> AppConfig {
     let (trigger_tx, _trigger_rx) = tokio::sync::mpsc::channel::<String>(1);
     AppConfig {
         program: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ast::Program::default())),
@@ -52,8 +54,9 @@ fn test_config() -> AppConfig {
         save_notify: None,
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
-        turn: None,
+        turn: None, workspaces: None, origin: None,
         turn_saves: Default::default(),
+        shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
     }
 }
 
@@ -771,8 +774,9 @@ fn test_config_with_io() -> (
         save_notify: None,
         access_level: crate::permissions::AccessLevel::Full,
         permission_config: std::sync::Arc::new(crate::permissions::PermissionConfig::default()),
-        turn: None,
+        turn: None, workspaces: None, origin: None,
         turn_saves: Default::default(),
+        shell_policy: crate::coroutine::ShellPolicy::Unrestricted,
     };
     (config, io_rx)
 }
