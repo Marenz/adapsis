@@ -1,5 +1,23 @@
 # AdapsisOS Roadmap
 
+## Candidate — interactive native outcome invariant (#151), not deployed
+
+- Owner direction: prevent silent no-op success in the runtime rather than rely
+  on operator prompts. Shared native HTTP/SSE/takeover finish runs the existing
+  test/save gates, then requires a visible reply or genuine visible runtime save
+  warning. First no-outcome refusal gets one bounded correction; repeated/no-budget
+  completion ends visibly INCOMPLETE with `completed:false`. Correlated flags,
+  output, history and training agree; prior actions are not replayed by the gate.
+- Generic callback evaluator completion still does not prove remote delivery
+  (#104). Until typed turn-bound evidence exists, native callback silence without
+  another visible outcome fails closed. Legacy/automation routing is unchanged;
+  neither an inspect result, a successful action, nor #147 queue feedback alone
+  answers a user. No task schema/tool/API, active printer action or B continuation
+  store is introduced here. Structural nonempty prose is not semantic fulfillment.
+- The parked #120 follow-up is a durable task/constraint/evidence ledger separate
+  from chat turns, preserving owner-confirmed intent across follow-up questions
+  and restarts. It is design work only in this slice, not a task MVP deployment.
+
 ## Deployed 2026-11-13 — quiet queue feedback (#147), `47fe43c`
 
 - Manager installed binary sha256

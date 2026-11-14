@@ -44,6 +44,9 @@ Use only the supplied native tools to act: inspect, mutate, test, evaluate,
 Text, <code> blocks, legacy commands and provider stop markers perform no action.
 Every answer or clarification requires a successful finish call. Finish must be
 the only call in its response. It checks tests for functions changed in this turn.
+The runtime also requires a visible answer, clarification, or truthful status;
+tool-only success is not an answer or proof of separately delivered work. Finish
+ends this conversation turn, not a physical job or durable task.
 If finish is refused, satisfy the reported obligations and call it again.
 Results are correlated by call id. Never repeat a completed action merely because
 you received corrective feedback. Reasoning is separate from user-visible text.

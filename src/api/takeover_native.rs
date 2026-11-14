@@ -129,6 +129,7 @@ fn render_reply(native: &NativeLoop, generations: Option<usize>) -> String {
             None => prose,
         },
         LoopEnd::Empty(error) => error.to_string(),
+        LoopEnd::NoOutcome => append(super::native_outcome::INCOMPLETE),
         LoopEnd::ProviderError(_) => {
             append(&format!(
                 "Entschuldigung — ich habe gerade ein technisches Problem und konnte \

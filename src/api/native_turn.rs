@@ -104,6 +104,8 @@ pub(super) enum LoopEnd {
     ProviderError(String),
     /// Two consecutive empty responses (takeover budget only).
     Empty(&'static str),
+    /// An interactive finish had no visible answer or certified publication.
+    NoOutcome,
 }
 
 impl LoopEnd {
@@ -113,6 +115,7 @@ impl LoopEnd {
             Self::Exhausted => "exhausted",
             Self::ProviderError(_) => "provider-error",
             Self::Empty(_) => "empty-response",
+            Self::NoOutcome => "no-outcome",
         }
     }
 }
@@ -142,6 +145,7 @@ pub(super) struct NativeLoop {
     pub(super) generator: Option<String>,
     /// Ladybug write failure; aborts the turn like the legacy takeover loop.
     pub(super) fatal: Option<anyhow::Error>,
+    outcome: super::native_outcome::Outcome,
 }
 
 pub(super) async fn run(
@@ -247,6 +251,7 @@ impl NativeLoop {
             end: LoopEnd::Exhausted,
             generator: None,
             fatal: None,
+            outcome: Default::default(),
             response: AskResponse {
                 reply: String::new(),
                 code: String::new(),
@@ -419,18 +424,36 @@ impl NativeLoop {
             self.end = LoopEnd::Finished;
             return false;
         }
+        match self.outcome.take_rejection() {
+            Some(super::native_outcome::Rejection::CorrectOnce) => {
+                self.end = LoopEnd::NoOutcome;
+                self.correct(super::native_outcome::CORRECTION);
+                budget.extend_for_correction(iteration);
+            }
+            Some(super::native_outcome::Rejection::Stop) => {
+                self.end = LoopEnd::NoOutcome;
+                return false;
+            }
+            None => {}
+        }
         true
     }
 
     async fn conclude(&mut self, config: &AppConfig, tx: &EventSender) {
         if !self.finished && self.fatal.is_none() {
-            self.error("Iteration limit or provider failure without successful finish; task completion is unconfirmed.".into(), tx).await;
+            let no_outcome = self.end == LoopEnd::NoOutcome;
+            let message = if no_outcome { super::native_outcome::INCOMPLETE } else {
+                "Iteration limit or provider failure without successful finish; task completion is unconfirmed."
+            };
+            self.error(message.into(), tx).await;
             // HTTP records the outcome in `main`; takeover conversations only
             // tell the person in the reply, as the legacy takeover loop does.
             if self.persist_incomplete_note {
                 self.persist_assistant(
                     config,
-                    "Native turn ended without successful finish; task completion is unconfirmed.".into(),
+                    if no_outcome { super::native_outcome::INCOMPLETE.into() } else {
+                        "Native turn ended without successful finish; task completion is unconfirmed.".into()
+                    },
                 );
             }
         }
@@ -475,6 +498,9 @@ impl NativeLoop {
         let prose = super::llm_handlers::visible_takeover_prose(&output.content);
         if !prose.is_empty() {
             self.prose = prose;
+            if self.end == LoopEnd::NoOutcome {
+                self.end = LoopEnd::Exhausted;
+            }
         }
         if !output.content.is_empty() {
             if !self.response.reply.is_empty() {
@@ -574,7 +600,7 @@ impl NativeLoop {
         tx: &EventSender,
     ) -> String {
         let mut session = config.snapshot_working_set().await;
-        let result = super::native_tools::execute_native_tool(
+        let mut result = super::native_tools::execute_native_tool(
             &call.name,
             &call.arguments,
             config,
@@ -583,6 +609,9 @@ impl NativeLoop {
         )
         .await;
         config.write_back_working_set(&session).await;
+        if call.name == "finish" {
+            self.outcome.check_finish(&self.prose, &mut result);
+        }
         let mut execution = result.execution;
         // Read-only inspectors carry their output in the structured envelope,
         // rather than pretending the query mutated the program in the executor.

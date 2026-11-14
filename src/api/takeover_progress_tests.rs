@@ -9,6 +9,35 @@ const REPLY: &str = "ProgressFixture.reply";
 const OLD_IMMEDIATE: &str = "Message received. I am starting to process it now.";
 
 #[tokio::test]
+async fn native_outcome_queue_notice_is_not_a_user_answer() {
+    let harness = Harness::new(true);
+    let io = CallbackIo::new(&harness, false).await;
+    let provider = provider(vec![response("", vec![call("empty", "finish", json!({}))]),
+        response("", vec![call("still-empty", "finish", json!({}))])]).await;
+    let reply = io.queued_turn(&harness, &provider, "telegram:outcome-queued", ADMIN,
+        "A follow-up still awaiting an answer", (Some(REPLY), Some("bound-destination"))).await;
+    assert_eq!(reply, crate::api::native_outcome::INCOMPLETE);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    assert!(io.delivered.lock().unwrap().iter().any(|text| text.contains(QUEUED)));
+}
+
+#[tokio::test]
+async fn native_outcome_uncertified_callback_return_does_not_allow_native_silence() {
+    let harness = Harness::new(true);
+    let io = CallbackIo::new(&harness, false).await;
+    let provider = provider(vec![tool("delivery", "evaluate", json!({
+        "function": REPLY, "input":"destination=\"bound-destination\" message=\"separate result\""})),
+        response("", vec![call("empty", "finish", json!({}))]),
+        response("", vec![call("still-empty", "finish", json!({}))])]).await;
+    let reply = io.turn(&harness, &provider, "telegram:outcome-callback", ADMIN,
+        "Report the outcome", (Some(REPLY), Some("bound-destination"))).await;
+    assert_eq!(reply, crate::api::native_outcome::INCOMPLETE);
+    assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    assert_eq!(io.delivered.lock().unwrap().as_slice(), &["bound-destination|separate result"]);
+    assert!(io.launches.lock().unwrap().is_empty(), "ordinary turn has no progress callback");
+}
+
+#[tokio::test]
 async fn takeover_progress_immediate_lock_stays_silent_even_while_provider_is_held() {
     for (native, error) in [(true, false), (false, false), (true, true), (false, true)] {
         let harness = Arc::new(Harness::new(native));

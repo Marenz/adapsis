@@ -87,6 +87,19 @@ pub struct NativeToolResult {
     pub content: String,
 }
 
+impl NativeToolResult {
+    /// Normalize both the typed result and correlated envelope before the loop
+    /// reports, trains on, or persists a finish rejected by its outcome gate.
+    pub(super) fn refuse_finish(&mut self, message: &str) {
+        self.execution.done_accepted = false;
+        self.execution.has_errors = true;
+        self.execution.mutation_results.push(MutationResult {
+            message: message.into(), success: false,
+        });
+        self.content = build_envelope("finish", &self.execution, message, None, None);
+    }
+}
+
 // ── Eligibility ────────────────────────────────────────────────────────────
 
 fn is_guest(config: &AppConfig) -> bool {
@@ -207,7 +220,7 @@ pub fn tool_definitions(config: &AppConfig) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "finish".into(),
-            description: "Signal task completion (!done) against the current turn's baseline.".into(),
+            description: "Conclude this interactive turn with a visible reply, subject to its test/save baseline. This does not certify physical job or durable task completion.".into(),
             parameters: obj(&[], serde_json::json!({})),
         },
     ];

@@ -8,6 +8,8 @@ mod python_turn_tests;
 mod native_repair_turn_tests;
 #[path = "source_save_tests.rs"]
 mod source_save_tests;
+#[path = "native_outcome_tests.rs"]
+mod outcome_tests;
 
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}})
@@ -20,7 +22,9 @@ fn response(content: &str, calls: Vec<Value>) -> Value {
 }
 
 fn tool(id: &str, name: &str, arguments: Value) -> Value {
-    response("", vec![call(id, name, arguments)])
+    // These fixtures test other gates, not silent completion. Outcome regressions
+    // construct genuinely empty finish responses explicitly.
+    response(if name == "finish" { "Turn complete." } else { "" }, vec![call(id, name, arguments)])
 }
 
 fn provider_body(output: &Value, streaming: bool) -> axum::response::Response {
@@ -77,6 +81,9 @@ impl Fixture {
                         .unwrap_or_else(|| response("unexpected", vec![]));
                     let streaming = body["stream"] == true;
                     requests.push(body);
+                    if output["http_status"] == 400 {
+                        return (axum::http::StatusCode::BAD_REQUEST, "scripted provider failure").into_response();
+                    }
                     provider_body(&output, streaming)
                 }
             }),
@@ -104,9 +111,13 @@ impl Fixture {
     }
 
     async fn run(&self, streaming: bool) -> AskResponse {
+        self.run_message(streaming, "Build and verify the function").await
+    }
+
+    async fn run_message(&self, streaming: bool, message: &str) -> AskResponse {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             let request = Json(AskRequest {
-                message: "Build and verify the function".into(),
+                message: message.into(),
                 caller: None,
             });
             if !streaming {
@@ -292,7 +303,7 @@ async fn native_prose_and_legacy_code_do_not_complete_or_execute() {
 async fn native_calls_take_precedence_over_embedded_legacy_code() {
     let fixture = Fixture::new(
         vec![response(
-            "<code>+module DoubleRunForbidden\n+fn no()->Int\n+return 1\n+end</code>",
+            "The answer is complete.\n<code>+module DoubleRunForbidden\n+fn no()->Int\n+return 1\n+end</code>",
             vec![call("finish", "finish", json!({}))],
         )],
         "",

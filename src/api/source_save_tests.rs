@@ -23,6 +23,18 @@ fn finish(id: &str) -> Value {
     tool(id, "finish", json!({}))
 }
 
+#[tokio::test]
+async fn native_outcome_real_unsaved_warning_is_visible_outcome_without_model_prose() {
+    let m = Managed::new(vec![python("edit", "PyA", "def three() -> int:\n    return 3\n"),
+        response("", vec![call("silent-with-warning", "finish", json!({}))])]).await;
+    std::fs::write(m.dir.path().join("library-sources.json"), format!("{MANIFEST} ")).unwrap();
+    let response = m.fixture.run(false).await;
+    assert_eq!(response.completed, Some(true));
+    assert!(response.reply.contains("[Runtime: not saved to source: PyA ("));
+    assert!(!response.reply.contains(crate::api::native_outcome::INCOMPLETE));
+    assert_eq!(m.fixture.requests.lock().unwrap().len(), 2);
+}
+
 /// 130 chained operators: accepted by the `.ax` path, too deep to print.
 fn too_deep(module: &str, function: &str) -> String {
     format!("+module {module}\n+fn {function} (x:Int)->Int\n  +return x{}\n+end\n", " + 1".repeat(130))

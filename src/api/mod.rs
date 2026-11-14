@@ -39,6 +39,7 @@ pub use execute::{
 pub use execute::CodeExecutionResult;
 pub mod llm_handlers;
 mod native_turn;
+mod native_outcome;
 mod takeover_budget;
 mod takeover_native;
 mod takeover_progress;

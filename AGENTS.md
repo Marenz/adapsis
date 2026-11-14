@@ -1021,6 +1021,24 @@ replaces that branch with one composer.
   widening is not.
 
 ## Conversation System (llm_takeover)
+- **Interactive native outcome (#151, DESIGN.md I7), `api/native_outcome.rs`.**
+  Native HTTP/SSE and takeover finish first run the unchanged test/save gates.
+  An accepted finish must then have non-whitespace visible prose in this turn,
+  or an actual server-generated visible unsaved-source warning. A first refusal
+  receives one protocol correction within the existing round budget/hard cap;
+  a repeated refusal or no remaining budget produces a visible INCOMPLETE reply,
+  never empty success. Completed operations are retained and are not replayed by
+  the guard. The correlated result is normalized before history/training/output:
+  `done_accepted:false`, `success:false`, `has_errors:true`, with refusal output.
+  Runtime queue/start notices, hidden reasoning, inspect/action counts, evaluate
+  success and callback return strings are not outcome evidence. There is no typed
+  server-bound delivery receipt on this baseline: intentional native callback
+  silence now requires a visible outcome until a reviewed #104 bridge exists.
+  Legacy/automation paths and guest routing are unchanged. This structural gate
+  cannot prove prose relevance or physical task fulfillment; durable continuation
+  and domain evidence remain #120 work. Sole-finish envelope admission, #146
+  save warnings, #147 quiet policy and #148 images are preserved. Focused gate:
+  `cargo test --release native_outcome` (actual mock HTTP/SSE/takeover/IO).
 - **Quiet queue feedback (#147, DESIGN.md I6), `api/takeover_progress.rs`.** A takeover
   pins only its supplied complete `reply_fn`/`reply_arg` pair; no stored-callback
   fallback. Immediate lock acquisition and queues shorter than 10 seconds are
@@ -1122,8 +1140,9 @@ replaces that branch with one composer.
   - **Reply = latest visible prose** (`visible_takeover_prose`), never tool JSON.
     If finish was not accepted, the reply says so truthfully: exhaustion note,
     50-generation note, the German provider-error apology, or `EMPTY_RESPONSE_ERROR`.
-    An accepted finish with no prose at all returns `""`, as legacy `!done` does,
-    so the Telegram module sends nothing.
+    Native finish with no visible prose is refused by #151 unless a genuine
+    visible runtime save warning supplies the outcome. This differs deliberately
+    from legacy `!done` silence; callback Strings do not prove separate delivery.
   - Not available natively: `!agent` (so no agent completion callbacks),
     plan/roadmap, `!opencode`, model switching, mocks. Other builtins are reachable
     only through existing module functions via evaluate.

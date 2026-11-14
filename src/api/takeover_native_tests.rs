@@ -11,6 +11,8 @@ mod cache;
 mod images;
 #[path = "takeover_progress_tests.rs"]
 mod progress;
+#[path = "takeover_outcome_tests.rs"]
+mod outcomes;
 
 const ADMIN: &str = "telegram:user:100000001";
 

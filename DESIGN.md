@@ -27,6 +27,7 @@ Evidence: [docs/design-intent-audit-20261109.md](docs/design-intent-audit-202611
 | I4 | Interfaces | Telegram is an easy UI: inline buttons (approve / merge / pause / cancel / details), `/tasks`, and a reply to a task message routes to that task. | | active | |
 | I5 | Interfaces | Voice and discussion interfaces. | Later. | deferred | |
 | I6 | Conversation feedback | Normal conversation answers directly without a runtime receipt/start message. Only a conversation-lock wait lasting 10 seconds may produce one honest queue notice; a paired start requires that notice to have actually launched. | Owner UX correction 2026-11-13: confidence without chat noise. This does not supply substantive task-progress reporting or typing indicators. | active | #147 |
+| I7 | Interactive completion | Native interactive finish requires a nonempty visible reply or a server-proved visible outcome; one bounded correction is allowed before a visible incomplete result. Tool success, hidden reasoning and queue notices are not outcome evidence. | Owner direction 2026-11-14: enforce this in the system. Finish ends a turn, not a physical job or durable task. Unproved native callback silence fails closed until typed delivery evidence exists (#104). | active | #151 |
 
 ## Nodes & security
 
