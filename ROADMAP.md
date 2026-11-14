@@ -1,5 +1,31 @@
 # AdapsisOS Roadmap
 
+## Live acceptance blocked 2026-11-14 — workspace protocol contradiction (#129/#147)
+
+- Manager deployed `3678a5b`, binary `f541a5ed…`, PID 678264, NRestarts 0,
+  275/275 startup cases and six modules. Direct native `run` succeeded without a
+  helper module, but private Telegram and local HTTP workspace smoke requests
+  refused without a workspace call. This is failed workspace activation, not
+  evidence that W2 is usable; no printer operation is part of this diagnosis.
+- Isolated real-registry reproduction proves the source contradiction: an eligible
+  local writer is supplied 16 schemas including all ten workspace tools, while
+  the authoritative closed protocol lists only six program tools. The workspace
+  instructions were merely appended. No live configuration was read by the writer.
+- Pending corrective delta retains the same private-writer/registry predicate and
+  closed protocol, deriving its enabled tool names from the actual pinned schemas.
+  Disabled/restricted protocol text, dispatch authority, quiet/outcome/image guards
+  and executor behavior are unchanged. Focused/wire gates pass: workspace 246
+  (one manual ignored), native prompt 3, restricted takeover 8, outcome 15,
+  quiet feedback 15, captionless images 2. Both captured local HTTP and private
+  takeover requests now assert closed protocol/schema agreement. No second full
+  suite is run for this bounded correction. Explicit build passed (exit 0);
+  private `/tmp/opencode/w2-activation-fix-candidate` SHA-256
+  `55fdc0f570fc678ee4cc2b637fdf541d29117c01bc2cc19dd96d59a005beb5d8`.
+  Corrective source review ACCEPT: `ses_e2607a49effezRQAThMNe06L4M`, reviewed
+  diff `5309e6757e0a3bbe774374d0319f70a849c2ee9725c33aeb9d7e3db9ae99adbc`.
+  This results update is docs-only; actual manager-run post-fix tool-call
+  acceptance is still required, not inferred from a model's permission prose.
+
 ## Candidate 2026-11-14 — reviewed W2 + quiet/outcome integration (#129/#147/#151)
 
 - Writer `ses_e2ec28eb9ffeyAROXQzG2ZDNxq` merges reviewed `faaad9d` into

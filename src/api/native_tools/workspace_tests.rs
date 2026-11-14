@@ -64,6 +64,72 @@ fn names(config: &AppConfig) -> Vec<String> {
     tool_definitions(config).into_iter().map(|tool| tool.name).collect()
 }
 
+fn native_prefix(config: &AppConfig) -> String {
+    let context = config.turn.as_ref().map_or("main", |turn| turn.context.as_str());
+    let model = config.llm_model.read().unwrap().clone();
+    let mut authority = config.permission_config.authority(config.access_level, &model);
+    if speaker_class(config).restricted() { authority.may_write = false; }
+    let inputs = crate::context_prompt::PromptInputs {
+        context, program_summary: "", llm_model: &model, available_models: &[], speaker: ADMIN, authority,
+    };
+    if config.turn.is_some() {
+        crate::context_prompt::native_takeover_prefix_keyed(&inputs).0
+    } else { crate::context_prompt::native_prefix_keyed(&inputs).0 }
+}
+
+#[tokio::test]
+async fn workspace_protocol_is_unchanged_for_disabled_or_restricted_turns() {
+    for (label, has, config) in turns().await {
+        let base = native_prefix(&config);
+        let rendered = workspace::with_prompt(base.clone(), Some(&config));
+        if !has {
+            assert_eq!(rendered, base, "{label}: no protocol broadening");
+            assert!(!rendered.contains("workspace_status"));
+        }
+        if has || speaker_class(&config) == SpeakerClass::Writer {
+            workspace::assert_protocol_matches(&rendered, &names(&config));
+        }
+        let mut bare = config;
+        bare.workspaces = None;
+        let base = native_prefix(&bare);
+        assert_eq!(workspace::with_prompt(base.clone(), Some(&bare)), base);
+    }
+}
+
+#[tokio::test]
+async fn workspace_native_protocol_matches_loaded_registry_schemas() {
+    if !crate::logging::tests::child() {
+        let repo = crate::workspace::test_support::RepoFixture::new();
+        let dir = tempfile::Builder::new().prefix("ws-protocol-").tempdir_in("/tmp/opencode").unwrap();
+        let registry = dir.path().join("workspaces.toml");
+        std::fs::write(&registry, format!(
+            "[repo.activation]\ncheckout = {:?}\nworktree_parent = {:?}\nbase = \"main\"\n",
+            repo.repository.checkout, repo.repository.worktree_parent,
+        )).unwrap();
+        crate::logging::tests::capture_with_env(
+            "api::native_tools::tests::workspace_tests::workspace_native_protocol_matches_loaded_registry_schemas",
+            false,
+            &[("ADAPSIS_WORKSPACES_FILE", registry.to_str().unwrap()),
+              ("ADAPSIS_WORKSPACE_STATE_DIR", dir.path().join("state").to_str().unwrap())],
+        );
+        return;
+    }
+    for identity in [None, turn("telegram:100000001", ADMIN, true, false)] {
+        let (mut config, _, _) = fixture("writer").await;
+        config.turn = identity;
+        config.origin = Some(Origin::Local);
+        config.workspaces = None;
+        workspace::attach(&mut config).await;
+        assert!(workspace::available(&config), "real isolated registry must load for eligible writer");
+        assert_eq!(config.workspaces.as_ref().unwrap().registry.names(), ["activation"]);
+        let system = workspace::with_prompt(native_prefix(&config), Some(&config));
+        let supplied = names(&config);
+        assert!(supplied.iter().any(|name| name == "workspace_status") && supplied.iter().any(|name| name == "bash"));
+        assert!(system.contains("## Workspace tools"));
+        workspace::assert_protocol_matches(&system, &supplied);
+    }
+}
+
 /// `workspace::available` is the one predicate: the writer class, in an owner-private
 /// conversation, with a registry. Everything else follows it.
 #[tokio::test]

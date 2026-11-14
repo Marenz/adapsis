@@ -967,6 +967,9 @@ async fn http_main_has_workspace_tools_only_for_a_local_request_and_hides_their_
     let requests = fixture.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 7);
     let names = |request: &Value| -> Vec<String> { request["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap().to_string()).collect() };
+    for request in &requests {
+        crate::api::native_tools::workspace::assert_protocol_matches(request["messages"][0]["content"].as_str().unwrap(), &names(request));
+    }
     let result = |index: usize, id: &str| requests[index]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == id).unwrap()["content"].as_str().unwrap().to_string();
     // Local: the tools, the section, the tail line, plain-text results.
     assert!(names(&requests[0]).iter().any(|name| name == "workspace_open") && names(&requests[0]).len() == 6 + 10, "{:?}", names(&requests[0]));

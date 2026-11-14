@@ -302,8 +302,30 @@ Never change credentials or seek them through bash."#;
 /// workspace tools. `config` is the turn's pinned native snapshot, if native.
 pub(in crate::api) fn with_prompt(system: String, config: Option<&AppConfig>) -> String {
     match config {
-        Some(config) if available(config) => format!("{system}\n\n{PROMPT}"),
+        Some(config) if available(config) => {
+            // The closed, authoritative writer list must name the SAME tools
+            // as this pinned snapshot's schemas, not contradict the section we
+            // append. Replace only the first trusted core declaration (before
+            // identity text); disabled/restricted turns remain byte-identical.
+            let previous = crate::prompt::default_native_tool_protocol(config.turn.is_some());
+            let names = super::tool_definitions(config).into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+            let protocol = crate::prompt::native_tool_protocol(&names.join(", "));
+            let system = system.replacen(&previous, &protocol, 1);
+            format!("{system}\n\n{PROMPT}")
+        }
         _ => system,
+    }
+}
+
+#[cfg(test)]
+pub(in crate::api) fn assert_protocol_matches(system: &str, supplied: &[String]) {
+    let supplied = supplied.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    let lists: Vec<_> = system.split("Use only the supplied native tools to act: ").skip(1).collect();
+    assert!(!lists.is_empty(), "writer protocol must retain a closed tool list");
+    for list in lists {
+        let declared = list.split_once(".\n").unwrap().0.split(',')
+            .map(|name| name.trim().to_string()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(declared, supplied, "authoritative closed protocol must agree with actual schemas");
     }
 }
 

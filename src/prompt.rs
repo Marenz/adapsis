@@ -1,4 +1,5 @@
 mod native;
+pub(crate) use native::{default_native_tool_protocol, native_tool_protocol};
 pub use native::{native_restricted_prompt, native_takeover_mechanics, native_tool_prompt, NATIVE_GUEST_SUMMARY};
 
 /// System prompt for the Adapsis feedback loop.

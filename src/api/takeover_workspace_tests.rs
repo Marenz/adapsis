@@ -139,6 +139,7 @@ async fn an_owner_opens_reads_and_closes_a_workspace_across_turns_and_a_restart(
     assert_eq!(text_of(&requests[4], "rd"), read);
     assert!(!all_text(&requests[4]).contains("are not shown in this turn"), "the owner's own turn sees its workspace batches");
     for request in &requests {
+        crate::api::native_tools::workspace::assert_protocol_matches(request["messages"][0]["content"].as_str().unwrap(), &tool_names(request));
         assert_eq!(crate::context_log::gateway_boundary_errors(request["messages"].as_array().unwrap()), Vec::<String>::new());
     }
 

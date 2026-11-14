@@ -351,6 +351,10 @@ N3, N5/N6, C4.
   the `unknown native tool` text of any invented name (for a writer without a registry
   byte for byte what it was before these tools). Do NOT add the names to `admit_tool`'s
   `known`, and never branch on `is_tool(name)` without `available(config)`.
+  The authoritative closed native-tool declaration must agree with the same
+  snapshot's schemas, not just an appended workspace section. For enabled turns
+  `with_prompt` renders that declaration from `tool_definitions(config)`; disabled
+  and restricted turns retain their existing protocol verbatim.
 - **The site is decided once per turn** by `workspace::attach(&mut snapshot)` at the two
   turn entries (`takeover_native::native_snapshot`, `native_turn::run`): not eligible means
   no site and the registry file is not read; eligible means the site the configuration

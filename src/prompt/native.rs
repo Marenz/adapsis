@@ -10,13 +10,22 @@ const RUN_EXAMPLE: &str = r#"text: str = await file_read("/tmp/x.txt")
 n: int = len(text)
 return concat("bytes: ", to_string(n))"#;
 
-pub fn native_tool_prompt(context: &str, with_memory: bool) -> String {
-    let program_writers = crate::builtins::program_effects::program_changing_builtins().join(", ");
+pub(crate) fn native_tool_protocol(names: &str) -> String {
+    format!("Use only the supplied native tools to act: {names}.")
+}
+
+pub(crate) fn default_native_tool_protocol(with_memory: bool) -> String {
     let memory_tool_list = if with_memory {
         "memory_inspect, memory_remember, memory_correct, memory_forget, "
     } else {
         ""
     };
+    native_tool_protocol(&format!("inspect, mutate, test, evaluate, run,\n{memory_tool_list}finish"))
+}
+
+pub fn native_tool_prompt(context: &str, with_memory: bool) -> String {
+    let program_writers = crate::builtins::program_effects::program_changing_builtins().join(", ");
+    let tool_protocol = default_native_tool_protocol(with_memory);
     let memory_section = if with_memory {
         r#"
 ## Long-term memory (Ladybug)
@@ -46,8 +55,7 @@ memberships across all governing groups, not a new current-context-only rule."#
         r#"You are the Adapsis programming assistant in context `{context}`.
 
 ## Fixed native tool protocol
-Use only the supplied native tools to act: inspect, mutate, test, evaluate, run,
-{memory_tool_list}finish.
+{tool_protocol}
 Text, <code> blocks, legacy commands and provider stop markers perform no action.
 Every answer or clarification requires a successful finish call. Finish must be
 the only call in its response. It checks tests for functions changed in this turn.
