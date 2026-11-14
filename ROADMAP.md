@@ -1,7 +1,25 @@
 # AdapsisOS Roadmap
 
-## Candidate — interactive native outcome invariant (#151), not deployed
+## Deployed 2026-11-14 — interactive native outcome invariant (#151), `dc19bb9`
 
+- Manager installed binary sha256
+  `70424d24857a381b9b232db6513c5f049b5df85faeb855b837407ed671856416`.
+  PID 527495, NRestarts 0, 275 startup cases, six unchanged managed modules; no
+  module-source replacement. Exact `chatgpt/gpt-6.1-sol`, quiet #147 and image
+  #148 behavior are preserved. Legacy/automation paths and API/tool schemas are
+  unchanged; the native interactive completion behavior below is now enforced.
+- **Live structural probe:** HTTP `main` first returned finish-only. Runtime
+  refused it with correlated `success:false` / `done_accepted:false`, then one
+  correction elicited `OUTCOME151-OK` and an accepted finish: `completed:true`.
+  Aggregate `has_errors:true` retains the corrected error by design. Stored
+  correlated history confirms refusal → visible prose → accepted finish. No
+  printer action was performed; this does not certify physical task fulfillment.
+- Independent source review accepted. One full release gate: 2419 unit passed,
+  only known strict parity failed (334/58/181, zero AST mismatches or
+  non-idempotence), seven ignored; CLI 5/5, startup 9/9, Result CLI 4/4.
+  Focused native 231/231, takeover 60/60, save 29/29, legacy HTTP 10/10 and
+  dedicated outcome 13/13 passed; explicit release build passed. Existing #96
+  was not reproduced in this gate and is not fixed by this patch.
 - Owner direction: prevent silent no-op success in the runtime rather than rely
   on operator prompts. Shared native HTTP/SSE/takeover finish runs the existing
   test/save gates, then requires a visible reply or genuine visible runtime save

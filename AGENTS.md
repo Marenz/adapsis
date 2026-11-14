@@ -10,7 +10,19 @@ there. Workers cite the DESIGN.md rows their change touches; reviewers check for
 narrowing. Where this file disagrees with DESIGN.md, DESIGN.md wins.
 
 ## Development baseline (2026-10-25 cleanup)
-- **Current here deployment (2026-11-13, quiet #147): `47fe43c`**, binary sha256
+- **Current here deployment (2026-11-14, native outcome #151): `dc19bb9`**, binary sha256
+  `70424d24857a381b9b232db6513c5f049b5df85faeb855b837407ed671856416`.
+  Manager verified PID 527495, NRestarts 0, 275 startup cases and six unchanged
+  managed modules. Exact model `chatgpt/gpt-6.1-sol`, quiet #147 and image #148
+  behavior are preserved. Live HTTP `main` probe first produced finish-only:
+  normalized `success:false` / `done_accepted:false`; one correction then produced
+  `OUTCOME151-OK` plus accepted finish, `completed:true`. Aggregate `has_errors:true`
+  correctly retains the corrected refusal. Stored correlated history confirms
+  refusal → visible reply → acceptance. No printer action was performed. This
+  proves structural outcome enforcement, not prose relevance or physical task
+  completion. The #120 continuation ledger remains design-only; #104 and #96
+  remain open. Legacy/automation paths and API/tool schemas are unchanged.
+- **Historical quiet deployment (2026-11-13, #147): `47fe43c`**, binary sha256
   `615f3dd45ff1c2756d29928961a0c944e0fb681d26d8f29d60c04261104ebca5`.
   Manager verified PID 3852743, NRestarts 0, six unchanged managed modules and
   stable preflight/checkpoint. Model `chatgpt/gpt-6.1-sol` is persisted in the
