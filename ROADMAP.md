@@ -1,5 +1,35 @@
 # AdapsisOS Roadmap
 
+## Incident 2026-11-14 — black-filament runout during print, recovery open (#147)
+
+- Owner observed filament exhausted while the job had advanced through many dry
+  layers, and manually paused. Exact first-left repeat 1 seq 794649725 at 84%;
+  manager read PAUSE at 11:49:09 UTC, `print_error` 0, `HMS[]`, nozzle target 90,
+  bed 65. Not completed; no cancel, resume or new start by the manager.
+- Kronk recommended cancel/restart rather than an ordinary resume after missing
+  layers; that is a recommendation, not authorization for a remote cancel. The
+  right/shelf part was not started; recovery is blocked pending disposition of the
+  failed job, material readiness and a cleared bed.
+- Canonical constraints unchanged: original spool starts black with white PLA only
+  when black runs out; the shelf part stays white.
+- Read-only artifact investigator session `ses_e2693fe12ffeX14sSVLQOxbKvC` found
+  exact sha `ea0493f7dd0a6c6f58ff4a12caee5bfbfba4038f59cdb220908da0f4c51c2194`,
+  byte-identical to 22 Oct, executable `M412 S1` at 763 and `M620.3 W1` at 765
+  after AMS load, no `M412 S0`; matches the official A1 template.
+- Static enabling commands are **not** evidence of actual runtime detection,
+  sensor, path or firmware state; the cause remains OPEN, and the earlier
+  successful print was not a runout test. RUNNING/no-errors/progress is not
+  deposition or completion evidence. No unsafe filament-pull test, raw AMS access
+  or automatic retry was performed.
+- Private canonical manager observation exists at
+  `~/.local/share/adapsis/print-oversight-20261114.json`; it is maintained by the
+  manager and grants no executor authority. Issue links:
+  [#147 comment 6876833716](https://github.com/Marenz/adapsis/issues/147#issuecomment-6876833716),
+  [#147 comment 6876860848](https://github.com/Marenz/adapsis/issues/147#issuecomment-6876860848).
+- Runtime remains `dc19bb9`; no code/deploy change. #151 remains structural only.
+  W2 cache permissions remain blocked and #136 stays parked. Unresolved: runout
+  cause and failed-job disposition/material/bed recovery.
+
 ## Deployed 2026-11-14 — interactive native outcome invariant (#151), `dc19bb9`
 
 - Manager installed binary sha256
